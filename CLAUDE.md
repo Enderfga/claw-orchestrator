@@ -18,6 +18,7 @@ support. Key source files:
 | `src/persistent-codex-session.ts` | Codex CLI wrapper (`codex exec --full-auto`) |
 | `src/persistent-gemini-session.ts` | Gemini CLI wrapper (`gemini -p --output-format stream-json`) |
 | `src/persistent-cursor-session.ts` | Cursor Agent CLI wrapper (`agent -p --force --output-format stream-json`) |
+| `src/persistent-opencode-session.ts` | sst/opencode CLI wrapper (`opencode run --format json --dangerously-skip-permissions`) |
 | `src/persistent-custom-session.ts` | Custom engine — any CLI via user-provided `CustomEngineConfig` |
 | `src/council.ts` | Multi-agent collaboration engine with git worktree isolation and post-processing |
 | `src/consensus.ts` | Consensus voting parser for council |
@@ -157,6 +158,7 @@ Current tested versions (update on each release):
 | Codex | `codex` | 0.128.0 | `codex exec --sandbox workspace-write --skip-git-repo-check --json -C <dir>` (or `codex app-server --listen stdio://` for /goal) |
 | Gemini | `gemini` | 0.36.0 | `gemini -p <msg> --output-format stream-json --yolo/--sandbox` |
 | Cursor | `agent` | 2026.03.30 | `agent -p <msg> --force --trust --output-format stream-json --workspace <dir>` |
+| OpenCode | `opencode` | 1.1.40 | `opencode run <msg> --format json --dangerously-skip-permissions [--model provider/model]` |
 
 **Important:** When CLI vendors change flags or output format, update the corresponding `persistent-*-session.ts` and re-run integration tests.
 

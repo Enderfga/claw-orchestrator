@@ -23,6 +23,7 @@ export { BaseOneShotSession, type OneShotEngineConfig } from './base-oneshot-ses
 export { PersistentCodexSession } from './persistent-codex-session.js';
 export { PersistentGeminiSession } from './persistent-gemini-session.js';
 export { PersistentCursorSession } from './persistent-cursor-session.js';
+export { PersistentOpencodeSession } from './persistent-opencode-session.js';
 export { PersistentCustomSession } from './persistent-custom-session.js';
 export { Council, getDefaultCouncilConfig } from './council.js';
 export { parseConsensus, stripConsensusTags, hasConsensusMarker } from './consensus.js';
@@ -130,7 +131,7 @@ const plugin = {
     api.registerTool({
       name: 'session_start',
       description:
-        'Start a persistent coding session. Supports multiple engines: claude (default) for Claude Code CLI, codex for OpenAI Codex CLI, gemini for Google Gemini CLI, cursor for Cursor Agent CLI, or custom for any user-configured coding agent CLI.',
+        'Start a persistent coding session. Supports multiple engines: claude (default) for Claude Code CLI, codex for OpenAI Codex CLI, gemini for Google Gemini CLI, cursor for Cursor Agent CLI, opencode for sst/opencode CLI, or custom for any user-configured coding agent CLI.',
       parameters: {
         type: 'object',
         properties: {
@@ -138,9 +139,9 @@ const plugin = {
           cwd: { type: 'string', description: 'Working directory' },
           engine: {
             type: 'string',
-            enum: ['claude', 'codex', 'codex-app', 'gemini', 'cursor', 'custom'],
+            enum: ['claude', 'codex', 'codex-app', 'gemini', 'cursor', 'opencode', 'custom'],
             description:
-              'Engine to use (default: claude). codex = `codex exec` per send (no /goal). codex-app = long-running `codex app-server` with /goal support. Use "custom" with customEngine config for any CLI.',
+              'Engine to use (default: claude). codex = `codex exec` per send (no /goal). codex-app = long-running `codex app-server` with /goal support. opencode = sst/opencode CLI (provider-agnostic; pass model as `provider/model`). Use "custom" with customEngine config for any CLI.',
           },
           model: { type: 'string', description: 'Model to use (opus, sonnet, haiku, gemini-pro, o4-mini, etc.)' },
           permissionMode: {
@@ -791,7 +792,7 @@ const plugin = {
                 persona: { type: 'string', description: 'Agent personality/expertise description' },
                 engine: {
                   type: 'string',
-                  enum: ['claude', 'codex', 'codex-app', 'gemini', 'cursor', 'custom'],
+                  enum: ['claude', 'codex', 'codex-app', 'gemini', 'cursor', 'opencode', 'custom'],
                   description: 'Engine (default: claude). Use "custom" with customEngine for any CLI.',
                 },
                 model: { type: 'string', description: 'Model to use' },

@@ -23,7 +23,7 @@ openclaw plugins install @enderfga/claw-orchestrator --dangerously-force-unsafe-
 openclaw gateway restart
 ```
 
-> **Why `--dangerously-force-unsafe-install`?** Claw Orchestrator spawns Claude Code / Codex / Gemini / Cursor Agent CLI subprocesses via `child_process`, which OpenClaw's security scanner flags by design. The flag is required — there is no way to drive coding CLIs without process spawning.
+> **Why `--dangerously-force-unsafe-install`?** Claw Orchestrator spawns Claude Code / Codex / Gemini / Cursor Agent / OpenCode CLI subprocesses via `child_process`, which OpenClaw's security scanner flags by design. The flag is required — there is no way to drive coding CLIs without process spawning.
 
 Agents automatically get access to all session, council, and management tools.
 

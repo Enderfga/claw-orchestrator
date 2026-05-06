@@ -12,7 +12,7 @@ Start a persistent coding session with full CLI flag support.
 |-----------|------|-------------|
 | `name` | string | Session name (auto-generated if omitted) |
 | `cwd` | string | Working directory |
-| `engine` | `'claude'` \| `'codex'` \| `'gemini'` \| `'cursor'` \| `'custom'` | Engine to use (default: `claude`). Use `custom` with `customEngine` for any CLI. |
+| `engine` | `'claude'` \| `'codex'` \| `'gemini'` \| `'cursor'` \| `'opencode'` \| `'custom'` | Engine to use (default: `claude`). `opencode` wraps sst/opencode (pass model as `provider/model`). Use `custom` with `customEngine` for any CLI. |
 | `model` | string | Model alias or full name |
 | `permissionMode` | string | `acceptEdits`, `bypassPermissions`, `plan`, `auto`, `default` |
 | `effort` | string | `low`, `medium`, `high`, `max`, `auto` |

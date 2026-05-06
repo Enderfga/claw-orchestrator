@@ -1,6 +1,6 @@
 ---
 name: claw-orchestrator
-description: Manage persistent coding sessions across Claude Code, Codex, Gemini, and Cursor engines. Use when orchestrating multi-engine coding agents, starting/sending/stopping sessions, running multi-agent council collaborations, cross-session messaging, ultraplan deep planning, ultrareview parallel code review, or switching models/tools at runtime. Triggers on "start a session", "send to session", "run council", "ultraplan", "ultrareview", "switch model", "multi-agent", "coding session", "session inbox", "cursor agent".
+description: Manage persistent coding sessions across Claude Code, Codex, Gemini, Cursor, and OpenCode engines. Use when orchestrating multi-engine coding agents, starting/sending/stopping sessions, running multi-agent council collaborations, cross-session messaging, ultraplan deep planning, ultrareview parallel code review, or switching models/tools at runtime. Triggers on "start a session", "send to session", "run council", "ultraplan", "ultrareview", "switch model", "multi-agent", "coding session", "session inbox", "cursor agent", "opencode".
 metadata:
   {
     "openclaw":
@@ -43,7 +43,7 @@ metadata:
 
 # Claw Orchestrator Skill
 
-Claw Orchestrator — persistent multi-engine coding session manager for claw-style agent systems. Runs as a standalone CLI/server, with first-class OpenClaw plugin support. Wraps Claude Code, Codex, Gemini, Cursor Agent, and custom CLIs into headless agentic engines with 35 tools.
+Claw Orchestrator — persistent multi-engine coding session manager for claw-style agent systems. Runs as a standalone CLI/server, with first-class OpenClaw plugin support. Wraps Claude Code, Codex, Gemini, Cursor Agent, OpenCode, and custom CLIs into headless agentic engines with 35 tools.
 
 ## Engine Quick Reference
 
@@ -53,6 +53,7 @@ Claw Orchestrator — persistent multi-engine coding session manager for claw-st
 | `codex` | `codex exec` | Per-message spawn | One-shot execution |
 | `gemini` | `gemini -p` | Per-message spawn | One-shot execution |
 | `cursor` | `agent -p` | Per-message spawn | One-shot execution |
+| `opencode` | `opencode run` | Per-message spawn | Provider-agnostic (`provider/model`) |
 
 ## Core Workflow
 
@@ -62,6 +63,7 @@ session_start({ name: "myproject", cwd: "/path/to/project", engine: "claude" })
 session_start({ name: "codex-task", cwd: "/path/to/project", engine: "codex" })
 session_start({ name: "gemini-task", cwd: "/path/to/project", engine: "gemini" })
 session_start({ name: "cursor-task", cwd: "/path/to/project", engine: "cursor" })
+session_start({ name: "opencode-task", cwd: "/path/to/project", engine: "opencode", model: "anthropic/claude-sonnet-4" })
 
 // 2. Send messages
 session_send({ name: "myproject", message: "Fix the auth bug" })
@@ -78,7 +80,7 @@ session_stop({ name: "myproject" })
 
 | Parameter | Description |
 |-----------|-------------|
-| `engine` | `claude` (default), `codex`, `gemini`, `cursor` |
+| `engine` | `claude` (default), `codex`, `gemini`, `cursor`, `opencode` |
 | `model` | Model name or alias (`opus`, `sonnet`, `haiku`, `gpt-5.4`, `gemini-pro`, `composer-2`) |
 | `permissionMode` | `acceptEdits`, `auto`, `plan`, `bypassPermissions`, `default` |
 | `effort` | `low`, `medium`, `high`, `xhigh`, `max`, `auto` (`xhigh` is Opus 4.7-only, between `high` and `max`) |
@@ -182,3 +184,4 @@ Each engine requires its own auth before use:
 - **Codex**: `codex login` or `OPENAI_API_KEY`
 - **Gemini**: `gemini login` or `GEMINI_API_KEY`
 - **Cursor**: `agent login` or `CURSOR_API_KEY`
+- **OpenCode**: `opencode auth login` (provider-agnostic; use `provider/model` form for `model`)

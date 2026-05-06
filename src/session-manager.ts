@@ -125,6 +125,7 @@ import { PersistentGeminiSession } from './persistent-gemini-session.js';
 import { PersistentCodexSession } from './persistent-codex-session.js';
 import { PersistentCodexAppServerSession } from './persistent-codex-app-session.js';
 import { PersistentCursorSession } from './persistent-cursor-session.js';
+import { PersistentOpencodeSession } from './persistent-opencode-session.js';
 import { PersistentCustomSession } from './persistent-custom-session.js';
 import {
   type SessionConfig,
@@ -1265,6 +1266,7 @@ export class SessionManager {
       /\bcodex\b/, // codex CLI
       /\bgemini\b/, // gemini CLI
       /\bcursor-agent\b/, // cursor-agent CLI
+      /\bopencode\b/, // opencode CLI (sst/opencode)
       /(?:^|\/)agent\s/, // 'agent' as standalone command (not ssh-agent etc.)
     ];
     try {
@@ -1376,6 +1378,8 @@ export class SessionManager {
         return new PersistentCodexAppServerSession(config, process.env.CODEX_BIN);
       case 'cursor':
         return new PersistentCursorSession(config, process.env.CURSOR_BIN);
+      case 'opencode':
+        return new PersistentOpencodeSession(config, process.env.OPENCODE_BIN);
       case 'custom':
         if (!config.customEngine) throw new Error('customEngine config is required for engine type "custom"');
         return new PersistentCustomSession(config);

@@ -33,7 +33,7 @@ export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'auto';
 
 // ─── Engine ─────────────────────────────────────────────────────────────────
 
-export type EngineType = 'claude' | 'codex' | 'codex-app' | 'gemini' | 'cursor' | 'custom';
+export type EngineType = 'claude' | 'codex' | 'codex-app' | 'gemini' | 'cursor' | 'opencode' | 'custom';
 
 // ─── Custom Engine Config ───────────────────────────────────────────────────
 //
