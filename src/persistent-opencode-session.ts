@@ -26,8 +26,11 @@
  * `anthropic/claude-sonnet-4`). We pass `--model` through only when the
  * configured value contains a `/`; otherwise opencode's default applies.
  *
- * Permissions: always pass `--dangerously-skip-permissions`. opencode's
- * default mode prompts interactively, which would hang the subprocess.
+ * Permissions: opencode 1.1.40's `run` subcommand does not gate tool use
+ * behind interactive prompts, so no skip-permissions flag is needed (and
+ * `--dangerously-skip-permissions` doesn't exist on this version — yargs
+ * strict mode would reject it and print help). If a future opencode version
+ * reintroduces prompting on `run`, add a flag here behind a version probe.
  */
 
 import { spawn } from 'node:child_process';
@@ -77,8 +80,8 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
   }
 
   protected _run(message: string, options: SessionSendOptions): Promise<TurnResult> {
-    // opencode run <message..> --format json --dangerously-skip-permissions
-    const args: string[] = ['run', message, '--format', 'json', '--dangerously-skip-permissions'];
+    // opencode run <message..> --format json
+    const args: string[] = ['run', message, '--format', 'json'];
 
     // opencode wants `provider/model` format. Only pass through if it looks correct.
     if (this.options.model && this.options.model.includes('/')) {
@@ -103,6 +106,9 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
         stdio: ['pipe', 'pipe', 'pipe'],
       });
       this.currentProc = proc;
+      // opencode reads stdin even when the prompt is on argv. Close it
+      // immediately so the subprocess doesn't hang waiting for EOF.
+      proc.stdin?.end();
 
       const timer = setTimeout(() => {
         if (!settled) {

@@ -84,7 +84,7 @@ describe('PersistentOpencodeSession', () => {
   });
 
   describe('spawn flags', () => {
-    it('uses run --format json --dangerously-skip-permissions', async () => {
+    it('uses run --format json', async () => {
       const session = new PersistentOpencodeSession({
         name: 'test',
         cwd: '/tmp',
@@ -101,7 +101,9 @@ describe('PersistentOpencodeSession', () => {
       expect(spawnArgs[1]).toBe('hello');
       expect(spawnArgs).toContain('--format');
       expect(spawnArgs).toContain('json');
-      expect(spawnArgs).toContain('--dangerously-skip-permissions');
+      // 1.1.40 does not have / does not need --dangerously-skip-permissions.
+      // Adding it would trigger yargs strict mode and print the help screen.
+      expect(spawnArgs).not.toContain('--dangerously-skip-permissions');
     });
 
     it('passes --model only when model contains "/"', async () => {

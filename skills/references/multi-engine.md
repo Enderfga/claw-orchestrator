@@ -142,16 +142,16 @@ await manager.startSession({
 
 ### OpenCode (`engine: 'opencode'`)
 
-Wraps the [sst/opencode](https://github.com/sst/opencode) CLI with `run --format json --dangerously-skip-permissions`. Each `send()` spawns a new process.
+Wraps the [sst/opencode](https://github.com/sst/opencode) CLI with `run --format json`. Each `send()` spawns a new process.
 
 - One-shot execution per message (no persistent subprocess)
 - NDJSON event stream with envelope `{ type, timestamp, sessionID, ... }`
 - Event types: `text`, `reasoning`, `tool_use`, `step_start`, `step_finish`, `error`
 - `text` and `tool_use` are **cumulative snapshots** keyed by `part.id` / `part.callID`; the wrapper diffs them to produce streaming deltas for `onText` callbacks and counts each tool invocation once
 - Real token counts from `step_finish.part.tokens.{input,output,cache.read}`
-- `--dangerously-skip-permissions` is always set (interactive prompts would hang the subprocess)
+- The wrapper closes the subprocess's stdin immediately after spawn (opencode otherwise reads stdin and blocks on EOF, hanging the call)
 - Provider-agnostic: opencode's `--model` expects `provider/model` form (e.g. `anthropic/claude-sonnet-4`). The wrapper passes `--model` through only when the value contains a `/`; otherwise opencode's own default applies
-- Requires opencode installed: `brew install sst/tap/opencode` or `npm install -g opencode-ai`. Auth via `opencode auth login`
+- Requires opencode installed: `brew install sst/tap/opencode` or `npm install -g opencode-ai`. Auth via `opencode auth login` **or** any provider env var (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, etc.) — opencode picks up either path
 - Binary: `opencode` (set `OPENCODE_BIN` env var to override)
 
 ```typescript
