@@ -1,6 +1,6 @@
 ---
 name: claw-orchestrator
-description: Manage persistent coding sessions across Claude Code, Codex, Gemini, Cursor, and OpenCode engines. Use when orchestrating multi-engine coding agents, starting/sending/stopping sessions, running multi-agent council collaborations, cross-session messaging, ultraplan deep planning, ultrareview parallel code review, or switching models/tools at runtime. Triggers on "start a session", "send to session", "run council", "ultraplan", "ultrareview", "switch model", "multi-agent", "coding session", "session inbox", "cursor agent", "opencode".
+description: Manage persistent coding sessions across Claude Code, Codex, Gemini, Cursor, and OpenCode engines. Use when orchestrating multi-engine coding agents, starting/sending/stopping sessions, running multi-agent council collaborations, cross-session messaging, ultraplan deep planning, ultrareview parallel code review, autoloop autonomous workspace iteration, or switching models/tools at runtime. Triggers on "start a session", "send to session", "run council", "ultraplan", "ultrareview", "autoloop", "autonomous iteration", "iterate until goal", "deep paper review", "auto research", "switch model", "multi-agent", "coding session", "session inbox", "cursor agent", "opencode".
 metadata:
   {
     "openclaw":
@@ -162,6 +162,27 @@ team_send({ name: "myproject", teammate: "teammate", message: "Review this" })
 - **Ultrareview**: Fleet of 5-20 bug-hunting agents reviewing in parallel (security, logic, perf, types, etc.)
 
 Both are async — start then poll status.
+
+## Autoloop (autonomous workspace iteration)
+
+Given a git workspace, a `plan.md` (intent + scope), and a `goal.json` (success criteria — scalar metric and/or structural gates), runs BOOTSTRAP → propose → execute → measure → ratchet → repeat until the goal is met or caps fire.
+
+```javascript
+autoloop_start({
+  workspace: '/path/to/repo',
+  plan_path: '/path/to/repo/plan.md',
+  goal_path: '/path/to/repo/goal.json',
+  // optional: propose_engine, propose_model, ratchet_engine, ratchet_model
+});
+autoloop_status({ id });
+autoloop_inject({ id, text: 'try lr warmup 500' });   // hint into next PROPOSE
+autoloop_resume({ workspace, task_id });              // resume after process death
+autoloop_stop({ id });
+```
+
+Asymmetric ratchet reviewer runs in a sandbox tmpdir (no source access), only writes a single decision bit to `state.json`. Non-blocking pushes via `openclaw message send` on new-best / plateau / aspirational gate proposals / termination. SSE event stream at `GET /autoloop/<id>/events`.
+
+For details and worked examples (Karpathy-style scalar improvement + paper-review style gates): see [references/autoloop.md](references/autoloop.md).
 
 ## 27 Tools Overview
 

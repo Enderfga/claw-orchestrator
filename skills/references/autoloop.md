@@ -13,9 +13,9 @@ Full design rationale lives in `tasks/autoloop.md`. This page is the operator re
 ## Quick start
 
 ```bash
-# 1. Author plan.md (intent) and goal.json (success criteria) somewhere — see §Examples.
+# 1. Author plan.md (intent + scope) and goal.json (success criteria) — see §Examples.
 
-# 2. Start the loop (via openclaw plugin tool or HTTP)
+# 2. Start the loop
 curl -X POST http://127.0.0.1:18789/v1/openclaw/tools/autoloop_start \
   -H 'content-type: application/json' \
   -d '{
@@ -26,15 +26,21 @@ curl -X POST http://127.0.0.1:18789/v1/openclaw/tools/autoloop_start \
 # → { ok: true, id: "autoloop-...", task_dir: ".../tasks/autoloop-...", current_phase: "RUNNING" }
 
 # 3. Watch
-curl http://127.0.0.1:18789/autoloop/<id>/events     # SSE stream
+curl http://127.0.0.1:18789/autoloop/<id>/events     # SSE stream (one event per phase / state / push)
 # or poll
 curl -X POST http://127.0.0.1:18789/v1/openclaw/tools/autoloop_status -d '{"id":"<id>"}'
 
-# 4. Inject a hint (becomes input to next PROPOSE)
+# 4. Inject a hint (becomes input to next PROPOSE via tasks/<id>/inbox.md)
 curl -X POST http://127.0.0.1:18789/v1/openclaw/tools/autoloop_inject \
   -d '{"id":"<id>","text":"try LR warmup 500 steps"}'
 
-# 5. Stop
+# 5. Resume after process death (gateway restart, OOM, machine reboot)
+curl -X POST http://127.0.0.1:18789/v1/openclaw/tools/autoloop_resume \
+  -d '{"workspace":"/path/to/workspace","task_id":"<id>"}'
+# Skips BOOTSTRAP, git-resets workspace to last best (or bootstrap baseline if no best yet),
+# then continues the loop. Refuses to resume already-terminated runs.
+
+# 6. Stop
 curl -X POST http://127.0.0.1:18789/v1/openclaw/tools/autoloop_stop -d '{"id":"<id>"}'
 ```
 
@@ -47,8 +53,11 @@ curl -X POST http://127.0.0.1:18789/v1/openclaw/tools/autoloop_stop -d '{"id":"<
     "name": "val_bpb",
     "direction": "min" | "max",
     "extract_cmd": "shell command that prints one number to stdout",
+    "extract_timeout_sec": 600,    // hard wall-clock cap on extract_cmd. Default 600.
+                                    //   For long ML evals (training+eval), set to your
+                                    //   real upper bound, e.g. 14400 = 4 hours.
     "target": 0.95,
-    "noise_floor": 0.005   // changes within ±noise are not improvements
+    "noise_floor": 0.005           // changes within ±noise are not improvements
   },
   // Required. May be empty only if scalar is set.
   "gates": [
@@ -71,6 +80,33 @@ curl -X POST http://127.0.0.1:18789/v1/openclaw/tools/autoloop_stop -d '{"id":"<
   }
 }
 ```
+
+## `plan.md` template
+
+The agent reads `plan.md` for free-text intent. RATCHET also reads it for **Scope** rules (added in v3.4.1). Use this skeleton:
+
+```markdown
+# Plan
+
+<one-paragraph statement of what you want the loop to achieve>
+
+## Deliverables
+
+<what artifacts must exist when done — files, sections, etc.>
+
+## Scope (HARD)   ← RATCHET will reset on violations
+
+- **Read-only**: `path/to/frozen-test-data.json`, `eval/golden_outputs/`. Never modify.
+- **Allowed paths to write**: `src/configs/`, `src/training/`. No changes elsewhere.
+- **Tunable hyperparameters**: `learning_rate`, `warmup_steps`, `batch_size`. Do NOT touch model architecture.
+- **No external network calls** beyond what BOOTSTRAP set up.
+
+## Style / Conventions
+
+<optional: code style, naming, citation format, etc.>
+```
+
+The Scope section is interpreted by RATCHET (rule #2 in `configs/autoloop-ratchet-prompt.md`): if `current.md` describes changes outside Allowed paths or to Read-only files, RATCHET resets even if gates pass.
 
 ## Examples
 
@@ -191,13 +227,14 @@ All files are git-tracked under the autoloop branch (`autoloop/<id>`). `git rese
 
 Replies arrive asynchronously through whatever your push command supports. The loop never blocks on a reply.
 
-## Known limitations (v1)
+## Known limitations
 
 - Single-track serial loop; no N-worktree population mode (state schema supports it for v2)
 - Only `local` runner backend; no remote runner backends (SSH / cloud worker / message bus) yet
 - No "explore mode" — multi-step refactors must be neutral-on-metric in one commit (Karpathy's documented trade-off)
-- No process-restart recovery
 - No webchat frontend (SSE endpoint is there, frontend deferred)
 - Cross-task lessons store (à la AutoResearchClaw `MetaClaw`) not implemented
+- ⚠️ **`bare: true` is not used** when starting child claude sessions because it skips loading `~/.claude/settings.json` env (and so loses custom-env-based auth on this user's setup). Cost: lose the `--exclude-dynamic-system-prompt-sections` + 1H cache optimisations. Real fix is upstream in `persistent-session.ts`.
+- ⚠️ **`autoloop_resume` is wired and unit/smoke-tested**, but exotic states (dirty working tree at resume time, mid-COMPRESS death, mid-RATCHET stdin pipe death) are not exercised yet.
 
 See `tasks/autoloop.md` §10 for the full failure-mode register.

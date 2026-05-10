@@ -126,6 +126,12 @@ export interface AutoloopState {
   /** Set by RATCHET only. PROPOSE / MEASURE may not write this. */
   decision: RatchetDecision | null;
   decision_reason: string | null;
+  /**
+   * Git sha of the BOOTSTRAP commit. Used as the floor for git reset when no
+   * `best` exists yet (otherwise we'd reset to HEAD~1, which after a failed
+   * propose-then-resume can be the wrong target).
+   */
+  bootstrap_sha: string | null;
   tree: StateTree;
   termination: {
     fired: boolean;

@@ -241,8 +241,9 @@ export class AutoloopRunner extends EventEmitter {
     await runShell(`git checkout ${this.branch}`, { cwd: this.config.workspace, timeout_ms: 10_000 });
 
     // Roll back to last known-good state — discard any crashed in-flight commits.
-    if (this.state.best?.git_sha) {
-      await runShell(`git reset --hard ${this.state.best.git_sha}`, {
+    const resetTarget = this.state.best?.git_sha ?? this.state.bootstrap_sha;
+    if (resetTarget) {
+      await runShell(`git reset --hard ${resetTarget}`, {
         cwd: this.config.workspace,
         timeout_ms: 10_000,
       });
@@ -334,6 +335,7 @@ export class AutoloopRunner extends EventEmitter {
       plateau_count: 0,
       decision: null,
       decision_reason: null,
+      bootstrap_sha: null,
       tree: { parent_iter: null, children_iters: [] },
       termination: { fired: false, reason: null },
       cost_usd_so_far: 0,
@@ -392,6 +394,8 @@ export class AutoloopRunner extends EventEmitter {
     }
 
     this.state.cost_usd_so_far += costUsd;
+    // Capture bootstrap commit sha as the rollback floor for the rest of the run.
+    this.state.bootstrap_sha = this.gitSha();
 
     // Did bootstrap leave a failure marker?
     const failPath = path.join(this.taskDir, 'bootstrap-failure.md');
@@ -806,7 +810,8 @@ export class AutoloopRunner extends EventEmitter {
   }
 
   private async gitReset(): Promise<void> {
-    const target = this.state.best?.git_sha ?? 'HEAD~1';
+    // Prefer best, then bootstrap (stable floor), then HEAD~1 as a last resort.
+    const target = this.state.best?.git_sha ?? this.state.bootstrap_sha ?? 'HEAD~1';
     await runShell(`git reset --hard ${target}`, {
       cwd: this.config.workspace,
       timeout_ms: 30_000,

@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.4.1] - 2026-05-10
+
+### Fixed — autoloop production-readiness pass
+
+After end-to-end smoke and Scenario 2 (paper review) live runs, five fixes:
+
+- **Cost tracking via `manager.getCost()`** — replaced events-based extraction (which silently returned `$0` because the event stream is empty without `bare:true`) with `readCostUsd(manager, sessionName, result)` that queries the session's authoritative cost before stop. Verified: smoke now reports `$0.40` (was `$0.00`).
+- **`autoloop_resume` tool + SessionManager.autoloopResume()** — recover from orchestrator process death (gateway restart, OOM, machine reboot). Reads `tasks/<id>/state.json` + `plan.md` + `goal.json`, skips BOOTSTRAP, git-resets workspace to last best (or `bootstrap_sha` baseline), continues from next iter. Refuses to resume already-terminated runs.
+- **`ScalarSpec.extract_timeout_sec`** — separates the scalar's shell wall-clock from the LLM-call cap. Default 600s; for long ML evals set e.g. `14400` (4h) in `goal.json`. Previously shared `per_iter_timeout_ms`.
+- **Scope discipline in propose + ratchet prompts** — `plan.md`'s `## Scope` / `## Constraints` / `## Read-only files` / `## Allowed paths` blocks are now HARD constraints. RATCHET rule #2 is "Scope violation → reset" (between gate-regression and aspirational-only). PROPOSE prompt explicitly enumerates how to interpret each constraint type. Default to narrower interpretation when ambiguous.
+- **`state.json.bootstrap_sha`** — captured after BOOTSTRAP succeeds. Used by `gitReset` and `autoloop_resume` as a stable rollback floor when no `best` exists yet (avoids the previous `HEAD~1` ping-pong on failed proposes during early iters).
+
+### Fixed — earlier post-merge fixes already shipped under 3.4.0 are listed here for completeness
+
+- **`bare: true` removed from autoloop child sessions** — claude `--bare` skips `~/.claude/settings.json` env loading, breaking auth via the custom env loaded from settings.json. Real fix is upstream in `persistent-session.ts`; autoloop's workaround is to drop `bare`.
+- **Robust RATCHET JSON parser** — Sonnet often wraps JSON in prose / code fences. Old parser missed → silently `{decision: "reset", reason: "malformed"}`, which rolled back every successful PROPOSE. New parser tries trim, fence-strip, and brace-balanced extraction; saves raw output to `iter/<n>/ratchet-raw.txt` for forensics.
+- **Public exports** — `AutoloopRunner`, `AutoloopConfig`, type re-exports added to `src/index.ts`.
+
+### Added — Scenario 2 starter and tests
+
+- `scripts/scenario2-paper-review.ts` — end-to-end paper-review demo. `ARXIV_ID=<id> npx tsx scripts/scenario2-paper-review.ts` — downloads arxiv PDF, sets up workspace with structural gates (≥1500 words, 6 required sections, ≥5 citations, ≥8 slides), runs autoloop. Verified on arxiv 2210.02747 (Lipman et al, Flow Matching): 11/11 gates, 1 iter, 5 min wall-clock, $0.87 with sonnet/sonnet.
+- `scripts/test-resume.ts` — start, stop after BOOTSTRAP, fresh SessionManager + `autoloopResume`, verify pytest passes.
+- `scripts/test-multi-iter.ts` — workspace with 4 independent bugs in 4 files, verifies multi-iter ratcheting, monotonic `metric.json`, ≥2 propose commits on the autoloop branch.
+
+### Known limitations
+
+- Multi-day runs are still vulnerable to mid-phase process death — `autoloop_resume` only handles "between phases" deaths cleanly. Mid-COMPRESS or mid-RATCHET pipe death may leave inconsistent ledger.
+- Scenario 1 (real ML training loop on remote box) needs `ssh <remote-host> …` wrapped inside `extract_cmd`. Native remote runner is a v2 item.
+
 ## [3.4.0] - 2026-05-10
 
 ### Added — `autoloop` (autonomous workspace iteration)
