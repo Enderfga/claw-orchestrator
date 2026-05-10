@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.5.3] - 2026-05-10
+
+### Added — auto-compact on context-budget threshold
+
+Each agent session is monitored after every turn via `getStats().contextPercent`.
+When it crosses the per-agent threshold the dispatcher dispatches `/compact`
+with an agent-specific summary hint:
+
+| Agent | Default threshold | What `/compact` is told to preserve |
+|---|---|---|
+| Planner | 80% | current plan / goal, decisions with the user, what's been tried + rejected, user prefs, iter verdicts |
+| Coder | 70% | codebase familiarity, attempted patches, current working state, plan + goal |
+| Reviewer | 70% | fakery patterns caught, recent metrics, structural rules from goal.json |
+
+Per-run override via `compactThresholds: { planner?, coder?, reviewer? }` on
+the dispatcher config. 30-second cooldown prevents back-to-back compactions.
+
+Surfaces as a new `compact` SSE event on `/autoloop/<id>/events` (alongside
+`planner_reply` / `coder_reply` / `reviewer_reply`); the embedded dashboard
+renders it as an inline `[auto-compact 82% ≥ 80% — /compact dispatched]`
+system entry in the relevant pane.
+
+Closes the last design-doc deferred item (auto-compact, design doc §7.1).
+Manual `autoloop_reset_agent` still available for nuclear reset.
+
 ## [3.5.2] - 2026-05-10
 
 ### Fixed

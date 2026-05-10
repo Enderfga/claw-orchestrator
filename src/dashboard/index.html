@@ -629,6 +629,24 @@
           });
           paintPlanner();
         });
+        es.addEventListener('compact', (e) => {
+          const data = JSON.parse(e.data);
+          const entry = {
+            who: 'system',
+            text: `[auto-compact ${data.percent.toFixed(0)}% ≥ ${data.threshold}% — /compact dispatched]`,
+            ts: new Date().toISOString(),
+          };
+          if (data.agent === 'planner') {
+            state.autoloop.plannerLog.push(entry);
+            paintPlanner();
+          } else if (data.agent === 'coder') {
+            state.autoloop.coderLog.push(entry);
+            paintCoder();
+          } else if (data.agent === 'reviewer') {
+            state.autoloop.reviewerLog.push(entry);
+            paintReviewer();
+          }
+        });
       }
 
       function paintAutoloopState() {

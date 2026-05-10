@@ -57,6 +57,16 @@ export interface ClaudeAgentDispatcherConfig {
   sendTimeoutMs?: number;
   logger?: Logger;
   /**
+   * Auto-compact thresholds (percent of context window). When the agent's
+   * `contextPercent` (from getStats) climbs above its threshold after a
+   * turn, the dispatcher dispatches `/compact <agent-specific summary>` to
+   * that agent. Defaults: Planner 80%, Coder 70%, Reviewer 70%.
+   *
+   * Per the design doc §7: each agent's context is precious; don't let it
+   * silently fill until the API rejects.
+   */
+  compactThresholds?: { planner?: number; coder?: number; reviewer?: number };
+  /**
    * Push-policy ref that S3's update_push_policy mutates. Caller (SessionManager)
    * passes its own policy object so changes are visible to the runner.
    */
@@ -228,6 +238,71 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
     }
   }
 
+  // ─── Auto-compact ────────────────────────────────────────────────────────
+  //
+  // After each agent turn we check getStats().contextPercent. When it crosses
+  // the per-agent threshold we send `/compact <hint>` to ask Claude Code to
+  // drop chunks of history while preserving what each role needs to keep
+  // working. /compact preserves the session id — no reset, no memory-file
+  // dance, no reprime — so this is cheap.
+  //
+  // We track lastCompactAt per agent to avoid re-firing within 30 s in case
+  // the immediate post-compact stats haven't refreshed yet.
+
+  private lastCompactAt: Partial<Record<'planner' | 'coder' | 'reviewer', number>> = {};
+
+  private compactSummaryFor(agent: 'planner' | 'coder' | 'reviewer'): string {
+    if (agent === 'planner') {
+      return [
+        'Preserve: current plan.md state and goal.json criteria; what the user has asked',
+        "for and approved; what directions have been tried and rejected; the user's style",
+        'preferences for this run; iter-by-iter Reviewer verdicts. Drop: verbose tool',
+        'output, intermediate file dumps, redundant context.',
+      ].join(' ');
+    }
+    if (agent === 'coder') {
+      return [
+        'Preserve: codebase familiarity (what files do what), what patches you have already',
+        'tried and why they failed, what is currently working, the current plan and goal.',
+        'Drop: full file dumps, verbose stack traces, intermediate eval output beyond the',
+        'last few iters.',
+      ].join(' ');
+    }
+    return [
+      'Preserve: patterns of fakery you have caught (in reviewer_memory.md), recent metric',
+      'history, structural rules from goal.json, your accumulating model of what cheating',
+      'looks like in this codebase. Drop: full diff dumps from older iters, verbose audit',
+      'transcripts beyond the last few iters.',
+    ].join(' ');
+  }
+
+  private async maybeCompact(agent: 'planner' | 'coder' | 'reviewer', name: string): Promise<void> {
+    const cfg = this.config.compactThresholds ?? {};
+    const threshold =
+      agent === 'planner' ? (cfg.planner ?? 80) : agent === 'coder' ? (cfg.coder ?? 70) : (cfg.reviewer ?? 70);
+    let pct: number | undefined;
+    try {
+      const stats = this.config.manager.getStatus(name).stats;
+      pct = stats.contextPercent;
+    } catch {
+      // Session might be gone (terminate races); silent skip.
+      return;
+    }
+    if (pct == null || pct < threshold) return;
+    const last = this.lastCompactAt[agent] ?? 0;
+    if (Date.now() - last < 30_000) return;
+    this.lastCompactAt[agent] = Date.now();
+    this.logger.info?.(
+      `[autoloop/${this.config.runId}] ${agent} context ${pct.toFixed(0)}% ≥ ${threshold}% — auto-compact`,
+    );
+    this.emit('compact', { agent, percent: pct, threshold });
+    try {
+      await this.config.manager.compactSession(name, this.compactSummaryFor(agent));
+    } catch (err) {
+      this.logger.warn?.(`[autoloop/${this.config.runId}] compact ${agent} failed: ${(err as Error).message}`);
+    }
+  }
+
   // ─── Planner-specific ────────────────────────────────────────────────────
 
   private async ensurePlanner(): Promise<void> {
@@ -318,6 +393,8 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
 
     // Emit cleaned reply (without raw JSON blocks) for the chat tool to surface.
     if (parsed.cleaned_reply) this.emit('planner_reply', parsed.cleaned_reply);
+    // Auto-compact after each Planner turn if context is filling up.
+    await this.maybeCompact('planner', this.plannerName);
     return handlerResult.emitted_messages;
   }
 
@@ -393,6 +470,7 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
     if (!ic) {
       // No iter_complete emitted — could be a clarification request, or the
       // Coder bailed. Return a directive_ack so Planner sees it next turn.
+      await this.maybeCompact('coder', this.coderName);
       return [
         Msg.directiveAck(env.iter, {
           understood: false,
@@ -424,6 +502,7 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
     const commitMsg = `autoloop/iter-${env.iter}: ${ic.summary}`.slice(0, 200);
     await this.runGit(['git', 'commit', '-m', commitMsg]);
 
+    await this.maybeCompact('coder', this.coderName);
     return [
       Msg.iterArtifacts(env.iter, {
         diff: diffOut.out,
@@ -522,10 +601,12 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
         metric: null,
         audit_notes: verdict.payload.audit_notes,
       });
+      await this.maybeCompact('reviewer', this.reviewerName);
       return [verdict];
     }
 
     this.persistVerdict(env.payload.iter, rc);
+    await this.maybeCompact('reviewer', this.reviewerName);
     return [Msg.reviewVerdict(env.payload.iter, rc)];
   }
 

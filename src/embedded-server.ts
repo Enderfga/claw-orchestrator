@@ -576,6 +576,7 @@ export class EmbeddedServer {
         const onPlannerReply = (text: unknown): void => send('planner_reply', { text });
         const onCoderReply = (text: unknown): void => send('coder_reply', { text });
         const onReviewerReply = (text: unknown): void => send('reviewer_reply', { text });
+        const onCompact = (e: unknown): void => send('compact', e);
         const cleanup = (): void => {
           ctx.runner.off('message', onMessage);
           ctx.runner.off('state', onState);
@@ -585,6 +586,7 @@ export class EmbeddedServer {
           ctx.dispatcher.off('planner_reply', onPlannerReply);
           ctx.dispatcher.off('coder_reply', onCoderReply);
           ctx.dispatcher.off('reviewer_reply', onReviewerReply);
+          ctx.dispatcher.off('compact', onCompact);
           try {
             res.end();
           } catch {
@@ -599,6 +601,7 @@ export class EmbeddedServer {
         ctx.dispatcher.on('planner_reply', onPlannerReply);
         ctx.dispatcher.on('coder_reply', onCoderReply);
         ctx.dispatcher.on('reviewer_reply', onReviewerReply);
+        ctx.dispatcher.on('compact', onCompact);
         res.on('close', cleanup);
         return;
       }
