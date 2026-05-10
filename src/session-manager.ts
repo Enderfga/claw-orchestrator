@@ -2026,6 +2026,24 @@ export class SessionManager {
     return Array.from(this.autoloopsV2.values()).map((c) => c.runner.state);
   }
 
+  /**
+   * Reset a single subagent on a v2 run. Useful when an agent has drifted
+   * (chat memory implies hallucination, repeated rejects, or context bloat).
+   * Coder/Reviewer: safe to reset; the next directive/review_request will
+   * re-prime from system prompt + ledger artifacts.
+   * Planner: requires force=true and discards user-conversation context.
+   */
+  async autoloopV2ResetAgent(
+    runId: string,
+    agent: 'planner' | 'coder' | 'reviewer',
+    opts: { force?: boolean; eagerRestart?: boolean } = {},
+  ): Promise<boolean> {
+    const ctx = this.autoloopsV2.get(runId);
+    if (!ctx) return false;
+    await ctx.dispatcher.resetAgent(agent, opts);
+    return true;
+  }
+
   async autoloopV2Stop(runId: string, reason = 'user-stop'): Promise<boolean> {
     const ctx = this.autoloopsV2.get(runId);
     if (!ctx) return false;

@@ -1401,6 +1401,39 @@ const plugin = {
       },
     });
 
+    // ─── Tool: autoloop_v2_reset_agent ──────────────────────────────
+
+    api.registerTool({
+      name: 'autoloop_v2_reset_agent',
+      description:
+        'Reset a single subagent (Coder or Reviewer) on a v2 run. Stops its persistent session; the next directive/review_request will re-prime from the system prompt + ledger artifacts. Use when an agent has drifted (repeated rejects, hallucinated context, token bloat). Planner reset requires force=true because it discards chat history with the user.',
+      parameters: {
+        type: 'object',
+        properties: {
+          run_id: { type: 'string' },
+          agent: { type: 'string', enum: ['planner', 'coder', 'reviewer'] },
+          force: { type: 'boolean', description: 'Required to reset Planner (discards user chat context)' },
+          eager_restart: {
+            type: 'boolean',
+            description: 'Start a fresh session immediately (default: lazy on next message)',
+          },
+        },
+        required: ['run_id', 'agent'],
+      },
+      execute: async (_id, args) => {
+        const ok = await getManager().autoloopV2ResetAgent(
+          args.run_id as string,
+          args.agent as 'planner' | 'coder' | 'reviewer',
+          {
+            force: args.force as boolean | undefined,
+            eagerRestart: args.eager_restart as boolean | undefined,
+          },
+        );
+        if (!ok) return { ok: false, error: 'Run not found' };
+        return { ok: true };
+      },
+    });
+
     // ─── Tool: autoloop_v2_stop ─────────────────────────────────────
 
     api.registerTool({

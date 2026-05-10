@@ -168,6 +168,66 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
     await this.ensureReviewer();
   }
 
+  /**
+   * Reset a single subagent — stop its session, clear the started flag, and
+   * (optionally) eagerly start a fresh one. The session-level system prompt is
+   * the same; persistent state lives in `<ledger>/{coder,reviewer}_memory.md`
+   * which the agent reads on its first turn after reset.
+   *
+   * Refuses to reset Planner without `force: true` — Planner reset throws away
+   * the user-conversation context and must be a deliberate action.
+   */
+  async resetAgent(
+    agent: 'planner' | 'coder' | 'reviewer',
+    opts: { force?: boolean; eagerRestart?: boolean } = {},
+  ): Promise<void> {
+    if (agent === 'planner' && !opts.force) {
+      throw new Error('Refusing to reset Planner without force=true (would discard chat context)');
+    }
+    const name = agent === 'planner' ? this.plannerName : agent === 'coder' ? this.coderName : this.reviewerName;
+    try {
+      await this.config.manager.stopSession(name);
+    } catch (err) {
+      this.logger.warn?.(`[autoloop-v2] resetAgent stop failed for ${name}: ${(err as Error).message}`);
+    }
+    if (agent === 'planner') this.plannerStarted = false;
+    if (agent === 'coder') this.coderStarted = false;
+    if (agent === 'reviewer') this.reviewerStarted = false;
+    if (opts.eagerRestart) {
+      if (agent === 'planner') await this.ensurePlanner();
+      else if (agent === 'coder') await this.ensureCoder();
+      else await this.ensureReviewer();
+    }
+  }
+
+  /**
+   * Wrap a subagent send. If the underlying session throws or returns an
+   * error string, auto-reset the subagent once and retry. Used by
+   * deliverToCoder / deliverToReviewer to recover from subprocess deaths.
+   */
+  private async sendWithRecovery(
+    agent: 'coder' | 'reviewer',
+    name: string,
+    promptText: string,
+  ): Promise<SendMessageResult> {
+    try {
+      return (await this.config.manager.sendMessage(name, promptText, {
+        timeout: this.config.sendTimeoutMs ?? 10 * 60_000,
+      })) as SendMessageResult;
+    } catch (err) {
+      this.logger.warn?.(`[autoloop-v2] ${agent} send threw, attempting reset+retry: ${(err as Error).message}`);
+      await this.resetAgent(agent, { eagerRestart: true });
+      try {
+        return (await this.config.manager.sendMessage(name, promptText, {
+          timeout: this.config.sendTimeoutMs ?? 10 * 60_000,
+        })) as SendMessageResult;
+      } catch (err2) {
+        this.logger.error?.(`[autoloop-v2] ${agent} second attempt failed after reset: ${(err2 as Error).message}`);
+        return { output: '', error: (err2 as Error).message };
+      }
+    }
+  }
+
   // ─── Planner-specific ────────────────────────────────────────────────────
 
   private async ensurePlanner(): Promise<void> {
@@ -313,9 +373,7 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
       .filter(Boolean)
       .join('\n');
 
-    const result = (await this.config.manager.sendMessage(this.coderName, promptText, {
-      timeout: this.config.sendTimeoutMs ?? 10 * 60_000,
-    })) as SendMessageResult;
+    const result = await this.sendWithRecovery('coder', this.coderName, promptText);
     const replyText = (result.output ?? '').trim();
     const parsed = parseAgentReply(replyText);
     this.emit('coder_reply', parsed.cleaned_reply);
@@ -434,9 +492,7 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
       'Audit and emit `review_complete`.',
     ].join('\n');
 
-    const result = (await this.config.manager.sendMessage(this.reviewerName, promptText, {
-      timeout: this.config.sendTimeoutMs ?? 10 * 60_000,
-    })) as SendMessageResult;
+    const result = await this.sendWithRecovery('reviewer', this.reviewerName, promptText);
     const replyText = (result.output ?? '').trim();
     const parsed = parseAgentReply(replyText);
     this.emit('reviewer_reply', parsed.cleaned_reply);
