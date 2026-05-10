@@ -27,6 +27,22 @@ export { PersistentCursorSession } from './persistent-cursor-session.js';
 export { PersistentOpencodeSession } from './persistent-opencode-session.js';
 export { PersistentCustomSession } from './persistent-custom-session.js';
 export { Council, getDefaultCouncilConfig } from './council.js';
+export { AutoloopRunner } from './autoloop.js';
+export type {
+  AutoloopConfig,
+  AutoloopHandle,
+  AutoloopPhase,
+  AutoloopState,
+  AutoloopStatus,
+  GoalSpec,
+  GateSpec,
+  ScalarSpec,
+  TerminationSpec,
+  EvalOutput,
+  RatchetOutput,
+  PushEvent,
+  PushKind,
+} from './autoloop-types.js';
 export { parseConsensus, stripConsensusTags, hasConsensusMarker } from './consensus.js';
 export { sanitizeCwd, validateRegex, validateName } from './validation.js';
 export { type Logger, createConsoleLogger, nullLogger } from './logger.js';

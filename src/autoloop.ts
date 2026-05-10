@@ -311,7 +311,6 @@ export class AutoloopRunner extends EventEmitter {
         engine: this.config.propose_engine || 'claude',
         model: this.config.propose_model || 'opus',
         permissionMode: 'bypassPermissions',
-        bare: true,
         systemPrompt: prompt,
         maxTurns: 30,
       });
@@ -448,7 +447,6 @@ export class AutoloopRunner extends EventEmitter {
         engine: this.config.propose_engine || 'claude',
         model: this.config.propose_model || 'opus',
         permissionMode: 'bypassPermissions',
-        bare: true,
         systemPrompt: prompt,
         maxTurns: 40,
       });
@@ -593,7 +591,6 @@ export class AutoloopRunner extends EventEmitter {
         engine: this.config.ratchet_engine || 'claude',
         model: this.config.ratchet_model || 'opus',
         permissionMode: 'default',
-        bare: true,
         systemPrompt: prompt,
         maxTurns: 1,
       });
@@ -602,6 +599,12 @@ export class AutoloopRunner extends EventEmitter {
       });
       raw = result.output || '';
       costUsd = extractCost(result);
+      // Save raw output for forensics regardless of parse success.
+      try {
+        fs.writeFileSync(path.join(this.taskDir, 'iter', String(iter), 'ratchet-raw.txt'), raw);
+      } catch {
+        // Non-fatal.
+      }
     } finally {
       try {
         await this.manager.stopSession(sessionName);
@@ -704,7 +707,6 @@ export class AutoloopRunner extends EventEmitter {
         engine: this.config.propose_engine || 'claude',
         model: this.config.propose_model || 'opus',
         permissionMode: 'bypassPermissions',
-        bare: true,
         systemPrompt: prompt,
         maxTurns: 20,
       });
@@ -827,24 +829,35 @@ export class AutoloopRunner extends EventEmitter {
 // ─── RATCHET output parsing ────────────────────────────────────────────────
 
 function parseRatchetJson(raw: string, iter: number): RatchetOutput {
-  // Strip code fences if present, then take last JSON object substring.
-  const cleaned = raw.replace(/```json\n?|```\n?/g, '').trim();
-  // Find the last balanced { ... } block.
-  const lastClose = cleaned.lastIndexOf('}');
-  const lastOpen = cleaned.lastIndexOf('{', lastClose);
+  // Try several extraction strategies. Order: most-specific to most-permissive.
+  const candidates: string[] = [];
+  // 1. Whole text trimmed.
+  candidates.push(raw.trim());
+  // 2. Strip code fences and try.
+  candidates.push(raw.replace(/```(?:json)?\n?|```\n?/g, '').trim());
+  // 3. Find every balanced top-level {...} block (greedy by matching braces),
+  //    try the last one first (RATCHET's prompt asks JSON to be at the end).
+  const balanced = extractBalancedJsonObjects(raw);
+  for (let i = balanced.length - 1; i >= 0; i--) candidates.push(balanced[i]);
+
   let payload: unknown = null;
-  if (lastClose > lastOpen && lastOpen >= 0) {
+  for (const c of candidates) {
+    if (!c) continue;
     try {
-      payload = JSON.parse(cleaned.slice(lastOpen, lastClose + 1));
+      const p = JSON.parse(c);
+      if (p && typeof p === 'object' && 'decision' in (p as Record<string, unknown>)) {
+        payload = p;
+        break;
+      }
     } catch {
-      payload = null;
+      // try next
     }
   }
   if (!payload || typeof payload !== 'object') {
     return {
       iter,
       decision: 'reset',
-      reason: 'malformed RATCHET output (could not parse JSON)',
+      reason: `malformed RATCHET output (could not parse JSON from ${raw.length} chars)`,
     };
   }
   const o = payload as Record<string, unknown>;
@@ -865,6 +878,39 @@ function parseRatchetJson(raw: string, iter: number): RatchetOutput {
 function tail(s: string, max: number): string {
   if (s.length <= max) return s;
   return s.slice(-max);
+}
+
+/** Walk the string brace-by-brace and return every top-level {...} substring. */
+function extractBalancedJsonObjects(s: string): string[] {
+  const out: string[] = [];
+  let depth = 0;
+  let start = -1;
+  let inString = false;
+  let escape = false;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (inString) {
+      if (escape) escape = false;
+      else if (ch === '\\') escape = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+    if (ch === '{') {
+      if (depth === 0) start = i;
+      depth++;
+    } else if (ch === '}') {
+      depth--;
+      if (depth === 0 && start >= 0) {
+        out.push(s.slice(start, i + 1));
+        start = -1;
+      }
+    }
+  }
+  return out;
 }
 
 function extractCost(result: SendResult): number {
