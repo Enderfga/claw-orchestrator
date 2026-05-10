@@ -87,9 +87,23 @@ await manager.councilStart("Design and implement an auth system", {
 });
 ```
 
+### Autoloop (autonomous workspace iteration)
+
+Given a git workspace, a `plan.md` (intent + scope), and a `goal.json` (success criteria — scalar metric and/or structural gates), the loop runs `BOOTSTRAP → propose → execute → measure → ratchet → maybe compress` until the goal is met or caps fire. Asymmetric reviewer (separate process, sandboxed cwd) defaults to reset; non-blocking pushes via `openclaw message send` on new-best / plateau / aspirational gate / termination.
+
+```ts
+await manager.autoloopStart({
+  workspace: "/path/to/repo",
+  plan_path: "/path/to/repo/plan.md",
+  goal_path: "/path/to/repo/goal.json",
+});
+```
+
+Resume after process death with `autoloopResume(workspace, taskId)`. SSE event stream at `GET /autoloop/<id>/events`. See [`skills/references/autoloop.md`](./skills/references/autoloop.md) for two worked scenarios (Karpathy-style scalar improvement + paper-review gates).
+
 ### Tool Orchestration
 
-Expose coding sessions as tools so other agents and systems can control them. The runtime registers 35 tools, including:
+Expose coding sessions as tools so other agents and systems can control them. The runtime registers 40 tools, including:
 
 ```txt
 session_start         session_send         coding_session_status
@@ -97,6 +111,7 @@ session_grep          session_compact      session_inbox
 team_send             team_list            coding_agents_list
 council_start         council_review       council_accept
 ultraplan_start       ultrareview_start
+autoloop_start        autoloop_resume      autoloop_inject
 ```
 
 ---
