@@ -52,14 +52,15 @@ goal.json: see below
   "aspirational_gates": [],     // agent may propose; user must lock
   "termination": {
     "scalar_target_hit": true,
-    "max_iters": 100,
-    "plateau_iters": 10,        // 10 consecutive non-improvements → push human
-    "max_cost_usd": 50
+    "max_iters": 200,
+    "plateau_iters": 10,        // 10 consecutive non-improvements → async push, loop continues
+    "max_cost_usd": 200,
+    "max_pending_aspirational": 5
   }
 }
 ```
 
-Loop behavior: PROPOSE edits training code → EXECUTE runs `train.py` (with kill at 600s) → MEASURE extracts `val_bpb` → RATCHET (separate process) checks `gates AND scalar_improved_beyond_noise` → commit on success, `git reset --hard` on failure. After 10 plateau iters or scalar target reached → async push user.
+Loop behavior: PROPOSE edits training code → EXECUTE runs `train.py` (with kill at 600s) → MEASURE extracts `val_bpb` → RATCHET (separate process) checks `gates AND scalar_improved_beyond_noise` → commit on success, `git reset --hard` on failure. After 10 plateau iters or scalar target reached → async push user (loop still continues unless user explicitly stops).
 
 This is essentially Karpathy autoresearch, with hard gates added (Anthropic's `passes` field pattern).
 
@@ -100,9 +101,10 @@ goal.json: see below
   "aspirational_gates": [],     // agent will populate during BOOTSTRAP after reading paper
   "termination": {
     "scalar_target_hit": true,
-    "max_iters": 50,
+    "max_iters": 100,
     "plateau_iters": 8,
-    "max_cost_usd": 30
+    "max_cost_usd": 100,
+    "max_pending_aspirational": 5
   }
 }
 ```
@@ -261,15 +263,18 @@ The loop pushes via `openclaw message send` (microsoft → wechat). Inner loop n
 
 C9 (proactivity) means: when in doubt, the loop **acts** (defaults to reset, defaults to continue) and informs you. It does not stop and wait.
 
-## 6. Ratchet Reviewer — Why a Different Engine
+## 6. Ratchet Reviewer — Process Isolation + Prompt Asymmetry
 
-C2 says RATCHET is a separate process. Stronger version: **use a different engine** if available. Reasoning:
+C2 says RATCHET is a separate process. **v1 default: `propose=opus, ratchet=opus`** — same strongest model, different processes, different prompts. User explicitly waived the cost constraint that would otherwise push toward `propose=sonnet`.
 
-1. Same model + same prompt-style → correlated failure modes (a coder Sonnet that misses a bug will likely also rubber-stamp itself when reviewing).
-2. claw-orchestrator already has 5 engines wired (Claude / Codex / Gemini / Cursor / OpenCode). RATCHET defaults to whichever is **not** the PROPOSE engine.
-3. The RATCHET prompt (see `src/autoloop-prompts/ratchet.md` once written) is effectively the council-reviewer prompt minus the council parts: "do NOT trust metric.json. find rewards being hacked. find regressions. your job is to reset, not commit."
+The reviewer's anti-rubber-stamp guarantee comes from two layers:
 
-This costs more tokens. Worth it; C2 is a hard rule.
+1. **Process isolation (C2/C3)**: RATCHET runs as a separate `claude` subprocess. Its `cwd` is a sandbox dir, **not** the workspace. It receives `eval.json + metric.json + current.md` summary via stdin only. It cannot read source code, cannot run commands, cannot read test data. Output is a single JSON decision blob written to `state.json.decision` and `iter/<n>/ratchet.json`.
+2. **Prompt asymmetry**: the RATCHET prompt (`src/autoloop-prompts/ratchet.md`) is the council-reviewer prompt's spirit minus the council parts: "do NOT trust metric.json. assume reward hacking until proven otherwise. find regressions. your default is reset, not commit."
+
+Why same-model is OK here: the failure mode we are guarding against is *prompt-level rubber-stamp drift* and *worktree-level reward hacking*. Both are addressed by isolation, not by model diversity. Different-engine ratchet is a v2 nice-to-have (see §11 deferred), not a correctness requirement.
+
+Fallback: if Opus is unavailable for either side, log a warning and fall back to Sonnet for the unavailable side. Never silently downgrade.
 
 ## 7. CLI / API surface
 
@@ -308,12 +313,19 @@ Plus SSE endpoint stub (no v1 frontend): `GET /autoloop/<id>/events` streams `{ 
 - Webchat visualization frontend → v3 (SSE endpoint already there for it)
 - Cross-task `MetaClaw`-style lessons store → v3
 
-## 9. Open Questions for User
+## 9. Resolved Decisions (post-user-review, 2026-05-10)
 
-1. **Ratchet engine pairing**: default `propose=sonnet, ratchet=opus`? Or different mix? Cost vs strictness.
-2. **Aspirational gates approval flow**: lock-on-reply (current §5) vs lock-after-N-iters-of-self-validation (more autonomous, higher gaming risk)?
-3. **`tasks/<id>/` location**: inside the workspace repo (so ledger versions with code, C1) — but this litters the user's repo. Alternative: separate `~/.clawd/autoloop/<id>/` dir + symlinks. Recommendation: **inside the workspace** for C1, but only `tasks/<id>/` (not `tasks/`) is added; user gitignores `tasks/` if they don't want it tracked, with a warning that they lose atomic rollback.
-4. **Plateau push default**: continue or stop? Currently defaults to continue (C9 proactivity), reverses the conservative default.
+User explicitly said: "都支持你的建议 不需要省钱" → all recommendations accepted, cost is not a constraint.
+
+1. **Ratchet engine pairing**: `propose=opus, ratchet=opus` — different processes, same strongest model, separate prompts. Cost not a concern; use the most capable model on both sides. Reviewer's strictness comes from process isolation + prompt asymmetry, not from a different model. (Implementation note: if Opus is unavailable, fall back to `ratchet=sonnet` with a warning.)
+2. **Aspirational gates approval flow**: lock-on-reply (§5 default). Agent works on un-locked aspirational gates in the background but they don't count toward `goal_completion`. Cap: `max_pending_aspirational = 5`. Once cap hit, agent must drop or rotate before adding more.
+3. **`tasks/<id>/` location**: inside the workspace repo. Atomic rollback (C1) wins over project-root cleanliness. Document this clearly in CLI `start` output.
+4. **Plateau push default**: continue. Each plateau threshold push fires a wechat ping (with `state.json` snapshot link), but the loop keeps running. User explicit `stop` is the only way to halt without termination criteria firing.
+
+Defaults updated everywhere in §2's `goal.json` examples:
+- `max_iters: 100 → 200` (cost not a constraint)
+- `max_cost_usd: 50 → 200` (scenario A), `30 → 100` (scenario B)
+- New: `max_pending_aspirational: 5`
 
 ## 10. Failure Modes We Are Knowingly Accepting
 
