@@ -462,6 +462,114 @@ export class EmbeddedServer {
         return;
       }
 
+      // ─── Autoloop v2 — list / state / push log / SSE events ─────
+      //
+      // Front-end contract (per tasks/autoloop-v2.md §9). Webchat opens these
+      // when rendering a 3-pane Orchestrator view.
+
+      if (path === '/autoloop/v2/list') {
+        json(200, { ok: true, runs: this.manager.autoloopV2List() });
+        return;
+      }
+
+      const v2StateMatch = path.match(/^\/autoloop\/v2\/([^/]+)\/state$/);
+      if (v2StateMatch) {
+        const state = this.manager.autoloopV2Status(v2StateMatch[1]);
+        if (!state) {
+          json(404, { ok: false, error: 'run not found' });
+        } else {
+          json(200, { ok: true, state });
+        }
+        return;
+      }
+
+      const v2PushLogMatch = path.match(/^\/autoloop\/v2\/([^/]+)\/push_log$/);
+      if (v2PushLogMatch) {
+        const id = v2PushLogMatch[1];
+        const ctx = this.manager.getAutoloopV2(id);
+        if (!ctx) {
+          json(404, { ok: false, error: 'run not found' });
+          return;
+        }
+        // push_log lives at <ledger>/push_log.jsonl — the dispatcher knows
+        // the ledger dir. We re-derive it here to avoid leaking dispatcher
+        // internals through the manager.
+        const fsMod = await import('node:fs');
+        const pathMod = await import('node:path');
+        const ledgerDir = pathMod.join(ctx.dispatcher.config.workspace, 'tasks', id);
+        const file = pathMod.join(ledgerDir, 'push_log.jsonl');
+        const lines: unknown[] = [];
+        if (fsMod.existsSync(file)) {
+          for (const line of fsMod.readFileSync(file, 'utf-8').split('\n')) {
+            if (!line.trim()) continue;
+            try {
+              lines.push(JSON.parse(line));
+            } catch {
+              /* skip malformed line */
+            }
+          }
+        }
+        json(200, { ok: true, entries: lines });
+        return;
+      }
+
+      const v2EventsMatch = path.match(/^\/autoloop\/v2\/([^/]+)\/events$/);
+      if (v2EventsMatch) {
+        const id = v2EventsMatch[1];
+        const ctx = this.manager.getAutoloopV2(id);
+        if (!ctx) {
+          json(404, { ok: false, error: 'run not found' });
+          return;
+        }
+        res.writeHead(200, {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+          Connection: 'keep-alive',
+        });
+        const send = (event: string, data: unknown): void => {
+          res.write(`event: ${event}\n`);
+          res.write(`data: ${JSON.stringify(data)}\n\n`);
+        };
+        send('snapshot', { state: ctx.runner.state });
+
+        const onMessage = (env: unknown): void => send('message', env);
+        const onState = (s: unknown): void => send('state', s);
+        const onPush = (e: unknown): void => send('push', e);
+        const onIterDone = (e: unknown): void => send('iter_done', e);
+        const onTerm = (r: unknown): void => {
+          send('terminated', { reason: r });
+          cleanup();
+        };
+        const onPlannerReply = (text: unknown): void => send('planner_reply', { text });
+        const onCoderReply = (text: unknown): void => send('coder_reply', { text });
+        const onReviewerReply = (text: unknown): void => send('reviewer_reply', { text });
+        const cleanup = (): void => {
+          ctx.runner.off('message', onMessage);
+          ctx.runner.off('state', onState);
+          ctx.runner.off('push', onPush);
+          ctx.runner.off('iter_done', onIterDone);
+          ctx.runner.off('terminated', onTerm);
+          ctx.dispatcher.off('planner_reply', onPlannerReply);
+          ctx.dispatcher.off('coder_reply', onCoderReply);
+          ctx.dispatcher.off('reviewer_reply', onReviewerReply);
+          try {
+            res.end();
+          } catch {
+            /* ignore */
+          }
+        };
+        ctx.runner.on('message', onMessage);
+        ctx.runner.on('state', onState);
+        ctx.runner.on('push', onPush);
+        ctx.runner.on('iter_done', onIterDone);
+        ctx.runner.on('terminated', onTerm);
+        ctx.dispatcher.on('planner_reply', onPlannerReply);
+        ctx.dispatcher.on('coder_reply', onCoderReply);
+        ctx.dispatcher.on('reviewer_reply', onReviewerReply);
+        res.on('close', cleanup);
+        return;
+      }
+
       // Use OpenAI error format for /v1/* paths
       if (path.startsWith('/v1/')) {
         json(404, { error: { message: 'Not found', type: 'invalid_request_error', code: null } });
