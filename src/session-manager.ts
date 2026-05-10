@@ -1936,6 +1936,7 @@ export class SessionManager {
     const pushPolicy: PushPolicy = JSON.parse(JSON.stringify(DEFAULT_PUSH_POLICY)) as PushPolicy;
     const runId = opts.runId;
     let runnerRef: AutoloopV2Runner | null = null;
+    let dispatcherRef: ClaudeAgentDispatcher | null = null;
     const dispatcherConfig: ClaudeAgentDispatcherConfig = {
       manager: this,
       runId: opts.runId,
@@ -1945,14 +1946,14 @@ export class SessionManager {
       sendTimeoutMs: opts.sendTimeoutMs,
       logger: this.logger,
       pushPolicyRef: pushPolicy,
-      // S4 wires the real coder/reviewer spawn; for S3 we record intent and
-      // flip the runner's flag so subsequent state queries reflect the request.
-      onSpawnSubagents: async () => {
-        this.logger.info?.(`[autoloop-v2/${runId}] spawn_subagents requested (S4 not wired yet — flag flipped)`);
+      onSpawnSubagents: async (args) => {
+        this.logger.info?.(`[autoloop-v2/${runId}] spawn_subagents starting Coder + Reviewer sessions`);
+        await dispatcherRef?.spawnSubagents(args);
         runnerRef?.markSubagentsSpawned();
       },
     };
     const dispatcher = new ClaudeAgentDispatcher(dispatcherConfig);
+    dispatcherRef = dispatcher;
     const runner = new AutoloopV2Runner({
       run_id: opts.runId,
       workspace: opts.workspace,

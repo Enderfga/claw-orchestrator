@@ -28,7 +28,7 @@ import type { SessionManager } from '../../session-manager.js';
 import type { Logger } from '../../logger.js';
 import { nullLogger } from '../../logger.js';
 import { spawn } from 'node:child_process';
-import { type AnyAutoloopV2Message } from './messages.js';
+import { type AnyAutoloopV2Message, Msg } from './messages.js';
 import type { AgentDispatcher, AutoloopV2RunState, PushPolicy } from './types.js';
 import {
   applyPlannerToolCalls,
@@ -36,6 +36,7 @@ import {
   type PlannerToolEffects,
   type SpawnSubagentsArgs,
 } from './planner-tools.js';
+import { extractIterComplete, extractReviewComplete, parseAgentReply } from './agent-tools.js';
 
 export interface ClaudeAgentDispatcherConfig {
   manager: SessionManager;
@@ -43,8 +44,15 @@ export interface ClaudeAgentDispatcherConfig {
   workspace: string;
   /** Override the default Planner system prompt (default loads from configs/autoloop-v2-planner-prompt.md). */
   plannerPromptPath?: string;
+  /** Override Coder/Reviewer prompt paths (defaults walk-up to configs/autoloop-v2-{coder,reviewer}-prompt.md). */
+  coderPromptPath?: string;
+  reviewerPromptPath?: string;
   /** Model alias for Planner (default: 'opus'). */
   plannerModel?: string;
+  /** Default Coder model (default: 'sonnet'). Can be overridden per spawn_subagents call. */
+  coderModel?: string;
+  /** Default Reviewer model (default: 'sonnet'). */
+  reviewerModel?: string;
   /** Per-message wall-clock cap. Default 10 min. */
   sendTimeoutMs?: number;
   logger?: Logger;
@@ -57,21 +65,21 @@ export interface ClaudeAgentDispatcherConfig {
   onSpawnSubagents?: (args: SpawnSubagentsArgs) => Promise<void>;
 }
 
-function resolveDefaultPlannerPrompt(): string {
-  // Walk up looking for configs/autoloop-v2-planner-prompt.md (matches the
-  // robust resolver used in v1/runner.ts).
+function resolveConfigByName(filename: string): string {
   const filePath = fileURLToPath(import.meta.url);
   let dir = path.dirname(filePath);
   for (let i = 0; i < 8; i++) {
-    const candidate = path.join(dir, 'configs', 'autoloop-v2-planner-prompt.md');
+    const candidate = path.join(dir, 'configs', filename);
     if (fs.existsSync(candidate)) return candidate;
     const parent = path.dirname(dir);
     if (parent === dir) break;
     dir = parent;
   }
-  // Fallback — caller will surface ENOENT if this is wrong.
-  return path.join(path.dirname(filePath), '..', 'configs', 'autoloop-v2-planner-prompt.md');
+  return path.join(path.dirname(filePath), '..', 'configs', filename);
 }
+const resolveDefaultPlannerPrompt = (): string => resolveConfigByName('autoloop-v2-planner-prompt.md');
+const resolveDefaultCoderPrompt = (): string => resolveConfigByName('autoloop-v2-coder-prompt.md');
+const resolveDefaultReviewerPrompt = (): string => resolveConfigByName('autoloop-v2-reviewer-prompt.md');
 
 interface SendMessageResult {
   output: string;
@@ -85,7 +93,16 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
   private coderName: string;
   private reviewerName: string;
   private plannerStarted = false;
+  private coderStarted = false;
+  private reviewerStarted = false;
   private plannerSystemPrompt: string;
+  private coderSystemPrompt: string;
+  private reviewerSystemPrompt: string;
+  private coderModel: string;
+  private reviewerModel: string;
+  /** Where Reviewer reads from. Created lazily by stageReviewSandbox(). */
+  private reviewerSandboxDir: string;
+  private ledgerDir: string;
 
   constructor(config: ClaudeAgentDispatcherConfig) {
     super();
@@ -97,6 +114,12 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
 
     const promptPath = config.plannerPromptPath ?? resolveDefaultPlannerPrompt();
     this.plannerSystemPrompt = fs.readFileSync(promptPath, 'utf-8');
+    this.coderSystemPrompt = fs.readFileSync(config.coderPromptPath ?? resolveDefaultCoderPrompt(), 'utf-8');
+    this.reviewerSystemPrompt = fs.readFileSync(config.reviewerPromptPath ?? resolveDefaultReviewerPrompt(), 'utf-8');
+    this.coderModel = config.coderModel ?? 'sonnet';
+    this.reviewerModel = config.reviewerModel ?? 'sonnet';
+    this.ledgerDir = path.join(config.workspace, 'tasks', config.runId);
+    this.reviewerSandboxDir = path.join(this.ledgerDir, 'reviewer_sandbox');
   }
 
   get sessionNames(): { planner: string; coder: string; reviewer: string } {
@@ -125,16 +148,24 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
       case 'planner':
         return await this.deliverToPlanner(env);
       case 'coder':
+        return await this.deliverToCoder(env);
       case 'reviewer':
-        // S4 plugs these in. Until then, throwing is the right signal —
-        // it means someone fired a directive/review_request before the
-        // subagents were spawned, which is a bug at this stage.
-        throw new Error(
-          `[autoloop-v2] dispatch to '${env.to}' not implemented yet (S4). Got message type=${env.type}.`,
-        );
+        return await this.deliverToReviewer(env);
       default:
         throw new Error(`[autoloop-v2] unexpected dispatcher target: ${env.to}`);
     }
+  }
+
+  /**
+   * Start Coder + Reviewer sessions. Idempotent. Called in response to a
+   * Planner spawn_subagents tool (the SessionManager wires this via
+   * onSpawnSubagents).
+   */
+  async spawnSubagents(args: SpawnSubagentsArgs = {}): Promise<void> {
+    if (args.coder_model) this.coderModel = args.coder_model;
+    if (args.reviewer_model) this.reviewerModel = args.reviewer_model;
+    await this.ensureCoder();
+    await this.ensureReviewer();
   }
 
   // ─── Planner-specific ────────────────────────────────────────────────────
@@ -228,6 +259,235 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
     // Emit cleaned reply (without raw JSON blocks) for the chat tool to surface.
     if (parsed.cleaned_reply) this.emit('planner_reply', parsed.cleaned_reply);
     return handlerResult.emitted_messages;
+  }
+
+  // ─── Coder ──────────────────────────────────────────────────────────────
+
+  private async ensureCoder(): Promise<void> {
+    if (this.coderStarted) return;
+    await this.config.manager.startSession({
+      name: this.coderName,
+      cwd: this.config.workspace,
+      engine: 'claude',
+      model: this.coderModel,
+      permissionMode: 'bypassPermissions',
+      systemPrompt: this.coderSystemPrompt,
+    });
+    this.coderStarted = true;
+  }
+
+  private async deliverToCoder(env: AnyAutoloopV2Message): Promise<AnyAutoloopV2Message[]> {
+    if (env.type !== 'directive') {
+      throw new Error(`[autoloop-v2] coder does not accept message type=${env.type}`);
+    }
+    await this.ensureCoder();
+
+    // Compose directive prompt + write directive.json to ledger so Reviewer
+    // and history can see exactly what the Coder was asked.
+    const iterDir = path.join(this.ledgerDir, 'iter', String(env.iter));
+    fs.mkdirSync(iterDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(iterDir, 'directive.json'),
+      JSON.stringify(
+        {
+          iter: env.iter,
+          ts: env.ts,
+          ...env.payload,
+        },
+        null,
+        2,
+      ),
+    );
+
+    const promptText = [
+      `[directive iter=${env.iter}]`,
+      `goal: ${env.payload.goal}`,
+      env.payload.constraints?.length ? `constraints:\n  - ${env.payload.constraints.join('\n  - ')}` : '',
+      env.payload.success_criteria?.length
+        ? `success_criteria:\n  - ${env.payload.success_criteria.join('\n  - ')}`
+        : '',
+      `max_attempts: ${env.payload.max_attempts}`,
+      '',
+      'Read plan.md / goal.json, make the change, run the evaluator, then emit `iter_complete`.',
+    ]
+      .filter(Boolean)
+      .join('\n');
+
+    const result = (await this.config.manager.sendMessage(this.coderName, promptText, {
+      timeout: this.config.sendTimeoutMs ?? 10 * 60_000,
+    })) as SendMessageResult;
+    const replyText = (result.output ?? '').trim();
+    const parsed = parseAgentReply(replyText);
+    this.emit('coder_reply', parsed.cleaned_reply);
+
+    const ic = extractIterComplete(parsed.calls);
+    if (!ic) {
+      // No iter_complete emitted — could be a clarification request, or the
+      // Coder bailed. Return a directive_ack so Planner sees it next turn.
+      return [
+        Msg.directiveAck(env.iter, {
+          understood: false,
+          clarification: parsed.cleaned_reply.slice(0, 500),
+        }),
+      ];
+    }
+
+    // Persist eval output to ledger.
+    fs.writeFileSync(path.join(iterDir, 'eval_output.json'), JSON.stringify(ic.eval_output, null, 2));
+    fs.writeFileSync(
+      path.join(iterDir, 'coder_summary.txt'),
+      `${ic.summary}\n\n--- coder cleaned reply ---\n${parsed.cleaned_reply}\n`,
+    );
+
+    // Compute diff + files_changed via git so we don't trust Coder's claim.
+    const diffOut = await this.runGit(['git', 'diff', '--unified=3']);
+    fs.writeFileSync(path.join(iterDir, 'diff.patch'), diffOut.out);
+    let filesChanged = ic.files_changed;
+    if (!filesChanged) {
+      const named = await this.runGit(['git', 'diff', '--name-only']);
+      filesChanged = named.out
+        .split('\n')
+        .map((s) => s.trim())
+        .filter(Boolean);
+    }
+    // Commit the iteration so Reviewer's git view is clean for the next iter.
+    await this.runGit(['git', 'add', '-A']);
+    const commitMsg = `autoloop-v2/iter-${env.iter}: ${ic.summary}`.slice(0, 200);
+    await this.runGit(['git', 'commit', '-m', commitMsg]);
+
+    return [
+      Msg.iterArtifacts(env.iter, {
+        diff: diffOut.out,
+        eval_output: ic.eval_output,
+        files_changed: filesChanged,
+      }),
+    ];
+  }
+
+  // ─── Reviewer ───────────────────────────────────────────────────────────
+
+  private async ensureReviewer(): Promise<void> {
+    if (this.reviewerStarted) return;
+    fs.mkdirSync(this.reviewerSandboxDir, { recursive: true });
+    await this.config.manager.startSession({
+      name: this.reviewerName,
+      cwd: this.reviewerSandboxDir,
+      engine: 'claude',
+      model: this.reviewerModel,
+      permissionMode: 'bypassPermissions',
+      systemPrompt: this.reviewerSystemPrompt,
+    });
+    this.reviewerStarted = true;
+  }
+
+  /**
+   * Stage the iter's artifacts into the Reviewer sandbox cwd. Reviewer is a
+   * persistent session whose cwd is fixed at <ledger>/reviewer_sandbox/, so
+   * every review must rewrite the sandbox to "this iter's view".
+   */
+  private stageReviewSandbox(iter: number): void {
+    fs.mkdirSync(this.reviewerSandboxDir, { recursive: true });
+    // Wipe top-level files (keep reviewer_memory.md if present).
+    for (const ent of fs.readdirSync(this.reviewerSandboxDir)) {
+      if (ent === 'reviewer_memory.md') continue;
+      const full = path.join(this.reviewerSandboxDir, ent);
+      try {
+        fs.rmSync(full, { recursive: true, force: true });
+      } catch {
+        /* ignore */
+      }
+    }
+    const iterSrc = path.join(this.ledgerDir, 'iter', String(iter));
+    if (!fs.existsSync(iterSrc)) return;
+    const dest = path.join(this.reviewerSandboxDir, `iter-${iter}`);
+    fs.mkdirSync(dest, { recursive: true });
+    for (const ent of fs.readdirSync(iterSrc)) {
+      fs.copyFileSync(path.join(iterSrc, ent), path.join(dest, ent));
+    }
+    // Also surface goal.json + plan.md if they exist at the workspace root.
+    for (const f of ['plan.md', 'goal.json']) {
+      const src = path.join(this.config.workspace, f);
+      if (fs.existsSync(src)) fs.copyFileSync(src, path.join(this.reviewerSandboxDir, f));
+    }
+    // Last iter's verdict for context (if exists).
+    if (iter > 0) {
+      const prior = path.join(this.ledgerDir, 'iter', String(iter - 1), 'verdict.json');
+      if (fs.existsSync(prior)) {
+        fs.copyFileSync(prior, path.join(this.reviewerSandboxDir, 'prior_verdict.json'));
+      }
+    }
+  }
+
+  private async deliverToReviewer(env: AnyAutoloopV2Message): Promise<AnyAutoloopV2Message[]> {
+    if (env.type !== 'review_request') {
+      throw new Error(`[autoloop-v2] reviewer does not accept message type=${env.type}`);
+    }
+    await this.ensureReviewer();
+    this.stageReviewSandbox(env.payload.iter);
+
+    const promptText = [
+      `[review_request iter=${env.payload.iter}]`,
+      `Artifacts staged at: iter-${env.payload.iter}/ (directive.json, diff.patch, eval_output.json)`,
+      `prior_verdict: ${fs.existsSync(path.join(this.reviewerSandboxDir, 'prior_verdict.json')) ? 'prior_verdict.json' : '(none)'}`,
+      `prior_metrics: ${JSON.stringify(env.payload.prior_metrics ?? [])}`,
+      '',
+      'Audit and emit `review_complete`.',
+    ].join('\n');
+
+    const result = (await this.config.manager.sendMessage(this.reviewerName, promptText, {
+      timeout: this.config.sendTimeoutMs ?? 10 * 60_000,
+    })) as SendMessageResult;
+    const replyText = (result.output ?? '').trim();
+    const parsed = parseAgentReply(replyText);
+    this.emit('reviewer_reply', parsed.cleaned_reply);
+
+    const rc = extractReviewComplete(parsed.calls);
+    if (!rc) {
+      // Reviewer didn't emit a verdict — treat as 'hold' with the cleaned
+      // reply as audit notes so the loop doesn't stall silently.
+      const verdict = Msg.reviewVerdict(env.payload.iter, {
+        decision: 'hold',
+        metric: null,
+        audit_notes: `[no verdict emitted] ${parsed.cleaned_reply.slice(0, 500)}`,
+      });
+      this.persistVerdict(env.payload.iter, {
+        decision: 'hold',
+        metric: null,
+        audit_notes: verdict.payload.audit_notes,
+      });
+      return [verdict];
+    }
+
+    this.persistVerdict(env.payload.iter, rc);
+    return [Msg.reviewVerdict(env.payload.iter, rc)];
+  }
+
+  private persistVerdict(
+    iter: number,
+    payload: { decision: string; metric: number | null; audit_notes: string },
+  ): void {
+    const iterDir = path.join(this.ledgerDir, 'iter', String(iter));
+    fs.mkdirSync(iterDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(iterDir, 'verdict.json'),
+      JSON.stringify({ iter, ts: new Date().toISOString(), ...payload }, null, 2),
+    );
+  }
+
+  /** Run a git command in the workspace; returns combined output. Used by Coder commits. */
+  private async runGit(argv: string[]): Promise<{ code: number; out: string; err: string }> {
+    return new Promise((resolve) => {
+      const child = spawn(argv[0], argv.slice(1), {
+        cwd: this.config.workspace,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let out = '';
+      let err = '';
+      child.stdout?.on('data', (b) => (out += b.toString()));
+      child.stderr?.on('data', (b) => (err += b.toString()));
+      child.on('error', (e) => resolve({ code: 127, out: '', err: (e as Error).message }));
+      child.on('exit', (code) => resolve({ code: code ?? 0, out, err }));
+    });
   }
 
   // ─── git helper for write_plan_committed / write_goal_committed ──────────
