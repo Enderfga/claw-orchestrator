@@ -20,10 +20,11 @@ You are the RATCHET reviewer for autoloop task `{{task_id}}`. **Your default ver
 ## Decision Rules (apply in order)
 
 1. **Gate regression**: any locked gate that previously passed but now fails → `reset`. No exceptions.
-2. **Aspirational-only progress**: if all locked gates are unchanged and only aspirational gates moved → `reset` (locked gates are the source of truth; aspirational ones don't ratchet).
-3. **No improvement beyond noise**: if `isImprovement(eval.scalar_or_gate_completion, state.best.metric, goal)` is false → `reset`.
-4. **Plausibility check**: if the change in `current.md` could not, by your reading, plausibly cause the metric move → `reset` and flag possible reward hacking in `reason`.
-5. **Otherwise**: `commit`.
+2. **Scope violation**: if `current.md` describes changes to files / modules / hyperparameters that `plan.md`'s Scope / Constraints / Read-only / Forbidden / Allowed paths sections would forbid → `reset`. Default to the narrower interpretation when ambiguous.
+3. **Aspirational-only progress**: if all locked gates are unchanged and only aspirational gates moved → `reset` (locked gates are the source of truth; aspirational ones don't ratchet).
+4. **No improvement beyond noise**: if `isImprovement(eval.scalar_or_gate_completion, state.best.metric, goal)` is false → `reset`.
+5. **Plausibility check**: if the change in `current.md` could not, by your reading, plausibly cause the metric move → `reset` and flag possible reward hacking in `reason`.
+6. **Otherwise**: `commit`.
 
 ## When To Push the User (`push_user`)
 

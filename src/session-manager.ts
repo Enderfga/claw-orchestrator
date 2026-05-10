@@ -1823,6 +1823,49 @@ export class SessionManager {
     return runner.handle();
   }
 
+  /**
+   * Resume an autoloop whose orchestrator process previously died.
+   * Reads existing tasks/<id>/state.json + plan.md + goal.json from the
+   * workspace. Skips BOOTSTRAP. Engine/model overrides are honoured (use
+   * defaults if not provided — note: original engine choice is NOT persisted
+   * in state.json today).
+   */
+  async autoloopResume(
+    workspace: string,
+    taskId: string,
+    overrides?: Partial<
+      Pick<
+        AutoloopConfig,
+        | 'propose_engine'
+        | 'propose_model'
+        | 'ratchet_engine'
+        | 'ratchet_model'
+        | 'compress_every_k'
+        | 'per_iter_timeout_ms'
+        | 'push_cmd'
+      >
+    >,
+  ): Promise<AutoloopHandle> {
+    const taskDir = path.join(workspace, 'tasks', taskId);
+    if (!fs.existsSync(taskDir)) {
+      throw new Error(`autoloopResume: task dir not found: ${taskDir}`);
+    }
+    const config: AutoloopConfig = {
+      workspace,
+      plan_path: path.join(taskDir, 'plan.md'),
+      goal_path: path.join(taskDir, 'goal.json'),
+      task_id: taskId,
+      ...(overrides ?? {}),
+    };
+    const runner = new AutoloopRunner(this, config, this.logger);
+    if (this.autoloops.has(runner.id)) {
+      throw new Error(`Autoloop with id '${runner.id}' is already running in this process`);
+    }
+    this.autoloops.set(runner.id, runner);
+    await runner.resume();
+    return runner.handle();
+  }
+
   autoloopStatus(id: string): AutoloopHandle | undefined {
     return this.autoloops.get(id)?.handle();
   }

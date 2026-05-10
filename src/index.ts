@@ -1177,6 +1177,59 @@ const plugin = {
       },
     });
 
+    // ─── Tool: autoloop_resume ──────────────────────────────────────
+
+    api.registerTool({
+      name: 'autoloop_resume',
+      description:
+        'Resume an autoloop whose orchestrator process previously died (e.g. gateway restart, OOM, machine reboot). Reads tasks/<id>/state.json + plan.md + goal.json from the workspace, skips BOOTSTRAP, and continues iteration from the last persisted state. Returns the same AutoloopHandle shape as autoloop_start.',
+      parameters: {
+        type: 'object',
+        properties: {
+          workspace: {
+            type: 'string',
+            description: 'Path to the git workspace (same as the original autoloop_start call)',
+          },
+          task_id: { type: 'string', description: 'The task id of the autoloop to resume' },
+          propose_engine: {
+            type: 'string',
+            enum: ['claude', 'codex', 'codex-app', 'gemini', 'cursor', 'opencode', 'custom'],
+            description: 'Override engine for BOOTSTRAP / PROPOSE / COMPRESS',
+          },
+          propose_model: { type: 'string' },
+          ratchet_engine: {
+            type: 'string',
+            enum: ['claude', 'codex', 'codex-app', 'gemini', 'cursor', 'opencode', 'custom'],
+          },
+          ratchet_model: { type: 'string' },
+          compress_every_k: { type: 'number' },
+          per_iter_timeout_ms: { type: 'number' },
+          push_cmd: { type: ['string', 'null'] },
+        },
+        required: ['workspace', 'task_id'],
+      },
+      execute: async (_id, args) => {
+        const handle = await getManager().autoloopResume(
+          sanitizeCwd(args.workspace as string)!,
+          args.task_id as string,
+          {
+            propose_engine: args.propose_engine as AutoloopConfig['propose_engine'],
+            propose_model: args.propose_model as string | undefined,
+            ratchet_engine: args.ratchet_engine as AutoloopConfig['ratchet_engine'],
+            ratchet_model: args.ratchet_model as string | undefined,
+            compress_every_k: args.compress_every_k as number | undefined,
+            per_iter_timeout_ms: args.per_iter_timeout_ms as number | undefined,
+            push_cmd: args.push_cmd as string | null | undefined,
+          },
+        );
+        return {
+          ok: true,
+          ...handle,
+          note: 'Autoloop resumed in background. Poll with autoloop_status.',
+        };
+      },
+    });
+
     // ─── Tool: autoloop_status ──────────────────────────────────────
 
     api.registerTool({

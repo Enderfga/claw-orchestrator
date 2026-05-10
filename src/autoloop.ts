@@ -199,6 +199,68 @@ export class AutoloopRunner extends EventEmitter {
     });
   }
 
+  /**
+   * Resume an interrupted autoloop from on-disk state. Skips BOOTSTRAP and
+   * jumps straight to the iteration loop. Resets the workspace to the last
+   * known best (or the BOOTSTRAP baseline if no best yet) so any half-finished
+   * PROPOSE that crashed mid-flight is discarded.
+   */
+  async resume(): Promise<void> {
+    this.startedAt = new Date().toISOString();
+    this.emit('starting');
+
+    if (!fs.existsSync(this.taskDir)) {
+      throw new Error(`autoloop ${this.id}: task dir not found at ${this.taskDir}`);
+    }
+    const statePath = path.join(this.taskDir, 'state.json');
+    if (!fs.existsSync(statePath)) {
+      throw new Error(`autoloop ${this.id}: no state.json — was BOOTSTRAP completed?`);
+    }
+
+    this.goal = this.loadAndValidateGoal();
+    this.state = JSON.parse(fs.readFileSync(statePath, 'utf-8')) as AutoloopState;
+
+    if (this.state.termination.fired) {
+      throw new Error(`autoloop ${this.id} already terminated: ${this.state.termination.reason}`);
+    }
+    if (this.state.iter >= this.goal.termination.max_iters) {
+      throw new Error(`autoloop ${this.id} already at max_iters (${this.state.iter})`);
+    }
+    if (this.state.cost_usd_so_far >= this.goal.termination.max_cost_usd) {
+      throw new Error(`autoloop ${this.id} already at max_cost_usd ($${this.state.cost_usd_so_far.toFixed(2)})`);
+    }
+
+    // Verify branch exists; switch to it.
+    const branchCheck = await runShell(`git rev-parse --verify ${this.branch}`, {
+      cwd: this.config.workspace,
+      timeout_ms: 10_000,
+    });
+    if (branchCheck.exit_code !== 0) {
+      throw new Error(`autoloop ${this.id}: branch ${this.branch} not found in workspace`);
+    }
+    await runShell(`git checkout ${this.branch}`, { cwd: this.config.workspace, timeout_ms: 10_000 });
+
+    // Roll back to last known-good state — discard any crashed in-flight commits.
+    if (this.state.best?.git_sha) {
+      await runShell(`git reset --hard ${this.state.best.git_sha}`, {
+        cwd: this.config.workspace,
+        timeout_ms: 10_000,
+      });
+    }
+
+    // Reset transient flags; persist; jump into loop.
+    this.stopRequested = false;
+    this.status = 'running';
+    this.state.phase = 'IDLE';
+    this.state.decision = null;
+    this.state.decision_reason = null;
+    this.persistState();
+
+    void this.runLoop().catch((err) => {
+      this.fail(`resumed loop crashed: ${err instanceof Error ? err.stack || err.message : String(err)}`);
+    });
+  }
+
   /** Ask the loop to halt at the next phase boundary. Resolves when actually stopped. */
   async stop(): Promise<void> {
     this.stopRequested = true;
@@ -317,7 +379,7 @@ export class AutoloopRunner extends EventEmitter {
       const result = await this.manager.sendMessage(sessionName, 'Begin BOOTSTRAP for this task.', {
         timeout: this.config.per_iter_timeout_ms ?? 600_000,
       });
-      costUsd = extractCost(result);
+      costUsd = readCostUsd(this.manager, sessionName, result);
     } catch (err) {
       this.logger.error(`[autoloop ${this.id}] bootstrap session failed:`, err);
       return false;
@@ -453,7 +515,7 @@ export class AutoloopRunner extends EventEmitter {
       const result = await this.manager.sendMessage(sessionName, `Run PROPOSE for iter ${iter}.`, {
         timeout: this.config.per_iter_timeout_ms ?? 600_000,
       });
-      this.state.cost_usd_so_far += extractCost(result);
+      this.state.cost_usd_so_far += readCostUsd(this.manager, sessionName, result);
     } finally {
       try {
         await this.manager.stopSession(sessionName);
@@ -506,7 +568,7 @@ export class AutoloopRunner extends EventEmitter {
     if (this.goal.scalar) {
       const res = await runShell(this.goal.scalar.extract_cmd, {
         cwd,
-        timeout_ms: (this.config.per_iter_timeout_ms ?? 600_000) - 1000,
+        timeout_ms: (this.goal.scalar.extract_timeout_sec ?? 600) * 1000,
       });
       if (res.exit_code === 0 && !res.timed_out) {
         const parsed = parseFloat(res.stdout.trim().split(/\s+/).pop() ?? '');
@@ -598,7 +660,7 @@ export class AutoloopRunner extends EventEmitter {
         timeout: 60_000,
       });
       raw = result.output || '';
-      costUsd = extractCost(result);
+      costUsd = readCostUsd(this.manager, sessionName, result);
       // Save raw output for forensics regardless of parse success.
       try {
         fs.writeFileSync(path.join(this.taskDir, 'iter', String(iter), 'ratchet-raw.txt'), raw);
@@ -713,7 +775,7 @@ export class AutoloopRunner extends EventEmitter {
       const result = await this.manager.sendMessage(sessionName, `Run COMPRESS for iters ${from}-${to}.`, {
         timeout: 180_000,
       });
-      this.state.cost_usd_so_far += extractCost(result);
+      this.state.cost_usd_so_far += readCostUsd(this.manager, sessionName, result);
     } finally {
       try {
         await this.manager.stopSession(sessionName);
@@ -913,7 +975,18 @@ function extractBalancedJsonObjects(s: string): string[] {
   return out;
 }
 
-function extractCost(result: SendResult): number {
+/**
+ * Pull the cost USD for a session from the manager. Tries `getCost(name)`
+ * (authoritative) first, then falls back to scanning events. We need to call
+ * this BEFORE stopSession or the session lookup throws.
+ */
+function readCostUsd(manager: SessionManager, sessionName: string, result: SendResult): number {
+  try {
+    const c = manager.getCost(sessionName);
+    if (typeof c.totalUsd === 'number' && Number.isFinite(c.totalUsd)) return c.totalUsd;
+  } catch {
+    // session may have been auto-stopped already; fall through
+  }
   const events: StreamEvent[] = result.events ?? [];
   for (let i = events.length - 1; i >= 0; i--) {
     const e = events[i];

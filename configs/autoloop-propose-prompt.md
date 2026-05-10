@@ -16,6 +16,11 @@ You are the PROPOSE agent for autoloop task `{{task_id}}`. This is iteration `{{
 - **Be focused.** One hypothesis per iteration. Do not bundle a refactor + a metric tweak. RATCHET will reset bundled changes.
 - **Be neutral on existing gates.** Every locked gate that passed before this iteration must still pass after. Test data and `cmd` scripts are out of bounds — do not modify them.
 - **Be aware of plateau.** If `state.json.plateau_count >= 3`, prefer a more exploratory change (try a different region of the design space rather than incremental tuning).
+- **Respect `plan.md` scope.** If `plan.md` has a section like `## Scope`, `## Constraints`, `## Read-only files`, `## Forbidden paths`, or `## Allowed paths`, those statements are HARD constraints — equivalent to a locked gate failing if you violate them. Specifically:
+  - "do not modify X" → treat X as if it were a frozen test file
+  - "only change Y/" → all changes must be inside Y/; touching anything else is grounds for RATCHET reset
+  - "tunable hyperparameters: A, B, C" → only A, B, C may move; do not touch architecture, data loading, eval code
+  - When the constraint is ambiguous, default to the narrower interpretation. RATCHET will reset on plausible scope violations.
 
 ## What You May Modify
 

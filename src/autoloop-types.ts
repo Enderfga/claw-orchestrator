@@ -33,6 +33,12 @@ export interface ScalarSpec {
    * Run by EXECUTE in the workspace. Must be deterministic.
    */
   extract_cmd: string;
+  /**
+   * Hard wall-clock cap on extract_cmd in seconds. Default 600 (10 min).
+   * For long ML evals (training + measure), set this to your real upper
+   * bound — e.g. 14400 for a 4-hour training run.
+   */
+  extract_timeout_sec?: number;
   /** Stop when scalar reaches this. For 'min' direction, stop when ≤ target. */
   target?: number;
   /** Changes within ±noise_floor are not considered improvements. Default 0. */
@@ -292,6 +298,8 @@ function validateScalar(raw: unknown): ScalarSpec {
     name: o.name,
     direction: o.direction,
     extract_cmd: o.extract_cmd,
+    extract_timeout_sec:
+      typeof o.extract_timeout_sec === 'number' && o.extract_timeout_sec > 0 ? o.extract_timeout_sec : 600,
     target: typeof o.target === 'number' ? o.target : undefined,
     noise_floor: typeof o.noise_floor === 'number' ? o.noise_floor : 0,
   };
