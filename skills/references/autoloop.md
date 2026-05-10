@@ -2,7 +2,12 @@
 
 Autonomous iteration loop for a git workspace. Given an intent (`plan.md`) and success criteria (`goal.json`), the loop edits the code, runs gates, ratchets on a faithful metric, and pushes you only when it has to.
 
-Full design rationale lives in `tasks/autoloop.md`. This page is the operator reference.
+There are **two architectures** — both supported in 3.5.x:
+
+- **v1** (the rest of this page): single-threaded phase machine (BOOTSTRAP → PROPOSE → EXECUTE → MEASURE → RATCHET → COMPRESS). Each phase spawns a fresh Claude session. Fire-and-forget — no human in the loop. Tools: `autoloop_start` / `autoloop_resume` / `autoloop_status` / `autoloop_inject` / `autoloop_stop`.
+- **v2** ([Autoloop v2 below](#autoloop-v2-three-agent-architecture)): three persistent agents — Planner (Opus, your interface), Coder (Sonnet, makes the change), Reviewer (Sonnet, sandboxed audit). You converse with Planner to design the plan; on approval Planner spawns subagents that self-iterate while Planner pushes you on regressions / decisions / completion via wechat → whatsapp → email fallback chain.
+
+Design docs: `tasks/autoloop.md` (v1), `tasks/autoloop-v2.md` (v2).
 
 ## When to use
 
@@ -238,3 +243,145 @@ Replies arrive asynchronously through whatever your push command supports. The l
 - ⚠️ **`autoloop_resume` is wired and unit/smoke-tested**, but exotic states (dirty working tree at resume time, mid-COMPRESS death, mid-RATCHET stdin pipe death) are not exercised yet.
 
 See `tasks/autoloop.md` §10 for the full failure-mode register.
+
+---
+
+## Autoloop v2 — three-agent architecture
+
+v2 keeps three Claude sessions persistent across iterations and uses messages
+on an inbox bus instead of fresh-spawn-per-phase. Design rationale and full
+schemas live in `tasks/autoloop-v2.md`.
+
+### Roles
+
+| Agent | Engine | cwd | Owns |
+|---|---|---|---|
+| **Planner** | claude / opus | workspace | strategy, plan.md, goal.json, talking to you |
+| **Coder** | claude / sonnet (override per spawn) | workspace | code changes, eval execution |
+| **Reviewer** | claude / sonnet | `<workspace>/tasks/<run_id>/reviewer_sandbox/` | distrust audit; advance / hold / rollback |
+
+### UX flow
+
+```
+1. autoloop_v2_start { run_id, workspace }
+2. autoloop_v2_chat { run_id, text } → talk to Planner
+3. Planner reads workspace, drafts plan.md + goal.json, asks "ready to spawn?"
+4. autoloop_v2_chat { run_id, "go" } → Planner emits spawn_subagents
+5. Coder + Reviewer self-iterate; you stay in chat with Planner
+6. Planner pushes you (wechat → whatsapp → email fallback) on regression /
+   decision / completion per push policy
+7. Run terminates on target_hit, plan-defined max_iters, or your `terminate`
+```
+
+### Quick start
+
+```bash
+# Start
+curl -X POST http://127.0.0.1:18789/v1/openclaw/tools/autoloop_v2_start \
+  -d '{"run_id":"my-run","workspace":"/abs/path/to/workspace"}'
+
+# Chat with Planner
+curl -X POST http://127.0.0.1:18789/v1/openclaw/tools/autoloop_v2_chat \
+  -d '{"run_id":"my-run","text":"Read the workspace and design a plan to fix X"}'
+
+# Inspect state
+curl http://127.0.0.1:18789/autoloop/v2/my-run/state
+
+# SSE stream (for the upcoming 3-pane UI)
+curl http://127.0.0.1:18789/autoloop/v2/my-run/events
+
+# Reset Coder if it drifts
+curl -X POST http://127.0.0.1:18789/v1/openclaw/tools/autoloop_v2_reset_agent \
+  -d '{"run_id":"my-run","agent":"coder","eager_restart":true}'
+
+# Stop
+curl -X POST http://127.0.0.1:18789/v1/openclaw/tools/autoloop_v2_stop \
+  -d '{"run_id":"my-run","reason":"done"}'
+```
+
+### Planner-emitted control tools
+
+Planner controls the run by emitting fenced ` ```autoloop ` JSON blocks. The
+dispatcher parses them out of every reply and applies them. You never see
+the JSON — only the Planner's narrative reply.
+
+| Tool | Args | What |
+|---|---|---|
+| `notify_user` | level, summary, detail?, channel? | push you out-of-band |
+| `spawn_subagents` | coder_model?, reviewer_model?, initial_directive? | start Coder + Reviewer |
+| `send_directive` | goal, constraints?, success_criteria?, max_attempts? | next iter's instruction |
+| `pause_loop` | reason | halt subloop at next boundary (chat keeps working) |
+| `resume_loop` | — | resume after pause |
+| `terminate` | reason | end run |
+| `update_push_policy` | partial PushPolicy | mutate notification rules |
+| `write_plan_committed` | message? | git-commit current plan.md |
+| `write_goal_committed` | message? | git-commit current goal.json |
+
+### Push policy (defaults)
+
+| Event | Default |
+|---|---|
+| on_start | info / wechat ("loop started, will notify on issues") |
+| on_iter_done_ok | silent |
+| on_target_hit | info / both (webchat + wechat) |
+| on_metric_regression_2 | warn / both |
+| on_reviewer_reject_2 | warn / both |
+| on_phase_error | error / both |
+| on_stall_30min | warn / wechat |
+| on_decision_needed | decision / both |
+
+5-minute dedup on (level, summary). Channel chain: `auto` walks
+wechat → whatsapp → email; `wechat` / `webchat` / `email` route directly;
+`both` does webchat + wechat.
+
+### Ledger layout
+
+```
+<workspace>/tasks/<run_id>/
+├── plan.md              # Planner-authored, git-committed
+├── goal.json            # Planner-authored, git-committed (v1 GoalSpec shape)
+├── push_log.jsonl       # every notify_user attempt + channel used
+├── reviewer_sandbox/    # Reviewer cwd; restaged per iter
+│   ├── plan.md          # copy
+│   ├── goal.json        # copy
+│   ├── iter-N/          # this iter's directive + diff + eval
+│   ├── prior_verdict.json
+│   └── reviewer_memory.md  # persistent across iters
+└── iter/<n>/
+    ├── directive.json     # Planner → Coder
+    ├── eval_output.json   # what Coder reported
+    ├── diff.patch         # git diff of the iter
+    ├── verdict.json       # Reviewer decision + audit notes
+    └── coder_summary.txt
+```
+
+### Backend HTTP / SSE
+
+| Endpoint | Returns |
+|---|---|
+| `GET /autoloop/v2/list` | `{ ok, runs: AutoloopV2RunState[] }` |
+| `GET /autoloop/v2/<id>/state` | `{ ok, state: AutoloopV2RunState }` |
+| `GET /autoloop/v2/<id>/push_log` | `{ ok, entries: PushLogEntry[] }` |
+| `GET /autoloop/v2/<id>/events` | SSE: `snapshot` / `message` / `state` / `push` / `iter_done` / `planner_reply` / `coder_reply` / `reviewer_reply` / `terminated` |
+
+The 3-pane UI (left: Planner chat, center: Coder activity, right: Reviewer
+verdicts, top: state, bottom: push_log) consumes these endpoints. The UI
+itself ships in a separate cross-repo PR.
+
+### Known v2 limitations (3.5.0)
+
+- **No auto-compact on token budget.** Manual `autoloop_v2_reset_agent`
+  covers the same recovery path. Auto-compact is queued for a 3.5.x
+  follow-up once `ISession.getStats` exposes the right hooks.
+- **One-way push only.** WeChat → Planner inbound replies are not yet
+  wired (would need an openclaw-gateway tmux-passthrough route). For now
+  reply via webchat / `autoloop_v2_chat`.
+- **No webchat UI yet.** Backend SSE is shipped; UI is a separate PR.
+- **No fork mode** for parallel exploration. Single linear iter trajectory.
+
+### Smoke
+
+`scripts/smoke-autoloop-v2.ts` runs a buggy add_two scenario end-to-end
+with Opus Planner + Sonnet × 2. Validates plan.md / goal.json commit,
+spawn, iter 0 ledger artifacts, terminate on target_hit. Cost ~$1-3,
+wall-clock ~5-15 min.
