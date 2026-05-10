@@ -153,6 +153,10 @@ import { resolveAlias, isClaudeModel } from './models.js';
 import { Council } from './council.js';
 import { AutoloopRunner } from './autoloop/v1/runner.js';
 import type { AutoloopConfig, AutoloopHandle } from './autoloop/v1/types.js';
+import { AutoloopV2Runner } from './autoloop/v2/runner.js';
+import { ClaudeAgentDispatcher, type ClaudeAgentDispatcherConfig } from './autoloop/v2/dispatcher.js';
+import type { AutoloopV2RunState } from './autoloop/v2/types.js';
+import { Msg as V2Msg, type PushChannel, type PushLevel } from './autoloop/v2/messages.js';
 import {
   PERSIST_DISK_TTL_MS,
   DEBOUNCED_SAVE_MS,
@@ -1891,6 +1895,105 @@ export class SessionManager {
   /** Used by embedded-server to attach SSE listeners. */
   getAutoloop(id: string): AutoloopRunner | undefined {
     return this.autoloops.get(id);
+  }
+
+  // ─── Autoloop v2 (three-agent architecture) ───────────────────────────
+
+  private autoloopsV2 = new Map<
+    string,
+    { runner: AutoloopV2Runner; dispatcher: ClaudeAgentDispatcher; workspace: string }
+  >();
+
+  /**
+   * Start a v2 autoloop in chat mode. Creates the Planner persistent session,
+   * returns the run handle. Coder/Reviewer are NOT started until S3's
+   * spawn_subagents tool is called.
+   */
+  async autoloopV2Start(opts: {
+    runId: string;
+    workspace: string;
+    plannerPromptPath?: string;
+    plannerModel?: string;
+    sendTimeoutMs?: number;
+  }): Promise<{ runId: string; plannerSession: string; state: AutoloopV2RunState }> {
+    if (this.autoloopsV2.has(opts.runId)) {
+      throw new Error(`Autoloop v2 with id '${opts.runId}' already exists`);
+    }
+    const ledgerDir = path.join(opts.workspace, 'tasks', opts.runId);
+    if (!fs.existsSync(ledgerDir)) {
+      fs.mkdirSync(ledgerDir, { recursive: true });
+    }
+    const dispatcherConfig: ClaudeAgentDispatcherConfig = {
+      manager: this,
+      runId: opts.runId,
+      workspace: opts.workspace,
+      plannerPromptPath: opts.plannerPromptPath,
+      plannerModel: opts.plannerModel,
+      sendTimeoutMs: opts.sendTimeoutMs,
+      logger: this.logger,
+    };
+    const dispatcher = new ClaudeAgentDispatcher(dispatcherConfig);
+    const runner = new AutoloopV2Runner({
+      run_id: opts.runId,
+      workspace: opts.workspace,
+      ledger_dir: ledgerDir,
+      // S3 swaps this stub for the wechat→whatsapp→email fallback chain.
+      notifyUser: async (level: PushLevel, summary: string, _detail, channel: PushChannel) => {
+        this.logger.info?.(`[autoloop-v2/${opts.runId}] notify_user[${level}@${channel}]: ${summary}`);
+      },
+      dispatcher,
+    });
+    this.autoloopsV2.set(opts.runId, { runner, dispatcher, workspace: opts.workspace });
+    await runner.start();
+    return {
+      runId: opts.runId,
+      plannerSession: dispatcher.sessionNames.planner,
+      state: runner.state,
+    };
+  }
+
+  /**
+   * Inject a user chat message into a v2 run's Planner. Returns the Planner's
+   * natural-language reply.
+   */
+  async autoloopV2Chat(runId: string, text: string): Promise<{ reply: string }> {
+    const ctx = this.autoloopsV2.get(runId);
+    if (!ctx) throw new Error(`Autoloop v2 run '${runId}' not found`);
+    let reply = '';
+    const onReply = (...args: unknown[]) => {
+      const t = args[0];
+      if (typeof t === 'string') reply = t;
+    };
+    ctx.dispatcher.on('planner_reply', onReply);
+    try {
+      await ctx.runner.send(V2Msg.chat(ctx.runner.state.iter, { text }));
+    } finally {
+      ctx.dispatcher.off('planner_reply', onReply);
+    }
+    return { reply };
+  }
+
+  autoloopV2Status(runId: string): AutoloopV2RunState | undefined {
+    return this.autoloopsV2.get(runId)?.runner.state;
+  }
+
+  autoloopV2List(): AutoloopV2RunState[] {
+    return Array.from(this.autoloopsV2.values()).map((c) => c.runner.state);
+  }
+
+  async autoloopV2Stop(runId: string, reason = 'user-stop'): Promise<boolean> {
+    const ctx = this.autoloopsV2.get(runId);
+    if (!ctx) return false;
+    await ctx.runner.send(V2Msg.terminate(ctx.runner.state.iter, { reason }));
+    this.autoloopsV2.delete(runId);
+    return true;
+  }
+
+  /** Used by embedded-server to attach SSE listeners. */
+  getAutoloopV2(runId: string): { runner: AutoloopV2Runner; dispatcher: ClaudeAgentDispatcher } | undefined {
+    const ctx = this.autoloopsV2.get(runId);
+    if (!ctx) return undefined;
+    return { runner: ctx.runner, dispatcher: ctx.dispatcher };
   }
 
   private _cleanupIdleSessions(): void {

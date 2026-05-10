@@ -28,6 +28,22 @@ export { PersistentOpencodeSession } from './persistent-opencode-session.js';
 export { PersistentCustomSession } from './persistent-custom-session.js';
 export { Council, getDefaultCouncilConfig } from './council.js';
 export { AutoloopRunner } from './autoloop/v1/runner.js';
+export { AutoloopV2Runner } from './autoloop/v2/runner.js';
+export { ClaudeAgentDispatcher } from './autoloop/v2/dispatcher.js';
+export { Msg as AutoloopV2Msg, validateMessage as autoloopV2Validate } from './autoloop/v2/messages.js';
+export type {
+  AutoloopV2Envelope,
+  AnyAutoloopV2Message,
+  AutoloopV2MessageType,
+  AutoloopV2Role,
+} from './autoloop/v2/messages.js';
+export type {
+  AgentDispatcher,
+  AutoloopV2Config,
+  AutoloopV2RunState,
+  AutoloopV2Status,
+  PushPolicy,
+} from './autoloop/v2/types.js';
 export type {
   AutoloopConfig,
   AutoloopHandle,
@@ -1294,6 +1310,113 @@ const plugin = {
       execute: async (_id, args) => {
         const ok = await getManager().autoloopStop(args.id as string);
         if (!ok) return { ok: false, error: 'Autoloop not found' };
+        return { ok: true };
+      },
+    });
+
+    // ─── Tool: autoloop_v2_start ────────────────────────────────────
+    //
+    // v2 architecture: three persistent agents (Planner / Coder / Reviewer).
+    // Starting a run only launches the Planner — Coder and Reviewer are
+    // spawned later by the Planner once the user approves the plan (S3).
+
+    api.registerTool({
+      name: 'autoloop_v2_start',
+      description:
+        'Start a v2 autoloop run in chat mode. The user converses with the persistent Planner (Claude Opus by default) to design plan.md and goal.json; subagents (Coder/Reviewer) are spawned later via the Planner when the plan is ready. Returns a run_id and the Planner session name. See tasks/autoloop-v2.md for the architecture.',
+      parameters: {
+        type: 'object',
+        properties: {
+          run_id: {
+            type: 'string',
+            description: 'Stable run identifier (used to address subsequent chat / status calls)',
+          },
+          workspace: { type: 'string', description: 'Path to the git workspace where the run lives' },
+          planner_model: { type: 'string', description: 'Model alias for Planner (default: opus)' },
+          send_timeout_ms: { type: 'number', description: 'Per-message wall-clock cap (default 600000 = 10 min)' },
+        },
+        required: ['run_id', 'workspace'],
+      },
+      execute: async (_id, args) => {
+        const result = await getManager().autoloopV2Start({
+          runId: args.run_id as string,
+          workspace: sanitizeCwd(args.workspace as string)!,
+          plannerModel: args.planner_model as string | undefined,
+          sendTimeoutMs: args.send_timeout_ms as number | undefined,
+        });
+        return {
+          ok: true,
+          ...result,
+          note: 'Planner ready. Use autoloop_v2_chat to converse. Coder/Reviewer not yet spawned.',
+        };
+      },
+    });
+
+    // ─── Tool: autoloop_v2_chat ─────────────────────────────────────
+
+    api.registerTool({
+      name: 'autoloop_v2_chat',
+      description:
+        "Send a chat message to the Planner of a v2 autoloop run. Returns the Planner's natural-language reply. Blocking: resolves after the Planner finishes its turn.",
+      parameters: {
+        type: 'object',
+        properties: {
+          run_id: { type: 'string', description: 'Run id from autoloop_v2_start' },
+          text: { type: 'string', description: 'User chat input' },
+        },
+        required: ['run_id', 'text'],
+      },
+      execute: async (_id, args) => {
+        const { reply } = await getManager().autoloopV2Chat(args.run_id as string, args.text as string);
+        return { ok: true, reply };
+      },
+    });
+
+    // ─── Tool: autoloop_v2_status ───────────────────────────────────
+
+    api.registerTool({
+      name: 'autoloop_v2_status',
+      description: 'Get current state of a v2 autoloop run (status, iter, push count, subagents_spawned).',
+      parameters: {
+        type: 'object',
+        properties: { run_id: { type: 'string' } },
+        required: ['run_id'],
+      },
+      execute: async (_id, args) => {
+        const state = getManager().autoloopV2Status(args.run_id as string);
+        if (!state) return { ok: false, error: 'Run not found' };
+        return { ok: true, state };
+      },
+    });
+
+    // ─── Tool: autoloop_v2_list ─────────────────────────────────────
+
+    api.registerTool({
+      name: 'autoloop_v2_list',
+      description: 'List all v2 autoloop runs in this manager process.',
+      parameters: { type: 'object', properties: {} },
+      execute: async () => {
+        if (!manager) return { ok: true, runs: [] };
+        return { ok: true, runs: getManager().autoloopV2List() };
+      },
+    });
+
+    // ─── Tool: autoloop_v2_stop ─────────────────────────────────────
+
+    api.registerTool({
+      name: 'autoloop_v2_stop',
+      description: 'Terminate a v2 autoloop run. Stops Planner (and Coder/Reviewer once spawned).',
+      parameters: {
+        type: 'object',
+        properties: {
+          run_id: { type: 'string' },
+          reason: { type: 'string', description: 'Optional reason recorded in run state' },
+        },
+        required: ['run_id'],
+      },
+      execute: async (_id, args) => {
+        const ok = await getManager().autoloopV2Stop(args.run_id as string, args.reason as string | undefined);
+        if (!ok) return { ok: false, error: 'Run not found' };
         return { ok: true };
       },
     });
