@@ -3,8 +3,8 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { applyPlannerToolCalls, parsePlannerReply, type PlannerToolEffects } from '../autoloop/v2/planner-tools.js';
-import type { AnyAutoloopV2Message } from '../autoloop/v2/messages.js';
+import { applyPlannerToolCalls, parsePlannerReply, type PlannerToolEffects } from '../autoloop/planner-tools.js';
+import type { AnyAutoloopMessage } from '../autoloop/messages.js';
 
 function makeMockEffects(): { fx: PlannerToolEffects; calls: string[]; policyDelta: Record<string, unknown> } {
   const calls: string[] = [];
@@ -138,7 +138,7 @@ describe('applyPlannerToolCalls', () => {
       fx,
       0,
     );
-    expect(r.emitted_messages.map((m: AnyAutoloopV2Message) => m.type)).toEqual(['pause', 'resume', 'terminate']);
+    expect(r.emitted_messages.map((m: AnyAutoloopMessage) => m.type)).toEqual(['pause', 'resume', 'terminate']);
   });
 
   it('update_push_policy mutates via the effect', async () => {

@@ -14,7 +14,6 @@ import { createProxyHandler } from './proxy/handler.js';
 import { EmbeddedServer } from './embedded-server.js';
 import { sanitizeCwd, validateRegex } from './validation.js';
 import type { PluginConfig, EffortLevel, CouncilConfig, AgentPersona } from './types.js';
-import type { AutoloopConfig } from './autoloop/v1/types.js';
 
 // ─── Standalone Export ───────────────────────────────────────────────────────
 
@@ -27,38 +26,11 @@ export { PersistentCursorSession } from './persistent-cursor-session.js';
 export { PersistentOpencodeSession } from './persistent-opencode-session.js';
 export { PersistentCustomSession } from './persistent-custom-session.js';
 export { Council, getDefaultCouncilConfig } from './council.js';
-export { AutoloopRunner } from './autoloop/v1/runner.js';
-export { AutoloopV2Runner } from './autoloop/v2/runner.js';
-export { ClaudeAgentDispatcher } from './autoloop/v2/dispatcher.js';
-export { Msg as AutoloopV2Msg, validateMessage as autoloopV2Validate } from './autoloop/v2/messages.js';
-export type {
-  AutoloopV2Envelope,
-  AnyAutoloopV2Message,
-  AutoloopV2MessageType,
-  AutoloopV2Role,
-} from './autoloop/v2/messages.js';
-export type {
-  AgentDispatcher,
-  AutoloopV2Config,
-  AutoloopV2RunState,
-  AutoloopV2Status,
-  PushPolicy,
-} from './autoloop/v2/types.js';
-export type {
-  AutoloopConfig,
-  AutoloopHandle,
-  AutoloopPhase,
-  AutoloopState,
-  AutoloopStatus,
-  GoalSpec,
-  GateSpec,
-  ScalarSpec,
-  TerminationSpec,
-  EvalOutput,
-  RatchetOutput,
-  PushEvent,
-  PushKind,
-} from './autoloop/v1/types.js';
+export { AutoloopRunner } from './autoloop/runner.js';
+export { ClaudeAgentDispatcher } from './autoloop/dispatcher.js';
+export { Msg as AutoloopMsg, validateMessage as autoloopValidate } from './autoloop/messages.js';
+export type { AutoloopEnvelope, AnyAutoloopMessage, AutoloopMessageType, AutoloopRole } from './autoloop/messages.js';
+export type { AgentDispatcher, AutoloopConfig, AutoloopState, AutoloopStatus, PushPolicy } from './autoloop/types.js';
 export { parseConsensus, stripConsensusTags, hasConsensusMarker } from './consensus.js';
 export { sanitizeCwd, validateRegex, validateName } from './validation.js';
 export { type Logger, createConsoleLogger, nullLogger } from './logger.js';
@@ -1132,198 +1104,16 @@ const plugin = {
       },
     });
 
-    // ─── Tool: autoloop_start ───────────────────────────────────────
-
-    api.registerTool({
-      name: 'autoloop_start',
-      description:
-        'Start an autonomous iteration loop on a git workspace. Given a plan.md (intent) and goal.json (success criteria with scalar and/or gates), the loop runs BOOTSTRAP → propose → execute → measure → ratchet → compress repeatedly until the goal is met, max_iters/cost is hit, or stopped. Pushes the user via openclaw message send when a new best is reached, on plateau, on aspirational gate proposals, and on termination. Iteration runs in the background; this call returns after BOOTSTRAP. See tasks/autoloop.md for the full design.',
-      parameters: {
-        type: 'object',
-        properties: {
-          workspace: { type: 'string', description: 'Path to the git workspace (must be a git repo)' },
-          plan_path: { type: 'string', description: 'Path to plan.md (free-text intent + constraints)' },
-          goal_path: {
-            type: 'string',
-            description: 'Path to goal.json (scalar + gates + termination spec; see tasks/autoloop.md §2)',
-          },
-          task_id: { type: 'string', description: 'Optional task id; auto-generated if omitted' },
-          propose_engine: {
-            type: 'string',
-            enum: ['claude', 'codex', 'codex-app', 'gemini', 'cursor', 'opencode', 'custom'],
-            description: 'Engine for BOOTSTRAP / PROPOSE / COMPRESS (default claude)',
-          },
-          propose_model: { type: 'string', description: 'Model for BOOTSTRAP / PROPOSE / COMPRESS (default opus)' },
-          ratchet_engine: {
-            type: 'string',
-            enum: ['claude', 'codex', 'codex-app', 'gemini', 'cursor', 'opencode', 'custom'],
-            description: 'Engine for RATCHET reviewer (default claude). Runs in a tmpdir sandbox cwd.',
-          },
-          ratchet_model: { type: 'string', description: 'Model for RATCHET reviewer (default opus)' },
-          compress_every_k: { type: 'number', description: 'Run COMPRESS every K iters (default 10)' },
-          per_iter_timeout_ms: { type: 'number', description: 'Wall-clock cap per phase in ms (default 600000)' },
-          push_cmd: {
-            type: ['string', 'null'],
-            description:
-              "Shell command for async push (default 'openclaw message send'). Set to null to disable pushes; inbox.md is still written.",
-          },
-        },
-        required: ['workspace', 'plan_path', 'goal_path'],
-      },
-      execute: async (_id, args) => {
-        const cfg: AutoloopConfig = {
-          workspace: sanitizeCwd(args.workspace as string)!,
-          plan_path: args.plan_path as string,
-          goal_path: args.goal_path as string,
-          task_id: args.task_id as string | undefined,
-          propose_engine: args.propose_engine as AutoloopConfig['propose_engine'],
-          propose_model: args.propose_model as string | undefined,
-          ratchet_engine: args.ratchet_engine as AutoloopConfig['ratchet_engine'],
-          ratchet_model: args.ratchet_model as string | undefined,
-          compress_every_k: args.compress_every_k as number | undefined,
-          per_iter_timeout_ms: args.per_iter_timeout_ms as number | undefined,
-          push_cmd: args.push_cmd as string | null | undefined,
-        };
-        const handle = await getManager().autoloopStart(cfg);
-        return {
-          ok: true,
-          ...handle,
-          note: 'Autoloop running in background. Poll with autoloop_status, inject hints with autoloop_inject, halt with autoloop_stop.',
-        };
-      },
-    });
-
-    // ─── Tool: autoloop_resume ──────────────────────────────────────
-
-    api.registerTool({
-      name: 'autoloop_resume',
-      description:
-        'Resume an autoloop whose orchestrator process previously died (e.g. gateway restart, OOM, machine reboot). Reads tasks/<id>/state.json + plan.md + goal.json from the workspace, skips BOOTSTRAP, and continues iteration from the last persisted state. Returns the same AutoloopHandle shape as autoloop_start.',
-      parameters: {
-        type: 'object',
-        properties: {
-          workspace: {
-            type: 'string',
-            description: 'Path to the git workspace (same as the original autoloop_start call)',
-          },
-          task_id: { type: 'string', description: 'The task id of the autoloop to resume' },
-          propose_engine: {
-            type: 'string',
-            enum: ['claude', 'codex', 'codex-app', 'gemini', 'cursor', 'opencode', 'custom'],
-            description: 'Override engine for BOOTSTRAP / PROPOSE / COMPRESS',
-          },
-          propose_model: { type: 'string' },
-          ratchet_engine: {
-            type: 'string',
-            enum: ['claude', 'codex', 'codex-app', 'gemini', 'cursor', 'opencode', 'custom'],
-          },
-          ratchet_model: { type: 'string' },
-          compress_every_k: { type: 'number' },
-          per_iter_timeout_ms: { type: 'number' },
-          push_cmd: { type: ['string', 'null'] },
-        },
-        required: ['workspace', 'task_id'],
-      },
-      execute: async (_id, args) => {
-        const handle = await getManager().autoloopResume(
-          sanitizeCwd(args.workspace as string)!,
-          args.task_id as string,
-          {
-            propose_engine: args.propose_engine as AutoloopConfig['propose_engine'],
-            propose_model: args.propose_model as string | undefined,
-            ratchet_engine: args.ratchet_engine as AutoloopConfig['ratchet_engine'],
-            ratchet_model: args.ratchet_model as string | undefined,
-            compress_every_k: args.compress_every_k as number | undefined,
-            per_iter_timeout_ms: args.per_iter_timeout_ms as number | undefined,
-            push_cmd: args.push_cmd as string | null | undefined,
-          },
-        );
-        return {
-          ok: true,
-          ...handle,
-          note: 'Autoloop resumed in background. Poll with autoloop_status.',
-        };
-      },
-    });
-
-    // ─── Tool: autoloop_status ──────────────────────────────────────
-
-    api.registerTool({
-      name: 'autoloop_status',
-      description: 'Get the current state of an autoloop (phase, iter, best metric, status).',
-      parameters: {
-        type: 'object',
-        properties: { id: { type: 'string', description: 'Autoloop ID returned from autoloop_start' } },
-        required: ['id'],
-      },
-      execute: async (_id, args) => {
-        const handle = getManager().autoloopStatus(args.id as string);
-        if (!handle) return { ok: false, error: 'Autoloop not found' };
-        return { ok: true, ...handle };
-      },
-    });
-
-    // ─── Tool: autoloop_list ────────────────────────────────────────
-
-    api.registerTool({
-      name: 'autoloop_list',
-      description: 'List all autoloops the manager knows about (running, stopped, errored, completed).',
-      parameters: { type: 'object', properties: {} },
-      execute: async () => {
-        if (!manager) return { ok: true, autoloops: [] };
-        return { ok: true, autoloops: getManager().autoloopList() };
-      },
-    });
-
-    // ─── Tool: autoloop_inject ──────────────────────────────────────
-
-    api.registerTool({
-      name: 'autoloop_inject',
-      description:
-        'Inject a free-text hint into the autoloop. The next PROPOSE phase will read inbox.md and may incorporate it. Non-blocking.',
-      parameters: {
-        type: 'object',
-        properties: {
-          id: { type: 'string', description: 'Autoloop ID' },
-          text: { type: 'string', description: 'Hint text to inject' },
-        },
-        required: ['id', 'text'],
-      },
-      execute: async (_id, args) => {
-        const ok = getManager().autoloopInject(args.id as string, args.text as string);
-        if (!ok) return { ok: false, error: 'Autoloop not found' };
-        return { ok: true };
-      },
-    });
-
-    // ─── Tool: autoloop_stop ────────────────────────────────────────
-
-    api.registerTool({
-      name: 'autoloop_stop',
-      description:
-        'Request the autoloop to halt at the next phase boundary. Resolves once actually stopped (worst case after the current LLM call returns).',
-      parameters: {
-        type: 'object',
-        properties: { id: { type: 'string', description: 'Autoloop ID' } },
-        required: ['id'],
-      },
-      execute: async (_id, args) => {
-        const ok = await getManager().autoloopStop(args.id as string);
-        if (!ok) return { ok: false, error: 'Autoloop not found' };
-        return { ok: true };
-      },
-    });
-
-    // ─── Tool: autoloop_v2_start ────────────────────────────────────
+    // ─── Tool: autoloop_start ────────────────────────────────────
     //
     // v2 architecture: three persistent agents (Planner / Coder / Reviewer).
     // Starting a run only launches the Planner — Coder and Reviewer are
     // spawned later by the Planner once the user approves the plan (S3).
 
     api.registerTool({
-      name: 'autoloop_v2_start',
+      name: 'autoloop_start',
       description:
-        'Start a v2 autoloop run in chat mode. The user converses with the persistent Planner (Claude Opus by default) to design plan.md and goal.json; subagents (Coder/Reviewer) are spawned later via the Planner when the plan is ready. Returns a run_id and the Planner session name. See tasks/autoloop-v2.md for the architecture.',
+        'Start a v2 autoloop run in chat mode. The user converses with the persistent Planner (Claude Opus by default) to design plan.md and goal.json; subagents (Coder/Reviewer) are spawned later via the Planner when the plan is ready. Returns a run_id and the Planner session name. See tasks/autoloop.md for the architecture.',
       parameters: {
         type: 'object',
         properties: {
@@ -1338,7 +1128,7 @@ const plugin = {
         required: ['run_id', 'workspace'],
       },
       execute: async (_id, args) => {
-        const result = await getManager().autoloopV2Start({
+        const result = await getManager().autoloopStart({
           runId: args.run_id as string,
           workspace: sanitizeCwd(args.workspace as string)!,
           plannerModel: args.planner_model as string | undefined,
@@ -1347,35 +1137,35 @@ const plugin = {
         return {
           ok: true,
           ...result,
-          note: 'Planner ready. Use autoloop_v2_chat to converse. Coder/Reviewer not yet spawned.',
+          note: 'Planner ready. Use autoloop_chat to converse. Coder/Reviewer not yet spawned.',
         };
       },
     });
 
-    // ─── Tool: autoloop_v2_chat ─────────────────────────────────────
+    // ─── Tool: autoloop_chat ─────────────────────────────────────
 
     api.registerTool({
-      name: 'autoloop_v2_chat',
+      name: 'autoloop_chat',
       description:
         "Send a chat message to the Planner of a v2 autoloop run. Returns the Planner's natural-language reply. Blocking: resolves after the Planner finishes its turn.",
       parameters: {
         type: 'object',
         properties: {
-          run_id: { type: 'string', description: 'Run id from autoloop_v2_start' },
+          run_id: { type: 'string', description: 'Run id from autoloop_start' },
           text: { type: 'string', description: 'User chat input' },
         },
         required: ['run_id', 'text'],
       },
       execute: async (_id, args) => {
-        const { reply } = await getManager().autoloopV2Chat(args.run_id as string, args.text as string);
+        const { reply } = await getManager().autoloopChat(args.run_id as string, args.text as string);
         return { ok: true, reply };
       },
     });
 
-    // ─── Tool: autoloop_v2_status ───────────────────────────────────
+    // ─── Tool: autoloop_status ───────────────────────────────────
 
     api.registerTool({
-      name: 'autoloop_v2_status',
+      name: 'autoloop_status',
       description: 'Get current state of a v2 autoloop run (status, iter, push count, subagents_spawned).',
       parameters: {
         type: 'object',
@@ -1383,28 +1173,28 @@ const plugin = {
         required: ['run_id'],
       },
       execute: async (_id, args) => {
-        const state = getManager().autoloopV2Status(args.run_id as string);
+        const state = getManager().autoloopStatus(args.run_id as string);
         if (!state) return { ok: false, error: 'Run not found' };
         return { ok: true, state };
       },
     });
 
-    // ─── Tool: autoloop_v2_list ─────────────────────────────────────
+    // ─── Tool: autoloop_list ─────────────────────────────────────
 
     api.registerTool({
-      name: 'autoloop_v2_list',
+      name: 'autoloop_list',
       description: 'List all v2 autoloop runs in this manager process.',
       parameters: { type: 'object', properties: {} },
       execute: async () => {
         if (!manager) return { ok: true, runs: [] };
-        return { ok: true, runs: getManager().autoloopV2List() };
+        return { ok: true, runs: getManager().autoloopList() };
       },
     });
 
-    // ─── Tool: autoloop_v2_reset_agent ──────────────────────────────
+    // ─── Tool: autoloop_reset_agent ──────────────────────────────
 
     api.registerTool({
-      name: 'autoloop_v2_reset_agent',
+      name: 'autoloop_reset_agent',
       description:
         'Reset a single subagent (Coder or Reviewer) on a v2 run. Stops its persistent session; the next directive/review_request will re-prime from the system prompt + ledger artifacts. Use when an agent has drifted (repeated rejects, hallucinated context, token bloat). Planner reset requires force=true because it discards chat history with the user.',
       parameters: {
@@ -1421,7 +1211,7 @@ const plugin = {
         required: ['run_id', 'agent'],
       },
       execute: async (_id, args) => {
-        const ok = await getManager().autoloopV2ResetAgent(
+        const ok = await getManager().autoloopResetAgent(
           args.run_id as string,
           args.agent as 'planner' | 'coder' | 'reviewer',
           {
@@ -1434,10 +1224,10 @@ const plugin = {
       },
     });
 
-    // ─── Tool: autoloop_v2_stop ─────────────────────────────────────
+    // ─── Tool: autoloop_stop ─────────────────────────────────────
 
     api.registerTool({
-      name: 'autoloop_v2_stop',
+      name: 'autoloop_stop',
       description: 'Terminate a v2 autoloop run. Stops Planner (and Coder/Reviewer once spawned).',
       parameters: {
         type: 'object',
@@ -1448,7 +1238,7 @@ const plugin = {
         required: ['run_id'],
       },
       execute: async (_id, args) => {
-        const ok = await getManager().autoloopV2Stop(args.run_id as string, args.reason as string | undefined);
+        const ok = await getManager().autoloopStop(args.run_id as string, args.reason as string | undefined);
         if (!ok) return { ok: false, error: 'Run not found' };
         return { ok: true };
       },

@@ -6,15 +6,15 @@
  * delivery throws — S4 wires them in.
  *
  * Naming convention:
- *   autoloop-v2-<run_id>-planner
- *   autoloop-v2-<run_id>-coder      (S4)
- *   autoloop-v2-<run_id>-reviewer   (S4)
+ *   autoloop-<run_id>-planner
+ *   autoloop-<run_id>-coder      (S4)
+ *   autoloop-<run_id>-reviewer   (S4)
  *
  * Reply path:
  *   When the user chats, we sendMessage(planner, text) and capture the
  *   Planner's natural-language reply. The reply is *not* a v2 message —
  *   it is emitted as the dispatcher's own 'planner_reply' event so the
- *   `autoloop_v2_chat` plugin tool can return it to the user. Structured
+ *   `autoloop_chat` plugin tool can return it to the user. Structured
  *   signals (S3+) will be parsed out of the same reply text and pushed
  *   into the runner queue.
  */
@@ -24,12 +24,12 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import type { SessionManager } from '../../session-manager.js';
-import type { Logger } from '../../logger.js';
-import { nullLogger } from '../../logger.js';
+import type { SessionManager } from '../session-manager.js';
+import type { Logger } from '../logger.js';
+import { nullLogger } from '../logger.js';
 import { spawn } from 'node:child_process';
-import { type AnyAutoloopV2Message, Msg } from './messages.js';
-import type { AgentDispatcher, AutoloopV2RunState, PushPolicy } from './types.js';
+import { type AnyAutoloopMessage, Msg } from './messages.js';
+import type { AgentDispatcher, AutoloopState, PushPolicy } from './types.js';
 import {
   applyPlannerToolCalls,
   parsePlannerReply,
@@ -42,9 +42,9 @@ export interface ClaudeAgentDispatcherConfig {
   manager: SessionManager;
   runId: string;
   workspace: string;
-  /** Override the default Planner system prompt (default loads from configs/autoloop-v2-planner-prompt.md). */
+  /** Override the default Planner system prompt (default loads from configs/autoloop-planner-prompt.md). */
   plannerPromptPath?: string;
-  /** Override Coder/Reviewer prompt paths (defaults walk-up to configs/autoloop-v2-{coder,reviewer}-prompt.md). */
+  /** Override Coder/Reviewer prompt paths (defaults walk-up to configs/autoloop-{coder,reviewer}-prompt.md). */
   coderPromptPath?: string;
   reviewerPromptPath?: string;
   /** Model alias for Planner (default: 'opus'). */
@@ -77,9 +77,9 @@ function resolveConfigByName(filename: string): string {
   }
   return path.join(path.dirname(filePath), '..', 'configs', filename);
 }
-const resolveDefaultPlannerPrompt = (): string => resolveConfigByName('autoloop-v2-planner-prompt.md');
-const resolveDefaultCoderPrompt = (): string => resolveConfigByName('autoloop-v2-coder-prompt.md');
-const resolveDefaultReviewerPrompt = (): string => resolveConfigByName('autoloop-v2-reviewer-prompt.md');
+const resolveDefaultPlannerPrompt = (): string => resolveConfigByName('autoloop-planner-prompt.md');
+const resolveDefaultCoderPrompt = (): string => resolveConfigByName('autoloop-coder-prompt.md');
+const resolveDefaultReviewerPrompt = (): string => resolveConfigByName('autoloop-reviewer-prompt.md');
 
 interface SendMessageResult {
   output: string;
@@ -108,9 +108,9 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
     super();
     this.config = config;
     this.logger = config.logger ?? nullLogger;
-    this.plannerName = `autoloop-v2-${config.runId}-planner`;
-    this.coderName = `autoloop-v2-${config.runId}-coder`;
-    this.reviewerName = `autoloop-v2-${config.runId}-reviewer`;
+    this.plannerName = `autoloop-${config.runId}-planner`;
+    this.coderName = `autoloop-${config.runId}-coder`;
+    this.reviewerName = `autoloop-${config.runId}-reviewer`;
 
     const promptPath = config.plannerPromptPath ?? resolveDefaultPlannerPrompt();
     this.plannerSystemPrompt = fs.readFileSync(promptPath, 'utf-8');
@@ -126,7 +126,7 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
     return { planner: this.plannerName, coder: this.coderName, reviewer: this.reviewerName };
   }
 
-  async init(state: AutoloopV2RunState): Promise<void> {
+  async init(state: AutoloopState): Promise<void> {
     void state;
     await this.ensurePlanner();
   }
@@ -138,12 +138,12 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
       try {
         await this.config.manager.stopSession(name);
       } catch (err) {
-        this.logger.warn?.(`[autoloop-v2] failed to stop ${name}: ${(err as Error).message}`);
+        this.logger.warn?.(`[autoloop] failed to stop ${name}: ${(err as Error).message}`);
       }
     }
   }
 
-  async deliver(env: AnyAutoloopV2Message): Promise<AnyAutoloopV2Message[]> {
+  async deliver(env: AnyAutoloopMessage): Promise<AnyAutoloopMessage[]> {
     switch (env.to) {
       case 'planner':
         return await this.deliverToPlanner(env);
@@ -152,7 +152,7 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
       case 'reviewer':
         return await this.deliverToReviewer(env);
       default:
-        throw new Error(`[autoloop-v2] unexpected dispatcher target: ${env.to}`);
+        throw new Error(`[autoloop] unexpected dispatcher target: ${env.to}`);
     }
   }
 
@@ -188,7 +188,7 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
     try {
       await this.config.manager.stopSession(name);
     } catch (err) {
-      this.logger.warn?.(`[autoloop-v2] resetAgent stop failed for ${name}: ${(err as Error).message}`);
+      this.logger.warn?.(`[autoloop] resetAgent stop failed for ${name}: ${(err as Error).message}`);
     }
     if (agent === 'planner') this.plannerStarted = false;
     if (agent === 'coder') this.coderStarted = false;
@@ -215,14 +215,14 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
         timeout: this.config.sendTimeoutMs ?? 10 * 60_000,
       })) as SendMessageResult;
     } catch (err) {
-      this.logger.warn?.(`[autoloop-v2] ${agent} send threw, attempting reset+retry: ${(err as Error).message}`);
+      this.logger.warn?.(`[autoloop] ${agent} send threw, attempting reset+retry: ${(err as Error).message}`);
       await this.resetAgent(agent, { eagerRestart: true });
       try {
         return (await this.config.manager.sendMessage(name, promptText, {
           timeout: this.config.sendTimeoutMs ?? 10 * 60_000,
         })) as SendMessageResult;
       } catch (err2) {
-        this.logger.error?.(`[autoloop-v2] ${agent} second attempt failed after reset: ${(err2 as Error).message}`);
+        this.logger.error?.(`[autoloop] ${agent} second attempt failed after reset: ${(err2 as Error).message}`);
         return { output: '', error: (err2 as Error).message };
       }
     }
@@ -243,11 +243,11 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
     this.plannerStarted = true;
   }
 
-  private async deliverToPlanner(env: AnyAutoloopV2Message): Promise<AnyAutoloopV2Message[]> {
+  private async deliverToPlanner(env: AnyAutoloopMessage): Promise<AnyAutoloopMessage[]> {
     if (env.type !== 'chat' && env.type !== 'directive_ack' && env.type !== 'iter_done') {
       // Other types (push_user / pause / resume / terminate) are runner-only
       // or planner-emitted; they should never arrive *to* planner.
-      throw new Error(`[autoloop-v2] planner does not accept message type=${env.type}`);
+      throw new Error(`[autoloop] planner does not accept message type=${env.type}`);
     }
 
     await this.ensurePlanner();
@@ -269,7 +269,7 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
     })) as SendMessageResult;
 
     if (result.error) {
-      this.logger.error?.(`[autoloop-v2] planner send error: ${result.error}`);
+      this.logger.error?.(`[autoloop] planner send error: ${result.error}`);
       this.emit('planner_error', new Error(result.error));
     }
 
@@ -279,14 +279,14 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
     // and bubble emitted messages back into the runner queue.
     const parsed = parsePlannerReply(replyText);
     if (parsed.parse_errors.length > 0) {
-      this.logger.warn?.(`[autoloop-v2] planner emitted ${parsed.parse_errors.length} malformed autoloop block(s)`);
+      this.logger.warn?.(`[autoloop] planner emitted ${parsed.parse_errors.length} malformed autoloop block(s)`);
     }
     const effects: PlannerToolEffects = {
       spawnSubagents: async (args) => {
         if (this.config.onSpawnSubagents) {
           await this.config.onSpawnSubagents(args);
         } else {
-          this.logger.warn?.('[autoloop-v2] spawn_subagents called but no handler installed (S4 not wired yet)');
+          this.logger.warn?.('[autoloop] spawn_subagents called but no handler installed (S4 not wired yet)');
         }
       },
       updatePushPolicy: (delta) => {
@@ -308,12 +308,12 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
         }
       },
       commitPlanFile: async (file, message) => {
-        await this.gitCommit(file, message ?? `autoloop-v2: planner commits ${file}`);
+        await this.gitCommit(file, message ?? `autoloop: planner commits ${file}`);
       },
     };
     const handlerResult = await applyPlannerToolCalls(parsed.calls, effects, env.iter);
     for (const errEntry of handlerResult.errors) {
-      this.logger.warn?.(`[autoloop-v2] tool '${errEntry.tool}' failed: ${errEntry.error}`);
+      this.logger.warn?.(`[autoloop] tool '${errEntry.tool}' failed: ${errEntry.error}`);
     }
 
     // Emit cleaned reply (without raw JSON blocks) for the chat tool to surface.
@@ -336,9 +336,9 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
     this.coderStarted = true;
   }
 
-  private async deliverToCoder(env: AnyAutoloopV2Message): Promise<AnyAutoloopV2Message[]> {
+  private async deliverToCoder(env: AnyAutoloopMessage): Promise<AnyAutoloopMessage[]> {
     if (env.type !== 'directive') {
-      throw new Error(`[autoloop-v2] coder does not accept message type=${env.type}`);
+      throw new Error(`[autoloop] coder does not accept message type=${env.type}`);
     }
     await this.ensureCoder();
 
@@ -421,7 +421,7 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
     }
     // Commit the iteration so Reviewer's git view is clean for the next iter.
     await this.runGit(['git', 'add', '-A']);
-    const commitMsg = `autoloop-v2/iter-${env.iter}: ${ic.summary}`.slice(0, 200);
+    const commitMsg = `autoloop/iter-${env.iter}: ${ic.summary}`.slice(0, 200);
     await this.runGit(['git', 'commit', '-m', commitMsg]);
 
     return [
@@ -487,9 +487,9 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
     }
   }
 
-  private async deliverToReviewer(env: AnyAutoloopV2Message): Promise<AnyAutoloopV2Message[]> {
+  private async deliverToReviewer(env: AnyAutoloopMessage): Promise<AnyAutoloopMessage[]> {
     if (env.type !== 'review_request') {
-      throw new Error(`[autoloop-v2] reviewer does not accept message type=${env.type}`);
+      throw new Error(`[autoloop] reviewer does not accept message type=${env.type}`);
     }
     await this.ensureReviewer();
     this.stageReviewSandbox(env.payload.iter);
@@ -579,17 +579,17 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
     // commit message captures the intent. Empty diff → skip (no error).
     const status = await run(['git', 'status', '--porcelain']);
     if (status.code !== 0) {
-      this.logger.warn?.(`[autoloop-v2] git status failed: ${status.err.slice(0, 200)}`);
+      this.logger.warn?.(`[autoloop] git status failed: ${status.err.slice(0, 200)}`);
       return;
     }
     if (status.out.trim() === '') {
-      this.logger.info?.(`[autoloop-v2] commit_${filename}: no changes to commit`);
+      this.logger.info?.(`[autoloop] commit_${filename}: no changes to commit`);
       return;
     }
     await run(['git', 'add', '-A']);
     const commit = await run(['git', 'commit', '-m', message]);
     if (commit.code !== 0) {
-      this.logger.warn?.(`[autoloop-v2] git commit failed: ${commit.err.slice(0, 200)}`);
+      this.logger.warn?.(`[autoloop] git commit failed: ${commit.err.slice(0, 200)}`);
     }
   }
 }

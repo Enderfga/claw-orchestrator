@@ -16,7 +16,7 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 
 import type { PushChannel, PushLevel } from './messages.js';
-import { type Logger, nullLogger } from '../../logger.js';
+import { type Logger, nullLogger } from '../logger.js';
 
 const WECHAT_RECIPIENT = 'o9cq80_8TbkFAYMZVvxNtR5C9STE@im.wechat';
 const WECHAT_ACCOUNT = 'fb9a0a155b73-im-bot';
@@ -88,7 +88,7 @@ async function tryWechat(text: string, logger: Logger): Promise<boolean> {
     text,
   ]);
   if (r.exit_code === 0 && /✅\s*Sent/.test(r.stdout)) return true;
-  logger.warn?.(`[autoloop-v2/notify] wechat failed: code=${r.exit_code} stderr=${r.stderr.slice(0, 200)}`);
+  logger.warn?.(`[autoloop/notify] wechat failed: code=${r.exit_code} stderr=${r.stderr.slice(0, 200)}`);
   return false;
 }
 
@@ -105,7 +105,7 @@ async function tryWhatsApp(text: string, logger: Logger): Promise<boolean> {
     text,
   ]);
   if (r.exit_code === 0 && /✅\s*Sent/.test(r.stdout)) return true;
-  logger.warn?.(`[autoloop-v2/notify] whatsapp failed: code=${r.exit_code} stderr=${r.stderr.slice(0, 200)}`);
+  logger.warn?.(`[autoloop/notify] whatsapp failed: code=${r.exit_code} stderr=${r.stderr.slice(0, 200)}`);
   return false;
 }
 
@@ -117,12 +117,12 @@ async function tryEmail(subject: string, body: string, logger: Logger): Promise<
   ];
   const script = candidates.find((p) => fs.existsSync(p));
   if (!script) {
-    logger.warn?.('[autoloop-v2/notify] email fallback unavailable: send-email.sh not found');
+    logger.warn?.('[autoloop/notify] email fallback unavailable: send-email.sh not found');
     return false;
   }
   const r = await runCmd(['bash', script, '-s', subject], { stdin: body, timeoutMs: 30_000 });
   if (r.exit_code === 0) return true;
-  logger.warn?.(`[autoloop-v2/notify] email failed: code=${r.exit_code} stderr=${r.stderr.slice(0, 200)}`);
+  logger.warn?.(`[autoloop/notify] email failed: code=${r.exit_code} stderr=${r.stderr.slice(0, 200)}`);
   return false;
 }
 

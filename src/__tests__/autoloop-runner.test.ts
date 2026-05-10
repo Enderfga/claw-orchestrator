@@ -1,5 +1,5 @@
 /**
- * Unit tests for autoloop v2 runner skeleton (S1 — no real LLM).
+ * Unit tests for autoloop runner skeleton (S1 — no real LLM).
  *
  * Strategy: inject a scripted AgentDispatcher that produces canned replies, then
  * drive the runner through a representative iter and assert routing invariants.
@@ -7,25 +7,25 @@
 
 import { describe, it, expect } from 'vitest';
 import {
-  type AnyAutoloopV2Message,
-  AutoloopV2RoutingError,
+  type AnyAutoloopMessage,
+  AutoloopRoutingError,
   Msg,
   deserialise,
   serialise,
   validateMessage,
-} from '../autoloop/v2/messages.js';
-import { AutoloopV2Runner } from '../autoloop/v2/runner.js';
-import type { AgentDispatcher, AutoloopV2Config } from '../autoloop/v2/types.js';
+} from '../autoloop/messages.js';
+import { AutoloopRunner } from '../autoloop/runner.js';
+import type { AgentDispatcher, AutoloopConfig } from '../autoloop/types.js';
 
 function makeRunner(
   dispatcher: AgentDispatcher,
-  recordedPushes: AnyAutoloopV2Message[] = [],
+  recordedPushes: AnyAutoloopMessage[] = [],
 ): {
-  runner: AutoloopV2Runner;
+  runner: AutoloopRunner;
   pushes: Array<{ level: string; summary: string }>;
 } {
   const pushes: Array<{ level: string; summary: string }> = [];
-  const config: AutoloopV2Config = {
+  const config: AutoloopConfig = {
     run_id: 'test-run',
     workspace: '/tmp/test',
     ledger_dir: '/tmp/test/ledger',
@@ -35,10 +35,10 @@ function makeRunner(
     },
     dispatcher,
   };
-  return { runner: new AutoloopV2Runner(config), pushes };
+  return { runner: new AutoloopRunner(config), pushes };
 }
 
-describe('autoloop v2 messages', () => {
+describe('autoloop messages', () => {
   it('Msg constructors build well-formed envelopes', () => {
     const e = Msg.chat(0, { text: 'hello' });
     expect(e.from).toBe('user');
@@ -71,7 +71,7 @@ describe('autoloop v2 messages', () => {
   });
 
   it('validateMessage rejects bogus routes', () => {
-    const bad: AnyAutoloopV2Message = {
+    const bad: AnyAutoloopMessage = {
       msg_id: 'x',
       iter: 0,
       from: 'coder',
@@ -79,12 +79,12 @@ describe('autoloop v2 messages', () => {
       type: 'iter_artifacts',
       ts: new Date().toISOString(),
       payload: { diff: '', eval_output: {}, files_changed: [] },
-    } as AnyAutoloopV2Message;
-    expect(() => validateMessage(bad)).toThrow(AutoloopV2RoutingError);
+    } as AnyAutoloopMessage;
+    expect(() => validateMessage(bad)).toThrow(AutoloopRoutingError);
   });
 });
 
-describe('AutoloopV2Runner', () => {
+describe('AutoloopRunner', () => {
   it('drains a full iter: chat → directive → ack → artifacts → verdict → iter_done', async () => {
     const observed: string[] = [];
 
@@ -230,7 +230,7 @@ describe('AutoloopV2Runner', () => {
       type: 'directive',
       ts: new Date().toISOString(),
       payload: { goal: 'x', constraints: [], success_criteria: [], max_attempts: 1 },
-    } as AnyAutoloopV2Message;
-    await expect(runner.send(bogus)).rejects.toThrow(AutoloopV2RoutingError);
+    } as AnyAutoloopMessage;
+    await expect(runner.send(bogus)).rejects.toThrow(AutoloopRoutingError);
   });
 });

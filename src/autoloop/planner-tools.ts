@@ -14,12 +14,12 @@
  * runner-state mutations. Multiple blocks per turn are allowed and processed
  * in order.
  *
- * The naming intentionally mirrors tasks/autoloop-v2.md §4.2 so a future
+ * The naming intentionally mirrors tasks/autoloop.md §4.2 so a future
  * MCP-based implementation can swap the parser for real tool dispatch
  * without changing any Planner-facing semantics.
  */
 
-import { type AnyAutoloopV2Message, Msg, type PushChannel, type PushLevel } from './messages.js';
+import { type AnyAutoloopMessage, Msg, type PushChannel, type PushLevel } from './messages.js';
 
 export type PlannerToolName =
   | 'notify_user'
@@ -105,7 +105,7 @@ export interface PlannerToolEffects {
 
 export interface PlannerToolHandlerResult {
   /** Messages the runner should push into its own queue. */
-  emitted_messages: AnyAutoloopV2Message[];
+  emitted_messages: AnyAutoloopMessage[];
   /** Errors encountered while handling this batch (does not throw). */
   errors: Array<{ tool: string; error: string }>;
 }
@@ -124,7 +124,7 @@ export async function applyPlannerToolCalls(
   fx: PlannerToolEffects,
   iter: number,
 ): Promise<PlannerToolHandlerResult> {
-  const emitted_messages: AnyAutoloopV2Message[] = [];
+  const emitted_messages: AnyAutoloopMessage[] = [];
   const errors: Array<{ tool: string; error: string }> = [];
 
   for (const call of calls) {

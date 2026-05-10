@@ -1,17 +1,16 @@
 /**
- * Runner-level types for autoloop v2 (three-agent architecture).
+ * Runner-level types for autoloop (three-agent architecture).
  *
- * Contract: tasks/autoloop-v2.md.
+ * Contract: tasks/autoloop.md.
  */
 
-import type { AnyAutoloopV2Message, PushChannel, PushLevel } from './messages.js';
+import type { AnyAutoloopMessage, PushChannel, PushLevel } from './messages.js';
 
-export type AutoloopV2Status = 'planning' | 'running' | 'paused' | 'terminated' | 'crashed';
+export type AutoloopStatus = 'planning' | 'running' | 'paused' | 'terminated' | 'crashed';
 
-export interface AutoloopV2RunState {
+export interface AutoloopState {
   run_id: string;
-  run_mode: 'v2';
-  status: AutoloopV2Status;
+  status: AutoloopStatus;
   iter: number;
   /** Set once Planner calls `spawn_subagents`. Until then we are in "planning" mode. */
   subagents_spawned: boolean;
@@ -63,14 +62,14 @@ export interface AgentDispatcher {
    * synchronously in reply. Asynchronous emissions should also be returned
    * (the runner awaits this call).
    */
-  deliver(env: AnyAutoloopV2Message): Promise<AnyAutoloopV2Message[]>;
+  deliver(env: AnyAutoloopMessage): Promise<AnyAutoloopMessage[]>;
   /** Called once when the runner is starting up — agent may pre-warm sessions. */
-  init?(state: AutoloopV2RunState): Promise<void>;
+  init?(state: AutoloopState): Promise<void>;
   /** Called on terminate — agent must release sessions cleanly. */
   shutdown?(reason: string): Promise<void>;
 }
 
-export interface AutoloopV2Config {
+export interface AutoloopConfig {
   run_id: string;
   workspace: string;
   ledger_dir: string;

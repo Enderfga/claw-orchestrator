@@ -8,7 +8,7 @@ import {
   extractIterComplete,
   extractReviewComplete,
   extractClarification,
-} from '../autoloop/v2/agent-tools.js';
+} from '../autoloop/agent-tools.js';
 
 describe('parseAgentReply', () => {
   it('extracts blocks from a coder reply', () => {

@@ -1,323 +1,109 @@
 # Autoloop — Reference
 
-Autonomous iteration loop for a git workspace. Given an intent (`plan.md`) and success criteria (`goal.json`), the loop edits the code, runs gates, ratchets on a faithful metric, and pushes you only when it has to.
+Three-agent autonomous iteration loop for a git workspace. You converse with
+the **Planner** to design a plan; on your approval, the Planner spawns the
+**Coder** + **Reviewer** subloop, monitors it, and pushes you (wechat →
+whatsapp → email fallback chain) only when something needs your attention.
 
-There are **two architectures** — both supported in 3.5.x:
-
-- **v1** (the rest of this page): single-threaded phase machine (BOOTSTRAP → PROPOSE → EXECUTE → MEASURE → RATCHET → COMPRESS). Each phase spawns a fresh Claude session. Fire-and-forget — no human in the loop. Tools: `autoloop_start` / `autoloop_resume` / `autoloop_status` / `autoloop_inject` / `autoloop_stop`.
-- **v2** ([Autoloop v2 below](#autoloop-v2-three-agent-architecture)): three persistent agents — Planner (Opus, your interface), Coder (Sonnet, makes the change), Reviewer (Sonnet, sandboxed audit). You converse with Planner to design the plan; on approval Planner spawns subagents that self-iterate while Planner pushes you on regressions / decisions / completion via wechat → whatsapp → email fallback chain.
-
-Design docs: `tasks/autoloop.md` (v1), `tasks/autoloop-v2.md` (v2).
+Design rationale: `tasks/autoloop.md`. This page is the operator reference.
 
 ## When to use
 
-- You can write down what "better" means as a shell command (test pass count, latency, loss, gate completion). Without that, ratchet has no anchor and the loop will drift — see `tasks/autoloop.md` §10.
-- The workspace runs on the local box (or wherever the orchestrator is hosted). v1 runner is local subprocess only.
-- You want the orchestrator to keep iterating while you do something else, and to push you on new-best / plateau / question.
+- Goal is exploratory and you want to **design the plan with the agent**
+  before running. The Planner will read your workspace, surface ambiguity,
+  and write `plan.md` / `goal.json` with you.
+- You want a long-running loop you can walk away from. The Planner pushes
+  you on regressions, completion, decisions, or stalls; otherwise it stays
+  silent.
+- You can write down what "better" means as a shell command (test pass
+  count, latency, loss, gate completion). Without that anchor, Reviewer has
+  nothing to ratchet on.
+
+## Roles
+
+| Agent | Engine (default) | cwd | Owns |
+|---|---|---|---|
+| **Planner** | claude / opus | workspace | strategy, `plan.md`, `goal.json`, talking to you |
+| **Coder** | claude / sonnet (override per spawn) | workspace | code changes, eval execution |
+| **Reviewer** | claude / sonnet | `<workspace>/tasks/<run_id>/reviewer_sandbox/` | distrust audit; advance / hold / rollback |
+
+Coder and Reviewer **never speak to you directly**. Anything they observe
+flows through the Planner. The Planner decides what to surface and what to
+absorb.
+
+## UX flow
+
+```
+1. autoloop_start { run_id, workspace }       → Planner session ready
+2. autoloop_chat { run_id, "<your goal>" }    → Planner reads workspace,
+                                                drafts plan.md + goal.json,
+                                                asks "ready to spawn?"
+3. autoloop_chat { run_id, "go" }             → Planner emits spawn_subagents
+4. Coder + Reviewer self-iterate              → ledger writes per iter
+5. Planner pushes you on target_hit / regression / decision / stall
+6. Run terminates on target hit, plan-defined max_iters, or your terminate.
+```
 
 ## Quick start
 
 ```bash
-# 1. Author plan.md (intent + scope) and goal.json (success criteria) — see §Examples.
-
-# 2. Start the loop
+# Start a run (creates Planner session)
 curl -X POST http://127.0.0.1:18789/v1/openclaw/tools/autoloop_start \
   -H 'content-type: application/json' \
-  -d '{
-    "workspace": "/Users/me/projects/nano-gpt",
-    "plan_path": "/Users/me/projects/nano-gpt/plan.md",
-    "goal_path": "/Users/me/projects/nano-gpt/goal.json"
-  }'
-# → { ok: true, id: "autoloop-...", task_dir: ".../tasks/autoloop-...", current_phase: "RUNNING" }
-
-# 3. Watch
-curl http://127.0.0.1:18789/autoloop/<id>/events     # SSE stream (one event per phase / state / push)
-# or poll
-curl -X POST http://127.0.0.1:18789/v1/openclaw/tools/autoloop_status -d '{"id":"<id>"}'
-
-# 4. Inject a hint (becomes input to next PROPOSE via tasks/<id>/inbox.md)
-curl -X POST http://127.0.0.1:18789/v1/openclaw/tools/autoloop_inject \
-  -d '{"id":"<id>","text":"try LR warmup 500 steps"}'
-
-# 5. Resume after process death (gateway restart, OOM, machine reboot)
-curl -X POST http://127.0.0.1:18789/v1/openclaw/tools/autoloop_resume \
-  -d '{"workspace":"/path/to/workspace","task_id":"<id>"}'
-# Skips BOOTSTRAP, git-resets workspace to last best (or bootstrap baseline if no best yet),
-# then continues the loop. Refuses to resume already-terminated runs.
-
-# 6. Stop
-curl -X POST http://127.0.0.1:18789/v1/openclaw/tools/autoloop_stop -d '{"id":"<id>"}'
-```
-
-## `goal.json` schema
-
-```jsonc
-{
-  // Optional. When absent, the de-facto metric is gate_completion.
-  "scalar": {
-    "name": "val_bpb",
-    "direction": "min" | "max",
-    "extract_cmd": "shell command that prints one number to stdout",
-    "extract_timeout_sec": 600,    // hard wall-clock cap on extract_cmd. Default 600.
-                                    //   For long ML evals (training+eval), set to your
-                                    //   real upper bound, e.g. 14400 = 4 hours.
-    "target": 0.95,
-    "noise_floor": 0.005           // changes within ±noise are not improvements
-  },
-  // Required. May be empty only if scalar is set.
-  "gates": [
-    {
-      "name": "tests_pass",
-      "cmd": "npm test",
-      "must": "exit-0",
-      "timeout_sec": 600
-    }
-  ],
-  // Optional. Agent-proposed gates that don't count toward goal_completion
-  // until you move them into `gates`. Capped by termination.max_pending_aspirational.
-  "aspirational_gates": [],
-  "termination": {
-    "scalar_target_hit": true,    // stop when scalar.target reached
-    "max_iters": 200,
-    "plateau_iters": 10,           // N consecutive non-improvements → push (loop continues)
-    "max_cost_usd": 200,
-    "max_pending_aspirational": 5
-  }
-}
-```
-
-## `plan.md` template
-
-The agent reads `plan.md` for free-text intent. RATCHET also reads it for **Scope** rules (added in v3.4.1). Use this skeleton:
-
-```markdown
-# Plan
-
-<one-paragraph statement of what you want the loop to achieve>
-
-## Deliverables
-
-<what artifacts must exist when done — files, sections, etc.>
-
-## Scope (HARD)   ← RATCHET will reset on violations
-
-- **Read-only**: `path/to/frozen-test-data.json`, `eval/golden_outputs/`. Never modify.
-- **Allowed paths to write**: `src/configs/`, `src/training/`. No changes elsewhere.
-- **Tunable hyperparameters**: `learning_rate`, `warmup_steps`, `batch_size`. Do NOT touch model architecture.
-- **No external network calls** beyond what BOOTSTRAP set up.
-
-## Style / Conventions
-
-<optional: code style, naming, citation format, etc.>
-```
-
-The Scope section is interpreted by RATCHET (rule #2 in `configs/autoloop-ratchet-prompt.md`): if `current.md` describes changes outside Allowed paths or to Read-only files, RATCHET resets even if gates pass.
-
-## Examples
-
-### Example A — Iterative metric improvement (scalar-driven)
-
-**Use case**: optimise a measurable number — training loss, latency, accuracy, error rate.
-
-`plan.md`:
-```
-Improve val_bpb on shakespeare-char.
-Constraints: must train on single A100 in <10 min/run.
-Don't change tokenizer or eval set.
-Initial idea: tune AdamW betas, then explore RoPE variants.
-```
-
-`goal.json`:
-```json
-{
-  "scalar": {
-    "name": "val_bpb",
-    "direction": "min",
-    "extract_cmd": "python eval.py --json | jq .val_bpb",
-    "target": 0.95,
-    "noise_floor": 0.005
-  },
-  "gates": [
-    { "name": "trains_in_time", "cmd": "timeout 600 python train.py", "must": "exit-0" },
-    { "name": "no_test_leak",   "cmd": "scripts/check_no_test_leak.sh", "must": "exit-0" }
-  ],
-  "termination": {
-    "scalar_target_hit": true,
-    "max_iters": 200,
-    "plateau_iters": 10,
-    "max_cost_usd": 200,
-    "max_pending_aspirational": 5
-  }
-}
-```
-
-### Example B — Paper deep-research (gate-driven)
-
-**Use case**: produce a structured research artifact (report, design doc) that satisfies a coverage checklist. No native scalar — the metric is gate completion.
-
-`plan.md`:
-```
-Deeply research arXiv:2310.06825 (Mistral 7B).
-Output research-report.md covering:
-  - claim-by-claim extraction
-  - related-work map (≥10 papers, each compared)
-  - identified open questions
-  - critique: which claims are weakest, why
-Allow web search. Cite all external sources.
-```
-
-`goal.json`:
-```json
-{
-  "gates": [
-    { "name": "report_exists",          "cmd": "test -f research-report.md", "must": "exit-0" },
-    { "name": "claims_extracted",       "cmd": "scripts/check_claims.sh ge 15", "must": "exit-0" },
-    { "name": "related_work_ge_10",     "cmd": "scripts/check_citations.sh ge 10", "must": "exit-0" },
-    { "name": "open_questions_present", "cmd": "scripts/check_section.sh 'Open Questions' ge 5", "must": "exit-0" },
-    { "name": "critique_present",       "cmd": "scripts/check_section.sh 'Critique' ge 3", "must": "exit-0" },
-    { "name": "all_citations_resolve",  "cmd": "scripts/verify_citations.sh", "must": "exit-0" }
-  ],
-  "termination": {
-    "scalar_target_hit": true,
-    "max_iters": 100,
-    "plateau_iters": 8,
-    "max_cost_usd": 100,
-    "max_pending_aspirational": 5
-  }
-}
-```
-
-BOOTSTRAP will read the paper and propose ~10 aspirational gates (e.g. "address sliding-window attention's KV-cache implication") via push. Reply via wechat to lock specific ones; they then count toward `gate_completion`.
-
-## Ledger files (under `<workspace>/tasks/<id>/`)
-
-| File | Owner | Purpose |
-|---|---|---|
-| `plan.md` | human | Intent. Immutable after BOOTSTRAP unless human edits |
-| `goal.json` | human + agent | Success criteria. Agent may append to `aspirational_gates` only |
-| `current.md` | PROPOSE | "current best summary + next proposal". Re-read every iter |
-| `state.json` | runner + RATCHET | Phase, iter, best, decision, plateau count. Only RATCHET writes `decision` |
-| `metric.json` | MEASURE | Append-only history of metric points |
-| `history.md` | COMPRESS | Compressed log of past iters (every K iters) |
-| `iter/<n>/` | various | Per-iter artifacts: `eval.json`, `ratchet.json`, run logs |
-| `inbox.md` | runner + human | Push log + injection log |
-| `bootstrap-failure.md` | BOOTSTRAP | Only created if BOOTSTRAP failed; aborts the loop |
-
-All files are git-tracked under the autoloop branch (`autoloop/<id>`). `git reset --hard` on RATCHET reset reverts ledger and code atomically.
-
-## Defaults
-
-| | Value |
-|---|---|
-| `propose_engine` / `propose_model` | `claude` / `opus` |
-| `ratchet_engine` / `ratchet_model` | `claude` / `opus` (different process, sandboxed cwd) |
-| `compress_every_k` | 10 |
-| `per_iter_timeout_ms` | 600 000 (10 min) |
-| `push_cmd` | `openclaw message send` |
-| `goal.termination.max_iters` | 200 |
-| `goal.termination.plateau_iters` | 10 |
-| `goal.termination.max_cost_usd` | 200 |
-| `goal.termination.max_pending_aspirational` | 5 |
-
-## Push events
-
-| Trigger | Reply expected? |
-|---|---|
-| `bootstrap_aspirational` (gates proposed at startup) | Yes — reply `lock 1,3,4` or `reject 2` to lock |
-| `new_best` (RATCHET committed and metric strictly better) | No |
-| `plateau` (N consecutive non-improvements) | Optional — `stop` to halt or `redirect: …` to inject |
-| `aspirational_proposed` (PROPOSE added a candidate gate) | Yes if you want it locked |
-| `termination` (target hit / max_iters / max_cost) | No |
-| `hard_error` (BOOTSTRAP failed / iter crashed) | Investigate the workspace |
-
-Replies arrive asynchronously through whatever your push command supports. The loop never blocks on a reply.
-
-## Known limitations
-
-- Single-track serial loop; no N-worktree population mode (state schema supports it for v2)
-- Only `local` runner backend; no remote runner backends (SSH / cloud worker / message bus) yet
-- No "explore mode" — multi-step refactors must be neutral-on-metric in one commit (Karpathy's documented trade-off)
-- No webchat frontend (SSE endpoint is there, frontend deferred)
-- Cross-task lessons store (à la AutoResearchClaw `MetaClaw`) not implemented
-- ⚠️ **`bare: true` is not used** when starting child claude sessions because it skips loading `~/.claude/settings.json` env (and so loses custom-env-based auth on this user's setup). Cost: lose the `--exclude-dynamic-system-prompt-sections` + 1H cache optimisations. Real fix is upstream in `persistent-session.ts`.
-- ⚠️ **`autoloop_resume` is wired and unit/smoke-tested**, but exotic states (dirty working tree at resume time, mid-COMPRESS death, mid-RATCHET stdin pipe death) are not exercised yet.
-
-See `tasks/autoloop.md` §10 for the full failure-mode register.
-
----
-
-## Autoloop v2 — three-agent architecture
-
-v2 keeps three Claude sessions persistent across iterations and uses messages
-on an inbox bus instead of fresh-spawn-per-phase. Design rationale and full
-schemas live in `tasks/autoloop-v2.md`.
-
-### Roles
-
-| Agent | Engine | cwd | Owns |
-|---|---|---|---|
-| **Planner** | claude / opus | workspace | strategy, plan.md, goal.json, talking to you |
-| **Coder** | claude / sonnet (override per spawn) | workspace | code changes, eval execution |
-| **Reviewer** | claude / sonnet | `<workspace>/tasks/<run_id>/reviewer_sandbox/` | distrust audit; advance / hold / rollback |
-
-### UX flow
-
-```
-1. autoloop_v2_start { run_id, workspace }
-2. autoloop_v2_chat { run_id, text } → talk to Planner
-3. Planner reads workspace, drafts plan.md + goal.json, asks "ready to spawn?"
-4. autoloop_v2_chat { run_id, "go" } → Planner emits spawn_subagents
-5. Coder + Reviewer self-iterate; you stay in chat with Planner
-6. Planner pushes you (wechat → whatsapp → email fallback) on regression /
-   decision / completion per push policy
-7. Run terminates on target_hit, plan-defined max_iters, or your `terminate`
-```
-
-### Quick start
-
-```bash
-# Start
-curl -X POST http://127.0.0.1:18789/v1/openclaw/tools/autoloop_v2_start \
   -d '{"run_id":"my-run","workspace":"/abs/path/to/workspace"}'
 
-# Chat with Planner
-curl -X POST http://127.0.0.1:18789/v1/openclaw/tools/autoloop_v2_chat \
+# Chat with the Planner
+curl -X POST http://127.0.0.1:18789/v1/openclaw/tools/autoloop_chat \
+  -H 'content-type: application/json' \
   -d '{"run_id":"my-run","text":"Read the workspace and design a plan to fix X"}'
 
 # Inspect state
-curl http://127.0.0.1:18789/autoloop/v2/my-run/state
+curl http://127.0.0.1:18789/autoloop/my-run/state
 
-# SSE stream (for the upcoming 3-pane UI)
-curl http://127.0.0.1:18789/autoloop/v2/my-run/events
+# Live SSE stream (the 3-pane UI subscribes here)
+curl http://127.0.0.1:18789/autoloop/my-run/events
 
-# Reset Coder if it drifts
-curl -X POST http://127.0.0.1:18789/v1/openclaw/tools/autoloop_v2_reset_agent \
+# Reset Coder if it drifts (lazy; eager_restart=true to start a fresh session immediately)
+curl -X POST http://127.0.0.1:18789/v1/openclaw/tools/autoloop_reset_agent \
+  -H 'content-type: application/json' \
   -d '{"run_id":"my-run","agent":"coder","eager_restart":true}'
 
 # Stop
-curl -X POST http://127.0.0.1:18789/v1/openclaw/tools/autoloop_v2_stop \
+curl -X POST http://127.0.0.1:18789/v1/openclaw/tools/autoloop_stop \
+  -H 'content-type: application/json' \
   -d '{"run_id":"my-run","reason":"done"}'
 ```
 
-### Planner-emitted control tools
-
-Planner controls the run by emitting fenced ` ```autoloop ` JSON blocks. The
-dispatcher parses them out of every reply and applies them. You never see
-the JSON — only the Planner's narrative reply.
+## Plugin tools
 
 | Tool | Args | What |
 |---|---|---|
-| `notify_user` | level, summary, detail?, channel? | push you out-of-band |
-| `spawn_subagents` | coder_model?, reviewer_model?, initial_directive? | start Coder + Reviewer |
-| `send_directive` | goal, constraints?, success_criteria?, max_attempts? | next iter's instruction |
-| `pause_loop` | reason | halt subloop at next boundary (chat keeps working) |
-| `resume_loop` | — | resume after pause |
-| `terminate` | reason | end run |
-| `update_push_policy` | partial PushPolicy | mutate notification rules |
-| `write_plan_committed` | message? | git-commit current plan.md |
-| `write_goal_committed` | message? | git-commit current goal.json |
+| `autoloop_start` | `run_id`, `workspace`, `planner_model?`, `send_timeout_ms?` | Start a run; launches Planner session. |
+| `autoloop_chat` | `run_id`, `text` | Send a chat message to the Planner; returns the Planner's reply. |
+| `autoloop_status` | `run_id` | Current state (status, iter, push count, subagents_spawned). |
+| `autoloop_list` | — | All active runs in this manager process. |
+| `autoloop_stop` | `run_id`, `reason?` | Terminate; stops Planner / Coder / Reviewer. |
+| `autoloop_reset_agent` | `run_id`, `agent` ('planner' / 'coder' / 'reviewer'), `force?`, `eager_restart?` | Reset one subagent. Planner reset requires `force: true`. |
 
-### Push policy (defaults)
+## Planner-emitted control tools
+
+The Planner controls the run by emitting fenced ` ```autoloop ` JSON blocks
+inside its replies. The dispatcher parses them out and applies them. You
+never see the JSON — only the Planner's narrative.
+
+| Tool | Args | What |
+|---|---|---|
+| `notify_user` | `level` ('info' / 'warn' / 'decision' / 'error'), `summary`, `detail?`, `channel?` ('auto' / 'wechat' / 'webchat' / 'both' / 'email') | Push you out-of-band. |
+| `spawn_subagents` | `coder_model?`, `reviewer_model?`, `initial_directive?` | Start Coder + Reviewer. Only after explicit user approval. |
+| `send_directive` | `goal`, `constraints?`, `success_criteria?`, `max_attempts?` | Next iter's instruction to Coder. |
+| `pause_loop` | `reason` | Halt subloop at next iter boundary; chat keeps working. |
+| `resume_loop` | — | Resume after pause. |
+| `terminate` | `reason` | End run. |
+| `update_push_policy` | partial PushPolicy | Mutate notification rules (e.g. when you say "tell me every iter"). |
+| `write_plan_committed` | `message?` | git-commit current plan.md. |
+| `write_goal_committed` | `message?` | git-commit current goal.json. |
+
+## Default push policy
 
 | Event | Default |
 |---|---|
@@ -330,16 +116,17 @@ the JSON — only the Planner's narrative reply.
 | on_stall_30min | warn / wechat |
 | on_decision_needed | decision / both |
 
-5-minute dedup on (level, summary). Channel chain: `auto` walks
-wechat → whatsapp → email; `wechat` / `webchat` / `email` route directly;
-`both` does webchat + wechat.
+5-minute dedup on (level, summary) prevents duplicate pushes from the same
+event. Channel chain: `auto` walks wechat → whatsapp → email; `wechat` /
+`webchat` / `email` route directly; `both` does webchat (if session known)
++ wechat fallback chain.
 
-### Ledger layout
+## Ledger layout
 
 ```
 <workspace>/tasks/<run_id>/
 ├── plan.md              # Planner-authored, git-committed
-├── goal.json            # Planner-authored, git-committed (v1 GoalSpec shape)
+├── goal.json            # Planner-authored, git-committed
 ├── push_log.jsonl       # every notify_user attempt + channel used
 ├── reviewer_sandbox/    # Reviewer cwd; restaged per iter
 │   ├── plan.md          # copy
@@ -355,33 +142,82 @@ wechat → whatsapp → email; `wechat` / `webchat` / `email` route directly;
     └── coder_summary.txt
 ```
 
-### Backend HTTP / SSE
+The orchestrator git-commits each iter automatically. Coder must NOT call
+`git commit` itself — that confuses the diff log.
+
+## Backend HTTP / SSE
 
 | Endpoint | Returns |
 |---|---|
-| `GET /autoloop/v2/list` | `{ ok, runs: AutoloopV2RunState[] }` |
-| `GET /autoloop/v2/<id>/state` | `{ ok, state: AutoloopV2RunState }` |
-| `GET /autoloop/v2/<id>/push_log` | `{ ok, entries: PushLogEntry[] }` |
-| `GET /autoloop/v2/<id>/events` | SSE: `snapshot` / `message` / `state` / `push` / `iter_done` / `planner_reply` / `coder_reply` / `reviewer_reply` / `terminated` |
+| `GET /autoloop/list` | `{ ok, runs: AutoloopState[] }` |
+| `GET /autoloop/<id>/state` | `{ ok, state: AutoloopState }` |
+| `GET /autoloop/<id>/push_log` | `{ ok, entries: PushLogEntry[] }` |
+| `GET /autoloop/<id>/events` | SSE: `snapshot` / `message` / `state` / `push` / `iter_done` / `planner_reply` / `coder_reply` / `reviewer_reply` / `terminated` |
 
-The 3-pane UI (left: Planner chat, center: Coder activity, right: Reviewer
-verdicts, top: state, bottom: push_log) consumes these endpoints. The UI
-itself ships in a separate cross-repo PR.
+The 3-pane UI consumes these endpoints:
+- **Left**: Planner chat (subscribes to `planner_reply`)
+- **Center**: Coder activity (`coder_reply` + `iter_done`)
+- **Right**: Reviewer verdicts (`reviewer_reply`)
+- **Top bar**: state (status / iter / metric)
+- **Bottom**: push_log
 
-### Known v2 limitations (3.5.0)
+The UI itself ships in a separate cross-repo PR.
 
-- **No auto-compact on token budget.** Manual `autoloop_v2_reset_agent`
-  covers the same recovery path. Auto-compact is queued for a 3.5.x
-  follow-up once `ISession.getStats` exposes the right hooks.
-- **One-way push only.** WeChat → Planner inbound replies are not yet
-  wired (would need an openclaw-gateway tmux-passthrough route). For now
-  reply via webchat / `autoloop_v2_chat`.
-- **No webchat UI yet.** Backend SSE is shipped; UI is a separate PR.
-- **No fork mode** for parallel exploration. Single linear iter trajectory.
+## `goal.json` shape
 
-### Smoke
+The Planner authors goal.json based on your conversation. There is no
+hard schema — the Coder reads what's there and runs the eval the Planner
+wrote down. A typical shape:
 
-`scripts/smoke-autoloop-v2.ts` runs a buggy add_two scenario end-to-end
-with Opus Planner + Sonnet × 2. Validates plan.md / goal.json commit,
-spawn, iter 0 ledger artifacts, terminate on target_hit. Cost ~$1-3,
-wall-clock ~5-15 min.
+```jsonc
+{
+  "scalar": {
+    "name": "test_pass_rate",
+    "direction": "max",
+    "extract_cmd": "bash eval.sh | grep -oE 'metric=[0-9.]+' | cut -d= -f2",
+    "target": 1.0
+  },
+  "gates": [
+    { "name": "tests_pass", "cmd": "npm test", "must": "exit-0" }
+  ],
+  "termination": {
+    "max_iters": 10,
+    "scalar_target_hit": true
+  }
+}
+```
+
+The Planner will riff on this shape during your chat and ask if it's right.
+
+## Hard rules (Coder / Reviewer)
+
+- ❌ Coder does NOT modify `plan.md`, `goal.json`, or anything under `tasks/`. Planner owns those.
+- ❌ Coder does NOT manually `git commit` — orchestrator commits per iter.
+- ❌ Reviewer modifies nothing outside its sandbox cwd.
+- ❌ Reviewer never pings Planner / Coder for clarification — operates from artifacts only.
+- ✅ Coder leaves notes in `coder_notes.md` for things future iters need to know.
+- ✅ Reviewer accumulates "fakery patterns I've seen" in `reviewer_memory.md` (persists across iters).
+- ✅ Reviewer defaults to `hold` under uncertainty; only `advance` after independent verification.
+
+## Smoke test
+
+`scripts/smoke-autoloop.ts` runs a buggy `add_two` scenario end-to-end with
+Opus Planner + Sonnet × 2. Validates plan.md / goal.json commit, spawn,
+iter 0 ledger artifacts (`directive` + `eval_output` + `diff.patch` +
+`verdict`), and termination on `target_hit`. Cost ~$1-3, wall-clock
+~5-15 min. Run with `npx tsx scripts/smoke-autoloop.ts` (requires
+`~/.claude/settings.json` to have your auth env).
+
+## Known limitations
+
+- **No auto-compact on token budget.** Manual `autoloop_reset_agent` covers
+  the same recovery path. Auto-compact is queued for a follow-up once
+  `ISession.getStats` exposes token-usage hooks.
+- **One-way push.** WeChat → Planner inbound replies are not yet wired (would
+  need an openclaw-gateway tmux-passthrough route). Reply via webchat /
+  `autoloop_chat`.
+- **No webchat UI yet.** Backend SSE is shipped; the UI is a separate
+  cross-repo PR in ChatGPT-Next-Web.
+- **No fork / population mode.** Single linear iter trajectory per run.
+- **Cross-run knowledge isolated.** Each run's `reviewer_memory.md` and
+  `coder_notes.md` live in that run's ledger; no shared meta-store yet.

@@ -87,19 +87,19 @@ await manager.councilStart("Design and implement an auth system", {
 });
 ```
 
-### Autoloop (autonomous workspace iteration)
+### Autoloop (three-agent autonomous workspace iteration)
 
-Given a git workspace, a `plan.md` (intent + scope), and a `goal.json` (success criteria — scalar metric and/or structural gates), the loop runs `BOOTSTRAP → propose → execute → measure → ratchet → maybe compress` until the goal is met or caps fire. Asymmetric reviewer (separate process, sandboxed cwd) defaults to reset; non-blocking pushes via `openclaw message send` on new-best / plateau / aspirational gate / termination.
+You converse with a long-lived **Planner** (Opus) to design `plan.md` and `goal.json`; on your "go" the Planner spawns a **Coder** (Sonnet) and a **Reviewer** (Sonnet, sandboxed cwd) into a self-iterating subloop. Coder applies changes + runs eval, Reviewer audits independently, ledger writes after every iter. The Planner pushes you (wechat → whatsapp → email fallback chain) on regression, target-hit, decision points, or a 30-min stall — silent otherwise.
 
 ```ts
-await manager.autoloopStart({
-  workspace: "/path/to/repo",
-  plan_path: "/path/to/repo/plan.md",
-  goal_path: "/path/to/repo/goal.json",
-});
+await manager.autoloopStart({ runId: "my-run", workspace: "/path/to/repo" });
+await manager.autoloopChat("my-run", "Read the workspace and design a plan to fix X");
+// Planner reads files, drafts plan.md/goal.json, asks "ready to spawn?"
+await manager.autoloopChat("my-run", "go");
+// → Planner spawns Coder + Reviewer, subloop runs to target / max_iters / your terminate.
 ```
 
-Resume after process death with `autoloopResume(workspace, taskId)`. SSE event stream at `GET /autoloop/<id>/events`. See [`skills/references/autoloop.md`](./skills/references/autoloop.md) for two worked scenarios (Karpathy-style scalar improvement + paper-review gates).
+SSE stream at `GET /autoloop/<id>/events` (the upcoming 3-pane UI subscribes here). See [`skills/references/autoloop.md`](./skills/references/autoloop.md) for the full operator reference: tool list, push policy, ledger layout, smoke test.
 
 ### Tool Orchestration
 
@@ -111,7 +111,7 @@ session_grep          session_compact      session_inbox
 team_send             team_list            coding_agents_list
 council_start         council_review       council_accept
 ultraplan_start       ultrareview_start
-autoloop_start        autoloop_resume      autoloop_inject
+autoloop_start        autoloop_chat        autoloop_reset_agent
 ```
 
 ---

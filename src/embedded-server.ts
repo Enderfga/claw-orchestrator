@@ -403,78 +403,19 @@ export class EmbeddedServer {
         return;
       }
 
-      // ─── Autoloop SSE ────────────────────────────────────────────
+      // ─── Autoloop — list / state / push log / SSE events ─────
       //
-      // GET /autoloop/<id>/events
-      // Streams phase / state / push events for a running autoloop. The
-      // frontend (webchat) is not yet built; this endpoint exists so it can
-      // be added without changing the runner contract.
-
-      const autoloopMatch = path.match(/^\/autoloop\/([^/]+)\/events$/);
-      if (autoloopMatch) {
-        const id = autoloopMatch[1];
-        const runner = this.manager.getAutoloop(id);
-        if (!runner) {
-          json(404, { ok: false, error: `autoloop not found: ${id}` });
-          return;
-        }
-        res.writeHead(200, {
-          'Content-Type': 'text/event-stream',
-          'Cache-Control': 'no-cache',
-          Connection: 'keep-alive',
-        });
-        const send = (event: string, data: unknown): void => {
-          res.write(`event: ${event}\n`);
-          res.write(`data: ${JSON.stringify(data)}\n\n`);
-        };
-        // Replay current handle so the frontend can render immediately.
-        send('snapshot', runner.handle());
-
-        const onPhase = (e: unknown): void => send('phase', e);
-        const onState = (e: unknown): void => send('state', e);
-        const onPush = (e: unknown): void => send('push', e);
-        const onTerm = (e: unknown): void => {
-          send('terminated', e);
-          cleanup();
-        };
-        const onError = (e: unknown): void => {
-          send('error', { message: e instanceof Error ? e.message : String(e) });
-          cleanup();
-        };
-        const cleanup = (): void => {
-          runner.off('phase', onPhase);
-          runner.off('state', onState);
-          runner.off('push', onPush);
-          runner.off('terminated', onTerm);
-          runner.off('error', onError);
-          try {
-            res.end();
-          } catch {
-            // Ignore.
-          }
-        };
-        runner.on('phase', onPhase);
-        runner.on('state', onState);
-        runner.on('push', onPush);
-        runner.on('terminated', onTerm);
-        runner.on('error', onError);
-        res.on('close', cleanup);
-        return;
-      }
-
-      // ─── Autoloop v2 — list / state / push log / SSE events ─────
-      //
-      // Front-end contract (per tasks/autoloop-v2.md §9). Webchat opens these
+      // Front-end contract (per tasks/autoloop.md §9). Webchat opens these
       // when rendering a 3-pane Orchestrator view.
 
-      if (path === '/autoloop/v2/list') {
-        json(200, { ok: true, runs: this.manager.autoloopV2List() });
+      if (path === '/autoloop/list') {
+        json(200, { ok: true, runs: this.manager.autoloopList() });
         return;
       }
 
       const v2StateMatch = path.match(/^\/autoloop\/v2\/([^/]+)\/state$/);
       if (v2StateMatch) {
-        const state = this.manager.autoloopV2Status(v2StateMatch[1]);
+        const state = this.manager.autoloopStatus(v2StateMatch[1]);
         if (!state) {
           json(404, { ok: false, error: 'run not found' });
         } else {
@@ -486,7 +427,7 @@ export class EmbeddedServer {
       const v2PushLogMatch = path.match(/^\/autoloop\/v2\/([^/]+)\/push_log$/);
       if (v2PushLogMatch) {
         const id = v2PushLogMatch[1];
-        const ctx = this.manager.getAutoloopV2(id);
+        const ctx = this.manager.getAutoloop(id);
         if (!ctx) {
           json(404, { ok: false, error: 'run not found' });
           return;
@@ -516,7 +457,7 @@ export class EmbeddedServer {
       const v2EventsMatch = path.match(/^\/autoloop\/v2\/([^/]+)\/events$/);
       if (v2EventsMatch) {
         const id = v2EventsMatch[1];
-        const ctx = this.manager.getAutoloopV2(id);
+        const ctx = this.manager.getAutoloop(id);
         if (!ctx) {
           json(404, { ok: false, error: 'run not found' });
           return;

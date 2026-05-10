@@ -1,7 +1,7 @@
 /**
  * Inbox message envelope + discriminated union of v2 message types.
  *
- * Contract: see tasks/autoloop-v2.md §3.3.
+ * Contract: see tasks/autoloop.md §3.3.
  *
  * Wire format: serialised as JSON in InboxManager's `text` field, with
  * `summary` set to the message `type` for human-readable inbox listings.
@@ -12,13 +12,13 @@
  * (which the runner consumes to invoke notify_user).
  */
 
-export type AutoloopV2Role = 'planner' | 'coder' | 'reviewer' | 'runner' | 'user';
+export type AutoloopRole = 'planner' | 'coder' | 'reviewer' | 'runner' | 'user';
 
-export interface AutoloopV2Envelope<T extends AutoloopV2MessageType = AutoloopV2MessageType> {
+export interface AutoloopEnvelope<T extends AutoloopMessageType = AutoloopMessageType> {
   msg_id: string;
   iter: number;
-  from: AutoloopV2Role;
-  to: AutoloopV2Role;
+  from: AutoloopRole;
+  to: AutoloopRole;
   type: T;
   ts: string;
   payload: PayloadFor<T>;
@@ -89,7 +89,7 @@ export interface TerminatePayload {
 
 // ─── Discriminated union ─────────────────────────────────────────────────────
 
-export type AutoloopV2MessageType =
+export type AutoloopMessageType =
   | 'chat'
   | 'directive'
   | 'directive_ack'
@@ -116,11 +116,11 @@ type PayloadMap = {
   terminate: TerminatePayload;
 };
 
-export type PayloadFor<T extends AutoloopV2MessageType> = PayloadMap[T];
+export type PayloadFor<T extends AutoloopMessageType> = PayloadMap[T];
 
-export type AnyAutoloopV2Message = {
-  [T in AutoloopV2MessageType]: AutoloopV2Envelope<T>;
-}[AutoloopV2MessageType];
+export type AnyAutoloopMessage = {
+  [T in AutoloopMessageType]: AutoloopEnvelope<T>;
+}[AutoloopMessageType];
 
 // ─── Sender/recipient validity table ────────────────────────────────────────
 //
@@ -129,7 +129,7 @@ export type AnyAutoloopV2Message = {
 // statements honest and gives us one place to update when v2.1 adds new
 // message types (e.g. weixin-inbound chat reply).
 
-const ALLOWED_ROUTES: ReadonlyArray<readonly [AutoloopV2Role, AutoloopV2Role, AutoloopV2MessageType]> = [
+const ALLOWED_ROUTES: ReadonlyArray<readonly [AutoloopRole, AutoloopRole, AutoloopMessageType]> = [
   ['user', 'planner', 'chat'],
   ['planner', 'coder', 'directive'],
   ['coder', 'planner', 'directive_ack'],
@@ -143,20 +143,20 @@ const ALLOWED_ROUTES: ReadonlyArray<readonly [AutoloopV2Role, AutoloopV2Role, Au
   ['planner', 'runner', 'terminate'],
 ];
 
-export class AutoloopV2RoutingError extends Error {
+export class AutoloopRoutingError extends Error {
   constructor(
     msg: string,
-    public envelope?: AnyAutoloopV2Message,
+    public envelope?: AnyAutoloopMessage,
   ) {
     super(msg);
-    this.name = 'AutoloopV2RoutingError';
+    this.name = 'AutoloopRoutingError';
   }
 }
 
-export function validateMessage(env: AnyAutoloopV2Message): void {
+export function validateMessage(env: AnyAutoloopMessage): void {
   const ok = ALLOWED_ROUTES.some(([f, t, ty]) => f === env.from && t === env.to && ty === env.type);
   if (!ok) {
-    throw new AutoloopV2RoutingError(`Invalid v2 routing: ${env.from} → ${env.to} (type=${env.type})`, env);
+    throw new AutoloopRoutingError(`Invalid v2 routing: ${env.from} → ${env.to} (type=${env.type})`, env);
   }
 }
 
@@ -169,13 +169,13 @@ function nextMsgId(): string {
   return `m_${Date.now().toString(36)}_${__counter.toString(36)}`;
 }
 
-function envelope<T extends AutoloopV2MessageType>(
+function envelope<T extends AutoloopMessageType>(
   iter: number,
-  from: AutoloopV2Role,
-  to: AutoloopV2Role,
+  from: AutoloopRole,
+  to: AutoloopRole,
   type: T,
   payload: PayloadFor<T>,
-): AutoloopV2Envelope<T> {
+): AutoloopEnvelope<T> {
   return {
     msg_id: nextMsgId(),
     iter,
@@ -207,17 +207,17 @@ export const Msg = {
 
 // ─── Wire serialisation (for InboxManager transport) ─────────────────────────
 
-export function serialise(env: AnyAutoloopV2Message): { text: string; summary: string } {
+export function serialise(env: AnyAutoloopMessage): { text: string; summary: string } {
   return {
     text: JSON.stringify(env),
     summary: env.type,
   };
 }
 
-export function deserialise(text: string): AnyAutoloopV2Message {
-  const parsed = JSON.parse(text) as AnyAutoloopV2Message;
+export function deserialise(text: string): AnyAutoloopMessage {
+  const parsed = JSON.parse(text) as AnyAutoloopMessage;
   if (typeof parsed !== 'object' || parsed === null || typeof parsed.type !== 'string') {
-    throw new AutoloopV2RoutingError('Malformed v2 envelope (not an object or missing type)');
+    throw new AutoloopRoutingError('Malformed v2 envelope (not an object or missing type)');
   }
   return parsed;
 }

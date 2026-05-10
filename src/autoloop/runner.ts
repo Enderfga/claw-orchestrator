@@ -1,5 +1,5 @@
 /**
- * Autoloop v2 — thin orchestrator.
+ * Autoloop — thin orchestrator.
  *
  * Pure transport: validates messages, dispatches to agents, handles the
  * tiny set of runner-self-targeted messages (iter_artifacts, review_verdict,
@@ -7,42 +7,41 @@
  * AgentDispatcher's job (S2-S4 will plug in real Claude sessions; S1 ships
  * with a mock dispatcher used by tests).
  *
- * Contract: tasks/autoloop-v2.md §3.4 (phase machine lives inside Coder/Reviewer
+ * Contract: tasks/autoloop.md §3.4 (phase machine lives inside Coder/Reviewer
  * dispatchers, not here).
  */
 
 import { EventEmitter } from 'node:events';
-import { type AnyAutoloopV2Message, AutoloopV2RoutingError, Msg, validateMessage } from './messages.js';
-import { DEFAULT_PUSH_POLICY, type AutoloopV2Config, type AutoloopV2RunState } from './types.js';
+import { type AnyAutoloopMessage, AutoloopRoutingError, Msg, validateMessage } from './messages.js';
+import { DEFAULT_PUSH_POLICY, type AutoloopConfig, type AutoloopState } from './types.js';
 
 const MAX_DISPATCH_DEPTH = 64;
 
 /**
  * Events emitted by the runner (string keys, documented payloads):
- * - 'message'    : (env: AnyAutoloopV2Message) — every routed message
- * - 'state'      : (state: AutoloopV2RunState) — status / iter changes
+ * - 'message'    : (env: AnyAutoloopMessage) — every routed message
+ * - 'state'      : (state: AutoloopState) — status / iter changes
  * - 'push'       : ({ level, summary, detail?, channel }) — fired before notifyUser
  * - 'iter_done'  : ({ iter, verdict, metric }) — Reviewer verdict committed
  * - 'terminated' : (reason: string) — final state, no more messages
  * - 'error'      : (err: Error) — routing or dispatcher errors
  */
-export class AutoloopV2Runner extends EventEmitter {
-  readonly config: AutoloopV2Config;
-  state: AutoloopV2RunState;
+export class AutoloopRunner extends EventEmitter {
+  readonly config: AutoloopConfig;
+  state: AutoloopState;
   /** Queue of messages awaiting routing. Drained by the active dispatch loop. */
-  private queue: AnyAutoloopV2Message[] = [];
+  private queue: AnyAutoloopMessage[] = [];
   private draining = false;
   private regressionStreak = 0;
   private rejectStreak = 0;
   /** Recent push events for dedup (5 min window). */
   private recentPushes: Array<{ key: string; ts: number }> = [];
 
-  constructor(config: AutoloopV2Config) {
+  constructor(config: AutoloopConfig) {
     super();
     this.config = config;
     this.state = {
       run_id: config.run_id,
-      run_mode: 'v2',
       status: 'planning',
       iter: 0,
       subagents_spawned: false,
@@ -61,7 +60,7 @@ export class AutoloopV2Runner extends EventEmitter {
   }
 
   /** Enqueue a message and drain the queue. Resolves when the queue is idle. */
-  async send(env: AnyAutoloopV2Message): Promise<void> {
+  async send(env: AnyAutoloopMessage): Promise<void> {
     validateMessage(env);
     this.queue.push(env);
     await this.drain();
@@ -89,7 +88,7 @@ export class AutoloopV2Runner extends EventEmitter {
       let depth = 0;
       while (this.queue.length > 0) {
         if (depth++ > MAX_DISPATCH_DEPTH) {
-          throw new AutoloopV2RoutingError(`dispatch depth exceeded ${MAX_DISPATCH_DEPTH} — likely message ping-pong`);
+          throw new AutoloopRoutingError(`dispatch depth exceeded ${MAX_DISPATCH_DEPTH} — likely message ping-pong`);
         }
         const env = this.queue.shift();
         if (!env) break;
@@ -100,7 +99,7 @@ export class AutoloopV2Runner extends EventEmitter {
     }
   }
 
-  private async handleOne(env: AnyAutoloopV2Message): Promise<void> {
+  private async handleOne(env: AnyAutoloopMessage): Promise<void> {
     this.emit('message', env);
 
     // Runner is the target for a small set of messages — handle them inline.
@@ -125,7 +124,7 @@ export class AutoloopV2Runner extends EventEmitter {
     }
   }
 
-  private async handleRunnerInbox(env: AnyAutoloopV2Message): Promise<void> {
+  private async handleRunnerInbox(env: AnyAutoloopMessage): Promise<void> {
     switch (env.type) {
       case 'iter_artifacts': {
         // Coder produced work for iter N; ask Reviewer to audit.
@@ -185,11 +184,11 @@ export class AutoloopV2Runner extends EventEmitter {
       }
       default:
         // review_request / iter_done etc. arriving with to=runner is a routing bug.
-        throw new AutoloopV2RoutingError(`Unexpected runner-targeted message type: ${env.type}`, env);
+        throw new AutoloopRoutingError(`Unexpected runner-targeted message type: ${env.type}`, env);
     }
   }
 
-  private async handlePushUser(env: AnyAutoloopV2Message): Promise<void> {
+  private async handlePushUser(env: AnyAutoloopMessage): Promise<void> {
     if (env.type !== 'push_user') return;
     const p = env.payload;
     const key = `${p.level}:${p.summary}`;

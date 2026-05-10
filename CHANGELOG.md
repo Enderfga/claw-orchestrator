@@ -7,64 +7,81 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [3.5.0] - 2026-05-10
 
-### Added — Autoloop v2 (three-agent architecture)
+### ⚠️ Breaking — Autoloop replaced with three-agent architecture
 
-Re-architected autoloop from a single-threaded phase machine that respawns a
-fresh Claude session per phase into **three persistent agents** that each own
-a slice of context. The user converses with the **Planner** (Opus) to design
-plan.md / goal.json; on approval, the Planner spawns **Coder** (Sonnet) and
-**Reviewer** (Sonnet) into a self-driving subloop. Coder/Reviewer never speak
-to the user — Planner is the human interface.
+The `autoloop_*` plugin tools shipped in 3.4.x kept their **names** but their
+**signatures and semantics changed**. Specifically:
 
-**Why:** v1 paid the cost of rebuilding plan + history context every phase
-(token waste) and had no specialisation accumulation. v2 keeps each agent's
-context warm across iterations.
+- `autoloop_start` now takes `{ run_id, workspace }` — no longer takes
+  `plan_path` / `goal_path` (the Planner authors those itself in chat).
+- `autoloop_resume` / `autoloop_inject` are **gone**. Replaced by
+  `autoloop_chat` (talk to Planner directly) and `autoloop_reset_agent`
+  (recover a drifted Coder/Reviewer).
+- `tasks/<id>/state.json` schema is different. Old-shape ledgers from 3.4.x
+  cannot be resumed by 3.5.x.
+- Removed exports: the old phase-machine `AutoloopRunner`, plus `GoalSpec`
+  / `GateSpec` / `ScalarSpec` / `AutoloopPhase` / `RatchetOutput` / etc
+  (those were specific to the old phase machine; the new architecture's
+  goal.json is free-form Planner-authored JSON).
 
-**New plugin tools**: `autoloop_v2_start`, `autoloop_v2_chat`,
-`autoloop_v2_status`, `autoloop_v2_list`, `autoloop_v2_stop`,
-`autoloop_v2_reset_agent`.
+If you have scripts calling 3.4.x autoloop tools, they will fail. Migration:
+swap to `autoloop_start { run_id, workspace }` + `autoloop_chat` + give the
+Planner a sentence describing the goal instead of writing plan.md/goal.json
+yourself.
 
-**Planner-emitted control** via fenced ` ```autoloop ` JSON blocks: notify_user,
-spawn_subagents, send_directive, pause_loop, resume_loop, terminate,
-update_push_policy, write_plan_committed, write_goal_committed.
+### Added — three-agent autoloop architecture
 
-**Push policy** (default): silent on iter-done-ok, push on target_hit,
-2-iter regression, 2-iter reviewer reject, phase error, 30-min stall, and
-explicit decision-needed. WeChat → WhatsApp → email fallback chain (mirrors
-push-api-skill SKILL.md). 5-min dedup on (level, summary).
+Replaced the single-threaded phase machine (BOOTSTRAP → PROPOSE → EXECUTE →
+MEASURE → RATCHET → COMPRESS, fresh session per phase) with **three
+persistent agents**:
+
+- **Planner** (Opus) — your chat interface. Long-lived. Owns strategy,
+  writes plan.md / goal.json, decides when to push you.
+- **Coder** (Sonnet) — receives directive, makes the change, runs the
+  evaluator, emits structured iter_complete.
+- **Reviewer** (Sonnet, sandboxed cwd) — distrustful audit. Decides
+  advance / hold / rollback per iter.
+
+**Why:** the old machine paid context-rebuild cost every phase (token
+waste) and had no specialisation accumulation. Persistent agents keep
+codebase familiarity / fakery patterns warm across iterations.
+
+**Plugin tools**: `autoloop_start`, `autoloop_chat`, `autoloop_status`,
+`autoloop_list`, `autoloop_stop`, `autoloop_reset_agent`.
+
+**Planner control** via fenced ` ```autoloop ` JSON blocks the dispatcher
+parses out of every reply: `notify_user`, `spawn_subagents`,
+`send_directive`, `pause_loop`, `resume_loop`, `terminate`,
+`update_push_policy`, `write_plan_committed`, `write_goal_committed`.
+
+**Push policy** (default): silent on iter-done-ok; push on target_hit,
+2-iter regression, 2-iter reviewer reject, phase error, 30-min stall, or
+explicit decision-needed. WeChat → WhatsApp → email fallback chain
+(mirrors push-api-skill SKILL.md §B). 5-minute dedup on (level, summary).
 
 **Backend SSE/HTTP** for the upcoming 3-pane UI:
-- `GET /autoloop/v2/list`
-- `GET /autoloop/v2/<id>/state`
-- `GET /autoloop/v2/<id>/push_log`
-- `GET /autoloop/v2/<id>/events` — SSE: snapshot / message / state / push /
-  iter_done / planner_reply / coder_reply / reviewer_reply / terminated
+- `GET /autoloop/list`
+- `GET /autoloop/<id>/state`
+- `GET /autoloop/<id>/push_log`
+- `GET /autoloop/<id>/events` — SSE: `snapshot` / `message` / `state` /
+  `push` / `iter_done` / `planner_reply` / `coder_reply` / `reviewer_reply`
+  / `terminated`
 
 **Ledger** under `<workspace>/tasks/<run_id>/`: `plan.md`, `goal.json`,
 `push_log.jsonl`, `iter/<n>/{directive,eval_output,diff.patch,verdict}.json`,
 `reviewer_sandbox/` (Reviewer cwd; runner restages per-iter artifacts).
 
-**Validated**: live e2e smoke (`scripts/smoke-autoloop-v2.ts`) converged the
-buggy add_two scenario in one iter. Log:
-`/tmp/clawd-share/autoloop-v2-smoke-success.md`.
+**Validated**: live e2e smoke (`scripts/smoke-autoloop.ts`) converged the
+buggy add_two scenario in one iter with Opus Planner + Sonnet × 2.
 
-### Changed
+### Deferred (v3.5.x follow-ups)
 
-- v1 autoloop relocated under `src/autoloop/v1/`. Existing `autoloop_start`
-  / `_resume` / `_status` / `_inject` / `_stop` tools and `AutoloopRunner`
-  export keep working unchanged.
-- `AutoloopState` gains optional `run_mode: 'v1' | 'v2'`.
-
-### Deferred (v3.5.x patch follow-ups)
-
-- **Auto-compact on token-budget threshold** (design doc §7.1) — manual
-  `autoloop_v2_reset_agent` covers the same recovery paths today.
-- **WeChat-inbound replies → Planner** (design doc §5.3) — v2.0 is one-way
-  push; reply via webchat / `autoloop_v2_chat`.
+- **Auto-compact on token-budget threshold** — manual `autoloop_reset_agent`
+  covers the same recovery paths today.
+- **WeChat-inbound replies → Planner** — currently one-way push; reply via
+  webchat / `autoloop_chat`.
 - **ChatGPT-Next-Web 3-pane UI** — separate cross-repo PR (backend
   contract is shipped in this release).
-- **Re-running scenario 2 (paper review) on v2** — smoke covers the same
-  pipeline end-to-end; informational re-run not gating.
 
 ## [3.4.2] - 2026-05-10
 

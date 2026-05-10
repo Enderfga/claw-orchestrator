@@ -1,38 +1,36 @@
 /**
  * scripts/smoke-autoloop.ts
  *
- * End-to-end smoke test for the autoloop feature.
+ * End-to-end smoke test for autoloop (three-agent architecture).
  *
- * - Creates a throwaway workspace at /tmp/autoloop-smoke-<ts>/
- * - Initializes it as a git repo with a buggy Python file + failing pytest
- * - Runs the autoloop until termination (or hard cap)
- * - Writes a SMOKE-LOG.md with every phase / push / state event
- * - Prints the log path so the user can read it
+ *   1. Creates a throwaway workspace at /tmp/autoloop-smoke-<ts>/
+ *      with a buggy add_two operator + failing pytest
+ *   2. Starts a v2 run (Planner only at first)
+ *   3. Chats with Planner; expects Planner to read the workspace, write
+ *      plan.md / goal.json, and ask for "go"
+ *   4. Sends "go" — Planner should spawn_subagents and send the first
+ *      directive
+ *   5. Coder fixes the bug, Reviewer audits, iter_done → loop terminates
+ *   6. Asserts ledger artifacts (directive.json / diff.patch /
+ *      eval_output.json / verdict.json) exist for at least iter 0
+ *   7. Writes SMOKE-LOG.md with full transcript
  *
  * Run with:  npx tsx scripts/smoke-autoloop.ts
  *
- * Caps are deliberately tight so this runs in ~5-15 min and costs <$5.
- * Uses sonnet/sonnet for both propose and ratchet — the goal here is to
- * validate the wiring, not to evaluate model quality.
+ * Caps deliberately tight: should converge in ≤3 iters at ~$1-3.
  */
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { execSync } from 'node:child_process';
-import { SessionManager, AutoloopRunner } from '../dist/src/index.js';
-import type { AutoloopConfig } from '../dist/src/index.js';
-import { createConsoleLogger } from '../dist/src/index.js';
+import { SessionManager, createConsoleLogger } from '../dist/src/index.js';
 
-// Inject env vars from ~/.claude/settings.json into our process.env so the
-// child claude subprocesses spawned by SessionManager inherit them. Claude
-// itself loads settings.json on interactive launch but does not export those
-// vars to subprocess descendants.
 function loadClaudeSettingsEnv(): void {
   const p = path.join(os.homedir(), '.claude', 'settings.json');
   if (!fs.existsSync(p)) return;
   try {
-    const cfg = JSON.parse(fs.readFileSync(p, 'utf-8'));
+    const cfg = JSON.parse(fs.readFileSync(p, 'utf-8')) as { env?: Record<string, string> };
     if (cfg.env && typeof cfg.env === 'object') {
       for (const [k, v] of Object.entries(cfg.env)) {
         if (typeof v === 'string' && !process.env[k]) process.env[k] = v;
@@ -46,219 +44,138 @@ loadClaudeSettingsEnv();
 
 const TS = new Date().toISOString().replace(/[:.]/g, '-');
 const WORKSPACE = `/tmp/autoloop-smoke-${TS}`;
+const RUN_ID = `smoke-${TS}`;
 const LOG_PATH = path.join(WORKSPACE, 'SMOKE-LOG.md');
+const HARD_CAP_MIN = 25;
 
 function log(line: string): void {
-  fs.appendFileSync(LOG_PATH, line + '\n');
-  // Mirror to stderr for live visibility.
+  if (fs.existsSync(WORKSPACE)) fs.appendFileSync(LOG_PATH, line + '\n');
   process.stderr.write(line + '\n');
 }
 
 function setupWorkspace(): void {
   fs.mkdirSync(WORKSPACE, { recursive: true });
-
-  // Buggy add_two: returns x - 2 instead of x + 2. The propose agent must fix it.
-  fs.writeFileSync(
-    path.join(WORKSPACE, 'app.py'),
-    `def add_two(x):
-    return x - 2
-`,
-  );
-
+  fs.writeFileSync(path.join(WORKSPACE, 'app.py'), `def add_two(x):\n    return x - 2\n`);
   fs.writeFileSync(
     path.join(WORKSPACE, 'test_app.py'),
-    `from app import add_two
-
-def test_add_two_positive():
-    assert add_two(3) == 5
-
-def test_add_two_zero():
-    assert add_two(0) == 2
-
-def test_add_two_negative():
-    assert add_two(-5) == -3
-`,
+    `from app import add_two\n\ndef test_pos():\n    assert add_two(3) == 5\n\ndef test_zero():\n    assert add_two(0) == 2\n\ndef test_neg():\n    assert add_two(-5) == -3\n`,
   );
-
+  // README so Planner has something narrative to read first.
   fs.writeFileSync(
-    path.join(WORKSPACE, 'plan.md'),
-    `# Plan
+    path.join(WORKSPACE, 'README.md'),
+    `# add_two smoke\n\nA toy module with a single \`add_two(x)\` function. The tests in test_app.py are correct; the implementation has a bug. Goal: fix \`add_two\` so all three tests pass.\n`,
+  );
+  // Eval helper — Coder runs this; output line "metric=<n>" is what we extract.
+  fs.writeFileSync(
+    path.join(WORKSPACE, 'eval.sh'),
+    `#!/usr/bin/env bash\nset -uo pipefail\ncd "$(dirname "$0")"\nresult=$(python3 -m pytest test_app.py -q 2>&1 || true)\npassed=$(echo "$result" | grep -oE '([0-9]+) passed' | grep -oE '[0-9]+' | head -1 || echo 0)\nfailed=$(echo "$result" | grep -oE '([0-9]+) failed' | grep -oE '[0-9]+' | head -1 || echo 0)\ntotal=$((passed + failed))\nif [ "$total" -eq 0 ]; then total=3; fi\nratio=$(python3 -c "print($passed/$total)")\necho "metric=$ratio"\n`,
+  );
+  fs.chmodSync(path.join(WORKSPACE, 'eval.sh'), 0o755);
+  execSync('git init -q && git add -A && git commit -qm "initial"', { cwd: WORKSPACE });
+  fs.writeFileSync(LOG_PATH, `# autoloop smoke — ${RUN_ID}\n\nworkspace: ${WORKSPACE}\n\n`);
+}
 
-The function \`add_two\` in \`app.py\` has a bug — it subtracts 2 instead of
-adding 2. Fix it so all tests in \`test_app.py\` pass.
+async function main(): Promise<number> {
+  setupWorkspace();
+  log('## phase: setup ✓');
 
-Constraints:
-- Do not modify \`test_app.py\`.
-- Keep the change minimal — fix the operator only.
-`,
+  const manager = new SessionManager({ defaultModel: 'sonnet' }, createConsoleLogger());
+
+  // Hard cap: kill the whole process if the smoke runs too long. Convergence
+  // on this trivial scenario should happen well under 25 min.
+  const killer = setTimeout(
+    () => {
+      log(`\n❌ Hard cap of ${HARD_CAP_MIN}m hit — bailing out`);
+      process.exit(2);
+    },
+    HARD_CAP_MIN * 60 * 1000,
   );
 
-  const goal = {
-    gates: [
-      {
-        name: 'pytest_passes',
-        cmd: 'python3 -m pytest -q test_app.py',
-        must: 'exit-0',
-        timeout_sec: 60,
-      },
-    ],
-    termination: {
-      scalar_target_hit: true,
-      max_iters: 3,
-      plateau_iters: 2,
-      max_cost_usd: 5,
-      max_pending_aspirational: 0,
-    },
-  };
-  fs.writeFileSync(path.join(WORKSPACE, 'goal.json'), JSON.stringify(goal, null, 2));
-
-  // Initialize git.
-  execSync('git init -q && git add -A && git -c user.email=smoke@test -c user.name=Smoke commit -qm initial', {
-    cwd: WORKSPACE,
-  });
-
-  // Verify the test fails initially (sanity check).
-  let initialFailed = false;
   try {
-    execSync('python3 -m pytest -q test_app.py', { cwd: WORKSPACE, stdio: 'pipe' });
-  } catch {
-    initialFailed = true;
-  }
-
-  fs.writeFileSync(LOG_PATH, `# Autoloop Smoke Run — ${TS}\n\n`);
-  log(`## Setup\n`);
-  log(`- Workspace: \`${WORKSPACE}\``);
-  log(`- Buggy file: \`app.py\` (returns \`x - 2\` instead of \`x + 2\`)`);
-  log(`- Test file: \`test_app.py\` (3 tests, all currently failing)`);
-  log(`- Initial pytest expected to fail: **${initialFailed ? 'YES' : 'NO (smoke broken)'}**`);
-  if (!initialFailed) {
-    throw new Error('Initial test should have failed but passed; smoke setup is broken.');
-  }
-  log('');
-}
-
-async function run(): Promise<void> {
-  setupWorkspace();
-
-  const logger = createConsoleLogger('smoke');
-  const manager = new SessionManager({});
-
-  // sonnet/sonnet for the smoke — the point is wiring validation, not model eval.
-  const config: AutoloopConfig = {
-    workspace: WORKSPACE,
-    plan_path: path.join(WORKSPACE, 'plan.md'),
-    goal_path: path.join(WORKSPACE, 'goal.json'),
-    task_id: 'smoke',
-    propose_engine: 'claude',
-    propose_model: 'sonnet',
-    ratchet_engine: 'claude',
-    ratchet_model: 'sonnet',
-    compress_every_k: 100, // disable for this short run
-    per_iter_timeout_ms: 180_000,
-    push_cmd: null, // do NOT push wechat; just write inbox.md
-  };
-
-  log(`## Config\n`);
-  log('```json');
-  log(JSON.stringify({ ...config, plan_path: '<path>', goal_path: '<path>' }, null, 2));
-  log('```\n');
-
-  const runner = new AutoloopRunner(manager, config, logger);
-
-  log(`## Event Stream\n`);
-
-  runner.on('starting', () => log(`- \`starting\``));
-  runner.on('phase', (e) => {
-    const ev = e as { phase: string; iter: number };
-    log(`- **phase=${ev.phase}** iter=${ev.iter}  (\`${new Date().toISOString()}\`)`);
-  });
-  runner.on('state', (s) => {
-    const st = s as Record<string, unknown>;
-    log(
-      `  - state: phase=${String(st.phase)} iter=${String(st.iter)} best=${st.best ? `metric=${(st.best as { metric: number }).metric}` : 'null'} cost=$${(Number(st.cost_usd_so_far) || 0).toFixed(4)}`,
-    );
-  });
-  runner.on('push', (p) => {
-    const pe = p as { kind: string; text: string };
-    log(`- 📨 push **${pe.kind}**: ${pe.text.replace(/\n/g, ' ')}`);
-  });
-  runner.on('terminated', (t) => {
-    const te = t as { reason: string };
-    log(`- ✅ **terminated**: ${te.reason}`);
-  });
-  runner.on('error', (e) => {
-    log(`- ❌ **error**: ${e instanceof Error ? e.message : String(e)}`);
-  });
-
-  // Hard wall-clock for the smoke itself.
-  const deadline = Date.now() + 25 * 60 * 1000;
-
-  await runner.start();
-
-  // Poll until terminated or deadline.
-  while (Date.now() < deadline) {
-    const h = runner.handle();
-    if (h.status === 'completed' || h.status === 'error' || h.status === 'stopped') {
-      break;
-    }
-    await new Promise((r) => setTimeout(r, 5_000));
-  }
-
-  if (Date.now() >= deadline) {
-    log(`\n## Wall-clock cap hit; calling stop()`);
-    await runner.stop();
-  }
-
-  // Snapshot final state.
-  const finalHandle = runner.handle();
-  log(`\n## Final\n`);
-  log('```json');
-  log(JSON.stringify(finalHandle, null, 2));
-  log('```');
-
-  // Read the on-disk state and metric history.
-  try {
-    const stateJson = fs.readFileSync(path.join(WORKSPACE, 'tasks', 'smoke', 'state.json'), 'utf-8');
-    log(`\n### state.json (final)\n\n\`\`\`json\n${stateJson}\n\`\`\``);
-  } catch {
-    log(`\n_no state.json on disk — runner failed before persisting_`);
-  }
-  try {
-    const metricJson = fs.readFileSync(path.join(WORKSPACE, 'tasks', 'smoke', 'metric.json'), 'utf-8');
-    log(`\n### metric.json\n\n\`\`\`json\n${metricJson}\n\`\`\``);
-  } catch {
-    log(`\n_no metric.json — no MEASURE phase reached_`);
-  }
-
-  // Final pytest result on the autoloop branch.
-  log(`\n### Final pytest on autoloop branch`);
-  try {
-    const out = execSync('python3 -m pytest -q test_app.py 2>&1', { cwd: WORKSPACE, encoding: 'utf-8' });
-    log('```\n' + out + '\n```');
-  } catch (e) {
-    const err = e as { stdout?: Buffer; stderr?: Buffer; status?: number };
-    log('```\n' + (err.stdout?.toString() || '') + (err.stderr?.toString() || '') + `\n[exit ${err.status}]\n` + '```');
-  }
-
-  // Final diff vs initial commit.
-  log(`\n### git diff vs initial commit`);
-  try {
-    const diff = execSync('git diff HEAD~ HEAD -- app.py test_app.py 2>/dev/null || git log --oneline', {
-      cwd: WORKSPACE,
-      encoding: 'utf-8',
+    log('## phase: start');
+    const start = await manager.autoloopStart({
+      runId: RUN_ID,
+      workspace: WORKSPACE,
+      plannerModel: 'opus',
+      sendTimeoutMs: 8 * 60_000,
     });
-    log('```diff\n' + diff + '\n```');
-  } catch {
-    log('_no diff available_');
+    log(`run_id=${start.runId} planner=${start.plannerSession}`);
+
+    // Listen for coder/reviewer/planner replies for visibility.
+    const ctx = manager.getAutoloop(start.runId);
+    if (!ctx) throw new Error('no ctx');
+    ctx.dispatcher.on('coder_reply', (...args) => log(`\n### coder\n\n${(args[0] as string).slice(0, 1500)}`));
+    ctx.dispatcher.on('reviewer_reply', (...args) =>
+      log(`\n### reviewer\n\n${(args[0] as string).slice(0, 1500)}`),
+    );
+    ctx.runner.on('iter_done', (...args) => log(`\n### iter_done: ${JSON.stringify(args[0])}`));
+
+    log('## phase: planner discovery');
+    let r = await manager.autoloopChat(
+      start.runId,
+      `I want to fix the buggy add_two function in this workspace. Read README.md, app.py, test_app.py, and eval.sh. Then design a small autoloop plan: success criteria, gates, constraints. The metric is the test pass rate from eval.sh (output line "metric=<n>", direction=max, target=1.0). When you have written plan.md and goal.json and committed both, ask if I'm ready to spawn subagents. Do not spawn until I say "go".`,
+    );
+    log(`\n### planner\n\n${r.reply.slice(0, 4000)}`);
+
+    log('## phase: planner approval');
+    r = await manager.autoloopChat(
+      start.runId,
+      `Plan looks good. Go — spawn subagents with an initial directive that targets fixing add_two. coder_model=sonnet, reviewer_model=sonnet.`,
+    );
+    log(`\n### planner\n\n${r.reply.slice(0, 4000)}`);
+
+    // Wait for the runner to finish iter 0. The chat above kicks off the loop;
+    // we poll state until status changes to terminated, or we see a verdict
+    // file for iter 0.
+    log('## phase: waiting for first iter');
+    const start_t = Date.now();
+    while (Date.now() - start_t < 15 * 60_000) {
+      const state = manager.autoloopStatus(start.runId);
+      if (!state) break;
+      if (state.status === 'terminated') {
+        log(`run terminated: ${state.status_reason ?? '(no reason)'}`);
+        break;
+      }
+      const verdict0 = path.join(WORKSPACE, 'tasks', RUN_ID, 'iter', '0', 'verdict.json');
+      if (fs.existsSync(verdict0)) {
+        log('iter 0 verdict written ✓');
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 5_000));
+    }
+
+    // Final assertions.
+    log('\n## phase: assertions');
+    const iter0 = path.join(WORKSPACE, 'tasks', RUN_ID, 'iter', '0');
+    const checks: Array<[string, boolean]> = [
+      ['plan.md committed', fs.existsSync(path.join(WORKSPACE, 'plan.md'))],
+      ['goal.json committed', fs.existsSync(path.join(WORKSPACE, 'goal.json'))],
+      ['iter 0 directive.json', fs.existsSync(path.join(iter0, 'directive.json'))],
+      ['iter 0 eval_output.json', fs.existsSync(path.join(iter0, 'eval_output.json'))],
+      ['iter 0 diff.patch', fs.existsSync(path.join(iter0, 'diff.patch'))],
+      ['iter 0 verdict.json', fs.existsSync(path.join(iter0, 'verdict.json'))],
+    ];
+    let pass = true;
+    for (const [name, ok] of checks) {
+      log(`  ${ok ? '✓' : '✗'} ${name}`);
+      if (!ok) pass = false;
+    }
+
+    // Stop run + show final cost.
+    await manager.autoloopStop(start.runId, 'smoke-end');
+    await manager.shutdown();
+
+    log(`\n${pass ? '## ✅ smoke pass' : '## ❌ smoke FAIL'}`);
+    log(`\nshare: cp ${LOG_PATH} /tmp/clawd-share/`);
+    return pass ? 0 : 1;
+  } finally {
+    clearTimeout(killer);
   }
-
-  await manager.shutdown();
-
-  process.stderr.write(`\n\n=== SMOKE COMPLETE ===\nLog: ${LOG_PATH}\nWorkspace: ${WORKSPACE}\n`);
 }
 
-run().catch((err) => {
-  log(`\n## FATAL\n\n\`\`\`\n${err instanceof Error ? err.stack || err.message : String(err)}\n\`\`\``);
-  process.stderr.write(`\nSMOKE FAILED: ${LOG_PATH}\n`);
-  process.exit(1);
-});
+main()
+  .then((code) => process.exit(code))
+  .catch((err) => {
+    log(`\n❌ uncaught: ${(err as Error).stack ?? String(err)}`);
+    process.exit(1);
+  });

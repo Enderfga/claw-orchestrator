@@ -151,14 +151,12 @@ import {
 } from './types.js';
 import { resolveAlias, isClaudeModel } from './models.js';
 import { Council } from './council.js';
-import { AutoloopRunner } from './autoloop/v1/runner.js';
-import type { AutoloopConfig, AutoloopHandle } from './autoloop/v1/types.js';
-import { AutoloopV2Runner } from './autoloop/v2/runner.js';
-import { ClaudeAgentDispatcher, type ClaudeAgentDispatcherConfig } from './autoloop/v2/dispatcher.js';
-import type { AutoloopV2RunState, PushPolicy } from './autoloop/v2/types.js';
-import { DEFAULT_PUSH_POLICY } from './autoloop/v2/types.js';
-import { Msg as V2Msg, type PushChannel, type PushLevel } from './autoloop/v2/messages.js';
-import { appendPushLog, notifyUserFallbackChain } from './autoloop/v2/notify.js';
+import { AutoloopRunner } from './autoloop/runner.js';
+import { ClaudeAgentDispatcher, type ClaudeAgentDispatcherConfig } from './autoloop/dispatcher.js';
+import type { AutoloopState, PushPolicy } from './autoloop/types.js';
+import { DEFAULT_PUSH_POLICY } from './autoloop/types.js';
+import { Msg as AutoloopMsg, type PushChannel, type PushLevel } from './autoloop/messages.js';
+import { appendPushLog, notifyUserFallbackChain } from './autoloop/notify.js';
 import {
   PERSIST_DISK_TTL_MS,
   DEBOUNCED_SAVE_MS,
@@ -864,10 +862,11 @@ export class SessionManager {
     // Stop ultrareview pollers
     for (const [, timer] of this.ultrareviewPollers) clearInterval(timer);
     this.ultrareviewPollers.clear();
-    // Stop autoloops
-    for (const [, runner] of this.autoloops) {
+    // Stop autoloops (graceful: dispatch a terminate envelope so each run
+    // shuts down its three persistent agents and cleans up the ledger lock).
+    for (const [, ctx] of this.autoloops) {
       try {
-        await runner.stop();
+        await ctx.runner.send(AutoloopMsg.terminate(ctx.runner.state.iter, { reason: 'manager-shutdown' }));
       } catch {
         // Best-effort.
       }
@@ -1814,97 +1813,12 @@ export class SessionManager {
     return this.ultrareviews.get(id);
   }
 
-  // ─── Autoloop ─────────────────────────────────────────────────────────
+  // ─── Autoloop (three-agent architecture) ───────────────────────────
 
-  private autoloops = new Map<string, AutoloopRunner>();
-
-  async autoloopStart(config: AutoloopConfig): Promise<AutoloopHandle> {
-    const runner = new AutoloopRunner(this, config, this.logger);
-    if (this.autoloops.has(runner.id)) {
-      throw new Error(`Autoloop with id '${runner.id}' already exists`);
-    }
-    this.autoloops.set(runner.id, runner);
-    // start() returns after BOOTSTRAP; iteration runs in background.
-    await runner.start();
-    return runner.handle();
-  }
-
-  /**
-   * Resume an autoloop whose orchestrator process previously died.
-   * Reads existing tasks/<id>/state.json + plan.md + goal.json from the
-   * workspace. Skips BOOTSTRAP. Engine/model overrides are honoured (use
-   * defaults if not provided — note: original engine choice is NOT persisted
-   * in state.json today).
-   */
-  async autoloopResume(
-    workspace: string,
-    taskId: string,
-    overrides?: Partial<
-      Pick<
-        AutoloopConfig,
-        | 'propose_engine'
-        | 'propose_model'
-        | 'ratchet_engine'
-        | 'ratchet_model'
-        | 'compress_every_k'
-        | 'per_iter_timeout_ms'
-        | 'push_cmd'
-      >
-    >,
-  ): Promise<AutoloopHandle> {
-    const taskDir = path.join(workspace, 'tasks', taskId);
-    if (!fs.existsSync(taskDir)) {
-      throw new Error(`autoloopResume: task dir not found: ${taskDir}`);
-    }
-    const config: AutoloopConfig = {
-      workspace,
-      plan_path: path.join(taskDir, 'plan.md'),
-      goal_path: path.join(taskDir, 'goal.json'),
-      task_id: taskId,
-      ...(overrides ?? {}),
-    };
-    const runner = new AutoloopRunner(this, config, this.logger);
-    if (this.autoloops.has(runner.id)) {
-      throw new Error(`Autoloop with id '${runner.id}' is already running in this process`);
-    }
-    this.autoloops.set(runner.id, runner);
-    await runner.resume();
-    return runner.handle();
-  }
-
-  autoloopStatus(id: string): AutoloopHandle | undefined {
-    return this.autoloops.get(id)?.handle();
-  }
-
-  autoloopList(): AutoloopHandle[] {
-    return Array.from(this.autoloops.values()).map((r) => r.handle());
-  }
-
-  async autoloopStop(id: string): Promise<boolean> {
-    const r = this.autoloops.get(id);
-    if (!r) return false;
-    await r.stop();
-    return true;
-  }
-
-  autoloopInject(id: string, text: string): boolean {
-    const r = this.autoloops.get(id);
-    if (!r) return false;
-    r.inject(text);
-    return true;
-  }
-
-  /** Used by embedded-server to attach SSE listeners. */
-  getAutoloop(id: string): AutoloopRunner | undefined {
-    return this.autoloops.get(id);
-  }
-
-  // ─── Autoloop v2 (three-agent architecture) ───────────────────────────
-
-  private autoloopsV2 = new Map<
+  private autoloops = new Map<
     string,
     {
-      runner: AutoloopV2Runner;
+      runner: AutoloopRunner;
       dispatcher: ClaudeAgentDispatcher;
       workspace: string;
       ledgerDir: string;
@@ -1917,15 +1831,15 @@ export class SessionManager {
    * returns the run handle. Coder/Reviewer are NOT started until S3's
    * spawn_subagents tool is called.
    */
-  async autoloopV2Start(opts: {
+  async autoloopStart(opts: {
     runId: string;
     workspace: string;
     plannerPromptPath?: string;
     plannerModel?: string;
     sendTimeoutMs?: number;
-  }): Promise<{ runId: string; plannerSession: string; state: AutoloopV2RunState }> {
-    if (this.autoloopsV2.has(opts.runId)) {
-      throw new Error(`Autoloop v2 with id '${opts.runId}' already exists`);
+  }): Promise<{ runId: string; plannerSession: string; state: AutoloopState }> {
+    if (this.autoloops.has(opts.runId)) {
+      throw new Error(`Autoloop with id '${opts.runId}' already exists`);
     }
     const ledgerDir = path.join(opts.workspace, 'tasks', opts.runId);
     if (!fs.existsSync(ledgerDir)) {
@@ -1935,7 +1849,7 @@ export class SessionManager {
     // to the runner without re-wiring.
     const pushPolicy: PushPolicy = JSON.parse(JSON.stringify(DEFAULT_PUSH_POLICY)) as PushPolicy;
     const runId = opts.runId;
-    let runnerRef: AutoloopV2Runner | null = null;
+    let runnerRef: AutoloopRunner | null = null;
     let dispatcherRef: ClaudeAgentDispatcher | null = null;
     const dispatcherConfig: ClaudeAgentDispatcherConfig = {
       manager: this,
@@ -1947,14 +1861,14 @@ export class SessionManager {
       logger: this.logger,
       pushPolicyRef: pushPolicy,
       onSpawnSubagents: async (args) => {
-        this.logger.info?.(`[autoloop-v2/${runId}] spawn_subagents starting Coder + Reviewer sessions`);
+        this.logger.info?.(`[autoloop/${runId}] spawn_subagents starting Coder + Reviewer sessions`);
         await dispatcherRef?.spawnSubagents(args);
         runnerRef?.markSubagentsSpawned();
       },
     };
     const dispatcher = new ClaudeAgentDispatcher(dispatcherConfig);
     dispatcherRef = dispatcher;
-    const runner = new AutoloopV2Runner({
+    const runner = new AutoloopRunner({
       run_id: opts.runId,
       workspace: opts.workspace,
       ledger_dir: ledgerDir,
@@ -1976,13 +1890,13 @@ export class SessionManager {
           channel_used: result.channel_used,
         });
         this.logger.info?.(
-          `[autoloop-v2/${runId}] push level=${level} channel=${channel}→${result.channel_used} summary="${summary.slice(0, 80)}"`,
+          `[autoloop/${runId}] push level=${level} channel=${channel}→${result.channel_used} summary="${summary.slice(0, 80)}"`,
         );
       },
       dispatcher,
     });
     runnerRef = runner;
-    this.autoloopsV2.set(opts.runId, {
+    this.autoloops.set(opts.runId, {
       runner,
       dispatcher,
       workspace: opts.workspace,
@@ -2001,9 +1915,9 @@ export class SessionManager {
    * Inject a user chat message into a v2 run's Planner. Returns the Planner's
    * natural-language reply.
    */
-  async autoloopV2Chat(runId: string, text: string): Promise<{ reply: string }> {
-    const ctx = this.autoloopsV2.get(runId);
-    if (!ctx) throw new Error(`Autoloop v2 run '${runId}' not found`);
+  async autoloopChat(runId: string, text: string): Promise<{ reply: string }> {
+    const ctx = this.autoloops.get(runId);
+    if (!ctx) throw new Error(`Autoloop run '${runId}' not found`);
     let reply = '';
     const onReply = (...args: unknown[]) => {
       const t = args[0];
@@ -2011,19 +1925,19 @@ export class SessionManager {
     };
     ctx.dispatcher.on('planner_reply', onReply);
     try {
-      await ctx.runner.send(V2Msg.chat(ctx.runner.state.iter, { text }));
+      await ctx.runner.send(AutoloopMsg.chat(ctx.runner.state.iter, { text }));
     } finally {
       ctx.dispatcher.off('planner_reply', onReply);
     }
     return { reply };
   }
 
-  autoloopV2Status(runId: string): AutoloopV2RunState | undefined {
-    return this.autoloopsV2.get(runId)?.runner.state;
+  autoloopStatus(runId: string): AutoloopState | undefined {
+    return this.autoloops.get(runId)?.runner.state;
   }
 
-  autoloopV2List(): AutoloopV2RunState[] {
-    return Array.from(this.autoloopsV2.values()).map((c) => c.runner.state);
+  autoloopList(): AutoloopState[] {
+    return Array.from(this.autoloops.values()).map((c) => c.runner.state);
   }
 
   /**
@@ -2033,28 +1947,28 @@ export class SessionManager {
    * re-prime from system prompt + ledger artifacts.
    * Planner: requires force=true and discards user-conversation context.
    */
-  async autoloopV2ResetAgent(
+  async autoloopResetAgent(
     runId: string,
     agent: 'planner' | 'coder' | 'reviewer',
     opts: { force?: boolean; eagerRestart?: boolean } = {},
   ): Promise<boolean> {
-    const ctx = this.autoloopsV2.get(runId);
+    const ctx = this.autoloops.get(runId);
     if (!ctx) return false;
     await ctx.dispatcher.resetAgent(agent, opts);
     return true;
   }
 
-  async autoloopV2Stop(runId: string, reason = 'user-stop'): Promise<boolean> {
-    const ctx = this.autoloopsV2.get(runId);
+  async autoloopStop(runId: string, reason = 'user-stop'): Promise<boolean> {
+    const ctx = this.autoloops.get(runId);
     if (!ctx) return false;
-    await ctx.runner.send(V2Msg.terminate(ctx.runner.state.iter, { reason }));
-    this.autoloopsV2.delete(runId);
+    await ctx.runner.send(AutoloopMsg.terminate(ctx.runner.state.iter, { reason }));
+    this.autoloops.delete(runId);
     return true;
   }
 
   /** Used by embedded-server to attach SSE listeners. */
-  getAutoloopV2(runId: string): { runner: AutoloopV2Runner; dispatcher: ClaudeAgentDispatcher } | undefined {
-    const ctx = this.autoloopsV2.get(runId);
+  getAutoloop(runId: string): { runner: AutoloopRunner; dispatcher: ClaudeAgentDispatcher } | undefined {
+    const ctx = this.autoloops.get(runId);
     if (!ctx) return undefined;
     return { runner: ctx.runner, dispatcher: ctx.dispatcher };
   }
