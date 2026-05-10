@@ -1458,6 +1458,18 @@ export class SessionManager {
     return council?.getSession();
   }
 
+  /** List all council sessions known to this manager (running, terminal, awaiting-user). */
+  councilList(): CouncilSession[] {
+    return Array.from(this.councils.values())
+      .map((c) => c.getSession())
+      .filter((s): s is CouncilSession => s !== null && s !== undefined);
+  }
+
+  /** Used by embedded-server to subscribe to a council's event stream. */
+  getCouncil(id: string): Council | undefined {
+    return this.councils.get(id);
+  }
+
   councilAbort(id: string): void {
     const council = this.councils.get(id);
     if (!council) throw new Error(`Council '${id}' not found`);

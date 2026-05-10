@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.5.1] - 2026-05-10
+
+### Added — embedded dashboard
+
+Single-page vanilla dashboard at `GET /dashboard`, served by the embedded
+HTTP server. Two tabs:
+
+- **Autoloop** — list of active runs in the left rail; selecting one shows a
+  3-pane view: Planner ⇄ user (with chat composer), Coder activity, Reviewer
+  verdicts. Top bar surfaces `status / iter / subagents_spawned / push count`;
+  bottom strip shows the last 20 push events. Live via SSE on `/autoloop/<id>/events`.
+- **Council** — list of active council sessions; selecting one shows the
+  agent-response stream (round-by-round, with a consensus marker on
+  `agent-complete`). Live via SSE on `/council/<id>/events` (new in this release).
+
+Zero new dependencies — single static `src/dashboard/index.html` (~870 lines,
+inline CSS + vanilla JS using `EventSource`). Visual blueprint cribbed from
+`webchat/app/council/council.module.scss` so colours and spacing match.
+
+### Added — council SSE/HTTP endpoints
+
+Mirrors the autoloop endpoints shipped in 3.5.0:
+
+- `GET /council/list` — all council sessions known to the manager
+- `GET /council/<id>/state` — current `CouncilSession` snapshot
+- `GET /council/<id>/events` — SSE stream of `snapshot` + `council-event`
+  events (every `Council` emit lands here)
+
+`SessionManager` gains `councilList()` and `getCouncil(id)` helpers.
+
+### Build
+
+`scripts/postbuild.mjs` now copies non-TS dashboard assets from
+`src/dashboard/` into `dist/src/dashboard/` so the published package serves
+the page identically to dev.
+
 ## [3.5.0] - 2026-05-10
 
 ### ⚠️ Breaking — Autoloop replaced with three-agent architecture

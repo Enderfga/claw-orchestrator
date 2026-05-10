@@ -1,0 +1,892 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Claw Orchestrator — Dashboard</title>
+    <style>
+      :root {
+        --bg: #f7f7f8;
+        --surface: #ffffff;
+        --surface-2: #f0f0f0;
+        --text: #1a1a1a;
+        --muted: #6e6e73;
+        --border: #e5e5e5;
+        --accent: #10a37f;
+        --accent-2: #cc785c;
+        --warn: #d97706;
+        --error: #dc2626;
+        --info: #2563eb;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      }
+      a {
+        color: var(--info);
+        text-decoration: none;
+      }
+      a:hover {
+        text-decoration: underline;
+      }
+
+      .app {
+        display: flex;
+        flex-direction: column;
+        height: 100vh;
+      }
+      .header {
+        display: flex;
+        align-items: center;
+        gap: 16px;
+        padding: 10px 24px;
+        border-bottom: 1px solid var(--border);
+        background: var(--surface);
+        min-height: 52px;
+      }
+      .header h1 {
+        font-size: 16px;
+        font-weight: 700;
+        margin: 0;
+        letter-spacing: -0.3px;
+      }
+      .tabs {
+        display: flex;
+        gap: 6px;
+        margin-left: 12px;
+      }
+      .tab {
+        padding: 6px 12px;
+        border-radius: 6px;
+        border: 1px solid transparent;
+        background: transparent;
+        cursor: pointer;
+        font: inherit;
+        color: var(--muted);
+      }
+      .tab[aria-selected='true'] {
+        background: var(--surface-2);
+        color: var(--text);
+        border-color: var(--border);
+      }
+      .header .grow {
+        flex: 1;
+      }
+      .header small {
+        color: var(--muted);
+      }
+
+      .body {
+        display: flex;
+        flex: 1;
+        min-height: 0;
+      }
+
+      /* ── Sidebar (run / council list) ───────────────────────────── */
+      .sidebar {
+        width: 260px;
+        border-right: 1px solid var(--border);
+        background: var(--surface);
+        overflow-y: auto;
+      }
+      .sidebar h2 {
+        font-size: 11px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: var(--muted);
+        margin: 0;
+        padding: 14px 16px 6px;
+      }
+      .runlist {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+      }
+      .runItem {
+        padding: 10px 16px;
+        border-bottom: 1px solid var(--border);
+        cursor: pointer;
+      }
+      .runItem:hover {
+        background: var(--surface-2);
+      }
+      .runItem[aria-selected='true'] {
+        background: var(--surface-2);
+        border-left: 3px solid var(--accent);
+        padding-left: 13px;
+      }
+      .runItem .id {
+        font-weight: 600;
+        font-size: 13px;
+        color: var(--text);
+        word-break: break-all;
+      }
+      .runItem .meta {
+        font-size: 11px;
+        color: var(--muted);
+        margin-top: 4px;
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+      .badge {
+        display: inline-block;
+        padding: 1px 6px;
+        border-radius: 10px;
+        font-size: 11px;
+        font-weight: 600;
+        background: var(--surface-2);
+        color: var(--text);
+      }
+      .badge.running {
+        background: #dcfce7;
+        color: #166534;
+      }
+      .badge.paused {
+        background: #fef3c7;
+        color: #92400e;
+      }
+      .badge.terminated,
+      .badge.consensus,
+      .badge.accepted {
+        background: #e0e7ff;
+        color: #3730a3;
+      }
+      .badge.error,
+      .badge.crashed,
+      .badge.rejected,
+      .badge.max_rounds {
+        background: #fee2e2;
+        color: #991b1b;
+      }
+      .badge.planning,
+      .badge.awaiting_user {
+        background: #dbeafe;
+        color: #1e40af;
+      }
+
+      /* ── Main pane ──────────────────────────────────────────────── */
+      .main {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        min-width: 0;
+        background: var(--bg);
+      }
+      .topbar {
+        background: var(--surface);
+        border-bottom: 1px solid var(--border);
+        padding: 10px 16px;
+        display: flex;
+        gap: 12px;
+        align-items: center;
+        flex-wrap: wrap;
+        font-size: 13px;
+      }
+      .topbar .item {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        color: var(--muted);
+      }
+      .topbar .item strong {
+        color: var(--text);
+      }
+      .panes {
+        flex: 1;
+        display: grid;
+        grid-template-columns: 1fr 1fr 1fr;
+        min-height: 0;
+        gap: 1px;
+        background: var(--border);
+      }
+      .panes .single {
+        grid-column: 1 / -1;
+      }
+      .pane {
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+        background: var(--surface);
+      }
+      .paneHeader {
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: var(--muted);
+        font-weight: 600;
+        padding: 10px 16px;
+        border-bottom: 1px solid var(--border);
+        background: var(--surface);
+      }
+      .paneBody {
+        flex: 1;
+        overflow-y: auto;
+        padding: 10px 16px;
+        font-size: 13px;
+        line-height: 1.55;
+      }
+      .empty {
+        color: var(--muted);
+        font-style: italic;
+        padding: 20px;
+        text-align: center;
+      }
+
+      /* ── Chat / activity entries ────────────────────────────────── */
+      .entry {
+        margin-bottom: 14px;
+        padding-bottom: 10px;
+        border-bottom: 1px dashed var(--border);
+      }
+      .entry:last-child {
+        border-bottom: none;
+      }
+      .entryHeader {
+        display: flex;
+        gap: 8px;
+        align-items: baseline;
+        font-size: 11px;
+        color: var(--muted);
+        margin-bottom: 4px;
+      }
+      .entryHeader .who {
+        font-weight: 600;
+        color: var(--text);
+      }
+      .entryHeader .iter {
+        background: var(--surface-2);
+        padding: 1px 6px;
+        border-radius: 4px;
+      }
+      .entryBody {
+        white-space: pre-wrap;
+        word-wrap: break-word;
+        font-family:
+          ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        font-size: 12px;
+        background: #fafafa;
+        padding: 8px 10px;
+        border-radius: 4px;
+        border: 1px solid var(--border);
+      }
+      .entryBody.text {
+        font-family: inherit;
+        font-size: 13px;
+        background: transparent;
+        border: none;
+        padding: 0;
+      }
+      .entryBody.verdict-advance {
+        border-left: 3px solid var(--accent);
+      }
+      .entryBody.verdict-hold {
+        border-left: 3px solid var(--warn);
+      }
+      .entryBody.verdict-rollback {
+        border-left: 3px solid var(--error);
+      }
+
+      /* ── Chat compose for autoloop ──────────────────────────────── */
+      .composer {
+        display: flex;
+        gap: 8px;
+        padding: 10px 16px;
+        border-top: 1px solid var(--border);
+        background: var(--surface);
+      }
+      .composer textarea {
+        flex: 1;
+        font: inherit;
+        padding: 8px 10px;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        resize: vertical;
+        min-height: 36px;
+        max-height: 120px;
+      }
+      .composer button {
+        padding: 0 16px;
+        background: var(--accent);
+        color: white;
+        border: none;
+        border-radius: 6px;
+        font: inherit;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      .composer button:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+
+      /* ── Push log (bottom strip) ───────────────────────────────── */
+      .pushlog {
+        background: var(--surface);
+        border-top: 1px solid var(--border);
+        padding: 6px 16px;
+        font-size: 12px;
+        color: var(--muted);
+        display: flex;
+        gap: 12px;
+        flex-wrap: wrap;
+        max-height: 80px;
+        overflow-y: auto;
+      }
+      .pushlog .item {
+        white-space: nowrap;
+      }
+
+      .footer {
+        padding: 6px 16px;
+        font-size: 11px;
+        color: var(--muted);
+        text-align: right;
+        border-top: 1px solid var(--border);
+        background: var(--surface);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="app">
+      <header class="header">
+        <h1>Claw Orchestrator</h1>
+        <nav class="tabs" role="tablist">
+          <button class="tab" role="tab" aria-selected="true" data-tab="autoloop">Autoloop</button>
+          <button class="tab" role="tab" aria-selected="false" data-tab="council">Council</button>
+        </nav>
+        <div class="grow"></div>
+        <small id="status">connected</small>
+      </header>
+
+      <div class="body">
+        <aside class="sidebar">
+          <h2 id="sidebarTitle">Runs</h2>
+          <ul class="runlist" id="runlist"></ul>
+        </aside>
+
+        <main class="main" id="main">
+          <div class="empty" style="margin-top: 80px">Select a run to view.</div>
+        </main>
+      </div>
+
+      <div class="footer">SSE-driven dashboard • served by claw-orchestrator embedded server</div>
+    </div>
+
+    <script>
+      // ─── State ────────────────────────────────────────────────────
+      const state = {
+        tab: 'autoloop',
+        selectedId: null,
+        runs: [],
+        // autoloop run-detail caches keyed by run_id
+        autoloop: {
+          state: null,
+          plannerLog: [],
+          coderLog: [],
+          reviewerLog: [],
+          pushLog: [],
+          eventSource: null,
+        },
+        // council session detail
+        council: {
+          session: null,
+          events: [],
+          eventSource: null,
+        },
+      };
+
+      const $ = (id) => document.getElementById(id);
+      const fmtTime = (iso) =>
+        iso ? new Date(iso).toLocaleTimeString(undefined, { hour12: false }) : '';
+      const escapeHtml = (s) =>
+        String(s ?? '').replace(/[&<>"']/g, (c) =>
+          ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c],
+        );
+
+      // ─── Tab switching ────────────────────────────────────────────
+      document.querySelectorAll('.tab').forEach((b) => {
+        b.addEventListener('click', () => switchTab(b.dataset.tab));
+      });
+
+      function switchTab(tab) {
+        if (state.tab === tab) return;
+        state.tab = tab;
+        document.querySelectorAll('.tab').forEach((b) => {
+          b.setAttribute('aria-selected', String(b.dataset.tab === tab));
+        });
+        $('sidebarTitle').textContent = tab === 'autoloop' ? 'Autoloop runs' : 'Council sessions';
+        state.selectedId = null;
+        closeStreams();
+        renderEmptyMain();
+        refreshList();
+      }
+
+      function closeStreams() {
+        if (state.autoloop.eventSource) {
+          state.autoloop.eventSource.close();
+          state.autoloop.eventSource = null;
+        }
+        if (state.council.eventSource) {
+          state.council.eventSource.close();
+          state.council.eventSource = null;
+        }
+        // Reset caches.
+        state.autoloop.state = null;
+        state.autoloop.plannerLog = [];
+        state.autoloop.coderLog = [];
+        state.autoloop.reviewerLog = [];
+        state.autoloop.pushLog = [];
+        state.council.session = null;
+        state.council.events = [];
+      }
+
+      function renderEmptyMain() {
+        $('main').innerHTML = '<div class="empty" style="margin-top:80px">Select a run to view.</div>';
+      }
+
+      // ─── List polling ─────────────────────────────────────────────
+      async function refreshList() {
+        try {
+          const url = state.tab === 'autoloop' ? '/autoloop/list' : '/council/list';
+          const r = await fetch(url);
+          const j = await r.json();
+          state.runs = state.tab === 'autoloop' ? j.runs || [] : j.councils || [];
+          renderList();
+          $('status').textContent = 'connected';
+        } catch (err) {
+          $('status').textContent = 'disconnected';
+        }
+      }
+      setInterval(refreshList, 5000);
+
+      function renderList() {
+        const ul = $('runlist');
+        if (state.runs.length === 0) {
+          ul.innerHTML =
+            '<li class="empty" style="padding:20px;list-style:none">No active ' +
+            (state.tab === 'autoloop' ? 'runs' : 'councils') +
+            '.</li>';
+          return;
+        }
+        const html = state.runs
+          .map((r) => {
+            if (state.tab === 'autoloop') {
+              return `
+                <li class="runItem" data-id="${escapeHtml(r.run_id)}" aria-selected="${r.run_id === state.selectedId}">
+                  <div class="id">${escapeHtml(r.run_id)}</div>
+                  <div class="meta">
+                    <span class="badge ${r.status}">${r.status}</span>
+                    <span>iter ${r.iter}</span>
+                    <span>↑${r.push_log_count}</span>
+                  </div>
+                </li>`;
+            } else {
+              return `
+                <li class="runItem" data-id="${escapeHtml(r.id)}" aria-selected="${r.id === state.selectedId}">
+                  <div class="id">${escapeHtml(r.id)}</div>
+                  <div class="meta">
+                    <span class="badge ${r.status}">${r.status}</span>
+                    <span>${r.responses?.length ?? 0} resp</span>
+                  </div>
+                </li>`;
+            }
+          })
+          .join('');
+        ul.innerHTML = html;
+        ul.querySelectorAll('.runItem').forEach((el) => {
+          el.addEventListener('click', () => {
+            state.selectedId = el.dataset.id;
+            renderList();
+            openDetail(el.dataset.id);
+          });
+        });
+      }
+
+      // ─── Detail open ──────────────────────────────────────────────
+      function openDetail(id) {
+        closeStreams();
+        if (state.tab === 'autoloop') openAutoloop(id);
+        else openCouncil(id);
+      }
+
+      // ─── Autoloop detail ──────────────────────────────────────────
+      function renderAutoloopShell() {
+        $('main').innerHTML = `
+          <div class="topbar">
+            <div class="item">run <strong id="auto-id">…</strong></div>
+            <div class="item">status <strong id="auto-status">…</strong></div>
+            <div class="item">iter <strong id="auto-iter">0</strong></div>
+            <div class="item">subagents <strong id="auto-sub">no</strong></div>
+            <div class="item">pushes <strong id="auto-push">0</strong></div>
+          </div>
+          <div class="panes">
+            <section class="pane">
+              <div class="paneHeader">Planner ⇄ user</div>
+              <div class="paneBody" id="auto-planner"><div class="empty">Waiting…</div></div>
+              <div class="composer">
+                <textarea id="auto-input" placeholder="Send to planner…  (Cmd/Ctrl+Enter)"></textarea>
+                <button id="auto-send">Send</button>
+              </div>
+            </section>
+            <section class="pane">
+              <div class="paneHeader">Coder activity</div>
+              <div class="paneBody" id="auto-coder"><div class="empty">Coder not yet spawned.</div></div>
+            </section>
+            <section class="pane">
+              <div class="paneHeader">Reviewer verdicts</div>
+              <div class="paneBody" id="auto-reviewer"><div class="empty">No verdicts yet.</div></div>
+            </section>
+          </div>
+          <div class="pushlog" id="auto-pushlog"><span class="item">No pushes yet.</span></div>
+        `;
+        $('auto-send').addEventListener('click', sendAutoloopChat);
+        $('auto-input').addEventListener('keydown', (e) => {
+          if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') sendAutoloopChat();
+        });
+      }
+
+      async function openAutoloop(id) {
+        renderAutoloopShell();
+        $('auto-id').textContent = id;
+        // Initial state fetch
+        try {
+          const r = await fetch(`/autoloop/${encodeURIComponent(id)}/state`);
+          const j = await r.json();
+          if (j.ok) {
+            state.autoloop.state = j.state;
+            paintAutoloopState();
+          }
+          const logR = await fetch(`/autoloop/${encodeURIComponent(id)}/push_log`);
+          const logJ = await logR.json();
+          if (logJ.ok) {
+            state.autoloop.pushLog = logJ.entries || [];
+            paintPushLog();
+          }
+        } catch (err) {
+          /* ignore */
+        }
+        // SSE
+        const es = new EventSource(`/autoloop/${encodeURIComponent(id)}/events`);
+        state.autoloop.eventSource = es;
+        es.addEventListener('snapshot', (e) => {
+          const data = JSON.parse(e.data);
+          if (data.state) {
+            state.autoloop.state = data.state;
+            paintAutoloopState();
+          }
+        });
+        es.addEventListener('state', (e) => {
+          state.autoloop.state = JSON.parse(e.data);
+          paintAutoloopState();
+        });
+        es.addEventListener('planner_reply', (e) => {
+          const { text } = JSON.parse(e.data);
+          state.autoloop.plannerLog.push({ who: 'planner', text, ts: new Date().toISOString() });
+          paintPlanner();
+        });
+        es.addEventListener('coder_reply', (e) => {
+          const { text } = JSON.parse(e.data);
+          state.autoloop.coderLog.push({ who: 'coder', text, ts: new Date().toISOString() });
+          paintCoder();
+        });
+        es.addEventListener('reviewer_reply', (e) => {
+          const { text } = JSON.parse(e.data);
+          state.autoloop.reviewerLog.push({ who: 'reviewer', text, ts: new Date().toISOString() });
+          paintReviewer();
+        });
+        es.addEventListener('iter_done', (e) => {
+          const data = JSON.parse(e.data);
+          state.autoloop.reviewerLog.push({
+            who: 'iter_done',
+            text: `iter ${data.iter} → ${data.verdict}` + (data.metric != null ? ` · metric=${data.metric}` : ''),
+            verdict: data.verdict,
+            ts: new Date().toISOString(),
+          });
+          paintReviewer();
+        });
+        es.addEventListener('push', (e) => {
+          state.autoloop.pushLog.push({
+            ts: new Date().toISOString(),
+            ...JSON.parse(e.data),
+          });
+          paintPushLog();
+        });
+        es.addEventListener('terminated', (e) => {
+          const data = JSON.parse(e.data);
+          state.autoloop.plannerLog.push({
+            who: 'system',
+            text: `[terminated] ${data.reason ?? ''}`,
+            ts: new Date().toISOString(),
+          });
+          paintPlanner();
+        });
+      }
+
+      function paintAutoloopState() {
+        const s = state.autoloop.state;
+        if (!s) return;
+        $('auto-status').innerHTML = `<span class="badge ${s.status}">${s.status}</span>`;
+        $('auto-iter').textContent = s.iter;
+        $('auto-sub').textContent = s.subagents_spawned ? 'yes' : 'no';
+        $('auto-push').textContent = s.push_log_count;
+      }
+
+      function paintPlanner() {
+        const el = $('auto-planner');
+        if (!el) return;
+        const items = state.autoloop.plannerLog;
+        if (!items.length) {
+          el.innerHTML = '<div class="empty">Waiting…</div>';
+          return;
+        }
+        el.innerHTML = items
+          .map(
+            (e) =>
+              `<div class="entry">
+                <div class="entryHeader"><span class="who">${escapeHtml(e.who)}</span><span>${fmtTime(e.ts)}</span></div>
+                <div class="entryBody text">${escapeHtml(e.text)}</div>
+              </div>`,
+          )
+          .join('');
+        el.scrollTop = el.scrollHeight;
+      }
+      function paintCoder() {
+        const el = $('auto-coder');
+        if (!el) return;
+        const items = state.autoloop.coderLog;
+        if (!items.length) {
+          el.innerHTML = '<div class="empty">Coder not yet spawned.</div>';
+          return;
+        }
+        el.innerHTML = items
+          .map(
+            (e) =>
+              `<div class="entry">
+                <div class="entryHeader"><span class="who">${escapeHtml(e.who)}</span><span>${fmtTime(e.ts)}</span></div>
+                <div class="entryBody">${escapeHtml(e.text)}</div>
+              </div>`,
+          )
+          .join('');
+        el.scrollTop = el.scrollHeight;
+      }
+      function paintReviewer() {
+        const el = $('auto-reviewer');
+        if (!el) return;
+        const items = state.autoloop.reviewerLog;
+        if (!items.length) {
+          el.innerHTML = '<div class="empty">No verdicts yet.</div>';
+          return;
+        }
+        el.innerHTML = items
+          .map((e) => {
+            const cls = e.verdict ? `verdict-${e.verdict}` : '';
+            return `<div class="entry">
+              <div class="entryHeader"><span class="who">${escapeHtml(e.who)}</span><span>${fmtTime(e.ts)}</span></div>
+              <div class="entryBody ${cls}">${escapeHtml(e.text)}</div>
+            </div>`;
+          })
+          .join('');
+        el.scrollTop = el.scrollHeight;
+      }
+      function paintPushLog() {
+        const el = $('auto-pushlog');
+        if (!el) return;
+        const items = state.autoloop.pushLog;
+        if (!items.length) {
+          el.innerHTML = '<span class="item">No pushes yet.</span>';
+          return;
+        }
+        el.innerHTML = items
+          .slice(-20)
+          .map(
+            (e) =>
+              `<span class="item">${fmtTime(e.ts)} <strong>${escapeHtml(e.level || '')}</strong> ${escapeHtml(e.summary || '')}</span>`,
+          )
+          .join(' · ');
+      }
+
+      async function sendAutoloopChat() {
+        const id = state.selectedId;
+        if (!id) return;
+        const ta = $('auto-input');
+        const text = ta.value.trim();
+        if (!text) return;
+        const btn = $('auto-send');
+        btn.disabled = true;
+        ta.disabled = true;
+        state.autoloop.plannerLog.push({ who: 'user', text, ts: new Date().toISOString() });
+        paintPlanner();
+        try {
+          await fetch('/v1/openclaw/tools/autoloop_chat', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ run_id: id, text }),
+          });
+          ta.value = '';
+        } catch (err) {
+          state.autoloop.plannerLog.push({
+            who: 'system',
+            text: `[error] ${(err && err.message) || 'send failed'}`,
+            ts: new Date().toISOString(),
+          });
+          paintPlanner();
+        } finally {
+          btn.disabled = false;
+          ta.disabled = false;
+          ta.focus();
+        }
+      }
+
+      // ─── Council detail ───────────────────────────────────────────
+      function renderCouncilShell() {
+        $('main').innerHTML = `
+          <div class="topbar">
+            <div class="item">council <strong id="c-id">…</strong></div>
+            <div class="item">status <strong id="c-status">…</strong></div>
+            <div class="item">round <strong id="c-round">0</strong></div>
+            <div class="item">agents <strong id="c-agents">…</strong></div>
+            <div class="item">task <strong id="c-task" style="font-weight:400;color:var(--muted)"></strong></div>
+          </div>
+          <div class="panes">
+            <section class="pane single">
+              <div class="paneHeader">Agent responses (live)</div>
+              <div class="paneBody" id="c-stream"><div class="empty">Waiting for events…</div></div>
+            </section>
+          </div>
+        `;
+      }
+
+      async function openCouncil(id) {
+        renderCouncilShell();
+        $('c-id').textContent = id;
+        try {
+          const r = await fetch(`/council/${encodeURIComponent(id)}/state`);
+          const j = await r.json();
+          if (j.ok) {
+            state.council.session = j.session;
+            paintCouncilState();
+            // Replay existing responses as initial entries.
+            (j.session.responses || []).forEach((resp) => {
+              state.council.events.push({
+                ts: resp.timestamp,
+                who: resp.agent,
+                round: resp.round,
+                text: resp.content,
+                consensus: resp.consensus,
+              });
+            });
+            paintCouncilStream();
+          }
+        } catch (err) {
+          /* ignore */
+        }
+        const es = new EventSource(`/council/${encodeURIComponent(id)}/events`);
+        state.council.eventSource = es;
+        es.addEventListener('snapshot', (e) => {
+          state.council.session = JSON.parse(e.data);
+          paintCouncilState();
+        });
+        es.addEventListener('council-event', (e) => {
+          const ev = JSON.parse(e.data);
+          handleCouncilEvent(ev);
+        });
+      }
+
+      function paintCouncilState() {
+        const s = state.council.session;
+        if (!s) return;
+        $('c-status').innerHTML = `<span class="badge ${s.status}">${s.status}</span>`;
+        const rounds =
+          s.responses && s.responses.length > 0
+            ? Math.max(...s.responses.map((r) => r.round))
+            : 0;
+        $('c-round').textContent = rounds;
+        $('c-agents').textContent = (s.config?.agents || []).map((a) => a.name).join(', ');
+        $('c-task').textContent = s.task || '';
+      }
+
+      function handleCouncilEvent(ev) {
+        // Materialise interesting events as stream entries.
+        const ts = ev.timestamp || new Date().toISOString();
+        switch (ev.type) {
+          case 'session-start':
+            state.council.events.push({ ts, who: 'system', text: `[session-start] ${ev.task || ''}` });
+            break;
+          case 'round-start':
+            state.council.events.push({ ts, who: 'system', text: `── round ${ev.round} ──` });
+            break;
+          case 'agent-start':
+            state.council.events.push({ ts, who: ev.agent, round: ev.round, text: '(thinking…)' });
+            break;
+          case 'agent-complete':
+            state.council.events.push({
+              ts,
+              who: ev.agent,
+              round: ev.round,
+              text: ev.content || '',
+              consensus: ev.consensus,
+            });
+            break;
+          case 'round-end':
+            state.council.events.push({ ts, who: 'system', text: `[round ${ev.round} → ${ev.status}]` });
+            break;
+          case 'complete':
+            state.council.events.push({ ts, who: 'system', text: `[complete: ${ev.status}]` });
+            break;
+          case 'error':
+            state.council.events.push({
+              ts,
+              who: 'system',
+              text: `[error${ev.agent ? ' ' + ev.agent : ''}] ${ev.error || ''}`,
+            });
+            break;
+          default:
+            return; // skip chunks/tools at this resolution
+        }
+        // Update rounds count from latest event with a round
+        if (ev.round && state.council.session) {
+          const cur = state.council.session;
+          cur.responses = cur.responses || [];
+          paintCouncilState();
+        }
+        paintCouncilStream();
+      }
+
+      function paintCouncilStream() {
+        const el = $('c-stream');
+        if (!el) return;
+        const items = state.council.events;
+        if (!items.length) {
+          el.innerHTML = '<div class="empty">Waiting for events…</div>';
+          return;
+        }
+        el.innerHTML = items
+          .map((e) => {
+            const tag = e.consensus ? ' (consensus ✓)' : '';
+            const round = e.round != null ? ` <span class="iter">r${e.round}</span>` : '';
+            return `<div class="entry">
+              <div class="entryHeader">
+                <span class="who">${escapeHtml(e.who || '?')}</span>${round}
+                <span>${fmtTime(e.ts)}${escapeHtml(tag)}</span>
+              </div>
+              <div class="entryBody text">${escapeHtml(e.text || '')}</div>
+            </div>`;
+          })
+          .join('');
+        el.scrollTop = el.scrollHeight;
+      }
+
+      // ─── Boot ────────────────────────────────────────────────────
+      refreshList();
+    </script>
+  </body>
+</html>

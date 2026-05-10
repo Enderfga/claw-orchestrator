@@ -403,6 +403,98 @@ export class EmbeddedServer {
         return;
       }
 
+      // ─── Dashboard (single static HTML) ─────────────────────────
+      //
+      // Serves src/dashboard/index.html (or dist/src/dashboard/index.html in
+      // a built install). Walks up like resolveConfigPath does so it works
+      // both during dev (tsx) and from the published package.
+
+      if (path === '/dashboard' || path === '/dashboard/' || path === '/dashboard/index.html') {
+        const fsMod = await import('node:fs');
+        const pathMod = await import('node:path');
+        const urlMod = await import('node:url');
+        const here = pathMod.dirname(urlMod.fileURLToPath(import.meta.url));
+        let dir = here;
+        let file = null;
+        for (let i = 0; i < 8; i++) {
+          const candidate = pathMod.join(dir, 'src', 'dashboard', 'index.html');
+          if (fsMod.existsSync(candidate)) {
+            file = candidate;
+            break;
+          }
+          const parent = pathMod.dirname(dir);
+          if (parent === dir) break;
+          dir = parent;
+        }
+        if (!file) {
+          json(404, { ok: false, error: 'dashboard asset not found' });
+          return;
+        }
+        const html = fsMod.readFileSync(file, 'utf-8');
+        res.writeHead(200, {
+          'Content-Type': 'text/html; charset=utf-8',
+          'Cache-Control': 'no-cache',
+        });
+        res.end(html);
+        return;
+      }
+
+      // ─── Council — list / state / events ────────────────────────
+      //
+      // Mirrors the autoloop endpoints below. The dashboard page consumes
+      // these to render the council tab.
+
+      if (path === '/council/list') {
+        json(200, { ok: true, councils: this.manager.councilList() });
+        return;
+      }
+
+      const councilStateMatch = path.match(/^\/council\/([^/]+)\/state$/);
+      if (councilStateMatch) {
+        const session = this.manager.councilStatus(councilStateMatch[1]);
+        if (!session) {
+          json(404, { ok: false, error: 'council not found' });
+        } else {
+          json(200, { ok: true, session });
+        }
+        return;
+      }
+
+      const councilEventsMatch = path.match(/^\/council\/([^/]+)\/events$/);
+      if (councilEventsMatch) {
+        const id = councilEventsMatch[1];
+        const council = this.manager.getCouncil(id);
+        if (!council) {
+          json(404, { ok: false, error: 'council not found' });
+          return;
+        }
+        res.writeHead(200, {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+          Connection: 'keep-alive',
+        });
+        const send = (event: string, data: unknown): void => {
+          res.write(`event: ${event}\n`);
+          res.write(`data: ${JSON.stringify(data)}\n\n`);
+        };
+        // Replay current session so the dashboard renders immediately.
+        const snap = council.getSession();
+        if (snap) send('snapshot', snap);
+
+        const onEvent = (e: unknown): void => send('council-event', e);
+        const cleanup = (): void => {
+          council.off('council-event', onEvent);
+          try {
+            res.end();
+          } catch {
+            /* ignore */
+          }
+        };
+        council.on('council-event', onEvent);
+        res.on('close', cleanup);
+        return;
+      }
+
       // ─── Autoloop — list / state / push log / SSE events ─────
       //
       // Front-end contract (per tasks/autoloop.md §9). Webchat opens these
