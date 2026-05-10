@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.4.0] - 2026-05-10
+
+### Added — `autoloop` (autonomous workspace iteration)
+
+New first-class feature alongside session / council / ultraplan / ultrareview. Given a git workspace, a `plan.md` (intent), and a `goal.json` (success criteria with scalar and/or gates), the loop runs autonomously until the goal is met, max iters/cost is hit, or the user stops it.
+
+- **Phase machine**: `BOOTSTRAP → { PROPOSE → EXECUTE → MEASURE → RATCHET → maybe COMPRESS }* → TERMINATED`
+- **Asymmetric ratchet reviewer**: separate process, sandboxed cwd (cannot read workspace source), stdin-only artifact passing, JSON-only decision output. Default verdict is reset; commit requires positive evidence (see `configs/autoloop-ratchet-prompt.md`)
+- **Two scenarios covered by one schema**: scalar-driven (Karpathy autoresearch shape) and gate-driven (paper deep-research shape with aspirational gates)
+- **Push hooks**: async via `openclaw message send` (configurable). Triggers on new-best, plateau, aspirational gate proposed, termination, hard error. Inner loop never blocks on stdin
+- **Kill switches**: per-iter wall-clock (process-group SIGKILL via `spawn detached: true`), `max_iters`, `max_cost_usd`. Token cap alone does not catch hung subprocesses
+- **Atomic ledger**: `tasks/<id>/{plan.md, goal.json, current.md, state.json, metric.json, history.md, iter/<n>/...}` co-located with the workspace so `git reset` reverts ledger and code atomically
+- **State schema supports population from day 1**: `state.json.tree.children_iters` is a list, even though v1 runs serial — future N-worktree mode reuses the same ledger
+- **Tools**: `autoloop_start`, `autoloop_status`, `autoloop_list`, `autoloop_inject`, `autoloop_stop`
+- **SSE endpoint**: `GET /autoloop/<id>/events` streams phase / state / push events. Frontend (webchat) deferred to a future release
+
+Design doc: `tasks/autoloop.md`. Reference: `skills/references/autoloop.md`.
+
+**Defaults** (cost not optimised per user direction): `propose=opus, ratchet=opus`, `max_iters=200`, `max_cost_usd=200`, `compress_every_k=10`, `per_iter_timeout_ms=600000`. Override via `goal.json.termination` or `autoloop_start` parameters.
+
+Resume after process death is **not** supported in v1 — if the orchestrator process dies, `state.json` and `current.md` are intact but the loop must be restarted. Running concurrent autoloops on the same workspace is not supported (they would race on the same git branch).
+
 ## [3.3.1] - 2026-05-07
 
 ### Fixed

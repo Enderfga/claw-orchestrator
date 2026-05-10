@@ -35,12 +35,7 @@ import type {
   RatchetOutput,
 } from './autoloop-types.js';
 import type { SendResult, StreamEvent } from './types.js';
-import {
-  deriveMetric,
-  isImprovement,
-  isTargetReached,
-  validateGoalSpec,
-} from './autoloop-types.js';
+import { deriveMetric, isImprovement, isTargetReached, validateGoalSpec } from './autoloop-types.js';
 
 // ─── Module-local config helpers ───────────────────────────────────────────
 
@@ -357,9 +352,7 @@ export class AutoloopRunner extends EventEmitter {
     if (newAspirational > 0) {
       this.goal = goal;
       this.state.pending_aspirational_count = goal.aspirational_gates?.length ?? 0;
-      const list = goal
-        .aspirational_gates!.map((g, i) => `${i + 1}. ${g.name}: ${g.cmd}`)
-        .join('\n');
+      const list = goal.aspirational_gates!.map((g, i) => `${i + 1}. ${g.name}: ${g.cmd}`).join('\n');
       await this.push({
         kind: 'bootstrap_aspirational',
         text: `Autoloop ${this.id} bootstrap done. ${newAspirational} aspirational gates proposed:\n${list}\n\nReply 'lock 1,3,4' or 'reject 2' or paste edits to lock or rotate.`,
