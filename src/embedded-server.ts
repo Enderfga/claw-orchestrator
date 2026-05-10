@@ -403,6 +403,65 @@ export class EmbeddedServer {
         return;
       }
 
+      // ─── Autoloop SSE ────────────────────────────────────────────
+      //
+      // GET /autoloop/<id>/events
+      // Streams phase / state / push events for a running autoloop. The
+      // frontend (webchat) is not yet built; this endpoint exists so it can
+      // be added without changing the runner contract.
+
+      const autoloopMatch = path.match(/^\/autoloop\/([^/]+)\/events$/);
+      if (autoloopMatch) {
+        const id = autoloopMatch[1];
+        const runner = this.manager.getAutoloop(id);
+        if (!runner) {
+          json(404, { ok: false, error: `autoloop not found: ${id}` });
+          return;
+        }
+        res.writeHead(200, {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+          Connection: 'keep-alive',
+        });
+        const send = (event: string, data: unknown): void => {
+          res.write(`event: ${event}\n`);
+          res.write(`data: ${JSON.stringify(data)}\n\n`);
+        };
+        // Replay current handle so the frontend can render immediately.
+        send('snapshot', runner.handle());
+
+        const onPhase = (e: unknown): void => send('phase', e);
+        const onState = (e: unknown): void => send('state', e);
+        const onPush = (e: unknown): void => send('push', e);
+        const onTerm = (e: unknown): void => {
+          send('terminated', e);
+          cleanup();
+        };
+        const onError = (e: unknown): void => {
+          send('error', { message: e instanceof Error ? e.message : String(e) });
+          cleanup();
+        };
+        const cleanup = (): void => {
+          runner.off('phase', onPhase);
+          runner.off('state', onState);
+          runner.off('push', onPush);
+          runner.off('terminated', onTerm);
+          runner.off('error', onError);
+          try {
+            res.end();
+          } catch {
+            // Ignore.
+          }
+        };
+        runner.on('phase', onPhase);
+        runner.on('state', onState);
+        runner.on('push', onPush);
+        runner.on('terminated', onTerm);
+        runner.on('error', onError);
+        res.on('close', cleanup);
+        return;
+      }
+
       // Use OpenAI error format for /v1/* paths
       if (path.startsWith('/v1/')) {
         json(404, { error: { message: 'Not found', type: 'invalid_request_error', code: null } });

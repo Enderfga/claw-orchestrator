@@ -151,6 +151,8 @@ import {
 } from './types.js';
 import { resolveAlias, isClaudeModel } from './models.js';
 import { Council } from './council.js';
+import { AutoloopRunner } from './autoloop.js';
+import type { AutoloopConfig, AutoloopHandle } from './autoloop-types.js';
 import {
   PERSIST_DISK_TTL_MS,
   DEBOUNCED_SAVE_MS,
@@ -856,6 +858,15 @@ export class SessionManager {
     // Stop ultrareview pollers
     for (const [, timer] of this.ultrareviewPollers) clearInterval(timer);
     this.ultrareviewPollers.clear();
+    // Stop autoloops
+    for (const [, runner] of this.autoloops) {
+      try {
+        await runner.stop();
+      } catch {
+        // Best-effort.
+      }
+    }
+    this.autoloops.clear();
     // Stop all sessions
     for (const [name, managed] of this.sessions) {
       try {
@@ -1795,6 +1806,48 @@ export class SessionManager {
 
   ultrareviewStatus(id: string): UltrareviewResult | undefined {
     return this.ultrareviews.get(id);
+  }
+
+  // ─── Autoloop ─────────────────────────────────────────────────────────
+
+  private autoloops = new Map<string, AutoloopRunner>();
+
+  async autoloopStart(config: AutoloopConfig): Promise<AutoloopHandle> {
+    const runner = new AutoloopRunner(this, config, this.logger);
+    if (this.autoloops.has(runner.id)) {
+      throw new Error(`Autoloop with id '${runner.id}' already exists`);
+    }
+    this.autoloops.set(runner.id, runner);
+    // start() returns after BOOTSTRAP; iteration runs in background.
+    await runner.start();
+    return runner.handle();
+  }
+
+  autoloopStatus(id: string): AutoloopHandle | undefined {
+    return this.autoloops.get(id)?.handle();
+  }
+
+  autoloopList(): AutoloopHandle[] {
+    return Array.from(this.autoloops.values()).map((r) => r.handle());
+  }
+
+  async autoloopStop(id: string): Promise<boolean> {
+    const r = this.autoloops.get(id);
+    if (!r) return false;
+    await r.stop();
+    return true;
+  }
+
+  autoloopInject(id: string, text: string): boolean {
+    const r = this.autoloops.get(id);
+    if (!r) return false;
+    r.inject(text);
+    return true;
+  }
+
+  /** Used by embedded-server to attach SSE listeners. */
+  getAutoloop(id: string): AutoloopRunner | undefined {
+    return this.autoloops.get(id);
   }
 
   private _cleanupIdleSessions(): void {
