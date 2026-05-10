@@ -151,8 +151,8 @@ import {
 } from './types.js';
 import { resolveAlias, isClaudeModel } from './models.js';
 import { Council } from './council.js';
-import { AutoloopRunner } from './autoloop.js';
-import type { AutoloopConfig, AutoloopHandle } from './autoloop-types.js';
+import { AutoloopRunner } from './autoloop/v1/runner.js';
+import type { AutoloopConfig, AutoloopHandle } from './autoloop/v1/types.js';
 import {
   PERSIST_DISK_TTL_MS,
   DEBOUNCED_SAVE_MS,

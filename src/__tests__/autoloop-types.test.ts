@@ -14,7 +14,7 @@ import {
   isTargetReached,
   type GoalSpec,
   type EvalOutput,
-} from '../autoloop-types.js';
+} from '../autoloop/v1/types.js';
 
 const minimalScalarGoal: GoalSpec = {
   scalar: { name: 'loss', direction: 'min', extract_cmd: 'echo 0.5', noise_floor: 0.01 },

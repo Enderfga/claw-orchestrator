@@ -18,10 +18,10 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { spawn, execSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import type { SessionManager } from './session-manager.js';
-import type { Logger } from './logger.js';
-import { nullLogger } from './logger.js';
-import type { EngineType } from './types.js';
+import type { SessionManager } from '../../session-manager.js';
+import type { Logger } from '../../logger.js';
+import { nullLogger } from '../../logger.js';
+import type { EngineType } from '../../types.js';
 import type {
   AutoloopConfig,
   AutoloopHandle,
@@ -33,20 +33,27 @@ import type {
   PushEvent,
   PushKind,
   RatchetOutput,
-} from './autoloop-types.js';
-import type { SendResult, StreamEvent } from './types.js';
-import { deriveMetric, isImprovement, isTargetReached, validateGoalSpec } from './autoloop-types.js';
+} from './types.js';
+import type { SendResult, StreamEvent } from '../../types.js';
+import { deriveMetric, isImprovement, isTargetReached, validateGoalSpec } from './types.js';
 
 // ─── Module-local config helpers ───────────────────────────────────────────
 
 function resolveConfigPath(filename: string): string {
+  // Walk up from this module looking for a `configs/<filename>` sibling.
+  // Works for both src/ (via tsx) and dist/ (after tsc), regardless of how deep
+  // we sit in the source tree (e.g. src/autoloop/v1/runner.ts).
   const filePath = fileURLToPath(import.meta.url);
-  const dir = path.dirname(filePath);
-  const candidates = [path.join(dir, '..', 'configs', filename), path.join(dir, '..', '..', 'configs', filename)];
-  for (const p of candidates) {
-    if (fs.existsSync(p)) return p;
+  let dir = path.dirname(filePath);
+  for (let i = 0; i < 8; i++) {
+    const candidate = path.join(dir, 'configs', filename);
+    if (fs.existsSync(candidate)) return candidate;
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
   }
-  return candidates[0];
+  // Fallback: same shape as before, leave caller to surface ENOENT.
+  return path.join(path.dirname(filePath), '..', 'configs', filename);
 }
 
 function loadPrompt(name: string, vars: Record<string, string | number>): string {
@@ -325,6 +332,7 @@ export class AutoloopRunner extends EventEmitter {
   private initialState(): AutoloopState {
     return {
       task_id: this.id,
+      run_mode: 'v1',
       branch: this.branch,
       phase: 'BOOTSTRAP',
       status: 'starting',

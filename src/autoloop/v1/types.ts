@@ -5,7 +5,7 @@
  * narrow — additions belong in the design doc first.
  */
 
-import type { EngineType } from './types.js';
+import type { EngineType } from '../../types.js';
 
 // ─── Phases ──────────────────────────────────────────────────────────────────
 
@@ -115,6 +115,12 @@ export type RatchetDecision = 'commit' | 'reset' | 'pending';
 
 export interface AutoloopState {
   task_id: string;
+  /**
+   * Architecture identifier. v1 = oneshot phase machine (this file).
+   * v2 (separate package under src/autoloop/v2/) = three persistent agents
+   * + Planner chat. Old states without this field are treated as v1.
+   */
+  run_mode?: 'v1' | 'v2';
   branch: string;
   phase: AutoloopPhase;
   status: AutoloopStatus;

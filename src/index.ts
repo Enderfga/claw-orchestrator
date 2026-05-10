@@ -14,7 +14,7 @@ import { createProxyHandler } from './proxy/handler.js';
 import { EmbeddedServer } from './embedded-server.js';
 import { sanitizeCwd, validateRegex } from './validation.js';
 import type { PluginConfig, EffortLevel, CouncilConfig, AgentPersona } from './types.js';
-import type { AutoloopConfig } from './autoloop-types.js';
+import type { AutoloopConfig } from './autoloop/v1/types.js';
 
 // ─── Standalone Export ───────────────────────────────────────────────────────
 
@@ -27,7 +27,7 @@ export { PersistentCursorSession } from './persistent-cursor-session.js';
 export { PersistentOpencodeSession } from './persistent-opencode-session.js';
 export { PersistentCustomSession } from './persistent-custom-session.js';
 export { Council, getDefaultCouncilConfig } from './council.js';
-export { AutoloopRunner } from './autoloop.js';
+export { AutoloopRunner } from './autoloop/v1/runner.js';
 export type {
   AutoloopConfig,
   AutoloopHandle,
@@ -42,7 +42,7 @@ export type {
   RatchetOutput,
   PushEvent,
   PushKind,
-} from './autoloop-types.js';
+} from './autoloop/v1/types.js';
 export { parseConsensus, stripConsensusTags, hasConsensusMarker } from './consensus.js';
 export { sanitizeCwd, validateRegex, validateName } from './validation.js';
 export { type Logger, createConsoleLogger, nullLogger } from './logger.js';
