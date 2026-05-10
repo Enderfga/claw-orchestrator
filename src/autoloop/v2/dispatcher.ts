@@ -27,8 +27,15 @@ import { fileURLToPath } from 'node:url';
 import type { SessionManager } from '../../session-manager.js';
 import type { Logger } from '../../logger.js';
 import { nullLogger } from '../../logger.js';
+import { spawn } from 'node:child_process';
 import { type AnyAutoloopV2Message } from './messages.js';
-import type { AgentDispatcher, AutoloopV2RunState } from './types.js';
+import type { AgentDispatcher, AutoloopV2RunState, PushPolicy } from './types.js';
+import {
+  applyPlannerToolCalls,
+  parsePlannerReply,
+  type PlannerToolEffects,
+  type SpawnSubagentsArgs,
+} from './planner-tools.js';
 
 export interface ClaudeAgentDispatcherConfig {
   manager: SessionManager;
@@ -41,6 +48,13 @@ export interface ClaudeAgentDispatcherConfig {
   /** Per-message wall-clock cap. Default 10 min. */
   sendTimeoutMs?: number;
   logger?: Logger;
+  /**
+   * Push-policy ref that S3's update_push_policy mutates. Caller (SessionManager)
+   * passes its own policy object so changes are visible to the runner.
+   */
+  pushPolicyRef?: PushPolicy;
+  /** Called when Planner emits spawn_subagents. S4 implements; S3 records the intent. */
+  onSpawnSubagents?: (args: SpawnSubagentsArgs) => Promise<void>;
 }
 
 function resolveDefaultPlannerPrompt(): string {
@@ -169,10 +183,86 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
     }
 
     const replyText = (result.output ?? '').trim();
-    if (replyText) this.emit('planner_reply', replyText);
 
-    // S2: Planner has no structured-emit grammar yet. Parsing for `notify_user` /
-    // `spawn_subagents` JSON blocks happens in S3.
-    return [];
+    // S3: parse autoloop-fenced tool calls out of the reply, apply effects,
+    // and bubble emitted messages back into the runner queue.
+    const parsed = parsePlannerReply(replyText);
+    if (parsed.parse_errors.length > 0) {
+      this.logger.warn?.(`[autoloop-v2] planner emitted ${parsed.parse_errors.length} malformed autoloop block(s)`);
+    }
+    const effects: PlannerToolEffects = {
+      spawnSubagents: async (args) => {
+        if (this.config.onSpawnSubagents) {
+          await this.config.onSpawnSubagents(args);
+        } else {
+          this.logger.warn?.('[autoloop-v2] spawn_subagents called but no handler installed (S4 not wired yet)');
+        }
+      },
+      updatePushPolicy: (delta) => {
+        if (!this.config.pushPolicyRef) return;
+        // Shallow-merge whitelisted keys onto the policy object.
+        const policyKeys = new Set([
+          'on_start',
+          'on_iter_done_ok',
+          'on_target_hit',
+          'on_metric_regression_2',
+          'on_reviewer_reject_2',
+          'on_phase_error',
+          'on_stall_30min',
+          'on_decision_needed',
+        ]);
+        for (const [k, v] of Object.entries(delta)) {
+          if (!policyKeys.has(k) || typeof v !== 'object' || v === null) continue;
+          (this.config.pushPolicyRef as unknown as Record<string, unknown>)[k] = v as Record<string, unknown>;
+        }
+      },
+      commitPlanFile: async (file, message) => {
+        await this.gitCommit(file, message ?? `autoloop-v2: planner commits ${file}`);
+      },
+    };
+    const handlerResult = await applyPlannerToolCalls(parsed.calls, effects, env.iter);
+    for (const errEntry of handlerResult.errors) {
+      this.logger.warn?.(`[autoloop-v2] tool '${errEntry.tool}' failed: ${errEntry.error}`);
+    }
+
+    // Emit cleaned reply (without raw JSON blocks) for the chat tool to surface.
+    if (parsed.cleaned_reply) this.emit('planner_reply', parsed.cleaned_reply);
+    return handlerResult.emitted_messages;
+  }
+
+  // ─── git helper for write_plan_committed / write_goal_committed ──────────
+
+  private async gitCommit(filename: string, message: string): Promise<void> {
+    const run = (argv: string[]): Promise<{ code: number; out: string; err: string }> =>
+      new Promise((resolve) => {
+        const child = spawn(argv[0], argv.slice(1), {
+          cwd: this.config.workspace,
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        let out = '';
+        let err = '';
+        child.stdout?.on('data', (b) => (out += b.toString()));
+        child.stderr?.on('data', (b) => (err += b.toString()));
+        child.on('error', (e) => resolve({ code: 127, out: '', err: (e as Error).message }));
+        child.on('exit', (code) => resolve({ code: code ?? 0, out, err }));
+      });
+
+    // Allow either a workspace-rooted plan.md or one inside tasks/<run_id>/.
+    // We don't know which; best-effort `git add -A` keeps it simple and the
+    // commit message captures the intent. Empty diff → skip (no error).
+    const status = await run(['git', 'status', '--porcelain']);
+    if (status.code !== 0) {
+      this.logger.warn?.(`[autoloop-v2] git status failed: ${status.err.slice(0, 200)}`);
+      return;
+    }
+    if (status.out.trim() === '') {
+      this.logger.info?.(`[autoloop-v2] commit_${filename}: no changes to commit`);
+      return;
+    }
+    await run(['git', 'add', '-A']);
+    const commit = await run(['git', 'commit', '-m', message]);
+    if (commit.code !== 0) {
+      this.logger.warn?.(`[autoloop-v2] git commit failed: ${commit.err.slice(0, 200)}`);
+    }
   }
 }

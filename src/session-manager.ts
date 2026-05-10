@@ -155,8 +155,10 @@ import { AutoloopRunner } from './autoloop/v1/runner.js';
 import type { AutoloopConfig, AutoloopHandle } from './autoloop/v1/types.js';
 import { AutoloopV2Runner } from './autoloop/v2/runner.js';
 import { ClaudeAgentDispatcher, type ClaudeAgentDispatcherConfig } from './autoloop/v2/dispatcher.js';
-import type { AutoloopV2RunState } from './autoloop/v2/types.js';
+import type { AutoloopV2RunState, PushPolicy } from './autoloop/v2/types.js';
+import { DEFAULT_PUSH_POLICY } from './autoloop/v2/types.js';
 import { Msg as V2Msg, type PushChannel, type PushLevel } from './autoloop/v2/messages.js';
+import { appendPushLog, notifyUserFallbackChain } from './autoloop/v2/notify.js';
 import {
   PERSIST_DISK_TTL_MS,
   DEBOUNCED_SAVE_MS,
@@ -1901,7 +1903,13 @@ export class SessionManager {
 
   private autoloopsV2 = new Map<
     string,
-    { runner: AutoloopV2Runner; dispatcher: ClaudeAgentDispatcher; workspace: string }
+    {
+      runner: AutoloopV2Runner;
+      dispatcher: ClaudeAgentDispatcher;
+      workspace: string;
+      ledgerDir: string;
+      pushPolicy: PushPolicy;
+    }
   >();
 
   /**
@@ -1923,6 +1931,11 @@ export class SessionManager {
     if (!fs.existsSync(ledgerDir)) {
       fs.mkdirSync(ledgerDir, { recursive: true });
     }
+    // Per-run policy object — mutable so Planner's update_push_policy is visible
+    // to the runner without re-wiring.
+    const pushPolicy: PushPolicy = JSON.parse(JSON.stringify(DEFAULT_PUSH_POLICY)) as PushPolicy;
+    const runId = opts.runId;
+    let runnerRef: AutoloopV2Runner | null = null;
     const dispatcherConfig: ClaudeAgentDispatcherConfig = {
       manager: this,
       runId: opts.runId,
@@ -1931,19 +1944,50 @@ export class SessionManager {
       plannerModel: opts.plannerModel,
       sendTimeoutMs: opts.sendTimeoutMs,
       logger: this.logger,
+      pushPolicyRef: pushPolicy,
+      // S4 wires the real coder/reviewer spawn; for S3 we record intent and
+      // flip the runner's flag so subsequent state queries reflect the request.
+      onSpawnSubagents: async () => {
+        this.logger.info?.(`[autoloop-v2/${runId}] spawn_subagents requested (S4 not wired yet — flag flipped)`);
+        runnerRef?.markSubagentsSpawned();
+      },
     };
     const dispatcher = new ClaudeAgentDispatcher(dispatcherConfig);
     const runner = new AutoloopV2Runner({
       run_id: opts.runId,
       workspace: opts.workspace,
       ledger_dir: ledgerDir,
-      // S3 swaps this stub for the wechat→whatsapp→email fallback chain.
-      notifyUser: async (level: PushLevel, summary: string, _detail, channel: PushChannel) => {
-        this.logger.info?.(`[autoloop-v2/${opts.runId}] notify_user[${level}@${channel}]: ${summary}`);
+      push_policy: pushPolicy,
+      notifyUser: async (level: PushLevel, summary: string, detail, channel: PushChannel) => {
+        const result = await notifyUserFallbackChain({
+          level,
+          summary,
+          detail,
+          channel,
+          logger: this.logger,
+        });
+        appendPushLog(ledgerDir, {
+          ts: new Date().toISOString(),
+          level,
+          summary,
+          detail,
+          channel_requested: channel,
+          channel_used: result.channel_used,
+        });
+        this.logger.info?.(
+          `[autoloop-v2/${runId}] push level=${level} channel=${channel}→${result.channel_used} summary="${summary.slice(0, 80)}"`,
+        );
       },
       dispatcher,
     });
-    this.autoloopsV2.set(opts.runId, { runner, dispatcher, workspace: opts.workspace });
+    runnerRef = runner;
+    this.autoloopsV2.set(opts.runId, {
+      runner,
+      dispatcher,
+      workspace: opts.workspace,
+      ledgerDir,
+      pushPolicy,
+    });
     await runner.start();
     return {
       runId: opts.runId,
