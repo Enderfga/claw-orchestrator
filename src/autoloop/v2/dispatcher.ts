@@ -359,13 +359,24 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
       ),
     );
 
+    // Defensive: Planner may emit constraints / success_criteria as either
+    // a string or a string[]. Normalise.
+    const constraints: string[] = Array.isArray(env.payload.constraints)
+      ? env.payload.constraints.map(String)
+      : env.payload.constraints
+        ? [String(env.payload.constraints)]
+        : [];
+    const success: string[] = Array.isArray(env.payload.success_criteria)
+      ? env.payload.success_criteria.map(String)
+      : env.payload.success_criteria
+        ? [String(env.payload.success_criteria)]
+        : [];
+
     const promptText = [
       `[directive iter=${env.iter}]`,
       `goal: ${env.payload.goal}`,
-      env.payload.constraints?.length ? `constraints:\n  - ${env.payload.constraints.join('\n  - ')}` : '',
-      env.payload.success_criteria?.length
-        ? `success_criteria:\n  - ${env.payload.success_criteria.join('\n  - ')}`
-        : '',
+      constraints.length ? `constraints:\n  - ${constraints.join('\n  - ')}` : '',
+      success.length ? `success_criteria:\n  - ${success.join('\n  - ')}` : '',
       `max_attempts: ${env.payload.max_attempts}`,
       '',
       'Read plan.md / goal.json, make the change, run the evaluator, then emit `iter_complete`.',
