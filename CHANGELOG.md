@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.5.2] - 2026-05-10
+
+### Fixed
+
+- Autoloop HTTP routes (`/autoloop/<id>/state`, `/autoloop/<id>/push_log`,
+  `/autoloop/<id>/events`) returned 404 in 3.5.0 and 3.5.1 because the
+  regex patterns were `/^\/autoloop\/v2\/.../` (left-over from when the
+  paths still had a `/v2/` prefix); the `/v2/` was stripped from URLs in
+  the 3.5.0 collapse but the escaped slashes in the regex source weren't
+  caught by the rename. Reported by `/dashboard` failing to populate the
+  detail pane.
+
+  `/autoloop/list` was unaffected (its match was a literal string compare,
+  not a regex), so the dashboard sidebar populated correctly while the
+  detail / push_log / SSE endpoints all 404'd.
+
 ## [3.5.1] - 2026-05-10
 
 ### Added — embedded dashboard

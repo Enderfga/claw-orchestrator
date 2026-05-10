@@ -505,7 +505,7 @@ export class EmbeddedServer {
         return;
       }
 
-      const v2StateMatch = path.match(/^\/autoloop\/v2\/([^/]+)\/state$/);
+      const v2StateMatch = path.match(/^\/autoloop\/([^/]+)\/state$/);
       if (v2StateMatch) {
         const state = this.manager.autoloopStatus(v2StateMatch[1]);
         if (!state) {
@@ -516,7 +516,7 @@ export class EmbeddedServer {
         return;
       }
 
-      const v2PushLogMatch = path.match(/^\/autoloop\/v2\/([^/]+)\/push_log$/);
+      const v2PushLogMatch = path.match(/^\/autoloop\/([^/]+)\/push_log$/);
       if (v2PushLogMatch) {
         const id = v2PushLogMatch[1];
         const ctx = this.manager.getAutoloop(id);
@@ -546,7 +546,7 @@ export class EmbeddedServer {
         return;
       }
 
-      const v2EventsMatch = path.match(/^\/autoloop\/v2\/([^/]+)\/events$/);
+      const v2EventsMatch = path.match(/^\/autoloop\/([^/]+)\/events$/);
       if (v2EventsMatch) {
         const id = v2EventsMatch[1];
         const ctx = this.manager.getAutoloop(id);

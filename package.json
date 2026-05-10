@@ -1,6 +1,6 @@
 {
   "name": "@enderfga/claw-orchestrator",
-  "version": "3.5.1",
+  "version": "3.5.2",
   "description": "Claw Orchestrator — run Claude Code, Codex, Gemini, Cursor Agent, OpenCode and custom coding CLIs as one unified runtime for claw-style agent systems. Runs standalone, with first-class OpenClaw plugin support. Persistent sessions, multi-agent council, tool orchestration.",
   "type": "module",
   "main": "./dist/src/index.js",
