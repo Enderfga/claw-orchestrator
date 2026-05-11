@@ -29,7 +29,7 @@ import type { Logger } from '../logger.js';
 import { nullLogger } from '../logger.js';
 import { spawn } from 'node:child_process';
 import { type AnyAutoloopMessage, Msg } from './messages.js';
-import type { AgentDispatcher, AutoloopState, PushPolicy } from './types.js';
+import { LEDGER_SCHEMA_VERSION, type AgentDispatcher, type AutoloopState, type PushPolicy } from './types.js';
 import {
   applyPlannerToolCalls,
   parsePlannerReply,
@@ -37,6 +37,21 @@ import {
   type SpawnSubagentsArgs,
 } from './planner-tools.js';
 import { extractIterComplete, extractReviewComplete, parseAgentReply } from './agent-tools.js';
+
+/**
+ * Files inside <ledger>/reviewer_sandbox/ that survive `stageReviewSandbox`.
+ * Anything not listed is wiped between iters. `reviewer_memory.md` is also
+ * frozen-injected into the Reviewer system prompt at session start, so
+ * mid-session edits won't be reread until the next reset.
+ */
+const REVIEWER_SANDBOX_PERSIST = new Set(['reviewer_memory.md', 'reviewer_log.jsonl']);
+
+/**
+ * Push-policy keys that callers MUST NOT be able to silence at runtime.
+ * Prompt-injection could otherwise let a confused/malicious Planner mute the
+ * channels we use to surface phase errors and decision points.
+ */
+const UNSILENCEABLE_POLICY_KEYS = new Set(['on_phase_error', 'on_decision_needed']);
 
 export interface ClaudeAgentDispatcherConfig {
   manager: SessionManager;
@@ -94,6 +109,22 @@ const resolveDefaultReviewerPrompt = (): string => resolveConfigByName('autoloop
 interface SendMessageResult {
   output: string;
   error?: string;
+  /** Set when even the recovery retry failed — caller surfaces as phase_error. */
+  fatal?: boolean;
+}
+
+interface DecisionLogEntry {
+  ts: string;
+  kind:
+    | 'terminate'
+    | 'reset_agent'
+    | 'update_push_policy'
+    | 'compact'
+    | 'spawn_subagents'
+    | 'phase_error'
+    | 'policy_silence_blocked';
+  actor: 'planner' | 'runner' | 'dispatcher';
+  payload: Record<string, unknown>;
 }
 
 export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatcher {
@@ -142,7 +173,11 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
   }
 
   async shutdown(reason: string): Promise<void> {
-    void reason;
+    this.appendDecisionLog({
+      kind: 'terminate',
+      actor: reason === 'phase_error_circuit' ? 'runner' : 'planner',
+      payload: { reason },
+    });
     // Best-effort cleanup. Stopping a non-existent session is a no-op.
     for (const name of [this.plannerName, this.coderName, this.reviewerName]) {
       try {
@@ -195,6 +230,11 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
       throw new Error('Refusing to reset Planner without force=true (would discard chat context)');
     }
     const name = agent === 'planner' ? this.plannerName : agent === 'coder' ? this.coderName : this.reviewerName;
+    this.appendDecisionLog({
+      kind: 'reset_agent',
+      actor: 'dispatcher',
+      payload: { agent, force: !!opts.force, eagerRestart: !!opts.eagerRestart },
+    });
     try {
       await this.config.manager.stopSession(name);
     } catch (err) {
@@ -233,8 +273,24 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
         })) as SendMessageResult;
       } catch (err2) {
         this.logger.error?.(`[autoloop] ${agent} second attempt failed after reset: ${(err2 as Error).message}`);
-        return { output: '', error: (err2 as Error).message };
+        return { output: '', error: (err2 as Error).message, fatal: true };
       }
+    }
+  }
+
+  /**
+   * Append a structured audit row to `<ledger>/decisions.jsonl`. Best-effort:
+   * any I/O failure is logged but never thrown. Captures terminate, reset,
+   * push-policy mutations, compact triggers, subagent spawns, phase-error
+   * passes, and policy-silence attempts that we rejected.
+   */
+  private appendDecisionLog(entry: Omit<DecisionLogEntry, 'ts'>): void {
+    try {
+      fs.mkdirSync(this.ledgerDir, { recursive: true });
+      const line = JSON.stringify({ ts: new Date().toISOString(), ...entry }) + '\n';
+      fs.appendFileSync(path.join(this.ledgerDir, 'decisions.jsonl'), line);
+    } catch (err) {
+      this.logger.warn?.(`[autoloop] decisions.jsonl append failed: ${(err as Error).message}`);
     }
   }
 
@@ -296,6 +352,11 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
       `[autoloop/${this.config.runId}] ${agent} context ${pct.toFixed(0)}% ≥ ${threshold}% — auto-compact`,
     );
     this.emit('compact', { agent, percent: pct, threshold });
+    this.appendDecisionLog({
+      kind: 'compact',
+      actor: 'dispatcher',
+      payload: { agent, percent: pct, threshold },
+    });
     try {
       await this.config.manager.compactSession(name, this.compactSummaryFor(agent));
     } catch (err) {
@@ -358,6 +419,11 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
     }
     const effects: PlannerToolEffects = {
       spawnSubagents: async (args) => {
+        this.appendDecisionLog({
+          kind: 'spawn_subagents',
+          actor: 'planner',
+          payload: { args },
+        });
         if (this.config.onSpawnSubagents) {
           await this.config.onSpawnSubagents(args);
         } else {
@@ -377,16 +443,45 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
           'on_stall_30min',
           'on_decision_needed',
         ]);
+        const applied: Record<string, unknown> = {};
+        const silenced_blocked: string[] = [];
         for (const [k, v] of Object.entries(delta)) {
           if (!policyKeys.has(k) || typeof v !== 'object' || v === null) continue;
-          (this.config.pushPolicyRef as unknown as Record<string, unknown>)[k] = v as Record<string, unknown>;
+          // B2: refuse to silence the channels that surface phase errors and
+          // user decisions. Other fields on the same rule still apply, so the
+          // operator can re-target level/channel without going dark.
+          const rule = { ...(v as Record<string, unknown>) };
+          if (UNSILENCEABLE_POLICY_KEYS.has(k) && rule.silent === true) {
+            silenced_blocked.push(k);
+            this.logger.warn?.(`[autoloop] refused to set silent=true on critical policy key ${k}`);
+            delete rule.silent;
+          }
+          (this.config.pushPolicyRef as unknown as Record<string, unknown>)[k] = rule;
+          applied[k] = rule;
+        }
+        if (silenced_blocked.length > 0) {
+          this.appendDecisionLog({
+            kind: 'policy_silence_blocked',
+            actor: 'planner',
+            payload: { keys: silenced_blocked },
+          });
+        }
+        if (Object.keys(applied).length > 0) {
+          this.appendDecisionLog({
+            kind: 'update_push_policy',
+            actor: 'planner',
+            payload: { applied },
+          });
         }
       },
       commitPlanFile: async (file, message) => {
         await this.gitCommit(file, message ?? `autoloop: planner commits ${file}`);
       },
     };
-    const handlerResult = await applyPlannerToolCalls(parsed.calls, effects, env.iter);
+    // After iter_done(N) the run has advanced to iter N+1 in runner state;
+    // any directive Planner emits in response targets the new iter.
+    const nextIter = env.type === 'iter_done' ? env.iter + 1 : env.iter;
+    const handlerResult = await applyPlannerToolCalls(parsed.calls, effects, nextIter);
     for (const errEntry of handlerResult.errors) {
       this.logger.warn?.(`[autoloop] tool '${errEntry.tool}' failed: ${errEntry.error}`);
     }
@@ -427,6 +522,7 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
       path.join(iterDir, 'directive.json'),
       JSON.stringify(
         {
+          schema_version: LEDGER_SCHEMA_VERSION,
           iter: env.iter,
           ts: env.ts,
           ...env.payload,
@@ -462,14 +558,31 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
       .join('\n');
 
     const result = await this.sendWithRecovery('coder', this.coderName, promptText);
+    // A3: subprocess died (recovery retry exhausted). Surface as phase_error
+    // rather than silently masquerading as a "clarification request"; the
+    // runner's circuit breaker can then trip after enough consecutive failures.
+    if (result.fatal) {
+      this.appendDecisionLog({
+        kind: 'phase_error',
+        actor: 'dispatcher',
+        payload: { agent: 'coder', phase: 'send', error: result.error ?? 'unknown' },
+      });
+      return [
+        Msg.phaseError(env.iter, {
+          agent: 'coder',
+          phase: 'send',
+          error: result.error ?? 'unknown send failure',
+        }),
+      ];
+    }
     const replyText = (result.output ?? '').trim();
     const parsed = parseAgentReply(replyText);
     this.emit('coder_reply', parsed.cleaned_reply);
 
     const ic = extractIterComplete(parsed.calls);
     if (!ic) {
-      // No iter_complete emitted — could be a clarification request, or the
-      // Coder bailed. Return a directive_ack so Planner sees it next turn.
+      // No iter_complete emitted — could be a clarification request. Return a
+      // directive_ack so Planner sees it next turn.
       await this.maybeCompact('coder', this.coderName);
       return [
         Msg.directiveAck(env.iter, {
@@ -480,7 +593,10 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
     }
 
     // Persist eval output to ledger.
-    fs.writeFileSync(path.join(iterDir, 'eval_output.json'), JSON.stringify(ic.eval_output, null, 2));
+    fs.writeFileSync(
+      path.join(iterDir, 'eval_output.json'),
+      JSON.stringify({ schema_version: LEDGER_SCHEMA_VERSION, iter: env.iter, eval_output: ic.eval_output }, null, 2),
+    );
     fs.writeFileSync(
       path.join(iterDir, 'coder_summary.txt'),
       `${ic.summary}\n\n--- coder cleaned reply ---\n${parsed.cleaned_reply}\n`,
@@ -500,7 +616,23 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
     // Commit the iteration so Reviewer's git view is clean for the next iter.
     await this.runGit(['git', 'add', '-A']);
     const commitMsg = `autoloop/iter-${env.iter}: ${ic.summary}`.slice(0, 200);
-    await this.runGit(['git', 'commit', '-m', commitMsg]);
+    const commitRes = await this.runGit(['git', 'commit', '-m', commitMsg]);
+    // A6: a non-"nothing to commit" failure (hook reject, signing missing,
+    // index lock) means the next iter's diff would be wrong. Bail to runner.
+    if (commitRes.code !== 0 && !/nothing to commit/i.test(commitRes.out + commitRes.err)) {
+      this.appendDecisionLog({
+        kind: 'phase_error',
+        actor: 'dispatcher',
+        payload: { agent: 'coder', phase: 'git_commit', error: commitRes.err.slice(0, 500) },
+      });
+      return [
+        Msg.phaseError(env.iter, {
+          agent: 'coder',
+          phase: 'git_commit',
+          error: `git commit failed (code=${commitRes.code}): ${commitRes.err.slice(0, 300)}`,
+        }),
+      ];
+    }
 
     await this.maybeCompact('coder', this.coderName);
     return [
@@ -514,6 +646,37 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
 
   // ─── Reviewer ───────────────────────────────────────────────────────────
 
+  /**
+   * Compose the Reviewer's system prompt with a frozen snapshot of
+   * `reviewer_memory.md` appended. Read once at session start; mid-session
+   * edits to the file do NOT take effect until the next Reviewer reset. This
+   * keeps the per-iter prompt prefix stable so Claude's prefix cache hits.
+   */
+  private buildReviewerSystemPrompt(): string {
+    const memoryPath = path.join(this.reviewerSandboxDir, 'reviewer_memory.md');
+    let memory = '';
+    try {
+      if (fs.existsSync(memoryPath)) {
+        memory = fs.readFileSync(memoryPath, 'utf-8').trim();
+      }
+    } catch (err) {
+      this.logger.warn?.(`[autoloop] failed to read reviewer_memory.md: ${(err as Error).message}`);
+    }
+    if (!memory) return this.reviewerSystemPrompt;
+    return [
+      this.reviewerSystemPrompt.trimEnd(),
+      '',
+      '<frozen_memory_snapshot>',
+      memory,
+      '</frozen_memory_snapshot>',
+      '',
+      'The snapshot above was injected into your system prompt at session start',
+      'and is frozen for this Reviewer session. Append new fakery patterns or',
+      'observations to reviewer_memory.md on disk; they will be re-injected on',
+      'the next Reviewer reset, not mid-session.',
+    ].join('\n');
+  }
+
   private async ensureReviewer(): Promise<void> {
     if (this.reviewerStarted) return;
     fs.mkdirSync(this.reviewerSandboxDir, { recursive: true });
@@ -523,7 +686,7 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
       engine: 'claude',
       model: this.reviewerModel,
       permissionMode: 'bypassPermissions',
-      systemPrompt: this.reviewerSystemPrompt,
+      systemPrompt: this.buildReviewerSystemPrompt(),
     });
     this.reviewerStarted = true;
   }
@@ -535,9 +698,11 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
    */
   private stageReviewSandbox(iter: number): void {
     fs.mkdirSync(this.reviewerSandboxDir, { recursive: true });
-    // Wipe top-level files (keep reviewer_memory.md if present).
+    // Wipe top-level files but preserve the Reviewer's cross-iter memory and
+    // append-only audit log (see REVIEWER_SANDBOX_PERSIST). The Reviewer prompt
+    // promises both survive across iters; the wipe used to break the log.
     for (const ent of fs.readdirSync(this.reviewerSandboxDir)) {
-      if (ent === 'reviewer_memory.md') continue;
+      if (REVIEWER_SANDBOX_PERSIST.has(ent)) continue;
       const full = path.join(this.reviewerSandboxDir, ent);
       try {
         fs.rmSync(full, { recursive: true, force: true });
@@ -583,6 +748,20 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
     ].join('\n');
 
     const result = await this.sendWithRecovery('reviewer', this.reviewerName, promptText);
+    if (result.fatal) {
+      this.appendDecisionLog({
+        kind: 'phase_error',
+        actor: 'dispatcher',
+        payload: { agent: 'reviewer', phase: 'send', error: result.error ?? 'unknown' },
+      });
+      return [
+        Msg.phaseError(env.payload.iter, {
+          agent: 'reviewer',
+          phase: 'send',
+          error: result.error ?? 'unknown send failure',
+        }),
+      ];
+    }
     const replyText = (result.output ?? '').trim();
     const parsed = parseAgentReply(replyText);
     this.emit('reviewer_reply', parsed.cleaned_reply);
@@ -618,7 +797,11 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
     fs.mkdirSync(iterDir, { recursive: true });
     fs.writeFileSync(
       path.join(iterDir, 'verdict.json'),
-      JSON.stringify({ iter, ts: new Date().toISOString(), ...payload }, null, 2),
+      JSON.stringify(
+        { schema_version: LEDGER_SCHEMA_VERSION, iter, ts: new Date().toISOString(), ...payload },
+        null,
+        2,
+      ),
     );
   }
 

@@ -5,6 +5,84 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.6.0] - 2026-05-11
+
+### Added — autoloop ergonomics & guardrails
+
+- **Reviewer frozen-memory injection.** `reviewer_memory.md` is now read at
+  Reviewer-session start and inlined as a `<frozen_memory_snapshot>` block in
+  the system prompt. The snapshot stays constant for the session's lifetime,
+  so the prefix cache hits on every iter; edits to the file on disk take
+  effect on the next Reviewer reset.
+- **Phase-error circuit breaker.** Consecutive `phase_error` messages
+  (subprocess deaths, failed `git commit`, etc.) count toward a configurable
+  threshold (`phaseErrorCircuit`, default `3`). When tripped, the runner
+  emits a `decision`-level push and auto-terminates with reason
+  `phase_error_circuit`. A successful `iter_done` resets the count.
+- **Stall detection.** A wall-clock timer fires `on_stall_30min` when the
+  runner has processed no messages for `stallMs` (default 30 min) while
+  `status === 'running'`. Configurable via `stallMs` /
+  `stallCheckIntervalMs`.
+- **`decisions.jsonl` audit trail.** `terminate`, `reset_agent`,
+  `update_push_policy`, `compact`, `spawn_subagents`, `phase_error`, and
+  rejected silence attempts write structured entries to
+  `<ledger>/decisions.jsonl`.
+- **`prior_metrics` history.** Runner keeps the last 20 verdict metrics and
+  passes the most recent 10 in every `review_request`, finally enabling the
+  Reviewer rubric's "metric improved but eval unchanged" check.
+- **Ledger `schema_version`.** `directive.json` / `eval_output.json` /
+  `verdict.json` now carry `schema_version: 1` for forward-compatible
+  migrations.
+
+### Fixed — autoloop correctness
+
+- **`state.iter` no longer pinned at `0`.** It advances by one per committed
+  `review_verdict`, so SSE events, `iter_done` payloads, push summaries and
+  ledger directories all point at the right iter. The dispatcher also bumps
+  the iter passed into Planner-tool handlers when responding to an
+  `iter_done(N)`, so follow-up directives correctly target iter `N+1`.
+- **`pause_loop` is enforced.** Previously a no-op; the runner now parks
+  agent-bound messages in a paused-buffer and replays them in order on
+  `resume`. `terminate` / runner-bound messages still process while paused.
+- **Coder / Reviewer subprocess death surfaces as `phase_error`.** A failed
+  `sendWithRecovery` retry used to masquerade as a "clarification request",
+  hiding the most common failure mode. A new `fatal` marker now flows into
+  a `phase_error` envelope and feeds the circuit.
+- **Reviewer sandbox restage preserves `reviewer_log.jsonl`.** The whitelist
+  also keeps the append-only audit log the Reviewer prompt has always
+  promised.
+- **Git commit failure inside an iter** (hook reject, signing missing) is
+  surfaced as `phase_error` instead of writing a stale `iter_artifacts`
+  with a phantom diff.
+- **Planner prompt drift.** Removed stale references to
+  `src/autoloop/v1/types.ts` (file does not exist) and the "S2 has no
+  `notify_user`" line that kept Planner from ever pushing the user.
+
+### Changed
+
+- **`update_push_policy` cannot silence `on_phase_error` or
+  `on_decision_needed`.** The `silent` flag is stripped (other fields on
+  the same rule still apply) and the attempt is recorded in
+  `decisions.jsonl`. Prevents a confused Planner from muting the
+  operator's lifeline channels.
+- **`firePolicyPush` self-drains** when called outside an active drain
+  (notably from the stall-detector interval), so policy pushes always
+  reach the notifier.
+- **`notify` reads recipient env vars at call time** rather than caching
+  them at module load — operators can rotate the env without restarting.
+
+### Tests
+
+- New `src/__tests__/autoloop-dispatcher.test.ts` (7 tests) covering
+  frozen-memory injection, phase_error surfacing, policy silencing guard,
+  sandbox whitelist, auto-compact + decisions.jsonl, ledger schema_version.
+- New `src/__tests__/autoloop-notify.test.ts` (5 tests) covering the
+  fallback chain (wechat → whatsapp → email), env-var gating, webchat
+  no-op, and `appendPushLog` formatting.
+- Extended `src/__tests__/autoloop-runner.test.ts` (16 tests, was 10)
+  with iter-advance, pause enforcement, phase-error circuit, prior_metrics
+  history, and stall detection.
+
 ## [3.5.6] - 2026-05-11
 
 ### Fixed — embedded HTTP server auth-by-default (closes #61)

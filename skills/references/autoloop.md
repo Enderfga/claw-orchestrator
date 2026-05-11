@@ -119,7 +119,60 @@ never see the JSON — only the Planner's narrative.
 5-minute dedup on (level, summary) prevents duplicate pushes from the same
 event. Channel chain: `auto` walks wechat → whatsapp → email; `wechat` /
 `webchat` / `email` route directly; `both` does webchat (if session known)
-+ wechat fallback chain.
++ wechat fallback chain. **`on_phase_error` and `on_decision_needed` cannot
+be set to `silent: true`** by Planner — `update_push_policy` strips the flag
+and records the attempt in `decisions.jsonl` (these channels are the
+operator's lifeline; they stay loud).
+
+## Auto-compact
+
+Each agent's context is monitored after every turn. When `getStats().contextPercent`
+crosses the per-agent threshold the dispatcher invokes `/compact` with a
+role-tuned hint (`compactSummaryFor`). Defaults: Planner 80 %, Coder 70 %,
+Reviewer 70 %. Override per run via `compactThresholds`. A 30 s debounce
+prevents re-fire while post-compact stats settle. Events: `compact` is
+emitted on the dispatcher EventEmitter AND appended to `decisions.jsonl`.
+
+## Phase-error circuit
+
+Subprocess deaths (Claude session lost), failed `git commit` in an iter, and
+other phase-bound failures surface as `phase_error` messages instead of
+silently masquerading as a "clarification request". The runner counts
+consecutive `phase_error`s and:
+
+1. Fires `on_phase_error` on each one (defaults to error / both channels).
+2. After `phaseErrorCircuit` consecutive errors (default **3**) emits a
+   `decision`-level push and an automatic `terminate { reason:
+   'phase_error_circuit' }`.
+
+A successful (non-error) `iter_done` resets the counter. Override the
+threshold via `AutoloopConfig.phaseErrorCircuit`.
+
+## Reviewer frozen memory
+
+`reviewer_memory.md` is read at Reviewer-session start and **injected as a
+frozen `<frozen_memory_snapshot>` block** into the system prompt. It stays
+constant for the lifetime of that session so Claude's prefix cache hits.
+Reviewer can append fresh observations to the file on disk; those edits
+become visible only on the next Reviewer reset (`autoloop_reset_agent`
+with `agent: 'reviewer', eager_restart: true`).
+
+## Decisions audit
+
+`<ledger>/decisions.jsonl` is the auditable trail of runner / dispatcher
+decisions:
+
+| Kind | When |
+|---|---|
+| `spawn_subagents` | Planner emits `spawn_subagents` |
+| `reset_agent` | Any agent reset (manual or auto-recovery) |
+| `compact` | Auto-compact fires |
+| `update_push_policy` | Planner mutates the policy |
+| `policy_silence_blocked` | Planner tried to silence a critical channel |
+| `phase_error` | Surfaced from dispatcher to runner |
+| `terminate` | Run ends (planner reason or `phase_error_circuit`) |
+
+JSONL, one entry per line, ts-prefixed.
 
 ## Ledger layout
 
@@ -128,22 +181,30 @@ event. Channel chain: `auto` walks wechat → whatsapp → email; `wechat` /
 ├── plan.md              # Planner-authored, git-committed
 ├── goal.json            # Planner-authored, git-committed
 ├── push_log.jsonl       # every notify_user attempt + channel used
+├── decisions.jsonl      # runner / dispatcher audit trail (see above)
 ├── reviewer_sandbox/    # Reviewer cwd; restaged per iter
 │   ├── plan.md          # copy
 │   ├── goal.json        # copy
 │   ├── iter-N/          # this iter's directive + diff + eval
 │   ├── prior_verdict.json
-│   └── reviewer_memory.md  # persistent across iters
+│   ├── reviewer_memory.md   # persistent (frozen-injected at session start)
+│   └── reviewer_log.jsonl   # persistent (Reviewer's append-only audit log)
 └── iter/<n>/
-    ├── directive.json     # Planner → Coder
-    ├── eval_output.json   # what Coder reported
+    ├── directive.json     # Planner → Coder        (schema_version: 1)
+    ├── eval_output.json   # what Coder reported     (schema_version: 1)
     ├── diff.patch         # git diff of the iter
-    ├── verdict.json       # Reviewer decision + audit notes
+    ├── verdict.json       # Reviewer decision + audit notes (schema_version: 1)
     └── coder_summary.txt
 ```
 
 The orchestrator git-commits each iter automatically. Coder must NOT call
-`git commit` itself — that confuses the diff log.
+`git commit` itself — that confuses the diff log. **If `git commit` fails
+inside an iter** (pre-commit hook reject, signing key missing, …) the
+dispatcher emits a `phase_error` instead of writing `iter_artifacts`, so
+the failure is visible to the runner and counts toward the circuit.
+
+Every JSON artifact in the ledger carries a `schema_version` field (currently
+`1`) to make future migrations explicit.
 
 ## Backend HTTP / SSE
 
@@ -210,9 +271,10 @@ iter 0 ledger artifacts (`directive` + `eval_output` + `diff.patch` +
 
 ## Known limitations
 
-- **No auto-compact on token budget.** Manual `autoloop_reset_agent` covers
-  the same recovery path. Auto-compact is queued for a follow-up once
-  `ISession.getStats` exposes token-usage hooks.
+- **`webchat` channel is a no-op** — `notifyUserFallbackChain` does not yet
+  carry a webchat session id at the run level, so `channel: 'webchat'`
+  always returns `channel_used: 'none'`. Use `auto` / `wechat` / `email`
+  until the inbound route lands.
 - **One-way push.** WeChat → Planner inbound replies are not yet wired (would
   need an openclaw-gateway tmux-passthrough route). Reply via webchat /
   `autoloop_chat`.
@@ -221,3 +283,10 @@ iter 0 ledger artifacts (`directive` + `eval_output` + `diff.patch` +
 - **No fork / population mode.** Single linear iter trajectory per run.
 - **Cross-run knowledge isolated.** Each run's `reviewer_memory.md` and
   `coder_notes.md` live in that run's ledger; no shared meta-store yet.
+- **No cost / wall-clock budget cap.** Only `phaseErrorCircuit` + Reviewer
+  hold/reject streaks bound the run; a steady-but-pointless ratchet could
+  run for days. Set `max_iters` in `goal.json` to bound iter count.
+- **Run state in memory.** SessionManager restart drops the live `autoloops`
+  map; the on-disk ledger survives but cannot resume a running state.
+- **Multi-run / same workspace** races on `git index.lock`. Run separate
+  workspaces (or git worktrees) for concurrent runs.

@@ -22,10 +22,19 @@ import { type Logger, nullLogger } from '../logger.js';
 // Set the following env vars before relying on the matching channel; if a
 // var is unset that channel is silently skipped and the fallback chain moves
 // on. Email (independent SMTP via push-api-skill script) is the final tier
-// regardless of these.
-const WECHAT_RECIPIENT = process.env.AUTOLOOP_WECHAT_RECIPIENT ?? '';
-const WECHAT_ACCOUNT = process.env.AUTOLOOP_WECHAT_ACCOUNT ?? '';
-const WHATSAPP_RECIPIENT = process.env.AUTOLOOP_WHATSAPP_RECIPIENT ?? '';
+// regardless of these. Read at call time (not module load) so the operator
+// can rotate the env without restarting the whole orchestrator.
+function readRecipientEnv(): {
+  wechatRecipient: string;
+  wechatAccount: string;
+  whatsappRecipient: string;
+} {
+  return {
+    wechatRecipient: process.env.AUTOLOOP_WECHAT_RECIPIENT ?? '',
+    wechatAccount: process.env.AUTOLOOP_WECHAT_ACCOUNT ?? '',
+    whatsappRecipient: process.env.AUTOLOOP_WHATSAPP_RECIPIENT ?? '',
+  };
+}
 
 interface RunResult {
   exit_code: number;
@@ -79,7 +88,8 @@ function formatMessage(level: PushLevel, summary: string): string {
 }
 
 async function tryWechat(text: string, logger: Logger): Promise<boolean> {
-  if (!WECHAT_RECIPIENT || !WECHAT_ACCOUNT) {
+  const { wechatRecipient, wechatAccount } = readRecipientEnv();
+  if (!wechatRecipient || !wechatAccount) {
     logger.info?.('[autoloop/notify] wechat skipped: AUTOLOOP_WECHAT_RECIPIENT / AUTOLOOP_WECHAT_ACCOUNT not set');
     return false;
   }
@@ -90,9 +100,9 @@ async function tryWechat(text: string, logger: Logger): Promise<boolean> {
     '--channel',
     'openclaw-weixin',
     '--account',
-    WECHAT_ACCOUNT,
+    wechatAccount,
     '-t',
-    WECHAT_RECIPIENT,
+    wechatRecipient,
     '-m',
     text,
   ]);
@@ -102,21 +112,12 @@ async function tryWechat(text: string, logger: Logger): Promise<boolean> {
 }
 
 async function tryWhatsApp(text: string, logger: Logger): Promise<boolean> {
-  if (!WHATSAPP_RECIPIENT) {
+  const { whatsappRecipient } = readRecipientEnv();
+  if (!whatsappRecipient) {
     logger.info?.('[autoloop/notify] whatsapp skipped: AUTOLOOP_WHATSAPP_RECIPIENT not set');
     return false;
   }
-  const r = await runCmd([
-    'openclaw',
-    'message',
-    'send',
-    '--channel',
-    'whatsapp',
-    '-t',
-    WHATSAPP_RECIPIENT,
-    '-m',
-    text,
-  ]);
+  const r = await runCmd(['openclaw', 'message', 'send', '--channel', 'whatsapp', '-t', whatsappRecipient, '-m', text]);
   if (r.exit_code === 0 && /✅\s*Sent/.test(r.stdout)) return true;
   logger.warn?.(`[autoloop/notify] whatsapp failed: code=${r.exit_code} stderr=${r.stderr.slice(0, 200)}`);
   return false;

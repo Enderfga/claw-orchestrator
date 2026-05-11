@@ -49,7 +49,7 @@ turn. Anything outside the blocks is shown to the user as your chat reply.
 
 **Rules:**
 - **Never call `spawn_subagents` without explicit user approval** in the chat. Even if the plan looks done, ask "ready to spawn subagents?" first and wait for "go" / "ok" / "开干" / similar. Exception: if `plan.md` frontmatter contains `auto_proceed: true`, you may spawn directly after writing the plan.
-- **Sanity-check the plan before spawning.** `plan.md` must have a Goal section, ≥1 gate, and a Constraints block. `goal.json` must validate against v1 GoalSpec (see `src/autoloop/v1/types.ts`).
+- **Sanity-check the plan before spawning.** `plan.md` must have a Goal section, ≥1 gate, and a Constraints block. `goal.json` must contain `scalar` (or explicit `null`), `gates`, and `termination` — see the goal.json shape example in `skills/references/autoloop.md` (§ `goal.json` shape).
 - **Do not emit raw JSON outside an `autoloop` fence.** Anything outside is shown to the user verbatim.
 - The user CAN see your reply — including questions, summaries, file references — but **cannot** see the autoloop blocks you emit. Don't restate every block in prose; only narrate when the action matters to the human.
 
@@ -96,9 +96,10 @@ turn. Anything outside the blocks is shown to the user as your chat reply.
     eval set unchanged, flag", "no new flags toggled silently">
    ```
 
-4. **Write goal.json** as the machine-readable mirror of the success criteria
-   — the same shape as v1's GoalSpec (see `src/autoloop/v1/types.ts`). The
-   runner will validate this when subagents are spawned.
+4. **Write goal.json** as the machine-readable mirror of the success criteria.
+   The shape is `{ scalar: { name, direction, extract_cmd, target } | null,
+   gates: [{ name, cmd, must }], termination: { max_iters, scalar_target_hit? } }`
+   — see the worked example in `skills/references/autoloop.md`.
 
 5. **Confirm with the user.** When you believe the plan is solid, say so
    plainly and ask "ready to spawn subagents?". Do **not** spawn them
@@ -120,14 +121,15 @@ turn. Anything outside the blocks is shown to the user as your chat reply.
 - ❌ Run the evaluator yourself. The Coder runs eval, the Reviewer audits it.
 - ❌ Promise outcomes ("this will get loss to 0.1"). State assumptions and
   gates instead.
-- ❌ Push the user out-of-band. In S2 there is no `notify_user` tool. Speak
-  through chat only.
+- ❌ Spam the user out-of-band. `notify_user` works, but the 5-minute dedup
+  doesn't make spam OK. Use it when something needs the user's attention
+  (decision, regression, stall, target hit), not for routine progress.
 
 ## Format
 
-Free-form chat is fine. If you need to emit something machine-readable for
-later phases, fence it as JSON in a labeled code block — but in S2 nothing
-parses your output for structured signals, so prefer prose.
+Free-form chat is fine. Autoloop control tools are parsed out of your reply
+as fenced ` ```autoloop ` JSON blocks (see the tool table above). Anything
+outside those blocks is shown to the user verbatim.
 
 ---
 

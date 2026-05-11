@@ -87,6 +87,19 @@ export interface TerminatePayload {
   reason: string;
 }
 
+/**
+ * Surfaced when an agent subprocess dies, a phase-bound side effect fails
+ * (e.g., git commit), or any other unrecoverable per-iter error needs to
+ * become visible to the runner instead of being swallowed inside a fake
+ * directive_ack. The runner counts consecutive phase_errors and trips a
+ * circuit-breaker terminate when the configured threshold is reached.
+ */
+export interface PhaseErrorPayload {
+  agent: 'planner' | 'coder' | 'reviewer';
+  phase: string;
+  error: string;
+}
+
 // ─── Discriminated union ─────────────────────────────────────────────────────
 
 export type AutoloopMessageType =
@@ -100,7 +113,8 @@ export type AutoloopMessageType =
   | 'push_user'
   | 'pause'
   | 'resume'
-  | 'terminate';
+  | 'terminate'
+  | 'phase_error';
 
 type PayloadMap = {
   chat: UserChatPayload;
@@ -114,6 +128,7 @@ type PayloadMap = {
   pause: PausePayload;
   resume: ResumePayload;
   terminate: TerminatePayload;
+  phase_error: PhaseErrorPayload;
 };
 
 export type PayloadFor<T extends AutoloopMessageType> = PayloadMap[T];
@@ -141,6 +156,9 @@ const ALLOWED_ROUTES: ReadonlyArray<readonly [AutoloopRole, AutoloopRole, Autolo
   ['planner', 'runner', 'pause'],
   ['planner', 'runner', 'resume'],
   ['planner', 'runner', 'terminate'],
+  ['coder', 'runner', 'phase_error'],
+  ['reviewer', 'runner', 'phase_error'],
+  ['planner', 'runner', 'phase_error'],
 ];
 
 export class AutoloopRoutingError extends Error {
@@ -203,6 +221,8 @@ export const Msg = {
   pause: (iter: number, payload: PausePayload) => envelope(iter, 'planner', 'runner', 'pause', payload),
   resume: (iter: number) => envelope(iter, 'planner', 'runner', 'resume', {}),
   terminate: (iter: number, payload: TerminatePayload) => envelope(iter, 'planner', 'runner', 'terminate', payload),
+  phaseError: (iter: number, payload: PhaseErrorPayload) =>
+    envelope(iter, payload.agent, 'runner', 'phase_error', payload),
 };
 
 // ─── Wire serialisation (for InboxManager transport) ─────────────────────────

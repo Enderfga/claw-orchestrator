@@ -20,7 +20,24 @@ export interface AutoloopState {
   push_log_count: number;
   /** Last reason set when status flips to terminated/crashed/paused. */
   status_reason: string | null;
+  /**
+   * Phase-error circuit breaker — incremented on every `phase_error` message,
+   * cleared on each successful (non-error) `iter_done`. When it reaches
+   * `AutoloopConfig.phaseErrorCircuit`, the runner auto-terminates.
+   */
+  consecutive_phase_errors: number;
+  /** Recent (≤ 3) phase_error payloads kept around for circuit-trip push detail. */
+  recent_phase_errors: Array<{ ts: string; agent: string; phase: string; error: string }>;
+  /** Recent metric history (most-recent last, capped at MAX_METRIC_HISTORY). */
+  metric_history: number[];
+  /** ms since epoch of the last handled message; used by stall detector. */
+  last_activity_at: number;
 }
+
+/** How many metric points the runner remembers for prior_metrics injection. */
+export const MAX_METRIC_HISTORY = 20;
+/** Schema version stamped onto every ledger artifact (directive/eval/verdict.json). */
+export const LEDGER_SCHEMA_VERSION = 1;
 
 export interface PushPolicyRule {
   silent?: boolean;
@@ -83,4 +100,21 @@ export interface AutoloopConfig {
   notifyUser: (level: PushLevel, summary: string, detail: string | undefined, channel: PushChannel) => Promise<void>;
   /** Agent transport layer (mockable). */
   dispatcher: AgentDispatcher;
+  /**
+   * Phase-error circuit threshold. After this many consecutive `phase_error`
+   * messages the runner auto-terminates with reason `phase_error_circuit`
+   * (and emits a decision-level push first). Default 3.
+   */
+  phaseErrorCircuit?: number;
+  /**
+   * Stall detection wall-clock budget (ms). When no message has been
+   * processed for this long and status is 'running', the runner fires
+   * `on_stall_30min`. Default 30 min.
+   */
+  stallMs?: number;
+  /**
+   * Stall check interval (ms). Default 30 s. Tests pass a smaller value
+   * along with shorter `stallMs` so the assertions complete quickly.
+   */
+  stallCheckIntervalMs?: number;
 }

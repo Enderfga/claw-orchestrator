@@ -13,9 +13,12 @@
 
 import { EventEmitter } from 'node:events';
 import { type AnyAutoloopMessage, AutoloopRoutingError, Msg, validateMessage } from './messages.js';
-import { DEFAULT_PUSH_POLICY, type AutoloopConfig, type AutoloopState } from './types.js';
+import { DEFAULT_PUSH_POLICY, MAX_METRIC_HISTORY, type AutoloopConfig, type AutoloopState } from './types.js';
 
 const MAX_DISPATCH_DEPTH = 64;
+const DEFAULT_PHASE_ERROR_CIRCUIT = 3;
+const DEFAULT_STALL_MS = 30 * 60_000;
+const DEFAULT_STALL_CHECK_MS = 30_000;
 
 /**
  * Events emitted by the runner (string keys, documented payloads):
@@ -31,11 +34,18 @@ export class AutoloopRunner extends EventEmitter {
   state: AutoloopState;
   /** Queue of messages awaiting routing. Drained by the active dispatch loop. */
   private queue: AnyAutoloopMessage[] = [];
+  /**
+   * Holds agent-bound messages that arrived while status === 'paused'.
+   * On `resume`, they are unshifted back onto the queue head in order so
+   * the loop continues exactly where it stopped.
+   */
+  private pausedBuffer: AnyAutoloopMessage[] = [];
   private draining = false;
   private regressionStreak = 0;
   private rejectStreak = 0;
   /** Recent push events for dedup (5 min window). */
   private recentPushes: Array<{ key: string; ts: number }> = [];
+  private stallTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(config: AutoloopConfig) {
     super();
@@ -50,6 +60,10 @@ export class AutoloopRunner extends EventEmitter {
       ledger_dir: config.ledger_dir,
       push_log_count: 0,
       status_reason: null,
+      consecutive_phase_errors: 0,
+      recent_phase_errors: [],
+      metric_history: [],
+      last_activity_at: Date.now(),
     };
   }
 
@@ -57,6 +71,32 @@ export class AutoloopRunner extends EventEmitter {
     await this.config.dispatcher.init?.(this.state);
     // Surface initial state so listeners can render the planning UI.
     this.emit('state', this.state);
+    this.startStallDetector();
+  }
+
+  /** Stop the stall detector; safe to call multiple times. Tests use this. */
+  stop(): void {
+    if (this.stallTimer) {
+      clearInterval(this.stallTimer);
+      this.stallTimer = null;
+    }
+  }
+
+  private startStallDetector(): void {
+    if (this.stallTimer) return;
+    const stallMs = this.config.stallMs ?? DEFAULT_STALL_MS;
+    const intervalMs = this.config.stallCheckIntervalMs ?? DEFAULT_STALL_CHECK_MS;
+    this.stallTimer = setInterval(() => {
+      if (this.state.status !== 'running') return;
+      const idleFor = Date.now() - this.state.last_activity_at;
+      if (idleFor < stallMs) return;
+      // Reuse the policy-push pipeline so dedup applies.
+      void this.firePolicyPush('on_stall_30min', this.state.iter).catch((err) => {
+        this.emit('error', err);
+      });
+    }, intervalMs);
+    // Don't keep node alive solely for stall checking.
+    this.stallTimer?.unref?.();
   }
 
   /** Enqueue a message and drain the queue. Resolves when the queue is idle. */
@@ -101,6 +141,7 @@ export class AutoloopRunner extends EventEmitter {
 
   private async handleOne(env: AnyAutoloopMessage): Promise<void> {
     this.emit('message', env);
+    this.state.last_activity_at = Date.now();
 
     // Runner is the target for a small set of messages — handle them inline.
     if (env.to === 'runner') {
@@ -117,6 +158,12 @@ export class AutoloopRunner extends EventEmitter {
 
     // Everything else goes to the agent dispatcher.
     if (this.state.status === 'terminated') return;
+    // Pause: park agent-bound messages until resume. Runner-bound (resume /
+    // terminate) and user-bound (push) flow through above and are unaffected.
+    if (this.state.status === 'paused') {
+      this.pausedBuffer.push(env);
+      return;
+    }
     const replies = await this.config.dispatcher.deliver(env);
     for (const r of replies) {
       validateMessage(r);
@@ -131,7 +178,7 @@ export class AutoloopRunner extends EventEmitter {
         const req = Msg.reviewRequest(env.iter, {
           iter: env.iter,
           ledger_path: this.config.ledger_dir,
-          prior_metrics: [], // S4 will populate from metric.json
+          prior_metrics: this.state.metric_history.slice(-10),
         });
         this.queue.push(req);
         return;
@@ -147,6 +194,18 @@ export class AutoloopRunner extends EventEmitter {
         if (regression) this.regressionStreak++;
         else this.regressionStreak = 0;
 
+        // A non-error iter resets the phase-error circuit.
+        this.state.consecutive_phase_errors = 0;
+        this.state.recent_phase_errors = [];
+
+        // A7: record metric for prior_metrics on the next review_request.
+        if (typeof v.metric === 'number' && Number.isFinite(v.metric)) {
+          this.state.metric_history.push(v.metric);
+          if (this.state.metric_history.length > MAX_METRIC_HISTORY) {
+            this.state.metric_history.splice(0, this.state.metric_history.length - MAX_METRIC_HISTORY);
+          }
+        }
+
         const done = Msg.iterDone(env.iter, {
           iter: env.iter,
           verdict: v.decision,
@@ -154,10 +213,51 @@ export class AutoloopRunner extends EventEmitter {
           regression,
         });
         this.queue.push(done);
+        // A1: advance iter counter after a verdict is committed. The new iter
+        // becomes addressable for follow-up directives, push events, and SSE.
+        this.state.iter = env.iter + 1;
+        this.emit('state', this.state);
         this.emit('iter_done', { iter: env.iter, verdict: v.decision, metric: v.metric });
         // Trigger policy-based push hooks.
         if (this.regressionStreak >= 2) await this.firePolicyPush('on_metric_regression_2', env.iter);
         if (this.rejectStreak >= 2) await this.firePolicyPush('on_reviewer_reject_2', env.iter);
+        return;
+      }
+      case 'phase_error': {
+        // A3 + C2: track consecutive failures and trip the circuit breaker.
+        const p = env.payload;
+        this.state.consecutive_phase_errors += 1;
+        this.state.recent_phase_errors.push({
+          ts: env.ts,
+          agent: p.agent,
+          phase: p.phase,
+          error: p.error,
+        });
+        if (this.state.recent_phase_errors.length > 5) {
+          this.state.recent_phase_errors.splice(0, this.state.recent_phase_errors.length - 5);
+        }
+        this.emit('state', this.state);
+        this.emit('phase_error', p);
+        await this.firePolicyPush('on_phase_error', env.iter);
+        const circuit = this.config.phaseErrorCircuit ?? DEFAULT_PHASE_ERROR_CIRCUIT;
+        if (this.state.consecutive_phase_errors >= circuit) {
+          const detail = this.state.recent_phase_errors
+            .map((e) => `${e.agent}/${e.phase}: ${e.error.slice(0, 160)}`)
+            .join('\n');
+          this.queue.push(
+            Msg.pushUser(env.iter, {
+              level: 'decision',
+              summary: `phase-error circuit tripped (${this.state.consecutive_phase_errors} consecutive)`,
+              detail,
+              channel: 'both',
+            }),
+          );
+          this.queue.push(
+            Msg.terminate(env.iter, {
+              reason: 'phase_error_circuit',
+            }),
+          );
+        }
         return;
       }
       case 'pause': {
@@ -170,6 +270,12 @@ export class AutoloopRunner extends EventEmitter {
         if (this.state.status === 'paused') {
           this.state.status = 'running';
           this.state.status_reason = null;
+          // Restore parked agent-bound messages at the queue head, preserving
+          // arrival order so the loop continues from where pause caught it.
+          while (this.pausedBuffer.length > 0) {
+            const item = this.pausedBuffer.pop();
+            if (item) this.queue.unshift(item);
+          }
           this.emit('state', this.state);
         }
         return;
@@ -177,6 +283,7 @@ export class AutoloopRunner extends EventEmitter {
       case 'terminate': {
         this.state.status = 'terminated';
         this.state.status_reason = env.payload.reason;
+        this.stop();
         this.emit('state', this.state);
         await this.config.dispatcher.shutdown?.(env.payload.reason);
         this.emit('terminated', env.payload.reason);
@@ -217,5 +324,12 @@ export class AutoloopRunner extends EventEmitter {
         channel: r.channel ?? 'auto',
       }),
     );
+    // When firePolicyPush is called from outside a running drain (e.g. the
+    // stall-detector interval), the queued message would otherwise sit until
+    // the next send(). Kick the drain — the re-entrancy guard makes this safe
+    // when we ARE inside a drain.
+    if (!this.draining) {
+      await this.drain();
+    }
   }
 }
