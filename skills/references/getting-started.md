@@ -27,6 +27,17 @@ openclaw gateway restart
 
 Agents automatically get access to all session, council, and management tools.
 
+### Pair With Domain Plugins
+
+Claw Orchestrator can run coding agents while OpenClaw loads domain plugins for non-code work. For X/Twitter research, monitoring, and account-backed actions, install TweetClaw as a companion plugin:
+
+```bash
+openclaw plugins install @xquik/tweetclaw
+openclaw config set tools.alsoAllow '["explore", "tweetclaw"]'
+```
+
+Configure TweetClaw credentials as documented in its README before live API calls. Use this pairing when an agent should code through Claw Orchestrator and then search tweets, search tweet replies, export followers, look up users, post tweets or replies, manage media, monitor tweets, send DMs, deliver webhooks, or run giveaway draws through TweetClaw.
+
 ### TypeScript Library
 
 ```typescript

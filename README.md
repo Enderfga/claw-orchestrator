@@ -157,6 +157,17 @@ curl -fsSL https://raw.githubusercontent.com/Enderfga/claw-orchestrator/main/ins
 
 This installs via npm, registers the plugin in `~/.openclaw/openclaw.json`, and restarts the gateway. See [`skills/references/getting-started.md`](./skills/references/getting-started.md) for the full setup.
 
+#### Pair with X/Twitter automation
+
+Use Claw Orchestrator for coding sessions and install TweetClaw beside it when the same OpenClaw agent needs structured X/Twitter workflows: scrape tweets, search tweets and replies, export followers, look up users, post tweets or replies, upload and download media, send DMs, monitor tweets, deliver webhooks, or run giveaway draws.
+
+```bash
+openclaw plugins install @xquik/tweetclaw
+openclaw config set tools.alsoAllow '["explore", "tweetclaw"]'
+```
+
+Keep coding-session control in Claw Orchestrator. Keep X/Twitter data and write actions in [TweetClaw](https://github.com/Xquik-dev/tweetclaw), where OpenClaw approval prompts guard write-like calls.
+
 ### As an MCP server (Hermes Agent, Claude Desktop, Cursor, Cline, Continue, Zed, Windsurf, Goose)
 
 Every host that speaks the [Model Context Protocol](https://modelcontextprotocol.io) can pick up the orchestrator's full toolset (41 tools — sessions, council, ultraplan, ultrareview, autoloop, codex, inbox) over stdio.
