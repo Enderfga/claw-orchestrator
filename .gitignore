@@ -39,3 +39,6 @@ docs/
 # Earlier history contained tasks/ files; those are scrubbed via filter-repo.
 tasks/
 demo/
+
+# Promo film composition source / fonts / renders — local only, not shipped.
+promo/
