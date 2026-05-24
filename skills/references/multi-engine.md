@@ -107,6 +107,9 @@ Wraps the `gemini` CLI with `--output-format stream-json`. Each `send()` spawns 
 - Working directory carries accumulated changes across sends
 - Real token counts from stream-json `result` events (not estimated)
 - Permission modes: `bypassPermissions` → `--yolo`, `default` → `--sandbox`
+- Always passes `--skip-trust` to bypass the "trusted folders" gate introduced
+  in Gemini CLI 0.43 (otherwise headless runs in worktrees / arbitrary cwds
+  abort before producing output)
 - Requires `gemini` CLI installed: `npm install -g @google/gemini-cli`
 
 ```typescript
@@ -373,6 +376,39 @@ await manager.startSession({
   },
 });
 ```
+
+### Example: Google Antigravity CLI (`agy`)
+
+Google is sunsetting Gemini CLI (consumer tiers stop serving **2026-06-18**) in
+favour of the Go-based **Antigravity CLI** (`agy`). Until `agy` ships first-class
+support here, you can drive it today via a custom engine:
+
+```typescript
+await manager.startSession({
+  name: 'antigravity-task',
+  engine: 'custom',
+  cwd: '/project',
+  dangerouslySkipPermissions: true,
+  customEngine: {
+    name: 'antigravity',
+    bin: 'agy',           // install: curl -fsSL https://antigravity.google/cli/install.sh | bash
+    binEnv: 'AGY_BIN',
+    persistent: false,
+    args: {
+      print: '-p',                                  // single-prompt headless mode
+      skipPermissions: '--dangerously-skip-permissions',
+      workspace: '--add-dir',
+      // NOTE: agy 1.0.2 has NO --output-format flag — output is plain text only.
+      // Omitting outputFormat makes the wrapper parse plain text and *estimate*
+      // tokens (no real usage / tool-call events). Watch for a JSON output mode.
+    },
+  },
+});
+```
+
+Caveats with `agy` 1.0.2: (1) no structured/stream-json output → token counts are
+estimated, not real; (2) requires a one-time `agy` Google OAuth login; (3) resume
+by conversation ID isn't wired (no JSON stream to capture the ID from).
 
 ### Custom Engine in Council
 

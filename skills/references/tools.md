@@ -28,7 +28,7 @@ Start a persistent coding session with full CLI flag support.
 | `worktree` | string \| boolean | Run in git worktree |
 | `fallbackModel` | string | Fallback when primary overloaded |
 | `resumeSessionId` | string | Resume existing session by ID |
-| `jsonSchema` | string | JSON Schema for structured output |
+| `jsonSchema` | string | JSON Schema for structured output. Claude: `--json-schema` (inline). Codex: `--output-schema` (written to a temp file, requires Codex 0.132+). Other engines ignore it. |
 | `mcpConfig` | string \| string[] | MCP server config file(s) |
 | `settings` | string | Settings.json path or inline JSON |
 | `noSessionPersistence` | boolean | Do not save session to disk |

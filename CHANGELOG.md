@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.1.1] - 2026-05-24
+
+### Added
+
+- **Codex structured output via `jsonSchema`.** The existing engine-agnostic
+  `jsonSchema` session config now wires into the Codex engine: it is written to
+  a temp file and passed as `codex exec --output-schema <FILE>` (and on resume),
+  enforcing the model's final response shape. Previously `jsonSchema` only
+  applied to the Claude engine (`--json-schema`). Requires Codex 0.132+.
+- **Antigravity CLI (`agy`) custom-engine recipe.** Documented a ready-to-use
+  `CustomEngineConfig` for Google's `agy` in `multi-engine.md`, so it can be
+  driven today via `engine: 'custom'`. Note: `agy` 1.0.2 has no structured
+  output mode, so token counts are estimated.
+
+### Fixed
+
+- **Gemini engine: pass `--skip-trust`.** Gemini CLI 0.43 added a "trusted
+  folders" gate that aborts headless `-p` runs in untrusted directories
+  (worktrees, arbitrary cwds) before any output is produced. The wrapper now
+  always passes `--skip-trust`, restoring headless operation.
+
+### Changed
+
+- Bumped tested engine CLI versions: Claude Code `2.1.150`, Codex `0.133.0`,
+  Gemini `0.43.0`. All wrappers re-verified against their pinned invocations.
+
 ## [4.1.0] - 2026-05-13
 
 ### Added — Sync to Claude Code CLI 2.1.140

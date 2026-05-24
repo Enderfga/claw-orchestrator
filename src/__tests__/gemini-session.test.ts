@@ -102,6 +102,8 @@ describe('PersistentGeminiSession', () => {
       expect(spawnArgs).toContain('stream-json');
       expect(spawnArgs).toContain('--model');
       expect(spawnArgs).toContain('gemini-2.5-pro');
+      // Gemini CLI 0.43 trusted-folders gate — must always be bypassed for headless runs.
+      expect(spawnArgs).toContain('--skip-trust');
     });
 
     it('uses --sandbox for default permissionMode', async () => {

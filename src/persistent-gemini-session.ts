@@ -47,7 +47,10 @@ export class PersistentGeminiSession extends BaseOneShotSession {
   }
 
   protected _run(message: string, options: SessionSendOptions): Promise<TurnResult> {
-    const args: string[] = ['-p', message, '--output-format', 'stream-json'];
+    // `--skip-trust` bypasses the "trusted folders" gate introduced in Gemini
+    // CLI 0.43 — without it, headless runs in worktrees / arbitrary cwds abort
+    // with "not running in a trusted directory" before producing any output.
+    const args: string[] = ['-p', message, '--output-format', 'stream-json', '--skip-trust'];
 
     // Permission mode
     if (this.options.permissionMode === 'bypassPermissions' || this.options.dangerouslySkipPermissions) {

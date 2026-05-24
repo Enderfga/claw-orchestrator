@@ -15,6 +15,9 @@
  */
 
 import { spawn } from 'node:child_process';
+import { writeFileSync, unlinkSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import type { SessionConfig, SessionSendOptions, StreamEvent, TurnResult } from './types.js';
 import { SESSION_EVENT } from './constants.js';
@@ -52,6 +55,14 @@ export class PersistentCodexSession extends BaseOneShotSession {
    */
   private codexThreadId?: string;
 
+  /**
+   * Path to a temp file holding the `jsonSchema` config, written lazily on
+   * first use. Codex's `--output-schema` takes a file path (unlike Claude's
+   * `--json-schema`, which takes the schema inline), so we materialize the
+   * config string to disk once and reuse it across turns. Removed on stop().
+   */
+  private _schemaFilePath?: string;
+
   constructor(config: SessionConfig, codexBin?: string) {
     super(config, codexBin || process.env.CODEX_BIN || 'codex', {
       enginePrefix: 'codex',
@@ -86,9 +97,40 @@ export class PersistentCodexSession extends BaseOneShotSession {
       args.push('--sandbox', sandbox, '--skip-git-repo-check', '--json');
       if (this.options.cwd) args.push('-C', this.options.cwd);
     }
+    // Structured output: Codex 0.132+ accepts `--output-schema <FILE>` on both
+    // `exec` and `exec resume`, enforcing the model's final response shape.
+    // The engine-agnostic `jsonSchema` config is inline; Codex needs a path.
+    const schemaPath = this._ensureSchemaFile();
+    if (schemaPath) args.push('--output-schema', schemaPath);
     if (this.options.model) args.push('--model', this.options.model);
     args.push(message);
     return args;
+  }
+
+  /**
+   * Materialize the `jsonSchema` config to a temp file (once) and return its
+   * path, or undefined when no schema is configured. The file is removed in
+   * _cleanupProc() (i.e. on stop()).
+   */
+  private _ensureSchemaFile(): string | undefined {
+    if (!this.options.jsonSchema) return undefined;
+    if (this._schemaFilePath) return this._schemaFilePath;
+    const path = join(tmpdir(), `claw-codex-schema-${this.sessionId}-${Date.now()}.json`);
+    writeFileSync(path, this.options.jsonSchema, 'utf8');
+    this._schemaFilePath = path;
+    return path;
+  }
+
+  protected override _cleanupProc(): void {
+    if (this._schemaFilePath) {
+      try {
+        unlinkSync(this._schemaFilePath);
+      } catch {
+        // Already gone / never written — nothing to clean.
+      }
+      this._schemaFilePath = undefined;
+    }
+    super._cleanupProc();
   }
 
   protected _run(message: string, options: SessionSendOptions): Promise<TurnResult> {

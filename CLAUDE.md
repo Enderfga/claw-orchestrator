@@ -169,9 +169,9 @@ Current tested versions (update on each release):
 
 | Engine | CLI | Tested Version | Invocation |
 |--------|-----|---------------|------------|
-| Claude | `claude` | 2.1.140 | Persistent subprocess, `--output-format stream-json` |
-| Codex | `codex` | 0.128.0 | `codex exec --sandbox workspace-write --skip-git-repo-check --json -C <dir>` (or `codex app-server --listen stdio://` for /goal) |
-| Gemini | `gemini` | 0.36.0 | `gemini -p <msg> --output-format stream-json --yolo/--sandbox` |
+| Claude | `claude` | 2.1.150 | Persistent subprocess, `--output-format stream-json` |
+| Codex | `codex` | 0.133.0 | `codex exec --sandbox workspace-write --skip-git-repo-check --json -C <dir>` (or `codex app-server --listen stdio://` for /goal) |
+| Gemini | `gemini` | 0.43.0 | `gemini -p <msg> --output-format stream-json --skip-trust --yolo/--sandbox` |
 | Cursor | `agent` | 2026.03.30 | `agent -p <msg> --force --trust --output-format stream-json --workspace <dir>` |
 | OpenCode | `opencode` | 1.1.40 | `opencode run <msg> --format json --dangerously-skip-permissions [--model provider/model]` |
 
