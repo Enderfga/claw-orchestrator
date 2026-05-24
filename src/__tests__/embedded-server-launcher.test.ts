@@ -6,32 +6,14 @@ import * as path from 'node:path';
 import { SessionManager } from '../session-manager.js';
 import { EmbeddedServer } from '../embedded-server.js';
 import type { CouncilSession } from '../types.js';
+import { useIsolatedHome } from './helpers/isolate-home.js';
 
-// Tests construct real EmbeddedServer instances, which write to the shared
-// host-level path ~/.openclaw/server-token. Without protection, running
-// `npm test` while logged into the dashboard rotates the user's token and
-// kicks them out. Snapshot before, restore after; the SessionManager
-// pidfile tests already do the same for ~/.openclaw/session-pids.json.
-const REAL_TOKEN_PATH = path.join(os.homedir(), '.openclaw', 'server-token');
-let realTokenBackup: string | null = null;
-
-beforeAll(() => {
-  try {
-    realTokenBackup = fs.readFileSync(REAL_TOKEN_PATH, 'utf-8');
-  } catch {
-    realTokenBackup = null;
-  }
-});
-afterAll(() => {
-  if (realTokenBackup !== null) {
-    try {
-      fs.mkdirSync(path.dirname(REAL_TOKEN_PATH), { recursive: true });
-      fs.writeFileSync(REAL_TOKEN_PATH, realTokenBackup, { mode: 0o600 });
-    } catch {
-      /* best-effort restore */
-    }
-  }
-});
+// Tests construct real EmbeddedServer instances, which write to
+// ~/.openclaw/server-token and re-read it per request. Isolating $HOME to a
+// per-file temp dir keeps that token file local to this worker, so the real
+// user token is never touched and parallel test files don't clobber each
+// other's token (which otherwise causes timing-dependent 401s).
+useIsolatedHome();
 
 function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {

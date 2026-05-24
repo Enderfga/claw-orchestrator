@@ -4,6 +4,10 @@ import * as net from 'node:net';
 import { EventEmitter } from 'node:events';
 import { EmbeddedServer } from '../../embedded-server.js';
 import type { SessionManager } from '../../session-manager.js';
+import { useIsolatedHome } from '../helpers/isolate-home.js';
+
+// Isolate ~/.openclaw/server-token to a per-file temp dir — see helper docs.
+useIsolatedHome();
 
 function getFreePort(): Promise<number> {
   return new Promise((resolve, reject) => {
