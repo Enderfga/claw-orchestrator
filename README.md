@@ -13,7 +13,9 @@
 Coding CLIs are designed for humans at terminals. Claw Orchestrator turns them into headless engines and stacks an agent platform on top: a 55-tool API that scales from a single session call up to a fully generated, deployed web app — reachable through the CLI, the OpenClaw gateway, the Model Context Protocol, or directly from TypeScript, and visible through an embedded three-tab dashboard.
 
 <p align="center">
-  <video src="https://github.com/Enderfga/claw-orchestrator/raw/main/assets/claw-promo.mp4" autoplay loop muted playsinline width="100%"></video>
+  <a href="https://github.com/Enderfga/claw-orchestrator/raw/main/assets/claw-promo.mp4">
+    <img src="assets/claw-promo.webp" alt="Claw Orchestrator demo" width="100%">
+  </a>
   <br>
   <sub><b>Control · Council · Autoloop · Ultraapp</b> — the four movements in 35s</sub>
 </p>
