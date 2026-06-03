@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.1.2] - 2026-06-03
+
+### Added
+
+- **Opus 4.8 / 4.7 in the model registry.** `claude-opus-4-8` (now the `opus`
+  alias target) and `claude-opus-4-7` are registered in `src/models.ts` with
+  pricing and context window, so model resolution and cost reporting are correct
+  when sessions request `opus` or pin a specific Opus 4.x id. Previously `opus`
+  resolved to `claude-opus-4-6`. `claude-opus-4-6` remains available by id.
+
+### Fixed
+
+- **Codex turn failures are now surfaced instead of resolving empty.** The Codex
+  wrapper now handles `turn.failed` and `error` stream events and rejects the
+  send with the reported message, even when the process exits 0. Previously a
+  failed turn fell through to the log channel and resolved an empty string,
+  silently masking the error.
+
+### Changed
+
+- Synced tested versions to Claude Code CLI 2.1.161 (from 2.1.150). The
+  2.1.151–2.1.161 range is mostly TUI / reliability work; two fixes directly
+  benefit our spawn path (2.1.153 stream-json stdin-close hang, 2.1.161 `-p`
+  stdout corruption from background subagents) with no wrapper change required.
+  Codex remains at 0.133.0.
+
 ## [4.1.1] - 2026-05-24
 
 ### Added

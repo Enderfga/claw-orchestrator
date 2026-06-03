@@ -45,6 +45,17 @@ interface CodexTurnCompleted {
     reasoning_output_tokens?: number;
   };
 }
+// Codex 0.13x surfaces turn-level failures as a top-level `error` event and/or
+// a `turn.failed` event whose `error.message` carries the reason. Without
+// handling these the process can exit 0 and we'd resolve an empty turn.
+interface CodexTurnFailed {
+  type: 'turn.failed';
+  error?: { message?: string };
+}
+interface CodexError {
+  type: 'error';
+  message?: string;
+}
 
 // ─── PersistentCodexSession ─────────────────────────────────────────────────
 
@@ -142,6 +153,7 @@ export class PersistentCodexSession extends BaseOneShotSession {
       let stderr = '';
       let assistantText = '';
       let lastUsage: CodexTurnCompleted['usage'] | undefined;
+      let turnError: string | undefined;
       let settled = false;
 
       const proc = spawn(this.engineBin, args, {
@@ -206,6 +218,18 @@ export class PersistentCodexSession extends BaseOneShotSession {
             if (tc.usage) lastUsage = tc.usage;
             break;
           }
+          case 'turn.failed': {
+            const tf = event as CodexTurnFailed;
+            if (tf.error?.message) turnError = tf.error.message;
+            this.emit(SESSION_EVENT.LOG, `[codex-error] ${trimmed}`);
+            break;
+          }
+          case 'error': {
+            const er = event as CodexError;
+            if (er.message) turnError = er.message;
+            this.emit(SESSION_EVENT.LOG, `[codex-error] ${trimmed}`);
+            break;
+          }
           default:
             // Unhandled event types still go to the log so users can debug.
             this.emit(SESSION_EVENT.LOG, `[codex-event] ${trimmed}`);
@@ -260,7 +284,11 @@ export class PersistentCodexSession extends BaseOneShotSession {
         this.emit(SESSION_EVENT.RESULT, event);
         this.emit(SESSION_EVENT.TURN_COMPLETE, event);
 
-        if (code !== 0) {
+        // A captured turn.failed/error event means the turn failed even if the
+        // process exits 0 — surface it rather than resolving an empty string.
+        if (turnError) {
+          reject(new Error(turnError));
+        } else if (code !== 0) {
           reject(new Error(stderr || `Codex exited with code ${code}`));
         } else {
           resolve({ text: assistantText, event });

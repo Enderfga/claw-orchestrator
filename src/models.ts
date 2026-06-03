@@ -38,12 +38,30 @@ export interface ModelDef {
 
 const MODELS: ModelDef[] = [
   // ── Anthropic ──────────────────────────────────────────────────────────
+  // Opus 4.x pricing is flat across the generation; 4.7/4.8 mirror 4.6's
+  // input:5 / output:25 / cached:0.5. Fast mode (Opus 4.8) bills at 2× the
+  // standard rate, but it's a human-interactive `/fast` toggle the CLI never
+  // enables in our headless spawn path, so we model the standard rate only.
+  {
+    id: 'claude-opus-4-8',
+    engine: 'claude',
+    provider: 'anthropic',
+    pricing: { input: 5, output: 25, cached: 0.5 },
+    aliases: ['opus'],
+    contextWindow: 200_000,
+  },
+  {
+    id: 'claude-opus-4-7',
+    engine: 'claude',
+    provider: 'anthropic',
+    pricing: { input: 5, output: 25, cached: 0.5 },
+    contextWindow: 200_000,
+  },
   {
     id: 'claude-opus-4-6',
     engine: 'claude',
     provider: 'anthropic',
     pricing: { input: 5, output: 25, cached: 0.5 },
-    aliases: ['opus'],
     contextWindow: 200_000,
   },
   {

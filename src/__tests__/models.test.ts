@@ -35,7 +35,7 @@ describe('lookupModel', () => {
   it('finds model by alias', () => {
     const m = lookupModel('opus');
     expect(m).toBeDefined();
-    expect(m!.id).toBe('claude-opus-4-6');
+    expect(m!.id).toBe('claude-opus-4-8');
   });
 
   it('returns undefined for unknown model', () => {
@@ -70,7 +70,7 @@ describe('lookupModel', () => {
 
 describe('resolveAlias', () => {
   it('resolves known aliases', () => {
-    expect(resolveAlias('opus')).toBe('claude-opus-4-6');
+    expect(resolveAlias('opus')).toBe('claude-opus-4-8');
     expect(resolveAlias('sonnet')).toBe('claude-sonnet-4-6');
     expect(resolveAlias('haiku')).toBe('claude-haiku-4-5');
     expect(resolveAlias('gemini-pro')).toBe('gemini-3.1-pro-preview');
@@ -96,7 +96,7 @@ describe('resolveEngineAndModel', () => {
   });
 
   it('resolves aliases to canonical id', () => {
-    expect(resolveEngineAndModel('opus')).toEqual({ engine: 'claude', model: 'claude-opus-4-6' });
+    expect(resolveEngineAndModel('opus')).toEqual({ engine: 'claude', model: 'claude-opus-4-8' });
     expect(resolveEngineAndModel('gemini-flash')).toEqual({ engine: 'gemini', model: 'gemini-3-flash-preview' });
   });
 
@@ -223,7 +223,7 @@ describe('isGeminiModel / isClaudeModel', () => {
 describe('getAliases', () => {
   it('returns all aliases as Record', () => {
     const aliases = getAliases();
-    expect(aliases.opus).toBe('claude-opus-4-6');
+    expect(aliases.opus).toBe('claude-opus-4-8');
     expect(aliases.sonnet).toBe('claude-sonnet-4-6');
     expect(aliases['gemini-pro']).toBe('gemini-3.1-pro-preview');
   });
@@ -238,7 +238,7 @@ describe('lookupModelStrict', () => {
 
   it('returns model for alias', () => {
     const m = lookupModelStrict('opus');
-    expect(m.id).toBe('claude-opus-4-6');
+    expect(m.id).toBe('claude-opus-4-8');
   });
 
   it('throws for unknown model', () => {
