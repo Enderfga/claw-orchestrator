@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.6.0] - 2026-06-14
+
+### Added — Moonshot Kimi engine (`engine: 'kimi'`)
+
+New built-in engine wrapping the Moonshot **Kimi Code** CLI (`kimi`), bringing the
+supported built-in engine count to seven (claude, codex, codex-app, gemini, kimi,
+cursor, opencode) plus custom.
+
+- `src/persistent-kimi-session.ts` — `PersistentKimiSession`, a one-shot
+  (process-per-send) engine extending `BaseOneShotSession`. Invokes
+  `kimi -p <msg> --output-format stream-json [--model <m>]` per send.
+- stream-json `role`-tagged parser: `assistant` (text via `content`, tool calls
+  via `tool_calls`), `tool` (results), `meta` (logged only), `error`. Non-JSON
+  lines fall back to plain text.
+- Token usage is **estimated** from text length (Kimi emits no usage events) and
+  priced via the model registry.
+- Two registered models in `src/models.ts`: `kimi-code/kimi-for-coding`
+  (aliases `kimi-k2`, `kimi-for-coding`, `kimi-k2-0711-preview`; $0.60/$2.50 per 1M
+  in/out, $0.15 cached; 262K context) and `kimi-code/kimi-for-coding-flash`
+  (alias `kimi-flash`). New `kimi` provider; `kimi-*` and `moonshot/` prefixes
+  resolve to the kimi engine/provider.
+- Permissions are delegated to the user's `~/.kimi-code/config.toml` (Kimi rejects
+  combining `--prompt` with `--yolo`/`--auto`).
+- Prompts over 20,000 chars are truncated to stay under the Windows command-line
+  length limit. stderr redacts `KIMI_API_KEY`, `MOONSHOT_API_KEY`, and `Bearer`
+  tokens.
+- Wired through `EngineType`, `PluginConfig.kimiBin` (env `KIMI_BIN`), the
+  `session_start` / `council` engine enums, the `session-start` CLI command, and
+  `openclaw.plugin.json`.
+- Tests: `src/__tests__/kimi-session.test.ts` (parser, flags, truncation, token
+  estimation, lifecycle, stderr sanitization) plus Kimi cases in `models.test.ts`.
+
 ## [3.5.3] - 2026-05-10
 
 ### Added — auto-compact on context-budget threshold

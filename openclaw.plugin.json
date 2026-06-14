@@ -1,7 +1,7 @@
 {
   "id": "claw-orchestrator",
   "name": "Claw Orchestrator",
-  "description": "Run Claude Code, Codex, Gemini, Cursor Agent and custom coding CLIs as one unified runtime. Persistent sessions, multi-engine orchestration, multi-agent council, worktree isolation, multi-model proxy, structured output, plan mode workflows.",
+  "description": "Run Claude Code, Codex, Gemini, Kimi, Cursor Agent and custom coding CLIs as one unified runtime. Persistent sessions, multi-engine orchestration, multi-agent council, worktree isolation, multi-model proxy, structured output, plan mode workflows.",
   "enabledByDefault": false,
   "configSchema": {
     "type": "object",
@@ -10,6 +10,11 @@
         "type": "string",
         "default": "claude",
         "description": "Path to the Claude engine CLI binary"
+      },
+      "kimiBin": {
+        "type": "string",
+        "default": "kimi",
+        "description": "Path to the Kimi engine CLI binary"
       },
       "defaultModel": {
         "type": "string",

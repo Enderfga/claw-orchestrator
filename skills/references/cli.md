@@ -60,7 +60,7 @@ clawo session-start [name] [options]
 | Flag | Description |
 |------|-------------|
 | `-d, --cwd <dir>` | Working directory |
-| `-e, --engine <engine>` | Engine: `claude` (default), `codex`, or `gemini` |
+| `-e, --engine <engine>` | Engine: `claude` (default), `codex`, `gemini`, `kimi`, `cursor`, `opencode`, or `custom` |
 | `-m, --model <model>` | Model name or alias |
 | `--permission-mode <mode>` | `acceptEdits`, `plan`, `auto`, `bypassPermissions` |
 | `--effort <level>` | `low`, `medium`, `high`, `max`, `auto` |

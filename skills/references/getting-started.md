@@ -53,6 +53,7 @@ await manager.stopSession('backend-fix');
 - **OpenClaw >= 2026.3.0** — for plugin mode (optional)
 - **OpenAI Codex CLI >= 0.112** — `npm install -g @openai/codex` (optional, for codex engine)
 - **Gemini CLI >= 0.35** — `npm install -g @google/gemini-cli` (optional, for gemini engine)
+- **Moonshot Kimi Code CLI** — install the `kimi` CLI (optional, for kimi engine)
 
 ### Engine Authentication
 
@@ -61,6 +62,7 @@ Each engine requires its own authentication before use:
 - **Claude Code** — run `claude /login` or set `ANTHROPIC_API_KEY`
 - **Codex** — run `codex login` or set `OPENAI_API_KEY`
 - **Gemini** — run `gemini login` or set `GEMINI_API_KEY`
+- **Kimi** — set `MOONSHOT_API_KEY` (or `KIMI_API_KEY`), or log in via the `kimi` CLI
 
 The plugin does not manage authentication — it expects each CLI to be ready to run.
 

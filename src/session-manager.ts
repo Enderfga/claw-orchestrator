@@ -122,6 +122,7 @@ import { InboxManager, type SessionLookup } from './inbox-manager.js';
 import { sanitizeCwd, validateName } from './validation.js';
 import { PersistentClaudeSession } from './persistent-session.js';
 import { PersistentGeminiSession } from './persistent-gemini-session.js';
+import { PersistentKimiSession } from './persistent-kimi-session.js';
 import { PersistentCodexSession } from './persistent-codex-session.js';
 import { PersistentCodexAppServerSession } from './persistent-codex-app-session.js';
 import { PersistentCursorSession } from './persistent-cursor-session.js';
@@ -1388,6 +1389,8 @@ export class SessionManager {
     switch (engine) {
       case 'gemini':
         return new PersistentGeminiSession(config, process.env.GEMINI_BIN);
+      case 'kimi':
+        return new PersistentKimiSession(config, this.pluginConfig.kimiBin || process.env.KIMI_BIN);
       case 'codex':
         return new PersistentCodexSession(config, process.env.CODEX_BIN);
       case 'codex-app':

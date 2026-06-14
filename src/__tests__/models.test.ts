@@ -281,3 +281,48 @@ describe('getModelPricing fallback warning', () => {
     warnSpy.mockRestore();
   });
 });
+
+describe('Kimi (Moonshot) models', () => {
+  it('looks up the kimi coding model by id and alias', () => {
+    const byId = lookupModel('kimi-code/kimi-for-coding');
+    expect(byId).toBeDefined();
+    expect(byId!.engine).toBe('kimi');
+    expect(byId!.provider).toBe('kimi');
+
+    expect(lookupModel('kimi-k2')!.id).toBe('kimi-code/kimi-for-coding');
+    expect(lookupModel('kimi-flash')!.id).toBe('kimi-code/kimi-for-coding-flash');
+  });
+
+  it('resolves kimi aliases to canonical ids', () => {
+    expect(resolveAlias('kimi-k2')).toBe('kimi-code/kimi-for-coding');
+    expect(resolveAlias('kimi-for-coding')).toBe('kimi-code/kimi-for-coding');
+    expect(resolveAlias('kimi-flash')).toBe('kimi-code/kimi-for-coding-flash');
+  });
+
+  it('resolves kimi models and patterns to the kimi engine', () => {
+    expect(resolveEngineAndModel('kimi-code/kimi-for-coding')).toEqual({
+      engine: 'kimi',
+      model: 'kimi-code/kimi-for-coding',
+    });
+    expect(resolveEngineAndModel('kimi-k2')).toEqual({ engine: 'kimi', model: 'kimi-code/kimi-for-coding' });
+    // Pattern fallback for unknown kimi-prefixed models
+    expect(resolveEngineAndModel('kimi-future')).toEqual({ engine: 'kimi', model: 'kimi-future' });
+  });
+
+  it('resolves the kimi provider, stripping moonshot/kimi prefixes', () => {
+    expect(resolveProvider('kimi-code/kimi-for-coding')).toEqual({
+      provider: 'kimi',
+      apiModel: 'kimi-code/kimi-for-coding',
+    });
+    expect(resolveProvider('moonshot/kimi-future').provider).toBe('kimi');
+    expect(resolveProvider('kimi-anything').provider).toBe('kimi');
+  });
+
+  it('reports the kimi context window and pricing', () => {
+    expect(getContextWindow('kimi-code/kimi-for-coding')).toBe(262_144);
+    const p = getModelPricing('kimi-code/kimi-for-coding');
+    expect(p.input).toBe(0.6);
+    expect(p.output).toBe(2.5);
+    expect(p.cached).toBe(0.15);
+  });
+});

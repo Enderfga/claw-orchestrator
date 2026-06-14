@@ -29,7 +29,7 @@ Key options:
 
 | Option | Description |
 |--------|-------------|
-| `engine` | `'claude'` (default), `'codex'`, or `'gemini'` — see [Multi-Engine](./multi-engine.md) |
+| `engine` | `'claude'` (default), `'codex'`, `'gemini'`, `'kimi'`, `'cursor'`, `'opencode'`, or `'custom'` — see [Multi-Engine](./multi-engine.md) |
 | `model` | Model alias (`opus`, `sonnet`, `haiku`, `gemini-pro`) or full name |
 | `permissionMode` | `acceptEdits`, `bypassPermissions`, `plan`, `auto`, `default` |
 | `effort` | `low`, `medium`, `high`, `max`, `auto` |

@@ -9,7 +9,7 @@ import type { EngineType } from './types.js';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
-export type ProviderName = 'anthropic' | 'openai' | 'google' | 'cursor' | 'custom';
+export type ProviderName = 'anthropic' | 'openai' | 'google' | 'kimi' | 'cursor' | 'custom';
 
 export interface ModelPricing {
   input: number; // per 1M tokens
@@ -156,6 +156,26 @@ const MODELS: ModelDef[] = [
     contextWindow: 1_000_000,
   },
 
+  // ── Moonshot Kimi ──────────────────────────────────────────────────────
+  // Kimi Code CLI model names follow the provider/model format from its
+  // config.toml. The canonical coding model is "kimi-code/kimi-for-coding".
+  {
+    id: 'kimi-code/kimi-for-coding',
+    engine: 'kimi',
+    provider: 'kimi',
+    pricing: { input: 0.6, output: 2.5, cached: 0.15 },
+    aliases: ['kimi-k2', 'kimi-for-coding', 'kimi-k2-0711-preview'],
+    contextWindow: 262_144,
+  },
+  {
+    id: 'kimi-code/kimi-for-coding-flash',
+    engine: 'kimi',
+    provider: 'kimi',
+    pricing: { input: 0.15, output: 0.6 },
+    aliases: ['kimi-flash'],
+    contextWindow: 262_144,
+  },
+
   // ── Cursor Composer ────────────────────────────────────────────────────
   {
     id: 'composer-2',
@@ -226,6 +246,7 @@ export function resolveEngineAndModel(model: string): { engine: EngineType; mode
 
   // 2. Pattern-based fallback for unknown models
   if (model.startsWith('gemini') || model.includes('gemini')) return { engine: 'gemini', model };
+  if (model.startsWith('kimi')) return { engine: 'kimi', model };
   if (model.startsWith('gpt') || model.startsWith('o3') || model.startsWith('o4') || model.startsWith('codex'))
     return { engine: 'codex', model };
   if (model.startsWith('composer') || model.startsWith('cursor') || model === 'auto')
@@ -239,7 +260,7 @@ export function resolveEngineAndModel(model: string): { engine: EngineType; mode
 export function resolveProvider(model: string): { provider: ProviderName; apiModel: string } {
   // Strip vendor prefixes
   let clean = model;
-  for (const prefix of ['anthropic/', 'openai/', 'openai-codex/', 'gemini/', 'google/', 'cursor/']) {
+  for (const prefix of ['anthropic/', 'openai/', 'openai-codex/', 'gemini/', 'google/', 'kimi/', 'moonshot/', 'cursor/']) {
     if (clean.startsWith(prefix)) {
       clean = clean.slice(prefix.length);
       break;
@@ -254,6 +275,7 @@ export function resolveProvider(model: string): { provider: ProviderName; apiMod
   if (lower.includes('claude') || lower.includes('opus') || lower.includes('sonnet') || lower.includes('haiku'))
     return { provider: 'anthropic', apiModel: clean };
   if (lower.includes('gemini')) return { provider: 'google', apiModel: clean };
+  if (lower.includes('kimi') || lower.startsWith('moonshot')) return { provider: 'kimi', apiModel: clean };
   if (
     lower.includes('gpt') ||
     lower.startsWith('o1') ||
@@ -269,7 +291,7 @@ export function resolveProvider(model: string): { provider: ProviderName; apiMod
 
 /** Get context window size for a model. Returns 200k default for unknown models. */
 export function getContextWindow(model: string): number {
-  const clean = model.replace(/^(anthropic|openai|openai-codex|google|gemini|cursor)\//g, '');
+  const clean = model.replace(/^(anthropic|openai|openai-codex|google|gemini|kimi|moonshot|cursor)\//g, '');
   const known = lookupModel(clean);
   return known?.contextWindow ?? 200_000;
 }
@@ -277,7 +299,7 @@ export function getContextWindow(model: string): number {
 /** Get pricing for a model. Falls back to sonnet pricing for unknown models. */
 export function getModelPricing(model?: string, defaultModel = 'claude-sonnet-4-6'): ModelPricing {
   if (!model) return lookupModel(defaultModel)?.pricing ?? { input: 0, output: 0 };
-  const clean = model.replace(/^(anthropic|openai|openai-codex|google|gemini|cursor)\//g, '');
+  const clean = model.replace(/^(anthropic|openai|openai-codex|google|gemini|kimi|moonshot|cursor)\//g, '');
   // Check overrides first
   const override = _pricingOverrides.get(clean);
   if (override) return override;

@@ -14,6 +14,8 @@ SessionManager
 │   └── Wraps: codex app-server --listen stdio:// (long-running JSON-RPC; required for /goal)
 ├── engine: 'gemini'    → PersistentGeminiSession
 │   └── Wraps: gemini -p --output-format stream-json (per-message spawning)
+├── engine: 'kimi'      → PersistentKimiSession
+│   └── Wraps: kimi -p --output-format stream-json (per-message spawning)
 ├── engine: 'cursor'    → PersistentCursorSession
 │   └── Wraps: agent -p --force --output-format stream-json (per-message spawning)
 ├── engine: 'opencode'  → PersistentOpencodeSession
@@ -114,6 +116,28 @@ await manager.startSession({
   name: 'gemini-task',
   engine: 'gemini',
   model: 'gemini-3.1-pro-preview',
+  cwd: '/project',
+});
+```
+
+### Moonshot Kimi (`engine: 'kimi'`)
+
+Wraps the Moonshot **Kimi Code** CLI (`kimi`) with `--output-format stream-json`. Each `send()` spawns a new process — same one-shot model as Gemini.
+
+- One-shot execution per message (no persistent subprocess); the working directory carries accumulated changes across sends
+- stream-json line protocol with `role`-tagged events: `assistant` (text via `content`, or tool invocations via `tool_calls`), `tool` (tool results), `meta` (session/resume hints, logged only), `error`
+- Kimi emits no usage events, so token counts are **estimated** from text length (~4 chars/token) and priced from the model registry
+- Default model: `kimi-code/kimi-for-coding` (aliases: `kimi-k2`, `kimi-for-coding`, `kimi-k2-0711-preview`); a cheaper `kimi-code/kimi-for-coding-flash` (alias `kimi-flash`) is also registered. Context window: 262,144 tokens
+- Permission handling is delegated to the user's Kimi config (`~/.kimi-code/config.toml`) — the wrapper does **not** pass `--yolo`/`--auto`, since Kimi rejects combining those with `--prompt`
+- Prompts longer than 20,000 chars are truncated to stay under the Windows command-line length limit (a `[kimi]` log is emitted when this happens)
+- stderr is sanitized: `KIMI_API_KEY`, `MOONSHOT_API_KEY`, and `Bearer <token>` are redacted from logs
+- Requires the `kimi` CLI installed and authenticated (`MOONSHOT_API_KEY` / `KIMI_API_KEY` or `kimi` login). Binary: `kimi` (override via the `kimiBin` plugin config or the `KIMI_BIN` env var)
+
+```typescript
+await manager.startSession({
+  name: 'kimi-task',
+  engine: 'kimi',
+  model: 'kimi-code/kimi-for-coding',
   cwd: '/project',
 });
 ```

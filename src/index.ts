@@ -22,6 +22,7 @@ export { PersistentClaudeSession } from './persistent-session.js';
 export { BaseOneShotSession, type OneShotEngineConfig } from './base-oneshot-session.js';
 export { PersistentCodexSession } from './persistent-codex-session.js';
 export { PersistentGeminiSession } from './persistent-gemini-session.js';
+export { PersistentKimiSession } from './persistent-kimi-session.js';
 export { PersistentCursorSession } from './persistent-cursor-session.js';
 export { PersistentOpencodeSession } from './persistent-opencode-session.js';
 export { PersistentCustomSession } from './persistent-custom-session.js';
@@ -69,7 +70,7 @@ const plugin = {
   id: 'claw-orchestrator',
   name: 'Claw Orchestrator',
   description:
-    'Run Claude Code, Codex, Gemini, Cursor Agent and custom coding CLIs as one unified runtime — persistent sessions, multi-agent council, worktree isolation, multi-model proxy',
+    'Run Claude Code, Codex, Gemini, Kimi, Cursor Agent and custom coding CLIs as one unified runtime — persistent sessions, multi-agent council, worktree isolation, multi-model proxy',
 
   register(api: PluginAPI): void {
     const rawConfig = (api.pluginConfig || {}) as Partial<PluginConfig>;
@@ -144,9 +145,9 @@ const plugin = {
           cwd: { type: 'string', description: 'Working directory' },
           engine: {
             type: 'string',
-            enum: ['claude', 'codex', 'codex-app', 'gemini', 'cursor', 'opencode', 'custom'],
+            enum: ['claude', 'codex', 'codex-app', 'gemini', 'kimi', 'cursor', 'opencode', 'custom'],
             description:
-              'Engine to use (default: claude). codex = `codex exec` per send (no /goal). codex-app = long-running `codex app-server` with /goal support. opencode = sst/opencode CLI (provider-agnostic; pass model as `provider/model`). Use "custom" with customEngine config for any CLI.',
+              'Engine to use (default: claude). codex = `codex exec` per send (no /goal). codex-app = long-running `codex app-server` with /goal support. kimi = Moonshot Kimi Code CLI. opencode = sst/opencode CLI (provider-agnostic; pass model as `provider/model`). Use "custom" with customEngine config for any CLI.',
           },
           model: { type: 'string', description: 'Model to use (opus, sonnet, haiku, gemini-pro, o4-mini, etc.)' },
           permissionMode: {
@@ -797,7 +798,7 @@ const plugin = {
                 persona: { type: 'string', description: 'Agent personality/expertise description' },
                 engine: {
                   type: 'string',
-                  enum: ['claude', 'codex', 'codex-app', 'gemini', 'cursor', 'opencode', 'custom'],
+                  enum: ['claude', 'codex', 'codex-app', 'gemini', 'kimi', 'cursor', 'opencode', 'custom'],
                   description: 'Engine (default: claude). Use "custom" with customEngine for any CLI.',
                 },
                 model: { type: 'string', description: 'Model to use' },

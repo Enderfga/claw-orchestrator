@@ -17,6 +17,7 @@ support. Key source files:
 | `src/persistent-session.ts` | Claude Code CLI wrapper (spawn, JSON protocol, stream parsing) |
 | `src/persistent-codex-session.ts` | Codex CLI wrapper (`codex exec --full-auto`) |
 | `src/persistent-gemini-session.ts` | Gemini CLI wrapper (`gemini -p --output-format stream-json`) |
+| `src/persistent-kimi-session.ts` | Kimi CLI wrapper (`kimi -p --output-format stream-json`) |
 | `src/persistent-cursor-session.ts` | Cursor Agent CLI wrapper (`agent -p --force --output-format stream-json`) |
 | `src/persistent-opencode-session.ts` | sst/opencode CLI wrapper (`opencode run --format json --dangerously-skip-permissions`) |
 | `src/persistent-custom-session.ts` | Custom engine — any CLI via user-provided `CustomEngineConfig` |
@@ -157,6 +158,7 @@ Current tested versions (update on each release):
 | Claude | `claude` | 2.1.126 | Persistent subprocess, `--output-format stream-json` |
 | Codex | `codex` | 0.128.0 | `codex exec --sandbox workspace-write --skip-git-repo-check --json -C <dir>` (or `codex app-server --listen stdio://` for /goal) |
 | Gemini | `gemini` | 0.36.0 | `gemini -p <msg> --output-format stream-json --yolo/--sandbox` |
+| Kimi | `kimi` | — | `kimi -p <msg> --output-format stream-json [--model <m>]` (one-shot per send; permissions via `~/.kimi-code/config.toml`) |
 | Cursor | `agent` | 2026.03.30 | `agent -p <msg> --force --trust --output-format stream-json --workspace <dir>` |
 | OpenCode | `opencode` | 1.1.40 | `opencode run <msg> --format json --dangerously-skip-permissions [--model provider/model]` |
 

@@ -93,7 +93,7 @@ program
   .command('session-start [name]')
   .description('Start a persistent coding session (Claude Code, Codex, Gemini, or Cursor)')
   .option('-d, --cwd <dir>', 'Working directory')
-  .option('-e, --engine <engine>', 'Engine: claude (default), codex, gemini, or cursor')
+  .option('-e, --engine <engine>', 'Engine: claude (default), codex, gemini, kimi, cursor, opencode, or custom')
   .option('-m, --model <model>', 'Model to use')
   .option('--permission-mode <mode>', 'Permission mode', 'acceptEdits')
   .option('--effort <level>', 'Effort level')

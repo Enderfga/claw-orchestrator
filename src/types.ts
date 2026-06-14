@@ -33,7 +33,7 @@ export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'auto';
 
 // ─── Engine ─────────────────────────────────────────────────────────────────
 
-export type EngineType = 'claude' | 'codex' | 'codex-app' | 'gemini' | 'cursor' | 'opencode' | 'custom';
+export type EngineType = 'claude' | 'codex' | 'codex-app' | 'gemini' | 'kimi' | 'cursor' | 'opencode' | 'custom';
 
 // ─── Custom Engine Config ───────────────────────────────────────────────────
 //
@@ -462,6 +462,7 @@ export interface ISession {
 
 export interface PluginConfig {
   claudeBin: string;
+  kimiBin?: string;
   defaultModel?: string;
   defaultPermissionMode: PermissionMode;
   defaultEffort: EffortLevel;

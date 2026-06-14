@@ -8,9 +8,9 @@ Run Claude Code, Codex and other coding agents in one unified runtime.
 
 Claw Orchestrator turns interactive coding CLIs into programmable, headless agent engines. Start persistent sessions, route tasks across different coding agents, coordinate multi-agent councils, and expose everything through a clean tool-based API.
 
-It's a TypeScript runtime for orchestrating Claude Code, OpenAI Codex, Gemini, Cursor Agent, and custom coding CLIs as persistent, programmable coding agents.
+It's a TypeScript runtime for orchestrating Claude Code, OpenAI Codex, Gemini, Kimi, Cursor Agent, and custom coding CLIs as persistent, programmable coding agents.
 
-> Claude Code, Codex, Gemini, Cursor Agent, OpenCode, or your own custom CLI — orchestrated as one runtime.
+> Claude Code, Codex, Gemini, Kimi, Cursor Agent, OpenCode, or your own custom CLI — orchestrated as one runtime.
 >
 > **Runs standalone, with first-class OpenClaw plugin support and a path to other claw-style agent platforms.**
 
@@ -27,7 +27,7 @@ Coding agents are powerful, but most are still designed as interactive CLIs.
 That works well when a human is sitting in front of a terminal. It breaks down when you want agents to:
 
 - keep long-running coding sessions alive
-- switch between Claude Code, Codex, Gemini, Cursor Agent, OpenCode, or custom CLIs
+- switch between Claude Code, Codex, Gemini, Kimi, Cursor Agent, OpenCode, or custom CLIs
 - collaborate as a team on the same codebase
 - integrate coding capabilities into OpenClaw first, and other claw-style agent systems over time
 - manage context, tools, worktrees, and execution state programmatically
@@ -42,7 +42,7 @@ Claw Orchestrator is the control layer for that.
 - Keep persistent AI coding sessions alive across requests
 - Build multi-agent coding teams with isolated git worktrees
 - Expose coding agents as tools to OpenClaw, MCP servers, bots, dashboards, or custom runtimes
-- Route tasks across Claude Code, Codex, Gemini, Cursor Agent, OpenCode, and custom CLIs
+- Route tasks across Claude Code, Codex, Gemini, Kimi, Cursor Agent, OpenCode, and custom CLIs
 
 ---
 
@@ -70,6 +70,7 @@ Drive different coding agents through one unified interface.
 await manager.startSession({ name: "claude-task", engine: "claude" });
 await manager.startSession({ name: "codex-task",  engine: "codex"  });
 await manager.startSession({ name: "gemini-task", engine: "gemini" });
+await manager.startSession({ name: "kimi-task",   engine: "kimi"   });
 await manager.startSession({ name: "cursor-task", engine: "cursor" });
 ```
 
@@ -165,6 +166,7 @@ This installs via npm, registers the plugin in `~/.openclaw/openclaw.json`, and 
 | Claude Code   | `claude` | 2.1.126     | Supported |
 | Codex         | `codex`  | 0.128.0     | Supported |
 | Gemini        | `gemini` | 0.36.0      | Supported |
+| Kimi          | `kimi`   | —           | Supported |
 | Cursor Agent  | `agent`  | 2026.03.30  | Supported |
 | OpenCode      | `opencode` | 1.1.40    | Supported |
 | Custom CLI    | any      | —           | Supported |
