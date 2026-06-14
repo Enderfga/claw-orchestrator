@@ -15,7 +15,8 @@
  * without writing engine-specific code.
  */
 
-import { spawn, ChildProcess } from 'node:child_process';
+import { ChildProcess } from 'node:child_process';
+import { spawnEngine } from './engine-spawn.js';
 import { EventEmitter } from 'node:events';
 import * as readline from 'node:readline';
 import * as fs from 'node:fs';
@@ -241,7 +242,7 @@ export class PersistentCustomSession extends EventEmitter implements ISession {
       ...this.engineConfig.env,
     };
 
-    this.proc = spawn(this.engineBin, args, {
+    this.proc = spawnEngine(this.engineBin, args, {
       cwd: this.options.cwd,
       env: spawnEnv,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -482,7 +483,7 @@ export class PersistentCustomSession extends EventEmitter implements ISession {
       let settled = false;
       let gotUsageFromEvents = false;
 
-      const proc = spawn(this.engineBin, args, {
+      const proc = spawnEngine(this.engineBin, args, {
         cwd: this.options.cwd,
         env: spawnEnv,
         stdio: ['pipe', 'pipe', 'pipe'],

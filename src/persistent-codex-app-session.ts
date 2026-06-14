@@ -22,7 +22,8 @@
  *     `thread/goal/cleared` notifications.
  */
 
-import { spawn, ChildProcess } from 'node:child_process';
+import { ChildProcess } from 'node:child_process';
+import { spawnEngine } from './engine-spawn.js';
 import { EventEmitter } from 'node:events';
 import * as readline from 'node:readline';
 import * as fs from 'node:fs';
@@ -182,7 +183,7 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
     }
 
     const args = ['app-server', '--listen', 'stdio://', '--enable', 'goals'];
-    this.proc = spawn(this.codexBin, args, {
+    this.proc = spawnEngine(this.codexBin, args, {
       cwd: this.options.cwd,
       env: { ...process.env },
       stdio: ['pipe', 'pipe', 'pipe'],

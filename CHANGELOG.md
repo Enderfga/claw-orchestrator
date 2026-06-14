@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.6.1] - 2026-06-14
+
+### Fixed — Windows npm-shim engine spawning
+
+On Windows the npm-installed coding CLIs (`claude`, `codex`, `gemini`, `opencode`,
+`cursor`) are launched through `.cmd` shims, not by a real executable on the bare
+name. `child_process.spawn('claude', …)` therefore failed with `spawn claude
+ENOENT`, and `shell: true` is not a safe fix (it concatenates rather than escapes
+args and breaks stdin piping). Only Kimi worked, because it ships a real `kimi.exe`.
+
+- New `src/engine-spawn.ts`: `resolveEngineBin()` / `spawnEngine()`. On Windows it
+  resolves the shim to the **real** program it wraps and spawns that directly with
+  no shell:
+  - `claude.cmd` / `opencode.cmd` → the native `.exe` they exec;
+  - `codex.cmd` / `gemini.cmd` → `node <pkg>/bin/x.js` (the `.js` is prepended to
+    the args, `node.exe` is the command);
+  - a real `.exe` already on PATH (e.g. `kimi.exe`) → spawned directly (unchanged).
+  Non-Windows platforms are a pure passthrough to `spawn()`.
+- All built-in engines now spawn via `spawnEngine` (`persistent-session`,
+  `persistent-codex-session`, `persistent-gemini-session`, `persistent-kimi-session`,
+  `persistent-cursor-session`, `persistent-opencode-session`,
+  `persistent-codex-app-session`, `persistent-custom-session`).
+- Verified end-to-end on Windows: Claude, Codex (gpt-5.5), Gemini, and Kimi all
+  respond correctly when driven through the OpenAI-compatible `/v1/chat/completions`
+  bridge. Tests: `src/__tests__/engine-spawn.test.ts`.
+
 ## [3.6.0] - 2026-06-14
 
 ### Added — Moonshot Kimi engine (`engine: 'kimi'`)

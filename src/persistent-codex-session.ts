@@ -14,7 +14,7 @@
  *     conversation continuity (Codex 0.119+).
  */
 
-import { spawn } from 'node:child_process';
+import { spawnEngine } from './engine-spawn.js';
 
 import type { SessionConfig, SessionSendOptions, StreamEvent, TurnResult } from './types.js';
 import { SESSION_EVENT } from './constants.js';
@@ -102,7 +102,7 @@ export class PersistentCodexSession extends BaseOneShotSession {
       let lastUsage: CodexTurnCompleted['usage'] | undefined;
       let settled = false;
 
-      const proc = spawn(this.engineBin, args, {
+      const proc = spawnEngine(this.engineBin, args, {
         cwd: this.options.cwd,
         env: { ...process.env },
         stdio: ['ignore', 'pipe', 'pipe'],

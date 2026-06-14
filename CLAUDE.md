@@ -21,6 +21,7 @@ support. Key source files:
 | `src/persistent-cursor-session.ts` | Cursor Agent CLI wrapper (`agent -p --force --output-format stream-json`) |
 | `src/persistent-opencode-session.ts` | sst/opencode CLI wrapper (`opencode run --format json --dangerously-skip-permissions`) |
 | `src/persistent-custom-session.ts` | Custom engine — any CLI via user-provided `CustomEngineConfig` |
+| `src/engine-spawn.ts` | Cross-platform engine spawning — resolves Windows npm `.cmd` shims to their real `.exe`/`node` target |
 | `src/council.ts` | Multi-agent collaboration engine with git worktree isolation and post-processing |
 | `src/consensus.ts` | Consensus voting parser for council |
 | `src/models.ts` | Centralized model registry — pricing, aliases, engine/provider mapping |

@@ -12,7 +12,7 @@
  * emits JSON lines with roles: assistant, tool, and meta.
  */
 
-import { spawn } from 'node:child_process';
+import { spawnEngine } from './engine-spawn.js';
 import * as readline from 'node:readline';
 
 import type { SessionConfig, SessionSendOptions, StreamEvent, TurnResult } from './types.js';
@@ -72,7 +72,7 @@ export class PersistentKimiSession extends BaseOneShotSession {
       let stderr = '';
       let settled = false;
 
-      const proc = spawn(this.engineBin, args, {
+      const proc = spawnEngine(this.engineBin, args, {
         cwd: this.options.cwd,
         env: { ...process.env },
         stdio: ['pipe', 'pipe', 'pipe'],
