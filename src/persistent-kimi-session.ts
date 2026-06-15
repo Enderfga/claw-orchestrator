@@ -63,12 +63,14 @@ export class PersistentKimiSession extends BaseOneShotSession {
 
     const args: string[] = ['-p', prompt, '--output-format', 'stream-json'];
 
-    if (this.options.model) args.push('--model', this.options.model);
+    // Resolve aliases (e.g. "kimi-k2") to the canonical id the CLI expects.
+    if (this.options.model) args.push('--model', this.resolveModel(this.options.model));
 
     const timeout = options.timeout || 300_000;
 
     return new Promise<TurnResult>((resolve, reject) => {
       const resultText = { value: '' };
+      const streamError = { value: null as string | null };
       let stderr = '';
       let settled = false;
 
@@ -94,7 +96,7 @@ export class PersistentKimiSession extends BaseOneShotSession {
         if (!line.trim()) return;
         try {
           const event = JSON.parse(line) as Record<string, unknown>;
-          this._handleStreamEvent(event, options, resultText);
+          this._handleStreamEvent(event, options, resultText, streamError);
         } catch {
           // Non-JSON line — treat as plain text
           resultText.value += line + '\n';
@@ -112,7 +114,7 @@ export class PersistentKimiSession extends BaseOneShotSession {
           .toString()
           .replace(/KIMI_API_KEY=[^\s]+/g, 'KIMI_API_KEY=***')
           .replace(/MOONSHOT_API_KEY=[^\s]+/g, 'MOONSHOT_API_KEY=***')
-          .replace(/Bearer [a-zA-Z0-9_-]+/g, 'Bearer ***');
+          .replace(/Bearer\s+[A-Za-z0-9._\-+/=]+/gi, 'Bearer ***');
         stderr += sanitized;
         this.emit(SESSION_EVENT.LOG, `[kimi-stderr] ${sanitized}`);
       });
@@ -139,7 +141,7 @@ export class PersistentKimiSession extends BaseOneShotSession {
 
         this._addHistory({ text: resultText.value, code });
 
-        const stopReason = code === 0 ? 'end_turn' : 'error';
+        const stopReason = code === 0 && !streamError.value ? 'end_turn' : 'error';
 
         const event: StreamEvent = {
           type: 'result',
@@ -173,6 +175,7 @@ export class PersistentKimiSession extends BaseOneShotSession {
     event: Record<string, unknown>,
     options: SessionSendOptions,
     resultText: { value: string },
+    streamError: { value: string | null },
   ): void {
     const role = event.role as string;
 
@@ -189,7 +192,6 @@ export class PersistentKimiSession extends BaseOneShotSession {
             }
             this.emit(SESSION_EVENT.TOOL_USE, tool);
           }
-          break;
         }
         const text = (event.content as string) || '';
         if (text) {
@@ -205,6 +207,9 @@ export class PersistentKimiSession extends BaseOneShotSession {
       }
 
       case 'tool': {
+        if (event.is_error === true || event.status === 'error' || event.error) {
+          this._stats.toolErrors++;
+        }
         try {
           options.callbacks?.onToolResult?.(event);
         } catch {
@@ -219,9 +224,13 @@ export class PersistentKimiSession extends BaseOneShotSession {
         this.emit(SESSION_EVENT.LOG, `[kimi-meta] ${JSON.stringify(event)}`);
         break;
 
-      case 'error':
-        this.emit(SESSION_EVENT.LOG, `[kimi-error] ${event.error || JSON.stringify(event)}`);
+      case 'error': {
+        // Surface the error so the turn is not reported as a clean success.
+        const detail = String(event.error || JSON.stringify(event));
+        streamError.value = detail;
+        this.emit(SESSION_EVENT.LOG, `[kimi-error] ${detail}`);
         break;
+      }
 
       default:
         break;

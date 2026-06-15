@@ -528,7 +528,7 @@ export class SessionManager {
 
     // Validate model — must be a known alias or contain a recognisable pattern
     const resolvedModel = this._resolveModel(model, managed.config.modelOverrides);
-    const knownPatterns = ['claude-', 'gemini-', 'gpt-', 'anthropic/', 'google/', 'openai/'];
+    const knownPatterns = ['claude-', 'gemini-', 'gpt-', 'kimi-', 'anthropic/', 'google/', 'openai/', 'moonshot/'];
     const looksValid = knownPatterns.some((p) => resolvedModel.includes(p));
     if (!looksValid) {
       throw new Error(

@@ -420,4 +420,78 @@ describe('PersistentKimiSession', () => {
       expect(logs.some((l) => l.includes('abc123secret'))).toBe(false);
     });
   });
+
+  // ─── audit hardening ────────────────────────────────────────────────────────
+
+  describe('audit hardening', () => {
+    it('resolves a model alias to the canonical id for --model', async () => {
+      const session = new PersistentKimiSession({
+        name: 'test',
+        cwd: '/tmp',
+        permissionMode: 'bypassPermissions',
+        model: 'kimi-k2',
+      });
+      await session.start();
+
+      const sendPromise = session.send('hi', { waitForComplete: true });
+      setTimeout(() => closeProc(mockProc, 0), 10);
+      await sendPromise;
+
+      const spawnArgs = mockSpawn.mock.calls[0][1] as string[];
+      const i = spawnArgs.indexOf('--model');
+      expect(i).toBeGreaterThanOrEqual(0);
+      expect(spawnArgs[i + 1]).toBe('kimi-code/kimi-for-coding');
+    });
+
+    it('captures both tool_calls and text on a single assistant event', async () => {
+      const session = new PersistentKimiSession({ name: 'test', cwd: '/tmp', permissionMode: 'bypassPermissions' });
+      await session.start();
+
+      const sendPromise = session.send('hi', { waitForComplete: true });
+      setTimeout(() => {
+        feedLines(mockProc, [
+          JSON.stringify({ role: 'assistant', tool_calls: [{ name: 'read_file', input: {} }], content: 'inline text' }),
+        ]);
+        closeProc(mockProc, 0);
+      }, 10);
+
+      const result = await sendPromise;
+      expect(session.getStats().toolCalls).toBe(1);
+      expect('text' in result && result.text).toBe('inline text');
+    });
+
+    it('surfaces a stream error-role event as stop_reason=error', async () => {
+      const session = new PersistentKimiSession({ name: 'test', cwd: '/tmp', permissionMode: 'bypassPermissions' });
+      await session.start();
+
+      const sendPromise = session.send('hi', { waitForComplete: true });
+      setTimeout(() => {
+        feedLines(mockProc, [
+          JSON.stringify({ role: 'error', error: 'rate limited' }),
+          JSON.stringify({ role: 'assistant', content: 'partial' }),
+        ]);
+        closeProc(mockProc, 0); // process still exits 0 despite the error event
+      }, 10);
+
+      const result = await sendPromise;
+      expect('event' in result && (result.event as Record<string, unknown>).stop_reason).toBe('error');
+    });
+
+    it('counts a tool result error in toolErrors', async () => {
+      const session = new PersistentKimiSession({ name: 'test', cwd: '/tmp', permissionMode: 'bypassPermissions' });
+      await session.start();
+
+      const sendPromise = session.send('hi', { waitForComplete: true });
+      setTimeout(() => {
+        feedLines(mockProc, [
+          JSON.stringify({ role: 'tool', tool_call_id: 'c1', is_error: true, content: 'boom' }),
+          JSON.stringify({ role: 'assistant', content: 'ok' }),
+        ]);
+        closeProc(mockProc, 0);
+      }, 10);
+
+      await sendPromise;
+      expect(session.getStats().toolErrors).toBe(1);
+    });
+  });
 });

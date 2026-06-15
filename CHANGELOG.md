@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.6.3] - 2026-06-14
+
+### Fixed — Kimi model routing + stream robustness (deep-audit follow-up)
+
+- **Model switching to Kimi threw "Unknown model".** `switchModel`'s validation
+  allowlist (`session-manager.ts`) omitted Kimi, so `session_switch_model` to any
+  Kimi model was rejected. Added `kimi-` / `moonshot/` to the allowlist.
+- **Kimi received the raw model alias.** `persistent-kimi-session.ts` passed the
+  unresolved alias (e.g. `kimi-k2`) to `kimi --model`; it now resolves it to the
+  canonical id (`kimi-code/kimi-for-coding`) via `resolveModel()`. (The OpenAI-compat
+  bridge was unaffected — it already passes the canonical model — so this only
+  mattered for a direct `session_start` with an alias.)
+- **Stream `error`-role events no longer look like success.** A fatal Kimi
+  `error` event with process exit 0 previously resolved as `end_turn`; the turn now
+  reports `stop_reason: 'error'`.
+- **Assistant text + tool_calls are no longer mutually exclusive** — an assistant
+  event carrying both now contributes its text instead of dropping it.
+- **`toolErrors` is now tracked** for Kimi (tool results flagged `is_error` /
+  `status: 'error'` / `error`), and **Bearer-token redaction** now covers
+  dot-bearing tokens (JWTs) in stderr.
+- Tests: 4 new cases in `kimi-session.test.ts` (alias resolution, co-located
+  text+tool_calls, error-role surfacing, tool error counting).
+
 ## [3.6.2] - 2026-06-14
 
 ### Fixed — autoloop tools missing from the plugin manifest
