@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.6.4] - 2026-06-14
+
+### Fixed — resolve model aliases for the remaining one-shot engines
+
+Extended the 3.6.3 Kimi alias fix to the sibling one-shot engines: `gemini`,
+`codex`, and `cursor` now also resolve a model alias to its canonical id before
+passing it to `--model` (via `resolveModel()`), matching `kimi` and the persistent
+Claude engine. Previously a raw alias was forwarded to the CLI. No effect on the
+canonical model strings already used by the OpenAI-compat bridge (resolution is a
+pass-through for non-aliases), so no behavioral change for existing setups. The
+niche `codex-app` JSON-RPC `model` field is left as-is.
+
 ## [3.6.3] - 2026-06-14
 
 ### Fixed — Kimi model routing + stream robustness (deep-audit follow-up)

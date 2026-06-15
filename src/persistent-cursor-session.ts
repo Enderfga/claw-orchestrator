@@ -51,7 +51,7 @@ export class PersistentCursorSession extends BaseOneShotSession {
     // agent -p <prompt> --force --trust --output-format stream-json
     const args: string[] = ['-p', message, '--force', '--trust', '--output-format', 'stream-json'];
 
-    if (this.options.model) args.push('--model', this.options.model);
+    if (this.options.model) args.push('--model', this.resolveModel(this.options.model));
     // Workspace directory (prefer --workspace over cwd for explicit path)
     if (this.options.cwd) args.push('--workspace', this.options.cwd);
 

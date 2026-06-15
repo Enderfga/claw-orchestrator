@@ -56,7 +56,7 @@ export class PersistentGeminiSession extends BaseOneShotSession {
       args.push('--sandbox');
     }
 
-    if (this.options.model) args.push('--model', this.options.model);
+    if (this.options.model) args.push('--model', this.resolveModel(this.options.model));
 
     const timeout = options.timeout || 300_000;
 

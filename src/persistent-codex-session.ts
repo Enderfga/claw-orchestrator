@@ -86,7 +86,7 @@ export class PersistentCodexSession extends BaseOneShotSession {
       args.push('--sandbox', sandbox, '--skip-git-repo-check', '--json');
       if (this.options.cwd) args.push('-C', this.options.cwd);
     }
-    if (this.options.model) args.push('--model', this.options.model);
+    if (this.options.model) args.push('--model', this.resolveModel(this.options.model));
     args.push(message);
     return args;
   }
