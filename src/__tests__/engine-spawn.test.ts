@@ -25,33 +25,30 @@ function setPlatform(p: NodeJS.Platform): void {
 
 describe('resolveEngineBin', () => {
   const origPath = process.env.PATH;
-  const origPathExt = process.env.PATHEXT;
 
   beforeEach(() => {
     existsSync.mockReset();
     readFileSync.mockReset();
-    process.env.PATHEXT = '.EXE;.CMD';
   });
 
   afterEach(() => {
     setPlatform(ORIG_PLATFORM);
     process.env.PATH = origPath;
-    process.env.PATHEXT = origPathExt;
   });
 
   it('is a no-op on non-Windows platforms', () => {
     setPlatform('linux');
-    expect(resolveEngineBin('claude')).toEqual({ command: 'claude', prefixArgs: [], useShell: false });
+    expect(resolveEngineBin('claude')).toEqual({ command: 'claude', prefixArgs: [] });
   });
 
-  it('resolves a bare name to a real .exe already on PATH (no shell)', () => {
+  it('resolves a bare name to a real .exe already on PATH', () => {
     setPlatform('win32');
     const dir = path.join('C:', 'bin');
     process.env.PATH = dir;
     const exe = path.join(dir, 'kimi.exe');
     existsSync.mockImplementation((p: string) => p === exe);
 
-    expect(resolveEngineBin('kimi')).toEqual({ command: exe, prefixArgs: [], useShell: false });
+    expect(resolveEngineBin('kimi')).toEqual({ command: exe, prefixArgs: [] });
   });
 
   it('resolves a .cmd shim that wraps a native .exe', () => {
@@ -63,7 +60,7 @@ describe('resolveEngineBin', () => {
     existsSync.mockImplementation((p: string) => p === cmd || p === exe);
     readFileSync.mockReturnValue('@ECHO off\n"%dp0%/node_modules/@anthropic-ai/claude-code/bin/claude.exe"   %*\n');
 
-    expect(resolveEngineBin('claude')).toEqual({ command: exe, prefixArgs: [], useShell: false });
+    expect(resolveEngineBin('claude')).toEqual({ command: exe, prefixArgs: [] });
   });
 
   it('resolves a .cmd shim that wraps node + a .js script', () => {
@@ -76,7 +73,7 @@ describe('resolveEngineBin', () => {
     existsSync.mockImplementation((p: string) => p === cmd || p === js || p === node);
     readFileSync.mockReturnValue('"%dp0%/node.exe" "%dp0%/node_modules/@openai/codex/bin/codex.js" %*');
 
-    expect(resolveEngineBin('codex')).toEqual({ command: node, prefixArgs: [js], useShell: false });
+    expect(resolveEngineBin('codex')).toEqual({ command: node, prefixArgs: [js] });
   });
 
   it('ignores the node.exe interpreter when picking the native target', () => {
@@ -92,7 +89,22 @@ describe('resolveEngineBin', () => {
       'IF EXIST "%dp0%/node.exe" ()\n"%dp0%/node_modules/opencode-ai/bin/opencode.exe"   %*\n',
     );
 
-    expect(resolveEngineBin('opencode')).toEqual({ command: exe, prefixArgs: [], useShell: false });
+    expect(resolveEngineBin('opencode')).toEqual({ command: exe, prefixArgs: [] });
+  });
+
+  it('picks the entrypoint (last) .js when a shim references more than one', () => {
+    setPlatform('win32');
+    const dir = path.join('C:', 'npm');
+    process.env.PATH = dir;
+    const cmd = path.join(dir, 'tool.cmd');
+    const entry = path.join(dir, 'node_modules/tool/bin/tool.js');
+    const node = path.join(dir, 'node.exe');
+    existsSync.mockImplementation((p: string) => p === cmd || p === entry || p === node);
+    readFileSync.mockReturnValue(
+      '"%dp0%/node.exe" --import "%dp0%/node_modules/tool/loader.js" "%dp0%/node_modules/tool/bin/tool.js" %*',
+    );
+
+    expect(resolveEngineBin('tool')).toEqual({ command: node, prefixArgs: [entry] });
   });
 
   it('falls back to the bare name when nothing is found', () => {
@@ -100,10 +112,10 @@ describe('resolveEngineBin', () => {
     process.env.PATH = path.join('C:', 'bin');
     existsSync.mockReturnValue(false);
 
-    expect(resolveEngineBin('agent')).toEqual({ command: 'agent', prefixArgs: [], useShell: false });
+    expect(resolveEngineBin('agent')).toEqual({ command: 'agent', prefixArgs: [] });
   });
 
-  it('uses the shell as a last resort for an unparseable .cmd shim', () => {
+  it('throws (no unsafe shell) when a .cmd shim cannot be resolved', () => {
     setPlatform('win32');
     const dir = path.join('C:', 'npm');
     process.env.PATH = dir;
@@ -111,6 +123,6 @@ describe('resolveEngineBin', () => {
     existsSync.mockImplementation((p: string) => p === cmd);
     readFileSync.mockReturnValue('@echo nothing resolvable here');
 
-    expect(resolveEngineBin('weird')).toEqual({ command: cmd, prefixArgs: [], useShell: true });
+    expect(() => resolveEngineBin('weird')).toThrow(/Cannot resolve Windows shim/);
   });
 });

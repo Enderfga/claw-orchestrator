@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.6.2] - 2026-06-14
+
+### Fixed — autoloop tools missing from the plugin manifest
+
+`openclaw plugins doctor` reported `plugin must declare contracts.tools for:
+autoloop_start / autoloop_chat / autoloop_status / autoloop_list /
+autoloop_reset_agent / autoloop_stop`. The six autoloop tools were registered in
+`src/index.ts` (since v3.5.0) but never added to `openclaw.plugin.json`
+`contracts.tools`, so OpenClaw would not expose them. Added all six (the manifest
+now declares 41 canonical tools, matching `src/index.ts`); `openclaw plugins
+doctor` now reports "No plugin issues detected." Doc tool counts updated
+(CLAUDE.md, SKILL.md, getting-started.md) from 35/27 → 41.
+
+### Hardened — engine-spawn shim resolver (deep-audit follow-up)
+
+Adversarial review of the 3.6.1 spawn fix flagged the `shell: true` fallback (only
+hit when a `.cmd`/`.bat` shim cannot be parsed) as unsafe — `shell: true`
+concatenates rather than escapes args, so a prompt with `& | < > ^ % "` could
+corrupt the command or allow injection. `src/engine-spawn.ts` now **never** uses a
+shell: an unresolvable shim throws a clear error (`Set the engine's *_BIN …`)
+instead. Also: node-based shims resolve the **last** quoted `.js` (the entrypoint,
+robust to loader/`--import` scripts), and `resolveNode` now prefers a shim-colocated
+node, then the orchestrator's own version-matched `process.execPath`, then PATH.
+
 ## [3.6.1] - 2026-06-14
 
 ### Fixed — Windows npm-shim engine spawning

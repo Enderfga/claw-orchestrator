@@ -103,7 +103,13 @@
       "ultraplan_start",
       "ultraplan_status",
       "ultrareview_start",
-      "ultrareview_status"
+      "ultrareview_status",
+      "autoloop_start",
+      "autoloop_chat",
+      "autoloop_status",
+      "autoloop_list",
+      "autoloop_reset_agent",
+      "autoloop_stop"
     ]
   },
   "skills": ["skills/SKILL.md"]

@@ -129,5 +129,5 @@ In `~/.openclaw/openclaw.json`:
 - [Multi-Engine](./multi-engine.md) — using Claude Code and Codex side by side
 - [Council](./council.md) — multi-agent collaboration with consensus voting
 - [Ultraplan & Ultrareview](./ultra.md) — deep planning and fleet code review
-- [Tools Reference](./tools.md) — complete tool API reference (27 tools)
+- [Tools Reference](./tools.md) — complete tool API reference (41 tools)
 - [CLI Reference](./cli.md) — command-line interface
