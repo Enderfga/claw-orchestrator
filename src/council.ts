@@ -35,7 +35,7 @@ import {
   type SendOptions,
   type SendResult,
 } from './types.js';
-import { parseConsensus, stripConsensusTags, hasConsensusMarker } from './consensus.js';
+import { parseConsensusWithSource, stripConsensusTags, hasConsensusMarker } from './consensus.js';
 import {
   DEFAULT_AGENT_TIMEOUT_MS,
   MIN_TASK_LENGTH,
@@ -476,6 +476,8 @@ export class Council extends EventEmitter {
           maxTurns: this.config.maxTurnsPerAgent || DEFAULT_MAX_TURNS_PER_AGENT,
           maxBudgetUsd: this.config.maxBudgetUsd,
           customEngine: agent.customEngine,
+          effort: agent.effort,
+          ultracode: agent.ultracode,
         });
 
         // Send the prompt and wait for completion
@@ -524,7 +526,14 @@ export class Council extends EventEmitter {
       this._activeSessions.delete(sessionName);
     }
 
-    const consensus = parseConsensus(content);
+    const { vote: consensus, source: consensusSource } = parseConsensusWithSource(content);
+    if (consensusSource !== 'strict') {
+      // Loose-variant or absent vote — surface it so degraded consensus
+      // detection is visible (e.g. an agent that forgot the [CONSENSUS: …] tag).
+      this.logger.warn?.(
+        `[council] ${agent.name} round ${round}: consensus from '${consensusSource}' (not the strict [CONSENSUS: YES/NO] tag) → ${consensus ? 'YES' : 'NO'}`,
+      );
+    }
     const response: AgentResponse = {
       agent: agent.name,
       round,

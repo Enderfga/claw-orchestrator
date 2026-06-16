@@ -5,6 +5,45 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.3.0] - 2026-06-16
+
+Parity batch 2 + upgrades to the older subsystems now that the new `fanout` primitive exists.
+Local-only by design — no cloud/managed features (`codex cloud exec`, best-of-N) since
+decoupling from the machine loses local monitoring/control. Every flag/RPC verified against the
+installed binaries.
+
+### Added
+
+- **`--fallback-model` array form.** `fallbackModel` on `session_start` now accepts a string or
+  an array; arrays are joined into the comma-separated list the CLI tries in order.
+- **`codex_threads` tool** (codex-app) — `thread/list` with optional filters/pagination
+  (searchTerm/cwd/archived/cursor/limit); returns `{ data, nextCursor }`.
+- **codex-app `thread/resume` on start.** When `resumeSessionId` is set, a codex-app session
+  resumes the existing thread (`thread/resume`) instead of opening a fresh one.
+- **Council per-agent `effort` + `ultracode`.** `AgentPersona` (and the `council_start` agent
+  schema) gain `effort` and `ultracode`, passed through to each agent's session.
+- **Cross-engine `ultrareview`.** `ultrareview_start` gains an `engines` option; reviewers now
+  fan out (via the `fanout` primitive) across the requested engines (default `["claude"]`,
+  round-robin), with per-agent failure isolation and a synthesis pass for `findings`.
+
+### Changed
+
+- **ultrareview now uses fan-out instead of a council** (single-shot N-perspective review +
+  synthesis fits review better than consensus rounds). `UltrareviewResult` shape is unchanged;
+  `councilId` now carries the fan-out run id.
+- **Consensus observability.** `council` logs when an agent's vote came from a loose variant or
+  was absent (`parseConsensusWithSource`), so degraded detection is visible. No behavior change.
+
+### Fixed
+
+- ultrareview reviewers run read-only (`plan` mode) — fan-out shares the project dir (no
+  per-reviewer worktree like council had), so reviewers must analyse without editing the code
+  under review.
+- codex-app `thread/resume` on start degrades to `thread/start` if the thread id is stale/unknown,
+  instead of failing the session.
+- `ultrareviewStart` surfaces a failed fan-out launch as `status: 'error'` instead of leaving the
+  result stuck at `'running'`.
+
 ## [4.2.0] - 2026-06-16
 
 Parity pass for Claude Code 2.1.178 and Codex 0.137.0. Every upstream flag/method below was

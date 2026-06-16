@@ -152,7 +152,7 @@ import {
 } from './types.js';
 import { resolveAlias, isClaudeModel } from './models.js';
 import { Council } from './council.js';
-import { Fanout, type FanoutConfig, type FanoutSession } from './fanout.js';
+import { Fanout, type FanoutConfig, type FanoutSession, type FanoutAgentSpec } from './fanout.js';
 import { AutoloopRunner } from './autoloop/runner.js';
 import { ClaudeAgentDispatcher, type ClaudeAgentDispatcherConfig } from './autoloop/dispatcher.js';
 import type { AutoloopState, PushPolicy } from './autoloop/types.js';
@@ -216,6 +216,13 @@ type CodexAppSession = ISession & {
   forkThread: () => Promise<{ threadId: string }>;
   rollback: (numTurns: number) => Promise<void>;
   listModels: () => Promise<unknown[]>;
+  listThreads: (opts?: {
+    cwd?: string;
+    searchTerm?: string;
+    archived?: boolean;
+    cursor?: string;
+    limit?: number;
+  }) => Promise<{ data: unknown[]; nextCursor: string | null }>;
 };
 
 // ─── Disk enumeration (cross-process visibility) ────────────────────────────
@@ -1199,6 +1206,14 @@ export class SessionManager {
     return { ok: true, models };
   }
 
+  async codexThreads(
+    name: string,
+    opts: { cwd?: string; searchTerm?: string; archived?: boolean; cursor?: string; limit?: number } = {},
+  ): Promise<{ ok: true; data: unknown[]; nextCursor: string | null }> {
+    const r = await this._getCodexAppSession(name, 'thread/list').listThreads(opts);
+    return { ok: true, ...r };
+  }
+
   // ─── Claude /goal helpers (CLI 2.1.139, claude engine only) ────────
   //
   // Claude Code's /goal slash command works in non-interactive stream-json
@@ -2115,7 +2130,13 @@ export class SessionManager {
   private ultrareviewPollers = new Map<string, ReturnType<typeof setInterval>>();
   ultrareviewStart(
     cwd: string,
-    opts?: { agentCount?: number; maxDurationMinutes?: number; model?: string; focus?: string },
+    opts?: {
+      agentCount?: number;
+      maxDurationMinutes?: number;
+      model?: string;
+      focus?: string;
+      engines?: EngineType[];
+    },
   ): UltrareviewResult {
     const id = `ultrareview-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
     const agentCount = Math.min(20, Math.max(1, opts?.agentCount || 5));
@@ -2253,34 +2274,57 @@ export class SessionManager {
       },
     ];
 
-    const agents = reviewAngles.slice(0, agentCount).map((a) => ({
-      ...a,
-      model: opts?.model,
-    }));
-
     const maxMinutes = Math.min(25, Math.max(5, opts?.maxDurationMinutes || 10));
     const focus = opts?.focus || 'Find bugs, security issues, and code quality problems';
+    const reviewInstruction =
+      `# Code Review Task\n\nReview the codebase in this project. ${focus}.\n\n` +
+      `Examine the code from your specialty angle and report bugs found with file paths and line numbers.`;
 
-    const councilConfig: CouncilConfig = {
-      name: 'ultrareview',
-      agents,
-      maxRounds: 2, // Review doesn't need many rounds — find bugs, then synthesize
-      projectDir: cwd,
-      agentTimeoutMs: maxMinutes * 60 * 1000,
-      maxTurnsPerAgent: 20,
-    };
+    // Cross-engine review: round-robin the requested engines across reviewers
+    // (default claude-only — unchanged behavior). Each reviewer's persona is
+    // its prompt; per-agent failures are isolated by the fan-out runner.
+    const engines = opts?.engines?.length ? opts.engines : (['claude'] as EngineType[]);
+    const agents: FanoutAgentSpec[] = reviewAngles.slice(0, agentCount).map((a, i) => ({
+      name: a.name,
+      engine: engines[i % engines.length],
+      model: opts?.model,
+      prompt: `${a.persona}\n\n${reviewInstruction}`,
+      // Review is read-only: keep reviewers out of edit mode so they analyse and
+      // report without modifying the very code they review. (Unlike council,
+      // fan-out shares the project dir — there is no worktree to sandbox edits.
+      // `plan` constrains the claude engine; non-claude reviewers, which are
+      // opt-in via `engines`, run under their engine's default sandbox.)
+      permissionMode: 'plan',
+    }));
 
-    const councilSession = this.councilStart(
-      `# Code Review Task\n\nReview the codebase in this project. ${focus}.\n\nEach reviewer: examine the code from your specialty angle, report bugs found with file paths and line numbers. Vote [CONSENSUS: YES] when your review is complete.`,
-      councilConfig,
-    );
+    let fanoutSession: FanoutSession;
+    try {
+      fanoutSession = this.fanoutStart({
+        task: reviewInstruction,
+        projectDir: cwd,
+        agents,
+        synthesize: true,
+        agentTimeoutMs: maxMinutes * 60 * 1000,
+        maxTurnsPerAgent: 20,
+      });
+    } catch (err) {
+      // Fan-out failed to even start (e.g. validation) — surface it on the
+      // stored result instead of leaving it frozen at 'running'.
+      result.status = 'error';
+      result.error = (err as Error).message;
+      result.endTime = new Date().toISOString();
+      setTimeout(() => this.ultrareviews.delete(id), RESULT_TTL_MS);
+      return result;
+    }
 
-    result.councilId = councilSession.id;
+    // `councilId` is kept for the UltrareviewResult contract; it now holds the
+    // fan-out id (an opaque run id used only by ultrareview_status).
+    result.councilId = fanoutSession.id;
 
-    // Poll council for completion (store ref for shutdown cleanup)
+    // Poll the fan-out for completion (store ref for shutdown cleanup).
     const pollInterval = setInterval(() => {
       try {
-        const status = this.councilStatus(councilSession.id);
+        const status = this.fanoutStatus(fanoutSession.id);
         if (!status || status.status === 'running') return;
 
         clearInterval(pollInterval);
@@ -2288,14 +2332,19 @@ export class SessionManager {
         result.status = status.status === 'error' ? 'error' : 'completed';
         result.endTime = new Date().toISOString();
 
-        // Synthesize findings from all agent responses
-        if (status.responses.length > 0) {
-          result.findings = status.responses.map((r) => `## ${r.agent}\n\n${r.content}`).join('\n\n---\n\n');
+        // Prefer the synthesis pass; fall back to joining successful results.
+        if (status.synthesis) {
+          result.findings = status.synthesis;
+        } else if (status.results.length > 0) {
+          result.findings = status.results
+            .filter((r) => r.ok)
+            .map((r) => `## ${r.agent}\n\n${r.output}`)
+            .join('\n\n---\n\n');
         }
 
         setTimeout(() => this.ultrareviews.delete(id), RESULT_TTL_MS);
       } catch {
-        // Council may have been cleaned up; stop polling
+        // Fan-out may have been cleaned up; stop polling.
         clearInterval(pollInterval);
         this.ultrareviewPollers.delete(id);
       }

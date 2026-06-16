@@ -877,9 +877,9 @@ describe('SessionManager', () => {
 
   describe('ultrareview', () => {
     it('ultrareviewStart creates result with running status', () => {
-      // We need to mock councilStart since it uses Council which we don't want to test here
+      // Mock fanoutStart (ultrareview now fans out reviewers) so we don't spawn real sessions.
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (mgr as any).councilStart = vi.fn().mockReturnValue({
+      (mgr as any).fanoutStart = vi.fn().mockReturnValue({
         id: 'council-mock-123',
         status: 'running',
         task: 'review',
@@ -895,9 +895,29 @@ describe('SessionManager', () => {
       expect(result.councilId).toBe('council-mock-123');
     });
 
+    it('runs reviewers read-only (plan mode) and fans out with synthesis', () => {
+      const spy = vi.fn().mockReturnValue({
+        id: 'fanout-x',
+        status: 'running',
+        task: '',
+        agentCount: 2,
+        startedAt: new Date().toISOString(),
+        results: [],
+      });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (mgr as any).fanoutStart = spy;
+      mgr.ultrareviewStart('/tmp', { agentCount: 2, engines: ['claude', 'codex'] });
+      const cfg = spy.mock.calls[0][0];
+      expect(cfg.synthesize).toBe(true);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect(cfg.agents.every((a: any) => a.permissionMode === 'plan')).toBe(true);
+      // engines round-robin across the two requested engines
+      expect(cfg.agents.map((a: { engine: string }) => a.engine)).toEqual(['claude', 'codex']);
+    });
+
     it('ultrareviewStart clamps agentCount to max 20', () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (mgr as any).councilStart = vi.fn().mockReturnValue({
+      (mgr as any).fanoutStart = vi.fn().mockReturnValue({
         id: 'council-mock-456',
         status: 'running',
         task: 'review',
@@ -925,7 +945,7 @@ describe('SessionManager', () => {
 
     it('ultrareviewStatus returns the stored result', () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (mgr as any).councilStart = vi.fn().mockReturnValue({
+      (mgr as any).fanoutStart = vi.fn().mockReturnValue({
         id: 'council-mock-789',
         status: 'running',
         task: 'review',
@@ -999,7 +1019,7 @@ describe('SessionManager', () => {
 
     it('clears ultrareview pollers', async () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (mgr as any).councilStart = vi.fn().mockReturnValue({
+      (mgr as any).fanoutStart = vi.fn().mockReturnValue({
         id: 'council-shutdown',
         status: 'running',
         task: 'review',

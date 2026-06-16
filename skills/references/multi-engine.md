@@ -85,8 +85,9 @@ Wraps `codex app-server --listen stdio:// --enable goals` as a long-running JSON
 - Real-time streaming via `item/agentMessage/delta` notifications
 - Cumulative token tracking from `thread/tokenUsage/updated` notifications
 - Goal lifecycle observation via `thread/goal/updated` and `thread/goal/cleared` notifications
-- Goal control via the `codex_goal_*` tools (which internally send the `/goal` slash command as user text — see [tools.md](./tools.md#codex-12))
-- v2 RPC tools (Codex 0.137): `codex_interrupt` (`turn/interrupt`), `codex_steer` (`turn/steer`), `codex_fork` (`thread/fork`), `codex_rollback` (`thread/rollback`), `codex_models` (`model/list`). A `turn/completed` with `status: 'failed'` rejects the turn and increments `toolErrors`.
+- Goal control via the `codex_goal_*` tools (which internally send the `/goal` slash command as user text — see [tools.md](./tools.md#codex-13))
+- v2 RPC tools (Codex 0.137): `codex_interrupt` (`turn/interrupt`), `codex_steer` (`turn/steer`), `codex_fork` (`thread/fork`), `codex_rollback` (`thread/rollback`), `codex_models` (`model/list`), `codex_threads` (`thread/list`). A `turn/completed` with `status: 'failed'` rejects the turn and increments `toolErrors`.
+- Thread resume: starting with `resumeSessionId` loads the existing thread via `thread/resume` instead of `thread/start`.
 
 > **Feature-flag risk.** The `goals` feature is marked "under development" in Codex 0.128.0 and has known bugs (e.g. issue #20591). The session class always passes `--enable goals` so it works the moment upstream stabilizes the feature, but during the transition period some goal commands may fail or be silently dropped on the server side. The wrapper layer is unaffected.
 

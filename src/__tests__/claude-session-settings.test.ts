@@ -129,4 +129,27 @@ describe('PersistentClaudeSession --settings / ultracode', () => {
     const argv = mockSpawn.mock.calls[0][1] as string[];
     expect(argv).not.toContain('--settings');
   });
+
+  it('joins a fallbackModel array into a comma-separated --fallback-model', async () => {
+    const session = new PersistentClaudeSession({ name: 't', cwd: '/tmp', fallbackModel: ['opus', 'sonnet', 'haiku'] });
+    await startReady(session, mockProc);
+    const argv = mockSpawn.mock.calls[0][1] as string[];
+    const i = argv.indexOf('--fallback-model');
+    expect(i).toBeGreaterThanOrEqual(0);
+    expect(argv[i + 1]).toBe('opus,sonnet,haiku');
+  });
+
+  it('passes a string fallbackModel through unchanged', async () => {
+    const session = new PersistentClaudeSession({ name: 't', cwd: '/tmp', fallbackModel: 'opus' });
+    await startReady(session, mockProc);
+    const argv = mockSpawn.mock.calls[0][1] as string[];
+    expect(argv[argv.indexOf('--fallback-model') + 1]).toBe('opus');
+  });
+
+  it('omits --fallback-model for an empty array', async () => {
+    const session = new PersistentClaudeSession({ name: 't', cwd: '/tmp', fallbackModel: [] });
+    await startReady(session, mockProc);
+    const argv = mockSpawn.mock.calls[0][1] as string[];
+    expect(argv).not.toContain('--fallback-model');
+  });
 });

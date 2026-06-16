@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { parseConsensus, stripConsensusTags, hasConsensusMarker } from '../consensus.js';
+import { parseConsensus, parseConsensusWithSource, stripConsensusTags, hasConsensusMarker } from '../consensus.js';
 
 // ─── parseConsensus ─────────────────────────────────────────────────────────
 
@@ -81,5 +81,17 @@ describe('hasConsensusMarker', () => {
 
   it('returns false when no marker', () => {
     expect(hasConsensusMarker('no vote here')).toBe(false);
+  });
+});
+
+describe('parseConsensusWithSource', () => {
+  it('reports strict source for the [CONSENSUS: …] tag', () => {
+    expect(parseConsensusWithSource('all good [CONSENSUS: YES]')).toEqual({ vote: true, source: 'strict' });
+  });
+  it('reports variant source for a loose vote', () => {
+    expect(parseConsensusWithSource('my consensus: no')).toEqual({ vote: false, source: 'variant' });
+  });
+  it('reports none (defaulting to NO) when no vote is present', () => {
+    expect(parseConsensusWithSource('I have not finished reviewing')).toEqual({ vote: false, source: 'none' });
   });
 });

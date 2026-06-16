@@ -29,10 +29,19 @@ export function hasConsensusMarker(text: string): boolean {
  * 4. Default: false (no consensus)
  */
 export function parseConsensus(content: string): boolean {
+  return parseConsensusWithSource(content).vote;
+}
+
+/**
+ * Like {@link parseConsensus} but also reports HOW the vote was detected, so
+ * callers can surface when a vote came from a loose variant (lower confidence)
+ * or was absent entirely (`none` → defaulted to NO).
+ */
+export function parseConsensusWithSource(content: string): { vote: boolean; source: 'strict' | 'variant' | 'none' } {
   // Strict format (supports Chinese colon) — take the LAST match
   const strictMatches = [...content.matchAll(/\[\s*CONSENSUS\s*[:：]\s*(YES|NO)\s*\]/gi)];
   if (strictMatches.length > 0) {
-    return strictMatches[strictMatches.length - 1][1].toUpperCase() === 'YES';
+    return { vote: strictMatches[strictMatches.length - 1][1].toUpperCase() === 'YES', source: 'strict' };
   }
 
   // Fallback: common variants — also take the last match
@@ -46,7 +55,7 @@ export function parseConsensus(content: string): boolean {
   for (const pattern of variantPatterns) {
     const matches = [...content.matchAll(pattern)];
     if (matches.length > 0) {
-      return matches[matches.length - 1][1].toUpperCase() === 'YES';
+      return { vote: matches[matches.length - 1][1].toUpperCase() === 'YES', source: 'variant' };
     }
   }
 
@@ -54,5 +63,5 @@ export function parseConsensus(content: string): boolean {
   // The previous tail-fallback heuristic was removed because it caused false
   // positives when agents echoed back prompt instructions containing consensus
   // keywords without actually voting.
-  return false;
+  return { vote: false, source: 'none' };
 }

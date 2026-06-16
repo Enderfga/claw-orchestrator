@@ -1,6 +1,6 @@
 ---
 name: claw-orchestrator
-description: Manage persistent coding sessions across Claude Code, Codex, Gemini, Cursor, and OpenCode engines. Use when orchestrating multi-engine coding agents, starting/sending/stopping sessions, running multi-agent council collaborations, cross-session messaging, ultraplan deep planning, ultrareview parallel code review, autoloop autonomous workspace iteration, ultraapp building deployable web apps from a structured Q&A interview, switching models/tools at runtime, or exposing the orchestrator's 64 tools as an MCP server to Hermes Agent / Claude Desktop / Cursor / Cline / Continue / Zed / Windsurf / Goose. Triggers on "start a session", "send to session", "run council", "ultraplan", "ultrareview", "autoloop", "ultraapp", "Forge tab", "build a web app", "one-click app", "AppSpec", "autonomous iteration", "iterate until goal", "deep paper review", "auto research", "switch model", "multi-agent", "coding session", "session inbox", "cursor agent", "opencode", "mcp server", "clawo-mcp", "hermes mcp", "model context protocol", "ultracode", "dynamic workflow", "fanout", "fan-out", "best-of-N", "steer turn", "interrupt turn", "fork thread", "rollback turns".
+description: Manage persistent coding sessions across Claude Code, Codex, Gemini, Cursor, and OpenCode engines. Use when orchestrating multi-engine coding agents, starting/sending/stopping sessions, running multi-agent council collaborations, cross-session messaging, ultraplan deep planning, ultrareview parallel code review, autoloop autonomous workspace iteration, ultraapp building deployable web apps from a structured Q&A interview, switching models/tools at runtime, or exposing the orchestrator's 65 tools as an MCP server to Hermes Agent / Claude Desktop / Cursor / Cline / Continue / Zed / Windsurf / Goose. Triggers on "start a session", "send to session", "run council", "ultraplan", "ultrareview", "autoloop", "ultraapp", "Forge tab", "build a web app", "one-click app", "AppSpec", "autonomous iteration", "iterate until goal", "deep paper review", "auto research", "switch model", "multi-agent", "coding session", "session inbox", "cursor agent", "opencode", "mcp server", "clawo-mcp", "hermes mcp", "model context protocol", "ultracode", "dynamic workflow", "fanout", "fan-out", "best-of-N", "steer turn", "interrupt turn", "fork thread", "rollback turns".
 metadata:
   {
     "openclaw":
@@ -43,7 +43,7 @@ metadata:
 
 # Claw Orchestrator Skill
 
-Claw Orchestrator — persistent multi-engine coding session manager for claw-style agent systems. Runs as a standalone CLI/server, with first-class OpenClaw plugin support. Wraps Claude Code, Codex, Gemini, Cursor Agent, OpenCode, and custom CLIs into headless agentic engines with 64 tools.
+Claw Orchestrator — persistent multi-engine coding session manager for claw-style agent systems. Runs as a standalone CLI/server, with first-class OpenClaw plugin support. Wraps Claude Code, Codex, Gemini, Cursor Agent, OpenCode, and custom CLIs into headless agentic engines with 65 tools.
 
 ## Engine Quick Reference
 
@@ -192,7 +192,7 @@ For details and worked examples (Karpathy-style scalar improvement + paper-revie
 | Session Ops | `coding_session_status`, `session_grep`, `session_compact`, `session_update_tools`, `session_switch_model` |
 | Inbox | `session_send_to`, `session_inbox`, `session_deliver_inbox` |
 | Teams | `coding_agents_list`, `team_list`, `team_send` |
-| Codex | `codex_resume`, `codex_review`, `codex_goal_*`, `codex_interrupt`, `codex_steer`, `codex_fork`, `codex_rollback`, `codex_models` |
+| Codex | `codex_resume`, `codex_review`, `codex_goal_*`, `codex_interrupt`, `codex_steer`, `codex_fork`, `codex_rollback`, `codex_models`, `codex_threads` |
 | Claude CLI | `claude_goal_*`, `claude_agents_list`, `plugin_details` |
 | Fan-out | `fanout_start`, `fanout_status`, `fanout_abort` |
 | Council | `council_start`, `council_status`, `council_abort`, `council_inject`, `council_review`, `council_accept`, `council_reject` |

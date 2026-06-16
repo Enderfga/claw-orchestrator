@@ -50,7 +50,13 @@ function createMockProc(responder: (msg: WrittenMsg) => Record<string, unknown> 
         written.push(msg);
         const result = responder(msg);
         if (msg.id !== undefined && result !== undefined) {
-          proc.stdout.push(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result }) + '\n');
+          // A responder returning { __rpcError: 'msg' } simulates a JSON-RPC error frame.
+          if (result && typeof result === 'object' && '__rpcError' in result) {
+            const message = (result as { __rpcError: string }).__rpcError;
+            proc.stdout.push(JSON.stringify({ jsonrpc: '2.0', id: msg.id, error: { code: -32000, message } }) + '\n');
+          } else {
+            proc.stdout.push(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result }) + '\n');
+          }
         }
       }
       cb?.();
@@ -210,5 +216,59 @@ describe('PersistentCodexAppServerSession v2 RPCs', () => {
     // It used turn/start, not turn/steer.
     expect(proc.written.some((m) => m.method === 'turn/steer')).toBe(false);
     expect(proc.written.some((m) => m.method === 'turn/start')).toBe(true);
+  });
+
+  it('listThreads() sends thread/list with filters and returns data + nextCursor', async () => {
+    const proc = createMockProc(
+      defaultResponder((m) =>
+        m.method === 'thread/list' ? { data: [{ id: 'a' }, { id: 'b' }], nextCursor: 'cur2' } : undefined,
+      ),
+    );
+    const session = await startSession(proc);
+    const r = await session.listThreads({ searchTerm: 'auth', limit: 10 });
+    expect(r).toEqual({ data: [{ id: 'a' }, { id: 'b' }], nextCursor: 'cur2' });
+    const sent = proc.written.find((m) => m.method === 'thread/list');
+    expect(sent?.params).toEqual({ searchTerm: 'auth', limit: 10 });
+  });
+
+  it('start() uses thread/resume (not thread/start) when resumeSessionId is set', async () => {
+    const proc = createMockProc((msg) => {
+      if (msg.method === 'initialize') return {};
+      if (msg.method === 'thread/resume') return { thread: { id: 't-prev' } };
+      return {};
+    });
+    mockSpawn.mockReturnValue(proc);
+    const session = new PersistentCodexAppServerSession({
+      name: 't',
+      cwd: '/tmp',
+      engine: 'codex-app',
+      resumeSessionId: 't-prev',
+    });
+    await session.start();
+    expect(session.codexThreadId).toBe('t-prev');
+    expect(proc.written.some((m) => m.method === 'thread/resume')).toBe(true);
+    expect(proc.written.some((m) => m.method === 'thread/start')).toBe(false);
+    const resume = proc.written.find((m) => m.method === 'thread/resume');
+    expect(resume?.params).toMatchObject({ threadId: 't-prev' });
+  });
+
+  it('falls back to thread/start when thread/resume fails (stale id)', async () => {
+    const proc = createMockProc((msg) => {
+      if (msg.method === 'initialize') return {};
+      if (msg.method === 'thread/resume') return { __rpcError: 'thread not found' };
+      if (msg.method === 'thread/start') return { thread: { id: 'fresh1' } };
+      return {};
+    });
+    mockSpawn.mockReturnValue(proc);
+    const session = new PersistentCodexAppServerSession({
+      name: 't',
+      cwd: '/tmp',
+      engine: 'codex-app',
+      resumeSessionId: 'stale-id',
+    });
+    await session.start();
+    expect(session.codexThreadId).toBe('fresh1');
+    expect(proc.written.some((m) => m.method === 'thread/resume')).toBe(true);
+    expect(proc.written.some((m) => m.method === 'thread/start')).toBe(true);
   });
 });

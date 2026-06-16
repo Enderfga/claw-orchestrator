@@ -218,11 +218,30 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
     // 2. thread/start — captures threadId both from the response and the
     //    `thread/started` notification (which arrives before the response per
     //    observed protocol semantics).
-    const threadResp = (await this._request('thread/start', {
+    const startParams = {
       cwd: this.options.cwd,
       model: this.options.model,
       sandbox: (this.options.sandboxMode || 'workspace-write') as SandboxMode,
-    })) as { thread?: { id?: string } };
+    };
+    // When resuming a known thread, use `thread/resume` (loads prior turns)
+    // instead of `thread/start` (which opens a fresh thread). A stale/unknown
+    // thread id (e.g. a wrong-engine id from auto-resume, or a thread that no
+    // longer exists) degrades gracefully to a fresh thread rather than failing
+    // the whole session.
+    const resumeId = this.options.resumeSessionId;
+    let threadResp: { thread?: { id?: string } };
+    if (resumeId) {
+      try {
+        threadResp = (await this._request('thread/resume', { threadId: resumeId, ...startParams })) as {
+          thread?: { id?: string };
+        };
+      } catch (err) {
+        this.emit(SESSION_EVENT.LOG, `[codex-app] thread/resume failed (${(err as Error).message}); starting fresh`);
+        threadResp = (await this._request('thread/start', startParams)) as { thread?: { id?: string } };
+      }
+    } else {
+      threadResp = (await this._request('thread/start', startParams)) as { thread?: { id?: string } };
+    }
     if (!this.threadId && threadResp?.thread?.id) {
       this.threadId = threadResp.thread.id;
     }
@@ -634,6 +653,20 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
   async listModels(): Promise<unknown[]> {
     const resp = (await this._request('model/list', {})) as { data?: unknown[] };
     return resp?.data ?? [];
+  }
+
+  /** List threads (`thread/list`) with optional filters + pagination. */
+  async listThreads(
+    opts: { cwd?: string; searchTerm?: string; archived?: boolean; cursor?: string; limit?: number } = {},
+  ): Promise<{ data: unknown[]; nextCursor: string | null }> {
+    const params: Record<string, unknown> = {};
+    if (opts.cwd !== undefined) params.cwd = opts.cwd;
+    if (opts.searchTerm !== undefined) params.searchTerm = opts.searchTerm;
+    if (opts.archived !== undefined) params.archived = opts.archived;
+    if (opts.cursor !== undefined) params.cursor = opts.cursor;
+    if (opts.limit !== undefined) params.limit = opts.limit;
+    const resp = (await this._request('thread/list', params)) as { data?: unknown[]; nextCursor?: string | null };
+    return { data: resp?.data ?? [], nextCursor: resp?.nextCursor ?? null };
   }
 
   // ── Helpers ────────────────────────────────────────────────────────────

@@ -197,7 +197,7 @@ export interface SessionConfig {
   // New CLI flags
   bare?: boolean;
   worktree?: string | boolean;
-  fallbackModel?: string;
+  fallbackModel?: string | string[];
   jsonSchema?: string;
   mcpConfig?: string | string[];
   settings?: string;
@@ -568,6 +568,10 @@ export interface AgentPersona {
   baseUrl?: string;
   permissionMode?: PermissionMode;
   customEngine?: CustomEngineConfig;
+  /** Per-agent reasoning effort (council only; passed to the agent's session). */
+  effort?: EffortLevel;
+  /** Per-agent ultracode / dynamic workflows (council, claude engine only). */
+  ultracode?: boolean;
 }
 
 export interface CouncilConfig {

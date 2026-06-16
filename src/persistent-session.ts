@@ -225,7 +225,13 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
       if (typeof this.options.worktree === 'string' && this.options.worktree !== 'true')
         args.push(this.options.worktree);
     }
-    if (this.options.fallbackModel) args.push('--fallback-model', this.options.fallbackModel);
+    if (this.options.fallbackModel) {
+      // CLI 2.1.x accepts a comma-separated list to try each in order.
+      const fm = Array.isArray(this.options.fallbackModel)
+        ? this.options.fallbackModel.join(',')
+        : this.options.fallbackModel;
+      if (fm) args.push('--fallback-model', fm);
+    }
     if (this.options.jsonSchema) args.push('--json-schema', this.options.jsonSchema);
     if (this.options.mcpConfig) {
       const configs = Array.isArray(this.options.mcpConfig) ? this.options.mcpConfig : [this.options.mcpConfig];

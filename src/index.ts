@@ -13,7 +13,7 @@ import { SessionManager } from './session-manager.js';
 import { createProxyHandler } from './proxy/handler.js';
 import { EmbeddedServer } from './embedded-server.js';
 import { sanitizeCwd, validateRegex } from './validation.js';
-import type { PluginConfig, EffortLevel, CouncilConfig, AgentPersona } from './types.js';
+import type { PluginConfig, EffortLevel, CouncilConfig, AgentPersona, EngineType } from './types.js';
 import type { FanoutConfig } from './fanout.js';
 
 // ─── Standalone Export ───────────────────────────────────────────────────────
@@ -173,7 +173,11 @@ const plugin = {
           agent: { type: 'string', description: 'Default agent to use' },
           bare: { type: 'boolean', description: 'Minimal mode: skip hooks, LSP, auto-memory, CLAUDE.md' },
           worktree: { type: ['string', 'boolean'], description: 'Run in git worktree' },
-          fallbackModel: { type: 'string', description: 'Auto fallback when primary overloaded' },
+          fallbackModel: {
+            type: ['string', 'array'],
+            items: { type: 'string' },
+            description: 'Auto fallback when primary overloaded. String or array (tried in order).',
+          },
           jsonSchema: { type: 'string', description: 'JSON Schema for structured output' },
           mcpConfig: {
             type: ['string', 'array'],
@@ -947,6 +951,31 @@ const plugin = {
       execute: async (_id, args) => getManager().codexModels(args.name as string),
     });
 
+    api.registerTool({
+      name: 'codex_threads',
+      description: 'List Codex threads visible to a codex-app session (`thread/list`), with optional filters.',
+      parameters: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: 'Session name.' },
+          searchTerm: { type: 'string', description: 'Filter threads by text.' },
+          cwd: { type: 'string', description: 'Filter to threads under this directory.' },
+          archived: { type: 'boolean', description: 'Include archived threads.' },
+          cursor: { type: 'string', description: 'Pagination cursor (from a prior nextCursor).' },
+          limit: { type: 'number', description: 'Max threads to return.' },
+        },
+        required: ['name'],
+      },
+      execute: async (_id, args) =>
+        getManager().codexThreads(args.name as string, {
+          searchTerm: args.searchTerm as string | undefined,
+          cwd: args.cwd ? sanitizeCwd(args.cwd as string) : undefined,
+          archived: args.archived as boolean | undefined,
+          cursor: args.cursor as string | undefined,
+          limit: args.limit as number | undefined,
+        }),
+    });
+
     // ─── Tool: claude_agents_list (Claude CLI 2.1.x, claude engine) ───────
 
     api.registerTool({
@@ -1081,6 +1110,15 @@ const plugin = {
                 model: { type: 'string', description: 'Model to use' },
                 baseUrl: { type: 'string', description: 'Custom API endpoint (for proxy)' },
                 customEngine: { type: 'object', description: 'Custom engine config (when engine="custom")' },
+                effort: {
+                  type: 'string',
+                  enum: ['low', 'medium', 'high', 'xhigh', 'max', 'auto'],
+                  description: 'Per-agent reasoning effort.',
+                },
+                ultracode: {
+                  type: 'boolean',
+                  description: 'Per-agent ultracode / dynamic workflows (claude engine only).',
+                },
               },
               required: ['name', 'emoji', 'persona'],
             },
@@ -1351,6 +1389,12 @@ const plugin = {
           maxDurationMinutes: { type: 'number', description: 'Max review duration in minutes (5-25, default 10)' },
           model: { type: 'string', description: 'Model for reviewers (default: session default)' },
           focus: { type: 'string', description: 'Review focus area (default: bugs + security + quality)' },
+          engines: {
+            type: 'array',
+            items: { type: 'string', enum: ['claude', 'codex', 'codex-app', 'gemini', 'cursor', 'opencode'] },
+            description:
+              'Engines to round-robin reviewers across (default ["claude"]). Reviewers fan out in parallel; per-agent failures are isolated.',
+          },
         },
         required: ['cwd'],
       },
@@ -1360,6 +1404,7 @@ const plugin = {
           maxDurationMinutes: args.maxDurationMinutes as number | undefined,
           model: args.model as string | undefined,
           focus: args.focus as string | undefined,
+          engines: args.engines as EngineType[] | undefined,
         });
         return { ok: true, ...result, note: 'Ultrareview running in background. Poll with ultrareview_status.' };
       },

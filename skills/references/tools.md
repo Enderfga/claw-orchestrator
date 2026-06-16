@@ -211,7 +211,7 @@ Returns the regular turn result; goal info is in the assistant's reply text.
 
 ---
 
-## Codex (12)
+## Codex (13)
 
 Tools targeting OpenAI's `codex` CLI. The `codex_resume` and `codex_review` tools are one-shot wrappers and work without a managed session. The `codex_goal_*` tools require a session started with `engine: "codex-app"` (see [multi-engine.md](./multi-engine.md)) — the legacy `engine: "codex"` (which uses `codex exec`) has no slash-command surface.
 
@@ -295,6 +295,11 @@ Codex app-server v2 RPCs (require `engine: "codex-app"`). Method names + param s
 | `codex_fork` | `thread/fork` | `name` | `{ ok, threadId }` — branches the thread; returns the forked id |
 | `codex_rollback` | `thread/rollback` | `name`, `numTurns` | `{ ok, numTurns }` — drops the last N turns |
 | `codex_models` | `model/list` | `name` | `{ ok, models }` — incl. each model's `supportedReasoningEfforts` |
+| `codex_threads` | `thread/list` | `name`, `searchTerm?`, `cwd?`, `archived?`, `cursor?`, `limit?` | `{ ok, data, nextCursor }` — list threads with filters + pagination |
+
+To **resume** a codex-app thread, start a session with `engine: "codex-app"` and
+`resumeSessionId: "<threadId>"` — it loads the existing thread via `thread/resume` instead of
+opening a fresh one.
 
 ---
 
