@@ -14,6 +14,7 @@ import { createProxyHandler } from './proxy/handler.js';
 import { EmbeddedServer } from './embedded-server.js';
 import { sanitizeCwd, validateRegex } from './validation.js';
 import type { PluginConfig, EffortLevel, CouncilConfig, AgentPersona } from './types.js';
+import type { FanoutConfig } from './fanout.js';
 
 // ─── Standalone Export ───────────────────────────────────────────────────────
 
@@ -180,6 +181,16 @@ const plugin = {
             description: 'MCP server config file(s)',
           },
           settings: { type: 'string', description: 'Settings.json path or inline JSON' },
+          ultracode: {
+            type: 'boolean',
+            description:
+              'Claude engine only. Enable "ultracode" / dynamic workflows: Claude plans a JS orchestration script per substantive task and fans out to subagents. Injected as the ultracode:true settings key (not a --effort value).',
+          },
+          codexProfile: {
+            type: 'string',
+            description:
+              'Codex engine only. Named config profile from ~/.codex/config.toml, passed as `codex exec --profile`. Reasoning effort is mapped from the engine-agnostic `effort` param to `-c model_reasoning_effort` automatically.',
+          },
           noSessionPersistence: { type: 'boolean', description: 'Do not save session to disk' },
           betas: { type: ['string', 'array'], items: { type: 'string' }, description: 'Custom beta headers' },
           enableAgentTeams: { type: 'boolean', description: 'Enable experimental agent teams' },
@@ -869,6 +880,176 @@ const plugin = {
       },
       execute: async (_id, args) => {
         return await getManager().codexGoalCommand(args.name as string, 'clear', args.timeout as number | undefined);
+      },
+    });
+
+    // ─── Codex app-server v2 RPC tools (codex-app engine, Codex 0.137) ────
+
+    api.registerTool({
+      name: 'codex_interrupt',
+      description: 'Cancel the in-flight turn on a codex-app session (`turn/interrupt`).',
+      parameters: {
+        type: 'object',
+        properties: { name: { type: 'string', description: 'Session name.' } },
+        required: ['name'],
+      },
+      execute: async (_id, args) => getManager().codexInterrupt(args.name as string),
+    });
+
+    api.registerTool({
+      name: 'codex_steer',
+      description:
+        'Add input to the in-flight turn on a codex-app session without restarting it (`turn/steer`). Falls back to a normal turn when idle.',
+      parameters: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: 'Session name.' },
+          message: { type: 'string', description: 'Text to steer the turn with.' },
+        },
+        required: ['name', 'message'],
+      },
+      execute: async (_id, args) => getManager().codexSteer(args.name as string, args.message as string),
+    });
+
+    api.registerTool({
+      name: 'codex_fork',
+      description: 'Branch a codex-app thread into a new one (`thread/fork`); returns the forked thread id.',
+      parameters: {
+        type: 'object',
+        properties: { name: { type: 'string', description: 'Session name.' } },
+        required: ['name'],
+      },
+      execute: async (_id, args) => getManager().codexForkThread(args.name as string),
+    });
+
+    api.registerTool({
+      name: 'codex_rollback',
+      description: 'Drop the last N turns from a codex-app thread (`thread/rollback`).',
+      parameters: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: 'Session name.' },
+          numTurns: { type: 'number', minimum: 1, description: 'Number of turns to roll back (>=1).' },
+        },
+        required: ['name', 'numTurns'],
+      },
+      execute: async (_id, args) => getManager().codexRollback(args.name as string, args.numTurns as number),
+    });
+
+    api.registerTool({
+      name: 'codex_models',
+      description: 'List models available to a codex-app session (`model/list`), incl. supported reasoning efforts.',
+      parameters: {
+        type: 'object',
+        properties: { name: { type: 'string', description: 'Session name.' } },
+        required: ['name'],
+      },
+      execute: async (_id, args) => getManager().codexModels(args.name as string),
+    });
+
+    // ─── Tool: claude_agents_list (Claude CLI 2.1.x, claude engine) ───────
+
+    api.registerTool({
+      name: 'claude_agents_list',
+      description:
+        'List Claude Code background agent sessions via `claude agents --json` (state/model/title/progress). One-shot, not tied to a managed session.',
+      parameters: {
+        type: 'object',
+        properties: {
+          all: { type: 'boolean', description: 'Include completed sessions (`--all`).' },
+          cwd: { type: 'string', description: 'Scope to sessions started under this directory (`--cwd`).' },
+        },
+      },
+      execute: async (_id, args) =>
+        getManager().claudeAgentsList({ all: args.all as boolean | undefined, cwd: args.cwd as string | undefined }),
+    });
+
+    // ─── Fan-out tools (parallel multi-engine task, no consensus) ─────────
+
+    api.registerTool({
+      name: 'fanout_start',
+      description:
+        'Run one task across N engine/model agents IN PARALLEL and collect their answers (optional synthesis). Cross-engine best-of-N / diverse-perspective primitive. No rounds, votes, or worktrees — use council for isolated parallel edits. Runs in background; poll with fanout_status.',
+      parameters: {
+        type: 'object',
+        properties: {
+          task: {
+            type: 'string',
+            description: 'The shared task/prompt sent to every agent (unless an agent overrides it).',
+          },
+          projectDir: { type: 'string', description: 'Working directory all agents run in.' },
+          agents: {
+            type: 'array',
+            description: 'Agent specs: { name, engine?, model?, prompt?, baseUrl?, permissionMode?, customEngine? }.',
+            items: {
+              type: 'object',
+              properties: {
+                name: { type: 'string', minLength: 1, description: 'Unique label (forms the session name).' },
+                engine: {
+                  type: 'string',
+                  enum: ['claude', 'codex', 'codex-app', 'gemini', 'cursor', 'opencode', 'custom'],
+                },
+                model: { type: 'string' },
+                prompt: { type: 'string' },
+                baseUrl: { type: 'string' },
+              },
+              required: ['name'],
+            },
+          },
+          synthesize: {
+            type: 'boolean',
+            description: 'Run a final synthesis pass over the successful results (>=2 needed).',
+          },
+          synthesisModel: { type: 'string', description: 'Model for the synthesis pass.' },
+          synthesisEngine: {
+            type: 'string',
+            enum: ['claude', 'codex', 'codex-app', 'gemini', 'cursor', 'opencode', 'custom'],
+            description: 'Engine for the synthesis pass (default claude).',
+          },
+          agentTimeoutMs: { type: 'number', description: 'Per-agent timeout in ms (default 600000).' },
+          maxTurnsPerAgent: { type: 'number', description: 'Max agent loop turns (default 30).' },
+          maxBudgetUsd: { type: 'number', description: 'Per-agent spend cap (USD).' },
+        },
+        required: ['task', 'projectDir', 'agents'],
+      },
+      execute: async (_id, args) => {
+        const session = getManager().fanoutStart({
+          task: args.task as string,
+          projectDir: sanitizeCwd(args.projectDir as string)!,
+          agents: args.agents as FanoutConfig['agents'],
+          synthesize: args.synthesize as boolean | undefined,
+          synthesisModel: args.synthesisModel as string | undefined,
+          synthesisEngine: args.synthesisEngine as FanoutConfig['synthesisEngine'],
+          agentTimeoutMs: args.agentTimeoutMs as number | undefined,
+          maxTurnsPerAgent: args.maxTurnsPerAgent as number | undefined,
+          maxBudgetUsd: args.maxBudgetUsd as number | undefined,
+        });
+        return { ok: true, ...session, note: 'Fan-out running in background. Poll with fanout_status.' };
+      },
+    });
+
+    api.registerTool({
+      name: 'fanout_status',
+      description: 'Poll a running or finished fan-out by id; returns per-agent results and any synthesis.',
+      parameters: {
+        type: 'object',
+        properties: { id: { type: 'string', description: 'Fan-out id from fanout_start.' } },
+        required: ['id'],
+      },
+      execute: async (_id, args) => ({ ok: true, ...getManager().fanoutStatus(args.id as string) }),
+    });
+
+    api.registerTool({
+      name: 'fanout_abort',
+      description: 'Abort a running fan-out by id (already-started agents finish; synthesis is skipped).',
+      parameters: {
+        type: 'object',
+        properties: { id: { type: 'string', description: 'Fan-out id from fanout_start.' } },
+        required: ['id'],
+      },
+      execute: async (_id, args) => {
+        getManager().fanoutAbort(args.id as string);
+        return { ok: true };
       },
     });
 

@@ -201,6 +201,13 @@ export interface SessionConfig {
   jsonSchema?: string;
   mcpConfig?: string | string[];
   settings?: string;
+  /**
+   * Enable Claude Code "ultracode" / dynamic workflows for this session (Claude engine only).
+   * NOT a --effort value — the CLI rejects `--effort ultracode`. It is the `ultracode: true`
+   * settings key, merged into --settings (per Claude Code 2.1.x model-config docs). When on,
+   * Claude writes a JS orchestration script per substantive task and fans out to subagents.
+   */
+  ultracode?: boolean;
   noSessionPersistence?: boolean;
   betas?: string | string[];
   enableAgentTeams?: boolean;
@@ -251,6 +258,12 @@ export interface SessionConfig {
    * Defaults to 'workspace-write' (matches the legacy --full-auto behavior).
    */
   sandboxMode?: 'read-only' | 'workspace-write' | 'danger-full-access';
+  /**
+   * Codex only. Named config profile from `~/.codex/config.toml`, passed as
+   * `codex exec --profile <name>`. Bundles model + reasoning effort + approval +
+   * permissions on the Codex side.
+   */
+  codexProfile?: string;
   /** Custom engine configuration — required when engine is 'custom' */
   customEngine?: CustomEngineConfig;
 }

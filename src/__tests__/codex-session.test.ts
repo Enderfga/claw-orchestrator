@@ -109,4 +109,103 @@ describe('PersistentCodexSession', () => {
 
     session.stop();
   });
+
+  it('maps effort to `-c model_reasoning_effort` (max → xhigh)', async () => {
+    const session = new PersistentCodexSession({ name: 'test', cwd: '/tmp', effort: 'max' });
+    await session.start();
+    const p = session.send('hi', { waitForComplete: true });
+    setTimeout(() => runTurn(mockProc, 'thread-eff'), 10);
+    await p;
+
+    const argv = mockSpawn.mock.calls[0][1] as string[];
+    const ci = argv.indexOf('-c');
+    expect(ci).toBeGreaterThanOrEqual(0);
+    expect(argv[ci + 1]).toBe('model_reasoning_effort=xhigh');
+    session.stop();
+  });
+
+  it('omits reasoning-effort override when effort is auto', async () => {
+    const session = new PersistentCodexSession({ name: 'test', cwd: '/tmp', effort: 'auto' });
+    await session.start();
+    const p = session.send('hi', { waitForComplete: true });
+    setTimeout(() => runTurn(mockProc, 'thread-auto'), 10);
+    await p;
+
+    const argv = mockSpawn.mock.calls[0][1] as string[];
+    expect(argv).not.toContain('-c');
+    session.stop();
+  });
+
+  it('passes --profile when codexProfile is set', async () => {
+    const session = new PersistentCodexSession({ name: 'test', cwd: '/tmp', codexProfile: 'fast' });
+    await session.start();
+    const p = session.send('hi', { waitForComplete: true });
+    setTimeout(() => runTurn(mockProc, 'thread-prof'), 10);
+    await p;
+
+    const argv = mockSpawn.mock.calls[0][1] as string[];
+    const pi = argv.indexOf('--profile');
+    expect(pi).toBeGreaterThanOrEqual(0);
+    expect(argv[pi + 1]).toBe('fast');
+    session.stop();
+  });
+
+  it('counts tool items, flags command failures, excludes reasoning/todo from tool counts', async () => {
+    const session = new PersistentCodexSession({ name: 'test', cwd: '/tmp' });
+    await session.start();
+    const p = session.send('hi', { waitForComplete: true });
+    setTimeout(() => {
+      mockProc.stdout.push(JSON.stringify({ type: 'thread.started', thread_id: 'thread-items' }) + '\n');
+      mockProc.stdout.push(
+        JSON.stringify({ type: 'item.completed', item: { type: 'reasoning', text: 'thinking' } }) + '\n',
+      );
+      mockProc.stdout.push(JSON.stringify({ type: 'item.completed', item: { type: 'todo_list' } }) + '\n');
+      mockProc.stdout.push(
+        JSON.stringify({ type: 'item.completed', item: { type: 'command_execution', exit_code: 0 } }) + '\n',
+      );
+      mockProc.stdout.push(
+        JSON.stringify({ type: 'item.completed', item: { type: 'command_execution', exit_code: 1 } }) + '\n',
+      );
+      mockProc.stdout.push(JSON.stringify({ type: 'item.completed', item: { type: 'file_change' } }) + '\n');
+      mockProc.stdout.push(
+        JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'done' } }) + '\n',
+      );
+      mockProc.stdout.push(
+        JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } }) + '\n',
+      );
+      mockProc.stdout.push(null);
+      mockProc.emit('close', 0);
+    }, 10);
+    const result = await p;
+
+    expect(result.text).toBe('done');
+    const stats = session.getStats();
+    // 3 tool items (2 command_execution + 1 file_change); reasoning + todo_list excluded.
+    expect(stats.toolCalls).toBe(3);
+    // One command_execution exited non-zero.
+    expect(stats.toolErrors).toBe(1);
+    session.stop();
+  });
+
+  it('passes --profile on the first turn but NOT on resume (resume rejects it)', async () => {
+    const session = new PersistentCodexSession({ name: 'test', cwd: '/tmp', codexProfile: 'fast' });
+    await session.start();
+
+    const p1 = session.send('first', { waitForComplete: true });
+    setTimeout(() => runTurn(mockProc, 'thread-pr'), 10);
+    await p1;
+
+    const proc2 = createMockProcess();
+    mockSpawn.mockReturnValue(proc2);
+    const p2 = session.send('second', { waitForComplete: true });
+    setTimeout(() => runTurn(proc2, 'thread-pr'), 10);
+    await p2;
+
+    const args1 = mockSpawn.mock.calls[0][1] as string[];
+    const args2 = mockSpawn.mock.calls[1][1] as string[];
+    expect(args1).toContain('--profile');
+    expect(args2).toContain('resume');
+    expect(args2).not.toContain('--profile');
+    session.stop();
+  });
 });

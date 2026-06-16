@@ -34,7 +34,7 @@ interface CodexThreadStarted {
 }
 interface CodexItemCompleted {
   type: 'item.completed';
-  item: { id?: string; type?: string; text?: string };
+  item: { id?: string; type?: string; text?: string; exit_code?: number };
 }
 interface CodexTurnCompleted {
   type: 'turn.completed';
@@ -114,8 +114,29 @@ export class PersistentCodexSession extends BaseOneShotSession {
     const schemaPath = this._ensureSchemaFile();
     if (schemaPath) args.push('--output-schema', schemaPath);
     if (this.options.model) args.push('--model', this.options.model);
+    args.push(...this._reasoningEffortArgs());
+    // `--profile` is rejected by `codex exec resume` (like --sandbox/-C); the
+    // resumed thread already carries the profile's config, so only pass it on
+    // the first turn. (`-c` and `--model` ARE accepted on resume, verified
+    // against `codex exec resume --help` on 0.137.)
+    if (!isResume && this.options.codexProfile) args.push('--profile', this.options.codexProfile);
     args.push(message);
     return args;
+  }
+
+  /**
+   * Map the engine-agnostic `effort` to Codex's reasoning-effort config override
+   * (`-c model_reasoning_effort=<level>`). Codex accepts minimal|low|medium|high|xhigh;
+   * we map `max`→`xhigh` (Codex has no `max`) and ignore `auto` / `ultracode`
+   * (ultracode is a Claude-only setting). `-c` is a global override accepted on
+   * both `exec` and `exec resume`.
+   */
+  private _reasoningEffortArgs(): string[] {
+    const e = this.options.effort;
+    if (!e || e === 'auto') return [];
+    const map: Record<string, string> = { low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'xhigh' };
+    const level = map[e];
+    return level ? ['-c', `model_reasoning_effort=${level}`] : [];
   }
 
   /**
@@ -193,7 +214,8 @@ export class PersistentCodexSession extends BaseOneShotSession {
           }
           case 'item.completed': {
             const it = event as CodexItemCompleted;
-            if (it.item?.type === 'agent_message' && typeof it.item.text === 'string') {
+            const itemType = it.item?.type;
+            if (itemType === 'agent_message' && typeof it.item.text === 'string') {
               const chunk = it.item.text;
               assistantText += chunk;
               try {
@@ -202,8 +224,22 @@ export class PersistentCodexSession extends BaseOneShotSession {
                 // User callback errors are not fatal.
               }
               this.emit(SESSION_EVENT.TEXT, chunk);
+            } else if (itemType === 'reasoning') {
+              // Reasoning summary — not a tool call; log without inflating toolCalls.
+              this.emit(SESSION_EVENT.LOG, `[codex-reasoning] ${trimmed}`);
+            } else if (itemType === 'todo_list') {
+              // Plan / todo-list updates (model-initiated or via --include-plan-tool).
+              this.emit(SESSION_EVENT.LOG, `[codex-plan] ${trimmed}`);
             } else {
-              // Tool-call items (command, apply_patch, mcp_tool_call) — surface as tool events.
+              // Real tool-call items: command_execution, file_change, mcp_tool_call, web_search.
+              this._stats.toolCalls++;
+              if (
+                itemType === 'command_execution' &&
+                typeof it.item.exit_code === 'number' &&
+                it.item.exit_code !== 0
+              ) {
+                this._stats.toolErrors++;
+              }
               try {
                 options.callbacks?.onToolUse?.(event);
               } catch {

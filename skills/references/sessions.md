@@ -75,6 +75,24 @@ await manager.startSession({
 });
 ```
 
+> `claude continue/respawn/stop/logs` are not headless subcommands — session continuation is via `resumeSessionId`/`forkSession`. Use the `claude_agents_list` tool (`claude agents --json`) to enumerate Claude Code background agent sessions.
+
+### ultracode (Claude dynamic workflows)
+
+Set `ultracode: true` on a Claude `session_start` to have Claude orchestrate a JS workflow per substantive task and fan out to subagents. It is injected as the `ultracode: true` settings key merged into `--settings` (not a `--effort` value — the CLI rejects `--effort ultracode`):
+
+```typescript
+await manager.startSession({ name: 'big-task', engine: 'claude', ultracode: true });
+```
+
+### Codex app-server turn control (`engine: 'codex-app'`)
+
+Mid-turn and thread control via Codex 0.137 v2 RPCs, surfaced as tools: `codex_interrupt` (cancel the in-flight turn), `codex_steer` (add input without restarting), `codex_fork` (branch the thread), `codex_rollback` (drop the last N turns), `codex_models` (list models + supported reasoning efforts).
+
+### Fan-out (cross-engine parallel)
+
+`fanout_start` runs one task across N engine/model agents in parallel and collects their answers (optional synthesis) — the best-of-N / diverse-perspective primitive. Unlike Council, no rounds/votes/worktrees; use Council for isolated parallel edits. See [tools.md](./tools.md#fan-out-3).
+
 ## Runtime Operations
 
 ### Model Switching

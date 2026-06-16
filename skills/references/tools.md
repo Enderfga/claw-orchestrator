@@ -31,6 +31,7 @@ Start a persistent coding session with full CLI flag support.
 | `jsonSchema` | string | JSON Schema for structured output. Claude: `--json-schema` (inline). Codex: `--output-schema` (written to a temp file, requires Codex 0.132+). Other engines ignore it. |
 | `mcpConfig` | string \| string[] | MCP server config file(s) |
 | `settings` | string | Settings.json path or inline JSON |
+| `ultracode` | boolean | Claude only. Enable "ultracode" / dynamic workflows — Claude plans a JS orchestration script per substantive task and fans out to subagents. Injected as the `ultracode:true` settings key (merged into `settings`), **not** a `--effort` value (the CLI rejects `--effort ultracode`). |
 | `noSessionPersistence` | boolean | Do not save session to disk |
 | `betas` | string \| string[] | Custom beta headers |
 | `enableAgentTeams` | boolean | Enable experimental agent teams |
@@ -210,7 +211,7 @@ Returns the regular turn result; goal info is in the assistant's reply text.
 
 ---
 
-## Codex (7)
+## Codex (12)
 
 Tools targeting OpenAI's `codex` CLI. The `codex_resume` and `codex_review` tools are one-shot wrappers and work without a managed session. The `codex_goal_*` tools require a session started with `engine: "codex-app"` (see [multi-engine.md](./multi-engine.md)) — the legacy `engine: "codex"` (which uses `codex exec`) has no slash-command surface.
 
@@ -282,6 +283,62 @@ Send `/goal pause`, `/goal resume`, or `/goal clear` respectively. Requires `eng
 Returns `{ ok, text, goal }`.
 
 > **Stability note:** Codex's `goals` feature is flagged "under development" in 0.128.0 and has known bugs (issue #20591). The slash-command parsing on the server side may also evolve. The wrapper is intentionally a thin sugar layer so upstream changes only affect the slash-text we send, not the protocol structure.
+
+### `codex_interrupt` / `codex_steer` / `codex_fork` / `codex_rollback` / `codex_models`
+
+Codex app-server v2 RPCs (require `engine: "codex-app"`). Method names + param shapes verified against `codex app-server generate-json-schema` (Codex 0.137).
+
+| Tool | RPC | Params | Returns |
+|------|-----|--------|---------|
+| `codex_interrupt` | `turn/interrupt` | `name` | `{ ok, interrupted }` — cancels the in-flight turn (no-op if idle) |
+| `codex_steer` | `turn/steer` | `name`, `message` | `{ ok, steered, turnId? , text? }` — adds input to the in-flight turn; falls back to a normal turn when idle |
+| `codex_fork` | `thread/fork` | `name` | `{ ok, threadId }` — branches the thread; returns the forked id |
+| `codex_rollback` | `thread/rollback` | `name`, `numTurns` | `{ ok, numTurns }` — drops the last N turns |
+| `codex_models` | `model/list` | `name` | `{ ok, models }` — incl. each model's `supportedReasoningEfforts` |
+
+---
+
+## Claude CLI (1)
+
+### `claude_agents_list`
+
+Wraps `claude agents --json` — lists Claude Code background agent sessions (state/model/title/progress). One-shot spawn, not tied to a managed session. (`claude continue/respawn/stop/logs` do not exist as headless subcommands; use `resumeSessionId` on `session_start` to resume.)
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `all` | boolean | Include completed sessions (`--all`). |
+| `cwd` | string | Scope to sessions started under this directory (`--cwd`). |
+
+Returns `{ ok, agents }`.
+
+---
+
+## Fan-out (3)
+
+Run one task across N engine/model agents **in parallel** and collect their answers, with an optional synthesis pass. Cross-engine best-of-N / diverse-perspective primitive — no rounds, votes, or git worktrees. For isolated parallel *editing*, use Council.
+
+### `fanout_start`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `task` | string | yes | Shared prompt sent to every agent (unless an agent overrides via its own `prompt`). |
+| `projectDir` | string | yes | Working directory all agents run in. |
+| `agents` | array | yes | Specs: `{ name, engine?, model?, prompt?, baseUrl?, permissionMode?, customEngine? }`. |
+| `synthesize` | boolean | | Run a final synthesis pass over the successful results (needs ≥2). |
+| `synthesisModel` / `synthesisEngine` | string | | Model/engine for the synthesis pass (default engine `claude`). |
+| `agentTimeoutMs` | number | | Per-agent timeout (default 600000). |
+| `maxTurnsPerAgent` | number | | Max agent loop turns (default 30). |
+| `maxBudgetUsd` | number | | Per-agent spend cap. |
+
+Runs in the background; returns `{ ok, id, status, ... }`. Poll with `fanout_status`.
+
+### `fanout_status`
+
+Poll a fan-out by `id`. Returns `{ ok, id, status, results: [{ agent, engine, model, ok, output, error?, durationMs }], synthesis? }`.
+
+### `fanout_abort`
+
+Abort a running fan-out by `id` (already-started agents finish; synthesis is skipped).
 
 ---
 

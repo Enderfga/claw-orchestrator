@@ -113,6 +113,29 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
     return this._isBusy;
   }
 
+  /**
+   * Build the `--settings` argv fragment, merging the `ultracode: true` key when requested.
+   * ultracode enables dynamic workflows and is a settings key, NOT a --effort value (the CLI
+   * rejects `--effort ultracode`). User-supplied settings are never dropped: inline JSON and
+   * readable settings files are parsed and merged into a single object; if that fails we fall
+   * back to passing the original --settings untouched plus a dedicated ultracode flag.
+   */
+  private buildSettingsArgs(): string[] {
+    const settings = this.options.settings;
+    if (!this.options.ultracode) return settings ? ['--settings', settings] : [];
+    if (!settings) return ['--settings', '{"ultracode":true}'];
+    const trimmed = settings.trim();
+    try {
+      const raw = trimmed.startsWith('{') ? trimmed : fs.readFileSync(trimmed, 'utf8');
+      const obj = JSON.parse(raw) as Record<string, unknown>;
+      obj.ultracode = true;
+      return ['--settings', JSON.stringify(obj)];
+    } catch {
+      // Couldn't parse/read to merge — keep the user's settings and add ultracode separately.
+      return ['--settings', settings, '--settings', '{"ultracode":true}'];
+    }
+  }
+
   // ─── Start ───────────────────────────────────────────────────────────────
 
   async start(): Promise<this> {
@@ -208,7 +231,7 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
       const configs = Array.isArray(this.options.mcpConfig) ? this.options.mcpConfig : [this.options.mcpConfig];
       for (const c of configs) args.push('--mcp-config', c);
     }
-    if (this.options.settings) args.push('--settings', this.options.settings);
+    args.push(...this.buildSettingsArgs());
     if (this.options.noSessionPersistence) args.push('--no-session-persistence');
     if (this.options.betas) {
       const bl = Array.isArray(this.options.betas) ? this.options.betas : this.options.betas.split(',');

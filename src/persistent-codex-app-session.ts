@@ -452,15 +452,29 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
         const p = params as TurnCompletedNotification;
         this._stats.turns++;
         this._stats.lastActivity = new Date().toISOString();
+        // Clear the active-turn id so a later interrupt()/steer() does not target
+        // an already-finished turn (only clear if it is the turn that completed).
+        if (p.turn?.id && this.currentTurnId === p.turn.id) this.currentTurnId = undefined;
         const turnText = this.turnAssistantText;
+        const failed = p.turn?.status === 'failed';
         const event: StreamEvent = {
           type: 'result',
           result: turnText,
-          stop_reason: p.turn?.status === 'failed' ? 'error' : 'end_turn',
+          stop_reason: failed ? 'error' : 'end_turn',
           session_id: this.threadId,
         };
         this.emit(SESSION_EVENT.RESULT, event);
         this.emit(SESSION_EVENT.TURN_COMPLETE, event);
+        // A failed turn is surfaced as a rejection (mirrors the exec wrapper),
+        // not an empty-text resolve, so callers see the failure.
+        if (failed && this.turnReject) {
+          this._stats.toolErrors++;
+          const rej = this.turnReject;
+          this.turnResolve = null;
+          this.turnReject = null;
+          rej(new Error(`Codex app-server turn failed${turnText ? `: ${turnText}` : ''}`));
+          break;
+        }
         if (this.turnResolve) {
           const r = this.turnResolve;
           this.turnResolve = null;
@@ -561,6 +575,65 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
     const text = `/goal${slashArgs.length > 0 ? ' ' + slashArgs : ''}`;
     const result = (await this.send(text, { waitForComplete: true, timeout: timeoutMs })) as TurnResult;
     return { text: result.text, goal: this.currentGoal };
+  }
+
+  // ── App-server v2 RPCs (Codex 0.137) ───────────────────────────────────
+  //
+  // Method names + param shapes verified against `codex app-server
+  // generate-json-schema` (TurnInterruptParams/TurnSteerParams/ThreadForkParams/
+  // ThreadRollbackParams/ModelListResponse/ThreadGoal*Params).
+
+  /** The id of the most recent turn (set by the `turn/started` notification). */
+  get activeTurnId(): string | undefined {
+    return this.currentTurnId;
+  }
+
+  /** Cancel the in-flight turn (`turn/interrupt`). No-op when no turn is active. */
+  async interrupt(): Promise<{ interrupted: boolean }> {
+    if (!this.threadId) throw new Error('No thread id');
+    if (!this.currentTurnId) return { interrupted: false };
+    await this._request('turn/interrupt', { threadId: this.threadId, turnId: this.currentTurnId });
+    return { interrupted: true };
+  }
+
+  /**
+   * Add input to the in-flight turn without restarting it (`turn/steer`). When
+   * no turn is in flight, falls back to a normal turn so the message is not lost.
+   */
+  async steer(text: string): Promise<{ steered: boolean; turnId?: string; text?: string }> {
+    if (!this.threadId) throw new Error('No thread id');
+    if (this._isBusy && this.currentTurnId) {
+      const resp = (await this._request('turn/steer', {
+        threadId: this.threadId,
+        expectedTurnId: this.currentTurnId,
+        input: [{ type: 'text', text, text_elements: [] }],
+      })) as { turnId?: string };
+      return { steered: true, turnId: resp?.turnId };
+    }
+    const r = (await this.send(text, { waitForComplete: true })) as TurnResult;
+    return { steered: false, text: r.text };
+  }
+
+  /** Branch this thread into a new one (`thread/fork`); returns the forked thread id. */
+  async forkThread(): Promise<{ threadId: string }> {
+    if (!this.threadId) throw new Error('No thread id');
+    const resp = (await this._request('thread/fork', { threadId: this.threadId })) as { thread?: { id?: string } };
+    const newId = resp?.thread?.id;
+    if (!newId) throw new Error('thread/fork did not return a forked thread id');
+    return { threadId: newId };
+  }
+
+  /** Drop the last `numTurns` turns from this thread (`thread/rollback`). */
+  async rollback(numTurns: number): Promise<void> {
+    if (!this.threadId) throw new Error('No thread id');
+    if (!Number.isInteger(numTurns) || numTurns < 1) throw new Error('rollback: numTurns must be a positive integer');
+    await this._request('thread/rollback', { threadId: this.threadId, numTurns });
+  }
+
+  /** List available models (`model/list`); returns the `data` array. */
+  async listModels(): Promise<unknown[]> {
+    const resp = (await this._request('model/list', {})) as { data?: unknown[] };
+    return resp?.data ?? [];
   }
 
   // ── Helpers ────────────────────────────────────────────────────────────

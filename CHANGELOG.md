@@ -5,6 +5,61 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.2.0] - 2026-06-16
+
+Parity pass for Claude Code 2.1.178 and Codex 0.137.0. Every upstream flag/method below was
+verified against the installed binaries (several were absent despite being widely reported —
+`--effort ultracode`, `codex exec --include-plan-tool`/`--ask-for-approval`, and
+`claude continue/respawn/stop/logs` do not exist).
+
+### Added
+
+- **`ultracode` option on `session_start` (Claude engine).** Enables Claude Code's dynamic
+  workflows: Claude plans a JS orchestration script per substantive task and fans out to
+  subagents. Wired as the `ultracode: true` settings key merged into `--settings` (verified to
+  activate workflows in headless `stream-json` mode); it is **not** a `--effort` value — the CLI
+  rejects `--effort ultracode`. User-supplied `settings` (inline JSON or file path) are merged,
+  never dropped.
+- **Codex app-server v2 RPC tools** (`codex-app` engine): `codex_interrupt` (`turn/interrupt`),
+  `codex_steer` (`turn/steer`, falls back to a normal turn when idle), `codex_fork`
+  (`thread/fork`), `codex_rollback` (`thread/rollback`), `codex_models` (`model/list`). Param
+  shapes verified against `codex app-server generate-json-schema`.
+- **`claude_agents_list` tool** — wraps `claude agents --json` to list Claude Code background
+  agent sessions (state/model/title/progress), with `all`/`cwd` filters.
+- **Fan-out** (`fanout_start` / `fanout_status` / `fanout_abort`) — run one task across N
+  engine/model agents in parallel and collect their answers, with an optional synthesis pass.
+  The cross-engine best-of-N / diverse-perspective primitive; no rounds, votes, or worktrees
+  (use `council` for isolated parallel edits).
+- **Codex reasoning-effort passthrough.** The engine-agnostic `effort` is mapped to
+  `codex exec -c model_reasoning_effort=<level>` (`max`→`xhigh`; `auto`/`ultracode` omitted),
+  verified accepted by Codex 0.137 under `--strict-config`.
+- **Codex `codexProfile` option** on `session_start` → `codex exec --profile <name>` (named
+  config profile from `~/.codex/config.toml`).
+
+### Changed
+
+- **Codex `item.completed` parsing.** `reasoning` and `todo_list` items are now logged as
+  reasoning/plan output instead of being miscounted as tool calls; real tool items
+  (`command_execution`, `file_change`, `mcp_tool_call`, `web_search`) increment `toolCalls`, and
+  a `command_execution` with a non-zero `exit_code` increments `toolErrors`.
+- **Codex app-server turn failures** (`turn/completed` with `status: 'failed'`) now reject the
+  turn and increment `toolErrors`, matching the `codex exec` wrapper, instead of resolving an
+  empty turn.
+
+### Fixed
+
+- `codex exec --profile` is now only sent on the first turn — `codex exec resume` rejects it
+  (verified against `codex exec resume --help` on 0.137; `-c` and `--model` are accepted there).
+- The codex-app active turn id is cleared on `turn/completed`, so `codex_interrupt`/`codex_steer`
+  can no longer target an already-finished turn.
+- `fanout_start` validates agent-name uniqueness (names form session names) and exposes
+  `synthesisError` so a failed synthesis pass is distinguishable from one that was not requested.
+  Tool schemas hardened (`codex_rollback.numTurns` minimum, fan-out agent `name`/`synthesisEngine`).
+
+### Tracked
+
+- Engine CLI reference bumped to tested versions Claude Code **2.1.178** and Codex **0.137.0**.
+
 ## [4.1.2] - 2026-06-03
 
 ### Added

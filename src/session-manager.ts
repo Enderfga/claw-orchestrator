@@ -152,6 +152,7 @@ import {
 } from './types.js';
 import { resolveAlias, isClaudeModel } from './models.js';
 import { Council } from './council.js';
+import { Fanout, type FanoutConfig, type FanoutSession } from './fanout.js';
 import { AutoloopRunner } from './autoloop/runner.js';
 import { ClaudeAgentDispatcher, type ClaudeAgentDispatcherConfig } from './autoloop/dispatcher.js';
 import type { AutoloopState, PushPolicy } from './autoloop/types.js';
@@ -203,6 +204,19 @@ interface SendOptions {
   onEvent?: (event: StreamEvent) => void;
   onChunk?: (chunk: string) => void;
 }
+
+/**
+ * Structural type for the `codex-app` engine session, exposing the app-server
+ * v2 RPC methods used by the codex_interrupt/steer/fork/rollback/models tools.
+ * The `interrupt` method is the discriminator for "this is a codex-app session".
+ */
+type CodexAppSession = ISession & {
+  interrupt: () => Promise<{ interrupted: boolean }>;
+  steer: (text: string) => Promise<{ steered: boolean; turnId?: string; text?: string }>;
+  forkThread: () => Promise<{ threadId: string }>;
+  rollback: (numTurns: number) => Promise<void>;
+  listModels: () => Promise<unknown[]>;
+};
 
 // ─── Disk enumeration (cross-process visibility) ────────────────────────────
 //
@@ -1137,6 +1151,54 @@ export class SessionManager {
     return { ok: true, goal: session.goal ?? null };
   }
 
+  // ─── Codex app-server v2 RPCs (codex-app engine only, Codex 0.137) ────────
+  //
+  // turn/interrupt, turn/steer, thread/fork, thread/rollback, model/list — the
+  // high-value app-server surface beyond /goal. Each requires a `codex-app`
+  // session; the discriminator is the presence of the `interrupt` method.
+
+  private _getCodexAppSession(name: string, feature: string): CodexAppSession {
+    const managed = this.sessions.get(name);
+    if (!managed) throw new Error(`Session not found: ${name}`);
+    const session = managed.session as CodexAppSession;
+    if (typeof session.interrupt !== 'function') {
+      const engine = managed.config.engine || 'claude';
+      throw new Error(
+        `Session "${name}" uses engine "${engine}" which does not support ${feature}. ` +
+          `Start a session with engine: "codex-app".`,
+      );
+    }
+    return session;
+  }
+
+  async codexInterrupt(name: string): Promise<{ ok: true; interrupted: boolean }> {
+    const r = await this._getCodexAppSession(name, 'turn/interrupt').interrupt();
+    return { ok: true, ...r };
+  }
+
+  async codexSteer(
+    name: string,
+    text: string,
+  ): Promise<{ ok: true; steered: boolean; turnId?: string; text?: string }> {
+    const r = await this._getCodexAppSession(name, 'turn/steer').steer(text);
+    return { ok: true, ...r };
+  }
+
+  async codexForkThread(name: string): Promise<{ ok: true; threadId: string }> {
+    const r = await this._getCodexAppSession(name, 'thread/fork').forkThread();
+    return { ok: true, ...r };
+  }
+
+  async codexRollback(name: string, numTurns: number): Promise<{ ok: true; numTurns: number }> {
+    await this._getCodexAppSession(name, 'thread/rollback').rollback(numTurns);
+    return { ok: true, numTurns };
+  }
+
+  async codexModels(name: string): Promise<{ ok: true; models: unknown[] }> {
+    const models = await this._getCodexAppSession(name, 'model/list').listModels();
+    return { ok: true, models };
+  }
+
   // ─── Claude /goal helpers (CLI 2.1.139, claude engine only) ────────
   //
   // Claude Code's /goal slash command works in non-interactive stream-json
@@ -1191,6 +1253,32 @@ export class SessionManager {
       maxBuffer: 8 * 1024 * 1024,
     });
     return { stdout, stderr };
+  }
+
+  /**
+   * Wraps `claude agents --json` — lists Claude Code background agent sessions
+   * (state/model/title/progress). One-shot spawn; not tied to a managed session.
+   * `all` adds `--all` (include completed); `cwd` scopes to a directory.
+   */
+  async claudeAgentsList(opts: { all?: boolean; cwd?: string } = {}): Promise<{ ok: true; agents: unknown[] }> {
+    const args = ['agents', '--json'];
+    if (opts.all) args.push('--all');
+    if (opts.cwd) args.push('--cwd', path.resolve(opts.cwd));
+    const { stdout } = await execFileAsync(this.pluginConfig.claudeBin, args, {
+      maxBuffer: 16 * 1024 * 1024,
+      timeout: 30_000,
+    });
+    let agents: unknown[] = [];
+    const trimmed = stdout.trim();
+    if (trimmed) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        agents = Array.isArray(parsed) ? parsed : ((parsed as { agents?: unknown[] }).agents ?? []);
+      } catch {
+        throw new Error(`claude agents --json returned non-JSON output: ${trimmed.slice(0, 200)}`);
+      }
+    }
+    return { ok: true, agents };
   }
 
   // ─── Codex one-shot wrappers ──────────────────────────────────────────
@@ -1851,6 +1939,56 @@ export class SessionManager {
     const result = await council.reject(feedback);
     this._scheduleCouncilCleanup(id); // reset TTL — council may be restarted
     return result;
+  }
+
+  // ─── Fan-out (parallel multi-engine task, no consensus) ────────────────
+
+  private fanouts = new Map<string, Fanout>();
+  private fanoutCleanupTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+  /**
+   * Start a fan-out: run the task across N engine/model agents in parallel and
+   * collect their answers (optional synthesis). Runs in the background; poll
+   * with fanoutStatus. Distinct from council — no rounds, votes, or worktrees.
+   */
+  fanoutStart(config: FanoutConfig): FanoutSession {
+    if (!config.agents?.length) throw new Error('fanoutStart: at least one agent is required');
+    const names = config.agents.map((a) => a.name);
+    if (new Set(names).size !== names.length) {
+      throw new Error('fanoutStart: agent names must be unique (they form session names)');
+    }
+    const fanout = new Fanout(config, this, this.logger);
+    const session = fanout.init();
+    this.fanouts.set(session.id, fanout);
+    fanout
+      .run()
+      .catch((err) => this.logger.error(`Fanout ${session.id} failed:`, err))
+      .finally(() => this._scheduleFanoutCleanup(session.id));
+    return session;
+  }
+
+  fanoutStatus(id: string): FanoutSession {
+    const fanout = this.fanouts.get(id);
+    if (!fanout) throw new Error(`Fanout '${id}' not found`);
+    return fanout.getSession();
+  }
+
+  fanoutAbort(id: string): void {
+    const fanout = this.fanouts.get(id);
+    if (!fanout) throw new Error(`Fanout '${id}' not found`);
+    fanout.abort();
+    this._scheduleFanoutCleanup(id);
+  }
+
+  private _scheduleFanoutCleanup(id: string): void {
+    const existing = this.fanoutCleanupTimers.get(id);
+    if (existing) clearTimeout(existing);
+    const timer = setTimeout(() => {
+      this.fanouts.delete(id);
+      this.fanoutCleanupTimers.delete(id);
+    }, RESULT_TTL_MS);
+    if (typeof timer.unref === 'function') timer.unref();
+    this.fanoutCleanupTimers.set(id, timer);
   }
 
   // ─── Inbox (cross-session messaging) — delegated to InboxManager ────

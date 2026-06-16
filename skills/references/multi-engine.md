@@ -26,7 +26,7 @@ SessionManager
 
 ### Claude Code (`engine: 'claude'`)
 
-Default engine. Long-running subprocess with streaming JSON I/O. Tested with Claude Code CLI **2.1.140**.
+Default engine. Long-running subprocess with streaming JSON I/O. Tested with Claude Code CLI **2.1.178**.
 
 - Persistent multi-turn conversations
 - Real-time streaming (text, tool_use, tool_result, system events)
@@ -52,10 +52,13 @@ await manager.startSession({
 
 ### OpenAI Codex (`engine: 'codex'`)
 
-Wraps the `codex exec` subcommand. Each `send()` spawns a new process. Tested with `codex` CLI **0.128.0**.
+Wraps the `codex exec` subcommand. Each `send()` spawns a new process. Tested with `codex` CLI **0.137.0**.
 
 - Non-interactive execution via `codex exec --sandbox workspace-write --json` (replaces the deprecated `--full-auto` flag from earlier Codex versions)
 - Real per-turn `usage` from the `turn.completed` JSON event (input, output, cached, reasoning tokens)
+- `item.completed` parsing distinguishes `reasoning` / `todo_list` (logged, not counted) from real tool items (`command_execution`, `file_change`, `mcp_tool_call`, `web_search`, which increment `toolCalls`; a non-zero `command_execution.exit_code` increments `toolErrors`)
+- Reasoning effort: the engine-agnostic `effort` maps to `-c model_reasoning_effort=<level>` (`max`→`xhigh`; `auto`/`ultracode` omitted)
+- `codexProfile` → `--profile <name>` (named config profile from `~/.codex/config.toml`)
 - Per-session continuity: the `thread_id` from the first turn's `thread.started` event is captured and reused via `codex exec resume <id>` for subsequent sends, so the model sees prior turns
 - One-shot execution per message (no persistent subprocess between sends)
 - Working directory passed via `-C` flag
@@ -82,7 +85,8 @@ Wraps `codex app-server --listen stdio:// --enable goals` as a long-running JSON
 - Real-time streaming via `item/agentMessage/delta` notifications
 - Cumulative token tracking from `thread/tokenUsage/updated` notifications
 - Goal lifecycle observation via `thread/goal/updated` and `thread/goal/cleared` notifications
-- Goal control via the `codex_goal_*` tools (which internally send the `/goal` slash command as user text — see [tools.md](./tools.md#codex-7))
+- Goal control via the `codex_goal_*` tools (which internally send the `/goal` slash command as user text — see [tools.md](./tools.md#codex-12))
+- v2 RPC tools (Codex 0.137): `codex_interrupt` (`turn/interrupt`), `codex_steer` (`turn/steer`), `codex_fork` (`thread/fork`), `codex_rollback` (`thread/rollback`), `codex_models` (`model/list`). A `turn/completed` with `status: 'failed'` rejects the turn and increments `toolErrors`.
 
 > **Feature-flag risk.** The `goals` feature is marked "under development" in Codex 0.128.0 and has known bugs (e.g. issue #20591). The session class always passes `--enable goals` so it works the moment upstream stabilizes the feature, but during the transition period some goal commands may fail or be silently dropped on the server side. The wrapper layer is unaffected.
 
