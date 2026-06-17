@@ -105,6 +105,12 @@ export interface AutoloopConfig {
    */
   phaseErrorCircuit?: number;
   /**
+   * Max messages routed in a single drain pass before the runner assumes a
+   * message ping-pong loop and aborts. Raise for legitimately deep workflows
+   * (many directive/policy-push chains per turn). Default 64.
+   */
+  maxDispatchDepth?: number;
+  /**
    * Stall detection wall-clock budget (ms). When no message has been
    * processed for this long and status is 'running', the runner fires
    * `on_stall_30min`. Default 30 min.

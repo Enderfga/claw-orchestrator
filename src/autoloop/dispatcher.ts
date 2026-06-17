@@ -270,6 +270,11 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
     } catch (err) {
       this.logger.warn?.(`[autoloop] ${agent} send threw, attempting reset+retry: ${(err as Error).message}`);
       await this.resetAgent(agent, { eagerRestart: true });
+      // Let the freshly-restarted subprocess settle before retrying — an
+      // immediate retry routinely hits the same transient failure (e.g. the
+      // old socket still in TIME_WAIT → ECONNREFUSED). Small jitter avoids
+      // lockstep retries across concurrent runs.
+      await new Promise((r) => setTimeout(r, 500 + Math.floor(Math.random() * 250)));
       try {
         return (await this.config.manager.sendMessage(name, promptText, {
           timeout: this.config.sendTimeoutMs ?? 10 * 60_000,
@@ -478,12 +483,20 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
         ]);
         const applied: Record<string, unknown> = {};
         const silenced_blocked: string[] = [];
+        const VALID_LEVELS = new Set(['info', 'warn', 'decision', 'error']);
+        const VALID_CHANNELS = new Set(['auto', 'wechat', 'webchat', 'both', 'email']);
         for (const [k, v] of Object.entries(delta)) {
           if (!policyKeys.has(k) || typeof v !== 'object' || v === null) continue;
+          // Only accept known, correctly-typed fields — a malformed rule
+          // (wrong types, bogus level/channel) must not enter the live policy.
+          const raw = v as Record<string, unknown>;
+          const rule: Record<string, unknown> = {};
+          if (typeof raw.silent === 'boolean') rule.silent = raw.silent;
+          if (typeof raw.level === 'string' && VALID_LEVELS.has(raw.level)) rule.level = raw.level;
+          if (typeof raw.channel === 'string' && VALID_CHANNELS.has(raw.channel)) rule.channel = raw.channel;
           // B2: refuse to silence the channels that surface phase errors and
           // user decisions. Other fields on the same rule still apply, so the
           // operator can re-target level/channel without going dark.
-          const rule = { ...(v as Record<string, unknown>) };
           if (UNSILENCEABLE_POLICY_KEYS.has(k) && rule.silent === true) {
             silenced_blocked.push(k);
             this.logger.warn?.(`[autoloop] refused to set silent=true on critical policy key ${k}`);
@@ -764,8 +777,12 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
       const full = path.join(this.reviewerSandboxDir, ent);
       try {
         fs.rmSync(full, { recursive: true, force: true });
-      } catch {
-        /* ignore */
+      } catch (err) {
+        // A stale file the Reviewer then reads as "this iter" causes silent
+        // context corruption — surface anything that isn't an already-gone file.
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+          this.logger.warn?.(`[autoloop] failed to clear sandbox entry ${ent}: ${(err as Error).message}`);
+        }
       }
     }
     const iterSrc = path.join(this.ledgerDir, 'iter', String(iter));

@@ -15,6 +15,9 @@ import { type AnyAutoloopMessage, AutoloopRoutingError, Msg, validateMessage } f
 import { DEFAULT_PUSH_POLICY, MAX_METRIC_HISTORY, type AutoloopConfig, type AutoloopState } from './types.js';
 
 const MAX_DISPATCH_DEPTH = 64;
+/** Cap on agent-bound messages parked during a pause, to bound memory if an
+ *  operator pauses while policy pushes keep arriving. Oldest are dropped. */
+const MAX_PAUSED_BUFFER = 1000;
 const DEFAULT_PHASE_ERROR_CIRCUIT = 3;
 const DEFAULT_STALL_MS = 30 * 60_000;
 const DEFAULT_STALL_CHECK_MS = 30_000;
@@ -124,10 +127,14 @@ export class AutoloopRunner extends EventEmitter {
     if (this.draining) return; // a previous send() is already draining; new items will be picked up
     this.draining = true;
     try {
+      const maxDepth = this.config.maxDispatchDepth ?? MAX_DISPATCH_DEPTH;
       let depth = 0;
       while (this.queue.length > 0) {
-        if (depth++ > MAX_DISPATCH_DEPTH) {
-          throw new AutoloopRoutingError(`dispatch depth exceeded ${MAX_DISPATCH_DEPTH} — likely message ping-pong`);
+        if (depth++ > maxDepth) {
+          const next = this.queue[0];
+          throw new AutoloopRoutingError(
+            `dispatch depth exceeded ${maxDepth} at iter ${this.state.iter} (next='${next?.type ?? '?'}' to '${next?.to ?? '?'}') — likely message ping-pong; raise config.maxDispatchDepth for legitimately deep workflows`,
+          );
         }
         const env = this.queue.shift();
         if (!env) break;
@@ -139,6 +146,10 @@ export class AutoloopRunner extends EventEmitter {
   }
 
   private async handleOne(env: AnyAutoloopMessage): Promise<void> {
+    // 'terminated' is the final state — once reached, no message of any kind is
+    // processed (see events contract above). The terminate message itself still
+    // runs because status only flips to 'terminated' while handling it.
+    if (this.state.status === 'terminated') return;
     this.emit('message', env);
     this.state.last_activity_at = Date.now();
 
@@ -155,11 +166,17 @@ export class AutoloopRunner extends EventEmitter {
       return;
     }
 
-    // Everything else goes to the agent dispatcher.
-    if (this.state.status === 'terminated') return;
+    // Everything else goes to the agent dispatcher. (terminated already
+    // short-circuited at the top of handleOne.)
     // Pause: park agent-bound messages until resume. Runner-bound (resume /
     // terminate) and user-bound (push) flow through above and are unaffected.
     if (this.state.status === 'paused') {
+      // Bound the buffer: a long pause + continuous policy pushes would
+      // otherwise grow it without limit and OOM the process.
+      if (this.pausedBuffer.length >= MAX_PAUSED_BUFFER) {
+        this.pausedBuffer.shift();
+        this.emit('error', new Error(`pausedBuffer exceeded ${MAX_PAUSED_BUFFER}; dropping oldest parked message`));
+      }
       this.pausedBuffer.push(env);
       return;
     }
@@ -282,6 +299,10 @@ export class AutoloopRunner extends EventEmitter {
       case 'terminate': {
         this.state.status = 'terminated';
         this.state.status_reason = env.payload.reason;
+        // Drop any messages queued behind this terminate — they are moot now
+        // and the contract says no more messages flow after termination.
+        this.queue.length = 0;
+        this.pausedBuffer.length = 0;
         this.stop();
         this.emit('state', this.state);
         await this.config.dispatcher.shutdown?.(env.payload.reason);

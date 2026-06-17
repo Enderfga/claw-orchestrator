@@ -233,9 +233,23 @@ export function serialise(env: AnyAutoloopMessage): { text: string; summary: str
 }
 
 export function deserialise(text: string): AnyAutoloopMessage {
-  const parsed = JSON.parse(text) as AnyAutoloopMessage;
-  if (typeof parsed !== 'object' || parsed === null || typeof parsed.type !== 'string') {
-    throw new AutoloopRoutingError('Malformed v2 envelope (not an object or missing type)');
+  let parsed: AnyAutoloopMessage;
+  try {
+    parsed = JSON.parse(text) as AnyAutoloopMessage;
+  } catch (err) {
+    throw new AutoloopRoutingError(`Malformed v2 envelope (invalid JSON: ${(err as Error).message})`);
   }
+  if (
+    typeof parsed !== 'object' ||
+    parsed === null ||
+    typeof parsed.type !== 'string' ||
+    typeof parsed.from !== 'string' ||
+    typeof parsed.to !== 'string'
+  ) {
+    throw new AutoloopRoutingError('Malformed v2 envelope (not an object or missing type/from/to)');
+  }
+  // Reject envelopes whose from→to→type isn't an allowed route, so a corrupt or
+  // forged message never reaches the dispatcher.
+  validateMessage(parsed);
   return parsed;
 }
