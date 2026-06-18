@@ -42,7 +42,12 @@ const ANTHROPIC_DEFAULT = 'https://api.anthropic.com';
 
 let _cachedBaseUrl: string | undefined;
 
-function getAnthropicBaseUrl(): string {
+/** Test-only: clear the memoized base URL so a test can vary env/config. */
+export function _resetAnthropicBaseUrlCache(): void {
+  _cachedBaseUrl = undefined;
+}
+
+export function getAnthropicBaseUrl(): string {
   if (_cachedBaseUrl !== undefined) return _cachedBaseUrl;
 
   // Layer 1: env var (highest priority — Claude Code convention)

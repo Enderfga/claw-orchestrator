@@ -7,7 +7,43 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { createProxyHandler, type ProxyEnv } from '../proxy/handler.js';
+import {
+  createProxyHandler,
+  getAnthropicBaseUrl,
+  _resetAnthropicBaseUrlCache,
+  type ProxyEnv,
+} from '../proxy/handler.js';
+
+describe('getAnthropicBaseUrl (3-layer fallback)', () => {
+  const savedEnv = process.env.ANTHROPIC_BASE_URL;
+  afterEach(() => {
+    if (savedEnv === undefined) delete process.env.ANTHROPIC_BASE_URL;
+    else process.env.ANTHROPIC_BASE_URL = savedEnv;
+    _resetAnthropicBaseUrlCache();
+  });
+
+  it('Layer 1: ANTHROPIC_BASE_URL env var takes priority', () => {
+    process.env.ANTHROPIC_BASE_URL = 'https://example.test/anthropic';
+    _resetAnthropicBaseUrlCache();
+    expect(getAnthropicBaseUrl()).toBe('https://example.test/anthropic');
+  });
+
+  it('memoizes — a later env change is ignored until cache reset', () => {
+    process.env.ANTHROPIC_BASE_URL = 'https://first.test';
+    _resetAnthropicBaseUrlCache();
+    expect(getAnthropicBaseUrl()).toBe('https://first.test');
+    process.env.ANTHROPIC_BASE_URL = 'https://second.test';
+    expect(getAnthropicBaseUrl()).toBe('https://first.test'); // cached
+    _resetAnthropicBaseUrlCache();
+    expect(getAnthropicBaseUrl()).toBe('https://second.test'); // re-read after reset
+  });
+
+  it('returns a valid https URL when no env var is set (config or default layer)', () => {
+    delete process.env.ANTHROPIC_BASE_URL;
+    _resetAnthropicBaseUrlCache();
+    expect(getAnthropicBaseUrl()).toMatch(/^https?:\/\//);
+  });
+});
 
 // ─── Mock fetch ────────────────────────────────────────────────────────────
 
