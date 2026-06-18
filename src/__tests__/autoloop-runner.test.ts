@@ -156,6 +156,24 @@ describe('AutoloopRunner', () => {
     expect(runner.state.status).toBe('terminated');
   });
 
+  it('drops all further messages once terminated (final-state contract)', async () => {
+    const delivered: string[] = [];
+    const dispatcher: AgentDispatcher = {
+      async deliver(env) {
+        delivered.push(env.type);
+        return [];
+      },
+    };
+    const { runner } = makeRunner(dispatcher);
+    await runner.start();
+
+    await runner.send(Msg.terminate(0, { reason: 'done' }));
+    // A chat after terminate must never reach the dispatcher.
+    await runner.chat('should be ignored');
+    expect(delivered).toEqual([]);
+    expect(runner.state.status).toBe('terminated');
+  });
+
   it('pause/resume flips status', async () => {
     const dispatcher: AgentDispatcher = {
       async deliver() {
