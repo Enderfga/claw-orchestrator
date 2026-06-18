@@ -11,7 +11,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { randomUUID, createHash } from 'node:crypto';
-import { resolveEngineAndModel } from './models.js';
+import { resolveEngineAndModel, estimateTokens } from './models.js';
 import {
   OPENAI_COMPAT_DEFAULT_MODEL,
   OPENAI_COMPAT_AUTO_COMPACT_THRESHOLD,
@@ -775,6 +775,10 @@ async function handleNonStreaming(
     } catch {
       /* stats unavailable */
     }
+    // Fall back to a length-based estimate rather than reporting usage as 0,
+    // which breaks downstream cost accounting for OpenAI-compatible clients.
+    if (tokensIn === 0) tokensIn = estimateTokens(userMessage);
+    if (tokensOut === 0) tokensOut = estimateTokens(result.output);
 
     // Parse tool_calls from response text when caller provided tools
     if (hasTools) {

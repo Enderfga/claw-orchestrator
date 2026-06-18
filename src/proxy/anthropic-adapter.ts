@@ -185,7 +185,8 @@ export function convertAnthropicToOpenAI(req: AnthropicRequest): OpenAIRequest {
   if (req.tool_choice) {
     const tc = req.tool_choice;
     if (tc.type === 'auto') openaiReq.tool_choice = 'auto';
-    else if (tc.type === 'any') openaiReq.tool_choice = 'auto';
+    else if (tc.type === 'any') openaiReq.tool_choice = 'required';
+    else if (tc.type === 'none') openaiReq.tool_choice = 'none';
     else if (tc.type === 'tool' && tc.name) {
       openaiReq.tool_choice = { type: 'function', function: { name: tc.name } };
     }
@@ -315,8 +316,13 @@ export function convertOpenAIToAnthropic(resp: OpenAIResponse, originalModel: st
         } catch {
           args = { raw: tc.function.arguments };
         }
-      } else {
+      } else if (tc.function.arguments != null) {
         args = tc.function.arguments;
+      }
+      // Anthropic tool_use.input must be a JSON object — a null/scalar value
+      // (some providers send arguments:null for no-arg tools) is invalid.
+      if (args === null || typeof args !== 'object' || Array.isArray(args)) {
+        args = typeof args === 'undefined' ? {} : { value: args };
       }
       content.push({
         type: 'tool_use',
