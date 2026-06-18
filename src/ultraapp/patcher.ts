@@ -154,9 +154,24 @@ function restoreSnapshot(dir: string, snap: Map<string, Buffer>): void {
     }
   };
   walk(dir);
+  // Restore every snapshot file FIRST (atomically per file: write a temp then
+  // rename, so a crash mid-write never leaves a half-written file), and only
+  // then delete extras. The whole pass is also idempotent — re-running restore
+  // after an interrupted attempt completes it.
   for (const [file, content] of snap) {
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, content);
+    const tmp = `${file}.restore-${process.pid}.tmp`;
+    try {
+      fs.writeFileSync(tmp, content);
+      fs.renameSync(tmp, file);
+    } catch (err) {
+      try {
+        fs.unlinkSync(tmp);
+      } catch {
+        /* tmp may not exist */
+      }
+      throw err;
+    }
   }
   for (const file of seen) {
     if (!snap.has(file)) {
