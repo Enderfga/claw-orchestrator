@@ -5,6 +5,55 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.4.0] - 2026-06-18
+
+Reliability and robustness pass across every subsystem (from a full multi-lens code audit).
+No behavior changes for normal use; the focus is failure-path correctness, resource cleanup,
+and input validation. All 793 unit tests pass; build/lint/format clean.
+
+### Fixed
+- **Subprocess I/O (all engines):** `persistent-session` / `persistent-custom-session` now attach a
+  readline `error` handler (an stdout stream fault used to crash the monitor process), check
+  `stdin.writable` and pass a write error callback (silent write failures left `waitForComplete`
+  callers hung), and clear references on process `error`. Force-kill (`SIGKILL`) fallback timers are
+  `unref`'d so they can't block process exit.
+- **SessionManager lifecycle:** `shutdown()` now clears the council / fan-out / ultraplan / ultrareview
+  cleanup timers (their 30-min closures captured `this` and fired post-shutdown; council timers also
+  blocked clean exit). `councilAbort` clears its own timer. Re-check session existence in `sendMessage`
+  after the per-session queue await (TOCTOU vs `stopSession`). User stream callbacks are isolated so a
+  throwing callback can't corrupt a turn. `autoloopDelete` is fenced against concurrent start/chat.
+- **autoloop:** bounded `pausedBuffer` (unbounded growth during a long pause could OOM); `terminated`
+  is now a true final state (queue is drained, no further messages dispatched); `sendWithRecovery`
+  waits with jitter before its retry; push-policy updates validate rule field types; sandbox cleanup
+  errors are surfaced; envelope deserialization fully validates routing; git-commit failures surface
+  via `planner_error` instead of a silent warning.
+- **council:** worktrees are cleaned up on abort and on run error (previously orphaned on disk;
+  successful runs still keep them for the review flow).
+- **embedded server:** SSE writes are guarded against write-after-close; `close()` drains with a
+  timeout instead of hanging on open SSE connections; the rate-limit timer is cleared on start
+  failure; the server reference is cleared after close.
+- **proxy / OpenAI-compat:** null/scalar tool-call arguments are normalized to objects; `tool_choice`
+  maps `any→required` and handles `none`; usage falls back to a length-based estimate when live stats
+  are unavailable.
+- **ultraapp:** build-output capture is capped (runaway output could OOM); the on-failure fixer frames
+  command output as untrusted data; snapshot/restore handles binary files as bytes (rollback used to
+  delete them).
+- **engines:** opencode fallback-text accumulation key fixed; `_isKnownCliProcess` matches CLI names at
+  executable/path position (no longer matches hyphenated lookalikes).
+- **Input validation:** `codex_review` base/commit refs are validated; array tool params
+  (`agents`, `sanitizePatterns`, `allowedTools`/`disallowedTools`) have size caps.
+- **Custom engine:** user-supplied `sanitizePatterns` compile via RE2 (linear-time) and invalid
+  patterns are logged instead of silently dropped; non-JSON stdout is sanitized before logging.
+- **Dependencies:** refreshed the lockfile (advisory count 30 → 5, none high/critical).
+
+### Added
+- `AutoloopConfig.maxDispatchDepth` — configurable per-drain message ceiling (default 64) for
+  legitimately deep workflows.
+
+### Docs
+- Corrected the registered-tool count (39 → 63) and the documented opencode/cursor invocation flags
+  to match the actual wrappers.
+
 ## [4.3.0] - 2026-06-16
 
 Parity batch 2 + upgrades to the older subsystems now that the new `fanout` primitive exists.
