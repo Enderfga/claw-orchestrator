@@ -128,7 +128,9 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
         } catch {
           // Non-JSON line — opencode banner or stray text. Treat as plain text.
           const fallback = line + '\n';
-          state.textParts.set(`__raw_${state.textParts.size}`, (state.textParts.get('__raw_acc') || '') + fallback);
+          // Accumulate fallback text under one stable key (the old code wrote to
+          // __raw_<size> but read __raw_acc, so it never actually accumulated).
+          state.textParts.set('__raw_acc', (state.textParts.get('__raw_acc') || '') + fallback);
           try {
             options.callbacks?.onText?.(fallback);
           } catch {

@@ -1469,6 +1469,16 @@ export class SessionManager {
     if (scopes.length > 1) {
       throw new Error('codexReview: --uncommitted, --base, and --commit are mutually exclusive');
     }
+    // Validate git refs: reject leading-dash (argument injection) and shell/path
+    // metacharacters. args go through execFile (no shell) but a '--flag'-shaped
+    // value could still be misread by codex's parser.
+    const GIT_REF = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
+    if (opts.base != null && !GIT_REF.test(opts.base)) {
+      throw new Error(`codexReview: invalid base ref '${opts.base}'`);
+    }
+    if (opts.commit != null && !GIT_REF.test(opts.commit)) {
+      throw new Error(`codexReview: invalid commit ref '${opts.commit}'`);
+    }
     const args: string[] = ['review'];
     if (opts.uncommitted) args.push('--uncommitted');
     if (opts.base) args.push('--base', opts.base);

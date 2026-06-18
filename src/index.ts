@@ -163,8 +163,8 @@ const plugin = {
             enum: ['acceptEdits', 'bypassPermissions', 'default', 'delegate', 'dontAsk', 'plan', 'auto'],
           },
           effort: { type: 'string', enum: ['low', 'medium', 'high', 'xhigh', 'max', 'auto'] },
-          allowedTools: { type: 'array', items: { type: 'string' }, description: 'Tools to auto-approve' },
-          disallowedTools: { type: 'array', items: { type: 'string' }, description: 'Tools to deny' },
+          allowedTools: { type: 'array', maxItems: 200, items: { type: 'string' }, description: 'Tools to auto-approve' },
+          disallowedTools: { type: 'array', maxItems: 200, items: { type: 'string' }, description: 'Tools to deny' },
           maxTurns: { type: 'number', description: 'Max agent loop turns' },
           maxBudgetUsd: { type: 'number', description: 'Max API spend (USD)' },
           systemPrompt: { type: 'string', description: 'Replace system prompt' },
@@ -305,7 +305,7 @@ const plugin = {
               },
               contextWindow: { type: 'number' },
               env: { type: 'object', description: 'Extra environment variables' },
-              sanitizePatterns: { type: 'array', items: { type: 'string' } },
+              sanitizePatterns: { type: 'array', maxItems: 100, items: { type: 'string' } },
             },
             required: ['name', 'bin', 'args'],
           },
@@ -1009,6 +1009,7 @@ const plugin = {
           projectDir: { type: 'string', description: 'Working directory all agents run in.' },
           agents: {
             type: 'array',
+            maxItems: 16,
             description: 'Agent specs: { name, engine?, model?, prompt?, baseUrl?, permissionMode?, customEngine? }.',
             items: {
               type: 'object',
