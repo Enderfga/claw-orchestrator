@@ -402,6 +402,9 @@ export class Council extends EventEmitter {
   private _activeSessions = new Set<string>();
   private _session: CouncilSession | null = null;
   private _pendingInjection: string | null = null;
+  /** Worktrees created for the current run — used to clean up on abort/error
+   *  (a successful run keeps them on disk for the user to review/accept). */
+  private _worktreeMap = new Map<string, string>();
   private logger: Logger;
 
   constructor(config: CouncilConfig, manager: SessionManagerLike, logger?: Logger) {
@@ -426,6 +429,12 @@ export class Council extends EventEmitter {
       this.manager.stopSession(name).catch(() => {});
     }
     this._activeSessions.clear();
+    // Discard the run's worktrees — an aborted run has nothing to review.
+    if (this._worktreeMap.size > 0) {
+      const map = new Map(this._worktreeMap);
+      this._worktreeMap.clear();
+      void cleanupCreatedWorktrees(map, this.config.projectDir, this.logger);
+    }
   }
 
   private emitEvent(event: Omit<CouncilEvent, 'timestamp'>) {
@@ -605,6 +614,7 @@ export class Council extends EventEmitter {
       throw err;
     }
 
+    this._worktreeMap = worktreeMap;
     this.logger.info('Worktrees:');
     for (const [name, wtPath] of worktreeMap) {
       this.logger.info(`  ${name}: ${wtPath}`);
@@ -698,6 +708,13 @@ export class Council extends EventEmitter {
       session.status = 'error';
       session.endTime = new Date().toISOString();
       this.emitEvent({ type: 'error', sessionId: session.id, error: (err as Error).message });
+      // The run failed — there is nothing to review, so don't orphan the
+      // worktrees on disk. (Successful runs keep them for the accept flow.)
+      if (this._worktreeMap.size > 0) {
+        const map = new Map(this._worktreeMap);
+        this._worktreeMap.clear();
+        await cleanupCreatedWorktrees(map, this.config.projectDir, this.logger).catch(() => {});
+      }
       throw err;
     }
   }
