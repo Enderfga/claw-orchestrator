@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Reliability and robustness pass across every subsystem (from a full multi-lens code audit).
 No behavior changes for normal use; the focus is failure-path correctness, resource cleanup,
-and input validation. All 793 unit tests pass; build/lint/format clean.
+and input validation. All 802 unit tests pass; build/lint/format clean.
 
 ### Fixed
 - **Subprocess I/O (all engines):** `persistent-session` / `persistent-custom-session` now attach a
@@ -29,6 +29,11 @@ and input validation. All 793 unit tests pass; build/lint/format clean.
   via `planner_error` instead of a silent warning.
 - **council:** worktrees are cleaned up on abort and on run error (previously orphaned on disk;
   successful runs still keep them for the review flow).
+- **inbox (cross-session messaging):** a broadcast (`to: '*'`) shared one message object across all
+  recipients, so delivering it to an idle session marked the queued copy for busy recipients as
+  already-read and `deliverInbox` then dropped it — each recipient now gets an independent copy.
+- **ultraapp patcher:** snapshot restore writes each file atomically (temp + rename) and is
+  idempotent, so an interrupted rollback can't leave a half-written file.
 - **embedded server:** SSE writes are guarded against write-after-close; `close()` drains with a
   timeout instead of hanging on open SSE connections; the rate-limit timer is cleared on start
   failure; the server reference is cleared after close.
@@ -53,6 +58,16 @@ and input validation. All 793 unit tests pass; build/lint/format clean.
 ### Docs
 - Corrected the registered-tool count (39 → 63) and the documented opencode/cursor invocation flags
   to match the actual wrappers.
+
+### Tests
+- Added InboxManager coverage (idle/busy delivery, broadcast, queue flush, error fallback) and
+  `getAnthropicBaseUrl` env-layer/memoization coverage; plus a regression test for the autoloop
+  terminated final-state contract.
+
+### Notes
+- The remaining audit-reported dependency advisories (esbuild, and protobufjs/tar nested under the
+  `openclaw` peer dependency) are not present in this package's published tarball; the only `npm audit
+  fix --force` path downgrades the `openclaw` peer to a stub, so it is intentionally not applied.
 
 ## [4.3.0] - 2026-06-16
 
