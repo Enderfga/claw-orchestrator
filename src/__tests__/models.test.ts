@@ -44,6 +44,7 @@ describe('lookupModel', () => {
 
   it('finds all known models', () => {
     const ids = [
+      'claude-fable-5',
       'claude-opus-4-6',
       'claude-sonnet-5',
       'claude-sonnet-4-6',
@@ -218,6 +219,29 @@ describe('claude-sonnet-5', () => {
   it('owns the `sonnet` alias so it tracks the CLI default', () => {
     expect(resolveAlias('sonnet')).toBe('claude-sonnet-5');
     expect(getContextWindow('sonnet')).toBe(1_000_000);
+  });
+});
+
+describe('claude-fable-5', () => {
+  it('is registered with 1M context and standard $10/$50 pricing (cache read $1)', () => {
+    const m = lookupModel('claude-fable-5');
+    expect(m).toBeDefined();
+    expect(m!.contextWindow).toBe(1_000_000);
+    expect(m!.pricing.input).toBe(10);
+    expect(m!.pricing.output).toBe(50);
+    expect(m!.pricing.cached).toBe(1);
+  });
+
+  it('resolves the `fable` alias to the claude engine', () => {
+    expect(resolveAlias('fable')).toBe('claude-fable-5');
+    expect(resolveEngineAndModel('fable')).toEqual({ engine: 'claude', model: 'claude-fable-5' });
+  });
+
+  it('fable/mythos strings are detected as Anthropic in the heuristics', () => {
+    expect(isClaudeModel('fable')).toBe(true);
+    expect(isClaudeModel('claude-mythos-5')).toBe(true);
+    expect(resolveProvider('claude-fable-5')).toEqual({ provider: 'anthropic', apiModel: 'claude-fable-5' });
+    expect(resolveProvider('claude-mythos-5').provider).toBe('anthropic');
   });
 });
 

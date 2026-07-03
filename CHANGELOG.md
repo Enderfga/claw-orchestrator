@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.6.0] - 2026-07-03
+
+### Added
+- **Claude Fable 5** registered in the model registry (`src/models.ts`): the first Claude 5-family
+  model, in a tier above Opus. Standard $10/$50-per-Mtok pricing (cache read $1.00), full 1M-token
+  context at standard rates (no long-context surcharge). New `fable` alias resolves to it. (Claude
+  Mythos 5 is the same model at the same price but limited-availability, so it is not listed;
+  `mythos`-named model strings are still routed to Anthropic.)
+
+### Changed
+- Anthropic-model detection heuristics (`isClaudeModel`, `resolveProvider` fallback) now recognize
+  `fable` and `mythos` model strings.
+- Tested Claude Code CLI pin updated to **2.1.199** (2.1.198–199 are subagent/background-agent
+  reliability fixes — no invocation-surface change; Codex unchanged at 0.142.4).
+
 ## [4.5.1] - 2026-07-01
 
 ### Changed

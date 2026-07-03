@@ -87,7 +87,7 @@ Quick config for any client:
 |---------|-------|
 | API Base URL | `http://127.0.0.1:18796/v1` |
 | API Key | The value of `OPENCLAW_SERVER_TOKEN`, or any string if auth is disabled |
-| Model | `claude-opus-4-8`, `claude-sonnet-5`, `gpt-5.5`, `gemini-3.1-pro-preview`, etc. |
+| Model | `claude-fable-5`, `claude-opus-4-8`, `claude-sonnet-5`, `gpt-5.5`, `gemini-3.1-pro-preview`, etc. |
 
 See [openai-compat.md](./openai-compat.md) for the full session-keying rules, `X-Session-Reset` semantics, the legacy-heuristic env var, and the `/v1/sessions` inspection endpoint.
 

@@ -38,6 +38,19 @@ export interface ModelDef {
 
 const MODELS: ModelDef[] = [
   // ── Anthropic ──────────────────────────────────────────────────────────
+  // Fable 5 — first model of the Claude 5 family, a Mythos-class tier above
+  // Opus. $10/$50 per Mtok, cache read $1 (0.1× input), full 1M-token context
+  // at standard pricing (no long-context surcharge). Claude Mythos 5 is the
+  // same model at the same price but limited-availability (approved orgs
+  // only), so we register only Fable.
+  {
+    id: 'claude-fable-5',
+    engine: 'claude',
+    provider: 'anthropic',
+    pricing: { input: 10, output: 50, cached: 1 },
+    aliases: ['fable'],
+    contextWindow: 1_000_000,
+  },
   // Opus 4.x pricing is flat across the generation; 4.7/4.8 mirror 4.6's
   // input:5 / output:25 / cached:0.5. Fast mode (Opus 4.8) bills at 2× the
   // standard rate, but it's a human-interactive `/fast` toggle the CLI never
@@ -284,7 +297,14 @@ export function resolveProvider(model: string): { provider: ProviderName; apiMod
 
   // Pattern fallback
   const lower = clean.toLowerCase();
-  if (lower.includes('claude') || lower.includes('opus') || lower.includes('sonnet') || lower.includes('haiku'))
+  if (
+    lower.includes('claude') ||
+    lower.includes('opus') ||
+    lower.includes('sonnet') ||
+    lower.includes('haiku') ||
+    lower.includes('fable') ||
+    lower.includes('mythos')
+  )
     return { provider: 'anthropic', apiModel: clean };
   if (lower.includes('gemini')) return { provider: 'google', apiModel: clean };
   if (
@@ -368,7 +388,14 @@ export function isGeminiModel(model: string): boolean {
 /** Check if a model string is a Claude model. */
 export function isClaudeModel(model: string): boolean {
   const l = model.toLowerCase();
-  return l.includes('claude') || l.includes('opus') || l.includes('sonnet') || l.includes('haiku');
+  return (
+    l.includes('claude') ||
+    l.includes('opus') ||
+    l.includes('sonnet') ||
+    l.includes('haiku') ||
+    l.includes('fable') ||
+    l.includes('mythos')
+  );
 }
 
 /** Rough token estimate: ~4 chars per token. */

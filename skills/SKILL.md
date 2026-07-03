@@ -81,7 +81,7 @@ session_stop({ name: "myproject" })
 | Parameter | Description |
 |-----------|-------------|
 | `engine` | `claude` (default), `codex`, `gemini`, `cursor`, `opencode` |
-| `model` | Model name or alias (`opus`, `sonnet`, `haiku`, `gpt-5.5`, `gemini-pro`, `composer-2`) |
+| `model` | Model name or alias (`fable`, `opus`, `sonnet`, `haiku`, `gpt-5.5`, `gemini-pro`, `composer-2`) |
 | `permissionMode` | `acceptEdits`, `auto`, `plan`, `bypassPermissions`, `default` |
 | `effort` | `low`, `medium`, `high`, `xhigh`, `max`, `auto` (`xhigh` is Opus 4.7-only, between `high` and `max`) |
 | `maxBudgetUsd` | Cost limit in USD |
