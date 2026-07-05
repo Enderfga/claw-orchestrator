@@ -127,6 +127,7 @@ import { PersistentCodexSession } from './persistent-codex-session.js';
 import { PersistentCodexAppServerSession } from './persistent-codex-app-session.js';
 import { PersistentCursorSession } from './persistent-cursor-session.js';
 import { PersistentOpencodeSession } from './persistent-opencode-session.js';
+import { PersistentAgySession } from './persistent-agy-session.js';
 import { PersistentCustomSession } from './persistent-custom-session.js';
 import {
   type SessionConfig,
@@ -1711,6 +1712,7 @@ export class SessionManager {
       /(?:^|[/\s])claude(?:[\s/]|$)/, // claude CLI
       /(?:^|[/\s])codex(?:[\s/]|$)/, // codex CLI
       /(?:^|[/\s])gemini(?:[\s/]|$)/, // gemini CLI
+      /(?:^|[/\s])agy(?:[\s/]|$)/, // agy CLI (Google Antigravity)
       /(?:^|[/\s])cursor-agent(?:[\s/]|$)/, // cursor-agent CLI
       /(?:^|[/\s])opencode(?:[\s/]|$)/, // opencode CLI (sst/opencode)
       /(?:^|\/)agent(?:[\s/]|$)/, // 'agent' only as executable/after a slash (not ssh-agent)
@@ -1856,6 +1858,8 @@ export class SessionManager {
     switch (engine) {
       case 'gemini':
         return new PersistentGeminiSession(config, process.env.GEMINI_BIN);
+      case 'agy':
+        return new PersistentAgySession(config, process.env.AGY_BIN);
       case 'codex':
         return new PersistentCodexSession(config, process.env.CODEX_BIN);
       case 'codex-app':

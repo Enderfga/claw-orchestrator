@@ -14,6 +14,8 @@ SessionManager
 │   └── Wraps: codex app-server --listen stdio:// (long-running JSON-RPC; required for /goal)
 ├── engine: 'gemini'    → PersistentGeminiSession
 │   └── Wraps: gemini -p --output-format stream-json (per-message spawning)
+├── engine: 'agy'       → PersistentAgySession
+│   └── Wraps: agy -p (Google Antigravity CLI, per-message spawning, plain-text output)
 ├── engine: 'cursor'    → PersistentCursorSession
 │   └── Wraps: agent -p --force --trust --output-format stream-json (per-message spawning)
 ├── engine: 'opencode'  → PersistentOpencodeSession
@@ -122,6 +124,43 @@ await manager.startSession({
   name: 'gemini-task',
   engine: 'gemini',
   model: 'gemini-3.1-pro-preview',
+  cwd: '/project',
+});
+```
+
+### Google Antigravity (`engine: 'agy'`)
+
+Wraps Google's **Antigravity CLI** (`agy`) — the successor to Gemini CLI (consumer
+Gemini CLI tiers stopped serving 2026-06-18). Each `send()` spawns a new process
+in print mode. Verified against `agy` **1.0.16**.
+
+- One-shot execution per message (no persistent subprocess)
+- **Plain-text output** — agy has no structured/stream-json mode, so stdout is
+  forwarded as streaming text and **token counts are estimated** (~4 chars/token)
+- **Real conversation continuity**: agy logs `Created conversation <uuid>` to its
+  log file; the engine passes a private `--log-file`, harvests the ID after the
+  first turn, and resumes with `--conversation <id>` on subsequent sends. Seed it
+  externally via `resumeSessionId`; read it back from `getStats().agyConversationId`
+- Permission modes: `bypassPermissions` → `--dangerously-skip-permissions`,
+  `default` → `--sandbox` (terminal-restricted). Other modes run agy's own
+  approval flow, which blocks in headless print mode — use `bypassPermissions`
+  for autonomous work
+- agy enforces its own print timeout (default 5m); the engine derives
+  `--print-timeout` from the send timeout so the wrapper timer decides
+- Unknown `--model` slugs do **not** error — agy silently falls back to its
+  default model. Registered slugs: `gemini-3.5-flash` (alias `agy-flash`),
+  `gemini-3.1-pro` (alias `agy-pro`); agy also proxies Claude and GPT-OSS
+  models (`agy models` lists them) which pass through unregistered
+- Consumer auth is a one-time `agy` Google OAuth login (subscription quotas, no
+  per-token billing — registry pricing mirrors Gemini API rates as a value proxy)
+- Requires `agy` installed: `curl -fsSL https://antigravity.google/cli/install.sh | bash`
+- Binary: `agy` (set `AGY_BIN` env var to override)
+
+```typescript
+await manager.startSession({
+  name: 'antigravity-task',
+  engine: 'agy',
+  model: 'gemini-3.5-flash',
   cwd: '/project',
 });
 ```
@@ -384,9 +423,10 @@ await manager.startSession({
 
 ### Example: Google Antigravity CLI (`agy`)
 
-Google is sunsetting Gemini CLI (consumer tiers stop serving **2026-06-18**) in
-favour of the Go-based **Antigravity CLI** (`agy`). Until `agy` ships first-class
-support here, you can drive it today via a custom engine:
+> **Note:** `agy` now has first-class support — use [`engine: 'agy'`](#google-antigravity-engine-agy)
+> instead, which adds conversation resume and timeout coherence the recipe below
+> lacks. This recipe remains as a reference for driving older agy builds or
+> forks with a diverged flag surface:
 
 ```typescript
 await manager.startSession({

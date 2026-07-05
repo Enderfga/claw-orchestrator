@@ -23,6 +23,7 @@ export { PersistentClaudeSession } from './persistent-session.js';
 export { BaseOneShotSession, type OneShotEngineConfig } from './base-oneshot-session.js';
 export { PersistentCodexSession } from './persistent-codex-session.js';
 export { PersistentGeminiSession } from './persistent-gemini-session.js';
+export { PersistentAgySession } from './persistent-agy-session.js';
 export { PersistentCursorSession } from './persistent-cursor-session.js';
 export { PersistentOpencodeSession } from './persistent-opencode-session.js';
 export { PersistentCustomSession } from './persistent-custom-session.js';
@@ -145,7 +146,7 @@ const plugin = {
     api.registerTool({
       name: 'session_start',
       description:
-        'Start a persistent coding session. Supports multiple engines: claude (default) for Claude Code CLI, codex for OpenAI Codex CLI, gemini for Google Gemini CLI, cursor for Cursor Agent CLI, opencode for sst/opencode CLI, or custom for any user-configured coding agent CLI.',
+        'Start a persistent coding session. Supports multiple engines: claude (default) for Claude Code CLI, codex for OpenAI Codex CLI, gemini for Google Gemini CLI, agy for Google Antigravity CLI, cursor for Cursor Agent CLI, opencode for sst/opencode CLI, or custom for any user-configured coding agent CLI.',
       parameters: {
         type: 'object',
         properties: {
@@ -153,9 +154,9 @@ const plugin = {
           cwd: { type: 'string', description: 'Working directory' },
           engine: {
             type: 'string',
-            enum: ['claude', 'codex', 'codex-app', 'gemini', 'cursor', 'opencode', 'custom'],
+            enum: ['claude', 'codex', 'codex-app', 'gemini', 'agy', 'cursor', 'opencode', 'custom'],
             description:
-              'Engine to use (default: claude). codex = `codex exec` per send (no /goal). codex-app = long-running `codex app-server` with /goal support. opencode = sst/opencode CLI (provider-agnostic; pass model as `provider/model`). Use "custom" with customEngine config for any CLI.',
+              'Engine to use (default: claude). codex = `codex exec` per send (no /goal). codex-app = long-running `codex app-server` with /goal support. agy = Google Antigravity CLI (Gemini CLI successor; plain-text output, tokens estimated, conversation resume handled automatically). opencode = sst/opencode CLI (provider-agnostic; pass model as `provider/model`). Use "custom" with customEngine config for any CLI.',
           },
           model: { type: 'string', description: 'Model to use (opus, sonnet, haiku, gemini-pro, o4-mini, etc.)' },
           permissionMode: {
@@ -1022,7 +1023,7 @@ const plugin = {
                 name: { type: 'string', minLength: 1, description: 'Unique label (forms the session name).' },
                 engine: {
                   type: 'string',
-                  enum: ['claude', 'codex', 'codex-app', 'gemini', 'cursor', 'opencode', 'custom'],
+                  enum: ['claude', 'codex', 'codex-app', 'gemini', 'agy', 'cursor', 'opencode', 'custom'],
                 },
                 model: { type: 'string' },
                 prompt: { type: 'string' },
@@ -1038,7 +1039,7 @@ const plugin = {
           synthesisModel: { type: 'string', description: 'Model for the synthesis pass.' },
           synthesisEngine: {
             type: 'string',
-            enum: ['claude', 'codex', 'codex-app', 'gemini', 'cursor', 'opencode', 'custom'],
+            enum: ['claude', 'codex', 'codex-app', 'gemini', 'agy', 'cursor', 'opencode', 'custom'],
             description: 'Engine for the synthesis pass (default claude).',
           },
           agentTimeoutMs: { type: 'number', description: 'Per-agent timeout in ms (default 600000).' },
@@ -1110,7 +1111,7 @@ const plugin = {
                 persona: { type: 'string', description: 'Agent personality/expertise description' },
                 engine: {
                   type: 'string',
-                  enum: ['claude', 'codex', 'codex-app', 'gemini', 'cursor', 'opencode', 'custom'],
+                  enum: ['claude', 'codex', 'codex-app', 'gemini', 'agy', 'cursor', 'opencode', 'custom'],
                   description: 'Engine (default: claude). Use "custom" with customEngine for any CLI.',
                 },
                 model: { type: 'string', description: 'Model to use' },
@@ -1397,7 +1398,7 @@ const plugin = {
           focus: { type: 'string', description: 'Review focus area (default: bugs + security + quality)' },
           engines: {
             type: 'array',
-            items: { type: 'string', enum: ['claude', 'codex', 'codex-app', 'gemini', 'cursor', 'opencode'] },
+            items: { type: 'string', enum: ['claude', 'codex', 'codex-app', 'gemini', 'agy', 'cursor', 'opencode'] },
             description:
               'Engines to round-robin reviewers across (default ["claude"]). Reviewers fan out in parallel; per-agent failures are isolated.',
           },

@@ -184,6 +184,32 @@ const MODELS: ModelDef[] = [
     contextWindow: 1_000_000,
   },
 
+  // ── Google Antigravity (agy) ───────────────────────────────────────────
+  // Antigravity CLI is Gemini CLI's successor (consumer Gemini CLI stopped
+  // serving 2026-06-18). Consumer agy auth is subscription-based with no
+  // per-token billing, and agy emits no usage data, so token counts for this
+  // engine are ESTIMATED. Pricing mirrors Gemini API list rates so costUsd
+  // approximates equivalent API value; use overrideModelPricing() to zero it
+  // out for subscription accounting. Slugs verified against agy 1.0.16
+  // (`agy models`); agy also proxies Claude/GPT-OSS models, passed through
+  // unregistered. Unknown slugs silently fall back to agy's default model.
+  {
+    id: 'gemini-3.5-flash',
+    engine: 'agy',
+    provider: 'google',
+    pricing: { input: 0.5, output: 3 },
+    aliases: ['agy-flash'],
+    contextWindow: 1_000_000,
+  },
+  {
+    id: 'gemini-3.1-pro',
+    engine: 'agy',
+    provider: 'google',
+    pricing: { input: 2, output: 12 },
+    aliases: ['agy-pro'],
+    contextWindow: 1_000_000,
+  },
+
   // ── Google Gemini 2.5 (stable) ─────────────────────────────────────────
   {
     id: 'gemini-2.5-pro',
@@ -285,7 +311,7 @@ export function resolveEngineAndModel(model: string): { engine: EngineType; mode
 export function resolveProvider(model: string): { provider: ProviderName; apiModel: string } {
   // Strip vendor prefixes
   let clean = model;
-  for (const prefix of ['anthropic/', 'openai/', 'openai-codex/', 'gemini/', 'google/', 'cursor/']) {
+  for (const prefix of ['anthropic/', 'openai/', 'openai-codex/', 'gemini/', 'google/', 'agy/', 'cursor/']) {
     if (clean.startsWith(prefix)) {
       clean = clean.slice(prefix.length);
       break;
@@ -322,7 +348,7 @@ export function resolveProvider(model: string): { provider: ProviderName; apiMod
 
 /** Get context window size for a model. Returns 200k default for unknown models. */
 export function getContextWindow(model: string): number {
-  const clean = model.replace(/^(anthropic|openai|openai-codex|google|gemini|cursor)\//g, '');
+  const clean = model.replace(/^(anthropic|openai|openai-codex|google|gemini|agy|cursor)\//g, '');
   const known = lookupModel(clean);
   return known?.contextWindow ?? 200_000;
 }
@@ -330,7 +356,7 @@ export function getContextWindow(model: string): number {
 /** Get pricing for a model. Falls back to sonnet pricing for unknown models. */
 export function getModelPricing(model?: string, defaultModel = 'claude-sonnet-4-6'): ModelPricing {
   if (!model) return lookupModel(defaultModel)?.pricing ?? { input: 0, output: 0 };
-  const clean = model.replace(/^(anthropic|openai|openai-codex|google|gemini|cursor)\//g, '');
+  const clean = model.replace(/^(anthropic|openai|openai-codex|google|gemini|agy|cursor)\//g, '');
   // Check overrides first
   const override = _pricingOverrides.get(clean);
   if (override) return override;
