@@ -28,6 +28,8 @@ import * as path from 'node:path';
 
 import type { SessionConfig, SessionSendOptions, StreamEvent, TurnResult } from './types.js';
 import { estimateTokens } from './models.js';
+import { sanitizeSecrets } from './sanitize.js';
+import { extractCreatedAgyConversationId, isAgyConversationId } from './agy-conversation.js';
 import { SESSION_EVENT } from './constants.js';
 import { BaseOneShotSession } from './base-oneshot-session.js';
 
@@ -48,7 +50,11 @@ export class PersistentAgySession extends BaseOneShotSession {
       supportsCachedTokens: false,
       engineDisplayName: 'Antigravity',
     });
-    if (config.resumeSessionId) this.agyConversationId = config.resumeSessionId;
+    // Non-UUID ids (synthetic session ids from persistence/restart paths) are
+    // ignored: starting a fresh conversation beats resuming a broken one.
+    if (isAgyConversationId(config.resumeSessionId)) {
+      this.agyConversationId = config.resumeSessionId;
+    }
   }
 
   /** Expose the captured conversation ID for resume tooling and stats overlay. */
@@ -86,7 +92,12 @@ export class PersistentAgySession extends BaseOneShotSession {
       args.push('--sandbox');
     }
 
-    if (this.options.model) args.push('--model', this.options.model);
+    // Use the SessionManager-resolved model when available so documented
+    // aliases (agy-pro → gemini-3.1-pro) do not silently fall back to agy's
+    // default model.
+    const configuredModel = this.options.resolvedModel || this.options.model;
+    const model = configuredModel ? this.resolveModel(configuredModel.replace(/^agy\//, '')) : undefined;
+    if (model) args.push('--model', model);
     if (this.agyConversationId) args.push('--conversation', this.agyConversationId);
 
     // agy enforces its own print-mode timeout (default 5m). Derive it from the
@@ -102,13 +113,29 @@ export class PersistentAgySession extends BaseOneShotSession {
    * existing ID is never overwritten by a miss.
    */
   private _harvestConversationId(): void {
+    // Once harvested (or seeded) the ID is final for the life of the session
+    // — skip the synchronous whole-log re-read on every later turn.
+    if (this.agyConversationId) return;
     try {
       const log = fs.readFileSync(this._logFile, 'utf8');
-      const created = log.match(/Created conversation ([0-9a-f-]{8,})/i);
-      if (created) this.agyConversationId = created[1];
+      this.agyConversationId = extractCreatedAgyConversationId(log);
     } catch {
-      // Log file missing (agy failed before logging) — keep any existing ID
+      // Log file missing — agy failed before logging anything
     }
+    if (!this.agyConversationId) {
+      // Without an ID every later send silently starts a fresh conversation.
+      // Make that observable — if this fires on every turn, agy most likely
+      // reworded its log line and the harvest regex needs updating.
+      this._warnHarvestMiss();
+    }
+  }
+
+  private _warnHarvestMiss(): void {
+    if (this._stats.turns !== 0) return;
+    this.emit(
+      SESSION_EVENT.LOG,
+      '[agy] no conversation ID found in log after turn — resume unavailable; the next send starts a fresh conversation',
+    );
   }
 
   protected _run(message: string, options: SessionSendOptions): Promise<TurnResult> {
@@ -148,10 +175,7 @@ export class PersistentAgySession extends BaseOneShotSession {
       });
 
       proc.stderr?.on('data', (data: Buffer) => {
-        const sanitized = data
-          .toString()
-          .replace(/Bearer [a-zA-Z0-9._-]+/g, 'Bearer ***')
-          .replace(/(api[_-]?key["':= ]+)[a-zA-Z0-9_-]+/gi, '$1***');
+        const sanitized = sanitizeSecrets(data.toString());
         stderr += sanitized;
         this.emit(SESSION_EVENT.LOG, `[agy-stderr] ${sanitized}`);
       });
@@ -159,10 +183,17 @@ export class PersistentAgySession extends BaseOneShotSession {
       proc.on('close', (code) => {
         clearTimeout(timer);
         this.currentProc = null;
+
+        // Harvest BEFORE the settled check: a turn that hit the wrapper
+        // timeout has already rejected (settled), but agy may still have
+        // logged `Created conversation <uuid>` before being killed. Skipping
+        // the harvest here would lose the ID permanently and every later
+        // send would silently start a fresh conversation.
+        this._harvestConversationId();
+
         if (settled) return;
         settled = true;
 
-        this._harvestConversationId();
         this._recordTurnComplete();
 
         const text = resultText.replace(/\n$/, '');

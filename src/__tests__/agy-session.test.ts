@@ -10,8 +10,6 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { EventEmitter } from 'node:events';
 import { Readable } from 'node:stream';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
-import * as path from 'node:path';
 
 // Mock child_process before importing the session
 const mockSpawn = vi.fn();
@@ -54,9 +52,12 @@ function closeProc(proc: ReturnType<typeof createMockProcess>, code: number) {
   proc.emit('close', code);
 }
 
-/** The deterministic per-session log path the engine passes via --log-file. */
-function logPathFor(session: InstanceType<typeof PersistentAgySession>): string {
-  return path.join(os.tmpdir(), `agy-${session.sessionId}.log`);
+/** Read the private agy log path from the actual spawn args. */
+function logPathFromSpawn(callIndex = mockSpawn.mock.calls.length - 1): string {
+  const args = mockSpawn.mock.calls[callIndex][1] as string[];
+  const idx = args.indexOf('--log-file');
+  expect(idx).toBeGreaterThan(-1);
+  return args[idx + 1];
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
@@ -166,6 +167,25 @@ describe('PersistentAgySession', () => {
       // 60s send timeout + 5s margin so the wrapper timer, not agy, decides
       expect(spawnArgs[idx + 1]).toBe('65s');
     });
+
+    it('resolves agy model aliases before passing --model', async () => {
+      const session = new PersistentAgySession({
+        name: 'test',
+        cwd: '/tmp',
+        permissionMode: 'bypassPermissions',
+        model: 'agy-pro',
+      });
+      await session.start();
+
+      const sendPromise = session.send('hello', { waitForComplete: true });
+      setTimeout(() => closeProc(mockProc, 0), 10);
+      await sendPromise;
+
+      const spawnArgs = mockSpawn.mock.calls[0][1] as string[];
+      const idx = spawnArgs.indexOf('--model');
+      expect(idx).toBeGreaterThan(-1);
+      expect(spawnArgs[idx + 1]).toBe('gemini-3.1-pro');
+    });
   });
 
   // ─── conversation continuity ────────────────────────────────────────────
@@ -180,14 +200,11 @@ describe('PersistentAgySession', () => {
       await session.start();
 
       // Turn 1: agy writes its log; the engine harvests the new conversation ID
-      const logFile = logPathFor(session);
-      tmpLogs.push(logFile);
       const send1 = session.send('first turn', { waitForComplete: true });
+      const logFile = logPathFromSpawn();
+      tmpLogs.push(logFile);
       setTimeout(() => {
-        fs.writeFileSync(
-          logFile,
-          'I0705 server.go:825] Created conversation 4ebc13c0-4cd3-4f59-b19d-2ee98ad883b2\n',
-        );
+        fs.writeFileSync(logFile, 'I0705 server.go:825] Created conversation 4ebc13c0-4cd3-4f59-b19d-2ee98ad883b2\n');
         feedText(mockProc, 'STORED\n');
         closeProc(mockProc, 0);
       }, 10);
@@ -233,6 +250,23 @@ describe('PersistentAgySession', () => {
       expect(spawnArgs[idx + 1]).toBe('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
     });
 
+    it('ignores synthetic agy session IDs passed as resumeSessionId', async () => {
+      const session = new PersistentAgySession({
+        name: 'test',
+        cwd: '/tmp',
+        permissionMode: 'bypassPermissions',
+        resumeSessionId: 'agy-1720000000000-ab3f',
+      });
+      await session.start();
+
+      const sendPromise = session.send('hello again', { waitForComplete: true });
+      setTimeout(() => closeProc(mockProc, 0), 10);
+      await sendPromise;
+
+      const spawnArgs = mockSpawn.mock.calls[0][1] as string[];
+      expect(spawnArgs).not.toContain('--conversation');
+    });
+
     it('keeps the existing ID when the log has no Created line (resumed turn)', async () => {
       const session = new PersistentAgySession({
         name: 'test',
@@ -242,16 +276,55 @@ describe('PersistentAgySession', () => {
       });
       await session.start();
 
-      const logFile = logPathFor(session);
-      tmpLogs.push(logFile);
       const sendPromise = session.send('hello', { waitForComplete: true });
+      const logFile = logPathFromSpawn();
+      tmpLogs.push(logFile);
       setTimeout(() => {
-        fs.writeFileSync(logFile, 'I0705 server.go:2215] GetConversationDetail: found conversation (active=true)\n');
+        fs.writeFileSync(logFile, 'I0705 server.go:825] Created conversation ffffffff-1111-2222-3333-444444444444\n');
         closeProc(mockProc, 0);
       }, 10);
       await sendPromise;
 
       expect(session.conversationId).toBe('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
+    });
+
+    it('harvests the conversation ID even after the wrapper timeout settles the turn', async () => {
+      const session = new PersistentAgySession({
+        name: 'test',
+        cwd: '/tmp',
+        permissionMode: 'bypassPermissions',
+      });
+      await session.start();
+
+      const observed = session.send('slow turn', { waitForComplete: true, timeout: 10 }).catch((err: Error) => err);
+      const logFile = logPathFromSpawn();
+      tmpLogs.push(logFile);
+      fs.writeFileSync(logFile, 'I0705 server.go:825] Created conversation 11111111-2222-3333-4444-555555555555\n');
+
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      closeProc(mockProc, 143);
+
+      const err = await observed;
+      expect(err.message).toContain('Timeout waiting for Antigravity response');
+      expect(session.conversationId).toBe('11111111-2222-3333-4444-555555555555');
+    });
+
+    it('logs a warning when the first turn cannot harvest a conversation ID', async () => {
+      const session = new PersistentAgySession({
+        name: 'test',
+        cwd: '/tmp',
+        permissionMode: 'bypassPermissions',
+      });
+      await session.start();
+
+      const logs: string[] = [];
+      session.on('log', (msg: string) => logs.push(msg));
+
+      const sendPromise = session.send('hello', { waitForComplete: true });
+      setTimeout(() => closeProc(mockProc, 0), 10);
+      await sendPromise;
+
+      expect(logs.some((l) => l.includes('no conversation ID found in log'))).toBe(true);
     });
   });
 
@@ -333,10 +406,9 @@ describe('PersistentAgySession', () => {
       });
       await session.start();
 
-      const logFile = logPathFor(session);
-      fs.writeFileSync(logFile, 'leftover log\n');
-
       session.send('hello', { waitForComplete: false });
+      const logFile = logPathFromSpawn();
+      fs.writeFileSync(logFile, 'leftover log\n');
       session.stop();
 
       expect(mockProc.kill).toHaveBeenCalledWith('SIGTERM');
@@ -394,6 +466,30 @@ describe('PersistentAgySession', () => {
       await sendPromise;
       expect(logs.some((l) => l.includes('Bearer ***'))).toBe(true);
       expect(logs.some((l) => l.includes('ya29.secret-token'))).toBe(false);
+    });
+
+    it('redacts sk-style keys and Google API key env vars from stderr', async () => {
+      const session = new PersistentAgySession({
+        name: 'test',
+        cwd: '/tmp',
+        permissionMode: 'bypassPermissions',
+      });
+      await session.start();
+
+      const logs: string[] = [];
+      session.on('log', (msg: string) => logs.push(msg));
+
+      const sendPromise = session.send('hello', { waitForComplete: true });
+      setTimeout(() => {
+        mockProc.stderr.emit('data', Buffer.from('GEMINI_API_KEY=AIza12345 key=sk-proj-abcdef1234567890'));
+        closeProc(mockProc, 0);
+      }, 10);
+
+      await sendPromise;
+      expect(logs.some((l) => l.includes('GEMINI_API_KEY=***'))).toBe(true);
+      expect(logs.some((l) => l.includes('sk-***'))).toBe(true);
+      expect(logs.some((l) => l.includes('AIza12345'))).toBe(false);
+      expect(logs.some((l) => l.includes('sk-proj-abcdef'))).toBe(false);
     });
   });
 });
