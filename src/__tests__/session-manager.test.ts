@@ -22,6 +22,7 @@ import type {
 
 class MockSession extends EventEmitter implements ISession {
   sessionId?: string;
+  conversationId?: string;
   private _isReady = true;
   private _isPaused = false;
   private _isBusy = false;
@@ -141,6 +142,7 @@ class MockSession extends EventEmitter implements ISession {
 // ─── Mock Factory ─────────────────────────────────────────────────────────
 
 let mockSessions: MockSession[] = [];
+let createdConfigs: SessionConfig[] = [];
 
 /**
  * We intercept the _createSession private method to inject MockSession
@@ -150,7 +152,9 @@ function patchCreateSession(manager: InstanceType<typeof SessionManager>): void 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   (manager as any)._createSession = (_engine: string, _config: SessionConfig): ISession => {
     const mock = new MockSession();
+    if (_engine === 'agy' && _config.resumeSessionId) mock.conversationId = _config.resumeSessionId;
     mockSessions.push(mock);
+    createdConfigs.push(_config);
     return mock;
   };
 }
@@ -232,6 +236,7 @@ describe('SessionManager', () => {
   beforeEach(() => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     mockSessions = [];
+    createdConfigs = [];
     mgr = createManager();
   });
 
@@ -1131,6 +1136,18 @@ describe('SessionManager', () => {
       // The session should have been recreated
       expect(mockSessions.length).toBe(2); // original + new
     });
+
+    it('uses the agy conversation UUID, not the synthetic session ID, when switching models', async () => {
+      await mgr.startSession({ name: 'agy-switch', cwd: '/tmp', engine: 'agy', model: 'gemini-3.5-flash' });
+      lastMock().conversationId = '11111111-2222-3333-4444-555555555555';
+      lastMock().setBusy(false);
+
+      await mgr.sendMessage('agy-switch', 'hello');
+      await mgr.switchModel('agy-switch', 'agy-pro');
+
+      expect(createdConfigs[1].resumeSessionId).toBe('11111111-2222-3333-4444-555555555555');
+      expect(createdConfigs[1].resumeSessionId).not.toMatch(/^mock-session-/);
+    });
   });
 
   // ─── updateTools ────────────────────────────────────────────────────
@@ -1185,6 +1202,18 @@ describe('SessionManager', () => {
       });
       expect(info.name).toBe('tools-merge');
     });
+
+    it('uses the agy conversation UUID, not the synthetic session ID, when updating tools', async () => {
+      await mgr.startSession({ name: 'agy-tools', cwd: '/tmp', engine: 'agy', model: 'gemini-3.5-flash' });
+      lastMock().conversationId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+      lastMock().setBusy(false);
+
+      await mgr.sendMessage('agy-tools', 'hello');
+      await mgr.updateTools('agy-tools', { allowedTools: ['Read'] });
+
+      expect(createdConfigs[1].resumeSessionId).toBe('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
+      expect(createdConfigs[1].resumeSessionId).not.toMatch(/^mock-session-/);
+    });
   });
 
   // ─── Persisted Sessions ─────────────────────────────────────────────
@@ -1207,6 +1236,20 @@ describe('SessionManager', () => {
 
       await mgr.stopSession('persist-remove');
       expect(mgr.listPersistedSessions().find((p) => p.name === 'persist-remove')).toBeUndefined();
+    });
+
+    it('persists the agy conversation UUID after first send and never the synthetic session ID', async () => {
+      const info = await mgr.startSession({ name: 'agy-persist', cwd: '/tmp', engine: 'agy' });
+      expect(info.claudeSessionId).toBeUndefined();
+      expect(mgr.listPersistedSessions().find((p) => p.name === 'agy-persist')).toBeUndefined();
+
+      lastMock().conversationId = '99999999-8888-7777-6666-555555555555';
+      const result = await mgr.sendMessage('agy-persist', 'hello');
+
+      expect(result.sessionId).toBe('99999999-8888-7777-6666-555555555555');
+      const entry = mgr.listPersistedSessions().find((p) => p.name === 'agy-persist');
+      expect(entry?.claudeSessionId).toBe('99999999-8888-7777-6666-555555555555');
+      expect(entry?.claudeSessionId).not.toMatch(/^mock-session-/);
     });
   });
 

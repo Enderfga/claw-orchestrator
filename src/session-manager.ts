@@ -152,6 +152,7 @@ import {
   overrideModelPricing,
 } from './types.js';
 import { resolveAlias, isClaudeModel } from './models.js';
+import { isAgyConversationId } from './agy-conversation.js';
 import { Council } from './council.js';
 import { Fanout, type FanoutConfig, type FanoutSession, type FanoutAgentSpec } from './fanout.js';
 import { AutoloopRunner } from './autoloop/runner.js';
@@ -186,6 +187,7 @@ interface ManagedSession {
   lastActivity: number;
   cwd: string;
   claudeSessionId?: string;
+  skipPersistence?: boolean;
   /**
    * Per-session send chain. Concurrent sendMessage() calls on the same session
    * MUST serialize, otherwise PersistentClaudeSession's single _streamCallbacks
@@ -513,6 +515,10 @@ export class SessionManager {
     // Starts a local proxy server that converts Anthropic → OpenAI format
     // and forwards to the OpenClaw gateway. Zero config required.
     const engine: EngineType = fullConfig.engine || persisted?.engine || 'claude';
+    // Write the resolved engine back so downstream consumers of the managed
+    // config (agy resume-id lookups, _persistSession's registry entry) see the
+    // real engine even when it came from the persisted registry.
+    fullConfig.engine = engine;
 
     // Circuit breaker — reject early if engine is in backoff
     this._circuitBreaker.check(engine);
@@ -551,7 +557,8 @@ export class SessionManager {
       created: persisted?.originalCreated || new Date().toISOString(),
       lastActivity: Date.now(),
       cwd: fullConfig.cwd,
-      claudeSessionId: session.sessionId,
+      claudeSessionId: this._sessionResumeId(engine, session),
+      skipPersistence: skipPersist,
     };
 
     this.sessions.set(name, managed);
@@ -633,11 +640,12 @@ export class SessionManager {
 
       const result = await managed.session.send(message, sendOpts);
 
-      // Update session ID if available (skip disk persist for ephemeral
-      // sessions that were started with skipPersistence)
-      if (managed.session.sessionId) {
-        managed.claudeSessionId = managed.session.sessionId;
-        if (this.persistedSessions.has(name)) {
+      // Update the resume-capable session ID if available (skip disk persist
+      // for ephemeral sessions that were started with skipPersistence)
+      const resumableId = this._managedResumeId(managed);
+      if (resumableId) {
+        managed.claudeSessionId = resumableId;
+        if (!managed.skipPersistence) {
           this._persistSession(name, managed);
         }
       }
@@ -645,12 +653,12 @@ export class SessionManager {
       if ('text' in result) {
         return {
           output: result.text,
-          sessionId: managed.claudeSessionId,
+          sessionId: this._managedResumeId(managed),
           events: [],
         };
       }
 
-      return { output: '', sessionId: managed.claudeSessionId, events: [] };
+      return { output: '', sessionId: this._managedResumeId(managed), events: [] };
     } finally {
       releaseChain();
       // If this was the tail of the chain, clear it so memory doesn't grow.
@@ -753,8 +761,12 @@ export class SessionManager {
       );
     }
 
-    const sessionId = managed.claudeSessionId || managed.session.sessionId;
-    if (!sessionId) throw new Error(`Session '${name}' has no claude session ID — cannot resume after restart`);
+    // An agy session with no harvested conversation yet has no history to
+    // preserve — restart it fresh instead of rejecting the switch.
+    const sessionId = this._managedResumeId(managed);
+    if (!sessionId && managed.config.engine !== 'agy') {
+      throw new Error(`Session '${name}' has no claude session ID — cannot resume after restart`);
+    }
 
     // Validate model — must be a known alias or contain a recognisable pattern
     const resolvedModel = this._resolveModel(model, managed.config.modelOverrides);
@@ -775,13 +787,13 @@ export class SessionManager {
         ...oldConfig,
         name,
         model,
-        resumeSessionId: sessionId,
+        ...(sessionId ? { resumeSessionId: sessionId } : {}),
       });
     } catch (err) {
       // Rollback: restart with original config
       this.logger.error(`switchModel failed for '${name}', attempting rollback:`, err);
       try {
-        await this.startSession({ ...oldConfig, name, resumeSessionId: sessionId });
+        await this.startSession({ ...oldConfig, name, ...(sessionId ? { resumeSessionId: sessionId } : {}) });
       } catch (rollbackErr) {
         this.logger.error(`Rollback also failed for '${name}':`, rollbackErr);
       }
@@ -819,8 +831,12 @@ export class SessionManager {
       );
     }
 
-    const sessionId = managed.claudeSessionId || managed.session.sessionId;
-    if (!sessionId) throw new Error(`Session '${name}' has no claude session ID — cannot resume after restart`);
+    // An agy session with no harvested conversation yet has no history to
+    // preserve — restart it fresh instead of rejecting the update.
+    const sessionId = this._managedResumeId(managed);
+    if (!sessionId && managed.config.engine !== 'agy') {
+      throw new Error(`Session '${name}' has no claude session ID — cannot resume after restart`);
+    }
 
     const oldConfig = { ...managed.config };
     let newAllowed = opts.allowedTools;
@@ -851,12 +867,12 @@ export class SessionManager {
         name,
         allowedTools: newAllowed,
         disallowedTools: newDisallowed,
-        resumeSessionId: sessionId,
+        ...(sessionId ? { resumeSessionId: sessionId } : {}),
       });
     } catch (err) {
       this.logger.error(`updateTools failed for '${name}', attempting rollback:`, err);
       try {
-        await this.startSession({ ...oldConfig, name, resumeSessionId: sessionId });
+        await this.startSession({ ...oldConfig, name, ...(sessionId ? { resumeSessionId: sessionId } : {}) });
       } catch (rollbackErr) {
         this.logger.error(`Rollback also failed for '${name}':`, rollbackErr);
       }
@@ -1013,7 +1029,7 @@ export class SessionManager {
       output: deliveryResult.delivered
         ? `Message delivered to ${teammate}`
         : `Message queued for ${teammate} (session is busy)`,
-      sessionId: managed.claudeSessionId,
+      sessionId: this._managedResumeId(managed),
       events: [],
     };
   }
@@ -1629,11 +1645,18 @@ export class SessionManager {
   // ─── Private ───────────────────────────────────────────────────────────
 
   private _persistSession(name: string, managed: ManagedSession): void {
-    if (!managed.claudeSessionId) return;
+    const resumeSessionId = this._managedResumeId(managed);
+    if (!resumeSessionId) {
+      if (managed.config.engine === 'agy' && this.persistedSessions.delete(name)) {
+        this._debouncedSave();
+      }
+      return;
+    }
+    managed.claudeSessionId = resumeSessionId;
     const existing = this.persistedSessions.get(name);
     this.persistedSessions.set(name, {
       name,
-      claudeSessionId: managed.claudeSessionId,
+      claudeSessionId: resumeSessionId,
       cwd: managed.cwd,
       model: managed.config.resolvedModel || managed.config.model,
       engine: managed.config.engine,
@@ -1826,9 +1849,11 @@ export class SessionManager {
 
   private _toSessionInfo(name: string, managed: ManagedSession): SessionInfo {
     const stats = managed.session.getStats();
+    const resumeSessionId = this._managedResumeId(managed);
+    if (resumeSessionId) managed.claudeSessionId = resumeSessionId;
     return {
       name,
-      claudeSessionId: managed.claudeSessionId,
+      claudeSessionId: resumeSessionId,
       created: managed.created,
       cwd: managed.cwd,
       model: managed.config.resolvedModel || managed.config.model,
@@ -1840,6 +1865,31 @@ export class SessionManager {
   private _resolveModel(alias: string, overrides?: Record<string, string>): string {
     if (overrides?.[alias]) return overrides[alias];
     return resolveAlias(alias);
+  }
+
+  private _managedResumeId(managed: ManagedSession): string | undefined {
+    return (
+      this._sessionResumeId(managed.config.engine, managed.session) ||
+      this._storedResumeId(managed.config.engine, managed.claudeSessionId)
+    );
+  }
+
+  /**
+   * Return only IDs that can actually resume the engine. For agy,
+   * session.sessionId is synthetic (`agy-<ts>-<rand>`); only the harvested
+   * conversation UUID works with `--conversation`.
+   */
+  private _sessionResumeId(engine: EngineType | undefined, session: ISession): string | undefined {
+    if (engine === 'agy') {
+      const conversationId = (session as { conversationId?: string }).conversationId;
+      return isAgyConversationId(conversationId) ? conversationId : undefined;
+    }
+    return session.sessionId;
+  }
+
+  private _storedResumeId(engine: EngineType | undefined, id: string | undefined): string | undefined {
+    if (engine === 'agy') return isAgyConversationId(id) ? id : undefined;
+    return id;
   }
 
   private _listMdFiles(dir: string): AgentInfo[] {
