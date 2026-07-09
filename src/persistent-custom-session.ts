@@ -18,7 +18,6 @@
 import { spawn, ChildProcess } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import * as readline from 'node:readline';
-import RE2 from 're2';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
@@ -36,6 +35,7 @@ import {
   getModelPricing as _getModelPricingBase,
 } from './types.js';
 import { resolveAlias, estimateTokens } from './models.js';
+import { buildSanitizer } from './sanitize.js';
 
 import {
   CONTEXT_HIGH_THRESHOLD,
@@ -66,38 +66,6 @@ function resolveBin(engineConfig: CustomEngineConfig): string {
     if (envVal) return envVal;
   }
   return engineConfig.bin;
-}
-
-/** Build sanitizer function from config patterns + common defaults */
-function buildSanitizer(engineConfig: CustomEngineConfig): (text: string) => string {
-  const patterns: Array<{ re: RegExp; replacement: string }> = [
-    // Always sanitize Bearer tokens and common API key patterns
-    { re: /Bearer [a-zA-Z0-9_-]+/g, replacement: 'Bearer ***' },
-    { re: /sk-[a-zA-Z0-9_-]{10,}/g, replacement: 'sk-***' },
-  ];
-  if (engineConfig.sanitizePatterns) {
-    for (const p of engineConfig.sanitizePatterns) {
-      try {
-        // RE2 runs in linear time and never backtracks, so a user-supplied
-        // sanitize pattern cannot trigger ReDoS on attacker-influenced output.
-        patterns.push({ re: new RE2(p, 'g') as unknown as RegExp, replacement: '***' });
-      } catch (err) {
-        // A silently-dropped sanitize pattern means secrets stop being redacted
-        // — make it visible so the operator fixes the typo.
-        console.warn(
-          `[custom-session:${engineConfig.name}] ignoring invalid sanitizePattern ${JSON.stringify(p)}: ${(err as Error).message}`,
-        );
-      }
-    }
-  }
-  return (text: string) => {
-    let result = text;
-    for (const { re, replacement } of patterns) {
-      re.lastIndex = 0;
-      result = result.replace(re, replacement);
-    }
-    return result;
-  };
 }
 
 // ─── PersistentCustomSession ───────────────────────────────────────────────
@@ -145,7 +113,10 @@ export class PersistentCustomSession extends EventEmitter implements ISession {
     }
     this.engineConfig = config.customEngine;
     this.engineBin = resolveBin(this.engineConfig);
-    this.sanitize = buildSanitizer(this.engineConfig);
+    this.sanitize = buildSanitizer({
+      extraPatterns: this.engineConfig.sanitizePatterns,
+      label: `custom-session:${this.engineConfig.name}`,
+    });
     this.options = {
       ...config,
       permissionMode: config.permissionMode || 'acceptEdits',

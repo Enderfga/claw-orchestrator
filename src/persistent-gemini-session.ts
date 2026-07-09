@@ -16,6 +16,7 @@ import * as readline from 'node:readline';
 
 import type { SessionConfig, SessionSendOptions, StreamEvent, TurnResult } from './types.js';
 import { estimateTokens } from './models.js';
+import { sanitizeSecrets } from './sanitize.js';
 import { SESSION_EVENT } from './constants.js';
 import { BaseOneShotSession } from './base-oneshot-session.js';
 
@@ -107,10 +108,7 @@ export class PersistentGeminiSession extends BaseOneShotSession {
       });
 
       proc.stderr?.on('data', (data: Buffer) => {
-        const sanitized = data
-          .toString()
-          .replace(/GEMINI_API_KEY=[^\s]+/g, 'GEMINI_API_KEY=***')
-          .replace(/Bearer [a-zA-Z0-9_-]+/g, 'Bearer ***');
+        const sanitized = sanitizeSecrets(data.toString());
         stderr += sanitized;
         this.emit(SESSION_EVENT.LOG, `[gemini-stderr] ${sanitized}`);
       });
