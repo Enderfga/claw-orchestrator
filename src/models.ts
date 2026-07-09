@@ -292,6 +292,18 @@ export function resolveAlias(alias: string): string {
 
 /** Resolve model string to engine + canonical model. Pattern fallback for unknown models. */
 export function resolveEngineAndModel(model: string): { engine: EngineType; model: string } {
+  // The `agy/` vendor prefix pins the Antigravity engine (mirroring the strip
+  // lists in resolveProvider/getContextWindow/getModelPricing). It must win
+  // over both the registry and the pattern heuristics: agy proxies Claude and
+  // GPT-OSS models that are registered to other engines, and a bare
+  // `gemini-*` heuristic would route `agy/gemini-3.5-flash` to the gemini
+  // engine — the opposite of the prefix's intent. Other vendor prefixes are
+  // deliberately NOT stripped here: prefixed strings fall through to the
+  // claude engine, which proxies them to the gateway.
+  if (model.startsWith('agy/')) {
+    return { engine: 'agy', model: resolveAlias(model.slice('agy/'.length)) };
+  }
+
   // 1. Exact match (id or alias)
   const known = lookupModel(model);
   if (known) return { engine: known.engine, model: known.id };
