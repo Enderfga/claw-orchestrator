@@ -140,7 +140,8 @@ in print mode. Verified against `agy` **1.0.16**.
 - **Real conversation continuity**: agy logs `Created conversation <uuid>` to its
   log file; the engine passes a private `--log-file`, harvests the ID after the
   first turn, and resumes with `--conversation <id>` on subsequent sends. Seed it
-  externally via `resumeSessionId`; read it back from `getStats().agyConversationId`
+  externally via `resumeSessionId` (bare UUID only); read it back from
+  `getStats().agyConversationId`
 - Permission modes: `bypassPermissions` → `--dangerously-skip-permissions`,
   `default` → `--sandbox` (terminal-restricted). Other modes run agy's own
   approval flow, which blocks in headless print mode — use `bypassPermissions`
@@ -150,7 +151,8 @@ in print mode. Verified against `agy` **1.0.16**.
 - Unknown `--model` slugs do **not** error — agy silently falls back to its
   default model. Registered slugs: `gemini-3.5-flash` (alias `agy-flash`),
   `gemini-3.1-pro` (alias `agy-pro`); agy also proxies Claude and GPT-OSS
-  models (`agy models` lists them) which pass through unregistered
+  models (`agy models` lists them) which pass through unregistered. The
+  `agy/` prefix forces Antigravity routing for provider-like model strings
 - Consumer auth is a one-time `agy` Google OAuth login (subscription quotas, no
   per-token billing — registry pricing mirrors Gemini API rates as a value proxy)
 - Requires `agy` installed: `curl -fsSL https://antigravity.google/cli/install.sh | bash`

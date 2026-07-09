@@ -223,7 +223,7 @@ Hosts deliberately do not forward your full shell environment to MCP subprocesse
 | `CLAWO_MCP_TOOLS` | Comma-separated allowlist of tool names; unlisted tools are not advertised |
 | `CLAWO_NO_EMBEDDED_SERVER` | Suppresses port 18796 binding. `clawo-mcp` sets this automatically |
 
-The engines themselves (`claude`, `codex`, `gemini`, `agent`, `opencode`) must also be installed and authenticated on the host machine — `clawo-mcp` spawns them as subprocesses, it does not bundle them.
+The engines themselves (`claude`, `codex`, `gemini`, `agy`, `agent`, `opencode`) must also be installed and authenticated on the host machine — `clawo-mcp` spawns them as subprocesses, it does not bundle them.
 
 ---
 

@@ -21,9 +21,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   has no structured output mode as of 1.0.16), so token counts are estimated.
   New registry models: `gemini-3.5-flash` (alias `agy-flash`) and `gemini-3.1-pro`
   (alias `agy-pro`); agy-proxied Claude/GPT-OSS models pass through unregistered.
+  Behavior change: bare `gemini-3.5-flash` / `gemini-3.1-pro` now route to
+  `engine: 'agy'` and require the `agy` binary; use the preview Gemini CLI slugs
+  (`gemini-3-flash-preview`, `gemini-3.1-pro-preview`) for the `gemini` engine.
   Unknown model slugs silently fall back to agy's default (verified on 1.0.16).
   `AGY_BIN` env var overrides the binary. Verified against `agy` 1.0.16, including
   a live two-turn resume test.
+
+### Changed
+- **stderr secret redaction unified across engines** (`src/sanitize.ts`). The claude,
+  gemini, cursor, opencode, custom, and agy engines now share one sanitizer whose
+  patterns are the union of the previous per-engine copies (Bearer tokens incl.
+  dotted `ya29.*`, `sk-*` keys, `api_key` assignments, and any `*_KEY=` / `*_TOKEN=` /
+  `*_SECRET=` env var) — strictly broader redaction for every engine.
 
 ## [4.6.0] - 2026-07-03
 

@@ -43,7 +43,8 @@ The server exposes an OpenAI-compatible chat completions endpoint, enabling any 
 - `claude-*`, `opus`, `sonnet`, `haiku` → Claude engine
 - `gpt-*` → Codex engine
 - `composer-*` → Cursor engine
-- `gemini-*` → Gemini engine
+- `gemini-3.5-flash`, `gemini-3.1-pro`, `agy-*`, `agy/*` → Antigravity (`agy`) engine
+- other `gemini-*` → Gemini engine
 
 **CORS:** `/v1/` paths allow cross-origin requests by default. Set `OPENCLAW_CORS_ORIGINS=*` to allow all origins on all paths.
 
@@ -60,7 +61,7 @@ clawo session-start [name] [options]
 | Flag | Description |
 |------|-------------|
 | `-d, --cwd <dir>` | Working directory |
-| `-e, --engine <engine>` | Engine: `claude` (default), `codex`, or `gemini` |
+| `-e, --engine <engine>` | Engine: `claude` (default), `codex`, `codex-app`, `gemini`, `agy`, `cursor`, `opencode`, or `custom` |
 | `-m, --model <model>` | Model name or alias |
 | `--permission-mode <mode>` | `acceptEdits`, `plan`, `auto`, `bypassPermissions` |
 | `--effort <level>` | `low`, `medium`, `high`, `max`, `auto` |
