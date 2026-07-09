@@ -33,7 +33,8 @@ export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'auto';
 
 // ─── Engine ─────────────────────────────────────────────────────────────────
 
-export type EngineType = 'claude' | 'codex' | 'codex-app' | 'gemini' | 'agy' | 'cursor' | 'opencode' | 'custom';
+export const ENGINE_TYPES = ['claude', 'codex', 'codex-app', 'gemini', 'agy', 'cursor', 'opencode', 'custom'] as const;
+export type EngineType = (typeof ENGINE_TYPES)[number];
 
 // ─── Custom Engine Config ───────────────────────────────────────────────────
 //
