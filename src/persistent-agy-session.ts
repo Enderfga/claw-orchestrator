@@ -88,7 +88,7 @@ export class PersistentAgySession extends BaseOneShotSession {
     // for headless work.
     if (this.options.permissionMode === 'bypassPermissions' || this.options.dangerouslySkipPermissions) {
       args.push('--dangerously-skip-permissions');
-    } else if (this.options.permissionMode === 'default') {
+    } else if (this.options.permissionMode === 'default' || this.options.permissionMode === 'manual') {
       args.push('--sandbox');
     }
 

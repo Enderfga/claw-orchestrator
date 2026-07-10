@@ -136,6 +136,19 @@ describe('PersistentAgySession', () => {
       expect(spawnArgs).not.toContain('--dangerously-skip-permissions');
     });
 
+    it('uses --sandbox for manual permissionMode (CLI 2.1.200+ name for default)', async () => {
+      const session = new PersistentAgySession({ name: 'test', cwd: '/tmp', permissionMode: 'manual' });
+      await session.start();
+
+      const sendPromise = session.send('hello', { waitForComplete: true });
+      setTimeout(() => closeProc(mockProc, 0), 10);
+      await sendPromise;
+
+      const spawnArgs = mockSpawn.mock.calls[0][1] as string[];
+      expect(spawnArgs).toContain('--sandbox');
+      expect(spawnArgs).not.toContain('--dangerously-skip-permissions');
+    });
+
     it('omits permission flags for other permission modes', async () => {
       const session = new PersistentAgySession({ name: 'test', cwd: '/tmp', permissionMode: 'acceptEdits' });
       await session.start();

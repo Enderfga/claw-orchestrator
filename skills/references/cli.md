@@ -63,7 +63,7 @@ clawo session-start [name] [options]
 | `-d, --cwd <dir>` | Working directory |
 | `-e, --engine <engine>` | Engine: `claude` (default), `codex`, `codex-app`, `gemini`, `agy`, `cursor`, `opencode`, or `custom` |
 | `-m, --model <model>` | Model name or alias |
-| `--permission-mode <mode>` | `acceptEdits`, `plan`, `auto`, `bypassPermissions` |
+| `--permission-mode <mode>` | `acceptEdits`, `plan`, `auto`, `bypassPermissions`, `manual`, `dontAsk` |
 | `--effort <level>` | `low`, `medium`, `high`, `max`, `auto` |
 | `--allowed-tools <tools>` | Comma-separated tool whitelist |
 | `--max-turns <n>` | Max agent loop turns |

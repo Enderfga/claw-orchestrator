@@ -120,6 +120,36 @@ const MODELS: ModelDef[] = [
     contextWindow: 1_000_000,
   },
 
+  // ── OpenAI GPT-5.6 (limited preview) ──────────────────────────────────
+  // Three-tier family, API + Codex only (NOT served to ChatGPT-account Codex
+  // auth — verified empirically: the API 400s with "not supported when using
+  // Codex with a ChatGPT account", so we keep gpt-5.5 as the Codex default).
+  // Ids and pricing from OpenAI's official pricing page; context windows per
+  // launch coverage (1M Sol/Terra, 400K Luna — not yet on the pricing page).
+  // Bare `gpt-5.6` is accepted by the API (likely a Sol alias) but is not a
+  // documented id, so it stays unregistered and passes through verbatim.
+  {
+    id: 'gpt-5.6-sol',
+    engine: 'codex',
+    provider: 'openai',
+    pricing: { input: 5, output: 30, cached: 0.5 },
+    contextWindow: 1_000_000,
+  },
+  {
+    id: 'gpt-5.6-terra',
+    engine: 'codex',
+    provider: 'openai',
+    pricing: { input: 2.5, output: 15, cached: 0.25 },
+    contextWindow: 1_000_000,
+  },
+  {
+    id: 'gpt-5.6-luna',
+    engine: 'codex',
+    provider: 'openai',
+    pricing: { input: 1, output: 6, cached: 0.1 },
+    contextWindow: 400_000,
+  },
+
   // ── OpenAI GPT-5.4 ────────────────────────────────────────────────────
   {
     id: 'gpt-5.4',

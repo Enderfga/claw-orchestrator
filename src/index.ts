@@ -168,7 +168,7 @@ const plugin = {
           model: { type: 'string', description: 'Model to use (opus, sonnet, haiku, gemini-pro, o4-mini, etc.)' },
           permissionMode: {
             type: 'string',
-            enum: ['acceptEdits', 'bypassPermissions', 'default', 'delegate', 'dontAsk', 'plan', 'auto'],
+            enum: ['acceptEdits', 'bypassPermissions', 'default', 'manual', 'dontAsk', 'plan', 'auto'],
           },
           effort: { type: 'string', enum: ['low', 'medium', 'high', 'xhigh', 'max', 'auto'] },
           allowedTools: {
@@ -1143,7 +1143,7 @@ const plugin = {
           maxBudgetUsd: { type: 'number', description: 'Max API spend per agent (USD)' },
           defaultPermissionMode: {
             type: 'string',
-            enum: ['acceptEdits', 'bypassPermissions', 'default', 'delegate', 'dontAsk', 'plan', 'auto'],
+            enum: ['acceptEdits', 'bypassPermissions', 'default', 'manual', 'dontAsk', 'plan', 'auto'],
             description: 'Default permission mode for council agents (default: bypassPermissions)',
           },
         },

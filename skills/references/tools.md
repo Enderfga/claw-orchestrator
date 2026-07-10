@@ -14,7 +14,7 @@ Start a persistent coding session with full CLI flag support.
 | `cwd` | string | Working directory |
 | `engine` | `'claude'` \| `'codex'` \| `'codex-app'` \| `'gemini'` \| `'agy'` \| `'cursor'` \| `'opencode'` \| `'custom'` | Engine to use (default: `claude`). `agy` wraps Google Antigravity CLI. `opencode` wraps sst/opencode (pass model as `provider/model`). Use `custom` with `customEngine` for any CLI. |
 | `model` | string | Model alias or full name |
-| `permissionMode` | string | `acceptEdits`, `bypassPermissions`, `plan`, `auto`, `default` |
+| `permissionMode` | string | `acceptEdits`, `bypassPermissions`, `plan`, `auto`, `manual`, `dontAsk` (`default` = legacy alias for `manual`) |
 | `effort` | string | `low`, `medium`, `high`, `max`, `auto` |
 | `allowedTools` | string[] | Tools to auto-approve |
 | `disallowedTools` | string[] | Tools to deny |

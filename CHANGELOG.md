@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [4.7.0] - 2026-07-10
 
 ### Added
 - **First-class Google Antigravity engine (`engine: 'agy'`).** Wraps the `agy` CLI —
@@ -28,12 +28,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `AGY_BIN` env var overrides the binary. Verified against `agy` 1.0.16, including
   a live two-turn resume test.
 
+- **`manual` permission mode** accepted everywhere `permissionMode` is (Claude Code CLI
+  2.1.200 renamed the `default` mode to `manual`; both are accepted and equivalent).
+  The agy and gemini engines map `manual` like `default` (→ `--sandbox`).
+- **GPT-5.6 family registered** (limited preview, API/Codex only): `gpt-5.6-sol`
+  ($5/$30 per Mtok, 1M context), `gpt-5.6-terra` ($2.50/$15, 1M), `gpt-5.6-luna`
+  ($1/$6, 400K) — official OpenAI pricing-page ids and rates. The Codex default
+  stays `gpt-5.5`: ChatGPT-account Codex auth does not serve GPT-5.6 (the API
+  rejects it for that auth type), so 5.6 is opt-in via `model`.
+
 ### Changed
 - **stderr secret redaction unified across engines** (`src/sanitize.ts`). The claude,
   gemini, cursor, opencode, custom, and agy engines now share one sanitizer whose
   patterns are the union of the previous per-engine copies (Bearer tokens incl.
   dotted `ya29.*`, `sk-*` keys, `api_key` assignments, and any `*_KEY=` / `*_TOKEN=` /
   `*_SECRET=` env var) — strictly broader redaction for every engine.
+- Tested-engine pins updated to Claude Code **2.1.206** and Codex **0.143.0**. Both
+  ranges since the last pins are reliability/TUI work that does not touch our
+  invocation flags or output schemas; Codex `-c model_reasoning_effort=max` was
+  re-tested against 0.143.0 and is still rejected for gpt-5.5 (0.143's first-class
+  `max` applies to Bedrock GPT-5.6 models only), so the `max`→`xhigh` mapping stays.
+
+### Removed
+- `delegate` removed from `PermissionMode` and the tool schemas: current Claude Code
+  CLIs reject it at spawn (verified against 2.1.206), so it could only produce a
+  session that fails to start.
 
 ## [4.6.0] - 2026-07-03
 

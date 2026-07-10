@@ -31,7 +31,7 @@ Key options:
 |--------|-------------|
 | `engine` | `'claude'` (default), `'codex'`, `'codex-app'`, `'gemini'`, `'agy'`, `'cursor'`, `'opencode'`, or `'custom'` — see [Multi-Engine](./multi-engine.md) |
 | `model` | Model alias (`opus`, `sonnet`, `haiku`, `gemini-pro`) or full name |
-| `permissionMode` | `acceptEdits`, `bypassPermissions`, `plan`, `auto`, `default` |
+| `permissionMode` | `acceptEdits`, `bypassPermissions`, `plan`, `auto`, `manual`, `dontAsk` (`default` = legacy alias for `manual`) |
 | `effort` | `low`, `medium`, `high`, `max`, `auto` |
 | `bare` | Skip hooks, LSP, auto-memory, CLAUDE.md |
 | `worktree` | Run in isolated git worktree |

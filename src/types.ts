@@ -27,7 +27,11 @@ export const MODEL_ALIASES: Record<string, string> = getAliases();
 
 // ─── Permission & Effort ─────────────────────────────────────────────────────
 
-export type PermissionMode = 'acceptEdits' | 'bypassPermissions' | 'default' | 'delegate' | 'dontAsk' | 'plan' | 'auto';
+// 'manual' is the CLI 2.1.200+ name for what used to be 'default'; the CLI
+// accepts both, so we do too. 'delegate' was removed — the claude CLI now
+// hard-rejects it at spawn ("Allowed choices are acceptEdits, auto,
+// bypassPermissions, manual, dontAsk, plan"), verified against 2.1.206.
+export type PermissionMode = 'acceptEdits' | 'bypassPermissions' | 'default' | 'manual' | 'dontAsk' | 'plan' | 'auto';
 
 export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'auto';
 

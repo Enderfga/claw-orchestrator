@@ -56,7 +56,7 @@ export class PersistentGeminiSession extends BaseOneShotSession {
     // Permission mode
     if (this.options.permissionMode === 'bypassPermissions' || this.options.dangerouslySkipPermissions) {
       args.push('--yolo');
-    } else if (this.options.permissionMode === 'default') {
+    } else if (this.options.permissionMode === 'default' || this.options.permissionMode === 'manual') {
       args.push('--sandbox');
     }
 
