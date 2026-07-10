@@ -33,7 +33,8 @@ export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'auto';
 
 // ─── Engine ─────────────────────────────────────────────────────────────────
 
-export type EngineType = 'claude' | 'codex' | 'codex-app' | 'gemini' | 'cursor' | 'opencode' | 'custom';
+export const ENGINE_TYPES = ['claude', 'codex', 'codex-app', 'gemini', 'agy', 'cursor', 'opencode', 'custom'] as const;
+export type EngineType = (typeof ENGINE_TYPES)[number];
 
 // ─── Custom Engine Config ───────────────────────────────────────────────────
 //
@@ -296,6 +297,8 @@ export interface SessionStats {
   pluginErrors?: Array<{ plugin: string; reason: string }>;
   /** Codex thread ID captured from the most recent `thread.started` event (Codex 0.119+). Used by `codex_resume`. */
   codexThreadId?: string;
+  /** Antigravity conversation ID harvested from the agy log file after the first turn. Reused via `--conversation` for multi-turn context. */
+  agyConversationId?: string;
 }
 
 // ─── Hook Config ─────────────────────────────────────────────────────────────

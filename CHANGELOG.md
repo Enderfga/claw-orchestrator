@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **First-class Google Antigravity engine (`engine: 'agy'`).** Wraps the `agy` CLI —
+  Google's successor to Gemini CLI (consumer Gemini CLI tiers stopped serving
+  2026-06-18) — as a built-in one-shot engine, replacing the custom-engine recipe.
+  Beyond the recipe it adds: **conversation continuity** (agy logs
+  `Created conversation <uuid>`; the engine passes a private `--log-file`, harvests
+  the ID after the first turn, and resumes with `--conversation <id>` — seedable via
+  `resumeSessionId`, exposed as `stats.agyConversationId`), **timeout coherence**
+  (`--print-timeout` derived from the send timeout), permission-mode mapping
+  (`bypassPermissions` → `--dangerously-skip-permissions`, `default` → `--sandbox`),
+  stderr secret redaction, and per-session log cleanup. Output is plain text (agy
+  has no structured output mode as of 1.0.16), so token counts are estimated.
+  New registry models: `gemini-3.5-flash` (alias `agy-flash`) and `gemini-3.1-pro`
+  (alias `agy-pro`); agy-proxied Claude/GPT-OSS models pass through unregistered.
+  Behavior change: bare `gemini-3.5-flash` / `gemini-3.1-pro` now route to
+  `engine: 'agy'` and require the `agy` binary; use the preview Gemini CLI slugs
+  (`gemini-3-flash-preview`, `gemini-3.1-pro-preview`) for the `gemini` engine.
+  Unknown model slugs silently fall back to agy's default (verified on 1.0.16).
+  `AGY_BIN` env var overrides the binary. Verified against `agy` 1.0.16, including
+  a live two-turn resume test.
+
+### Changed
+- **stderr secret redaction unified across engines** (`src/sanitize.ts`). The claude,
+  gemini, cursor, opencode, custom, and agy engines now share one sanitizer whose
+  patterns are the union of the previous per-engine copies (Bearer tokens incl.
+  dotted `ya29.*`, `sk-*` keys, `api_key` assignments, and any `*_KEY=` / `*_TOKEN=` /
+  `*_SECRET=` env var) — strictly broader redaction for every engine.
+
 ## [4.6.0] - 2026-07-03
 
 ### Added

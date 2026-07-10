@@ -1,12 +1,12 @@
 ---
 name: claw-orchestrator
-description: Manage persistent coding sessions across Claude Code, Codex, Gemini, Cursor, and OpenCode engines. Use when orchestrating multi-engine coding agents, starting/sending/stopping sessions, running multi-agent council collaborations, cross-session messaging, ultraplan deep planning, ultrareview parallel code review, autoloop autonomous workspace iteration, ultraapp building deployable web apps from a structured Q&A interview, switching models/tools at runtime, or exposing the orchestrator's 65 tools as an MCP server to Hermes Agent / Claude Desktop / Cursor / Cline / Continue / Zed / Windsurf / Goose. Triggers on "start a session", "send to session", "run council", "ultraplan", "ultrareview", "autoloop", "ultraapp", "Forge tab", "build a web app", "one-click app", "AppSpec", "autonomous iteration", "iterate until goal", "deep paper review", "auto research", "switch model", "multi-agent", "coding session", "session inbox", "cursor agent", "opencode", "mcp server", "clawo-mcp", "hermes mcp", "model context protocol", "ultracode", "dynamic workflow", "fanout", "fan-out", "best-of-N", "steer turn", "interrupt turn", "fork thread", "rollback turns".
+description: Manage persistent coding sessions across Claude Code, Codex, Gemini, Antigravity (agy), Cursor, and OpenCode engines. Use when orchestrating multi-engine coding agents, starting/sending/stopping sessions, running multi-agent council collaborations, cross-session messaging, ultraplan deep planning, ultrareview parallel code review, autoloop autonomous workspace iteration, ultraapp building deployable web apps from a structured Q&A interview, switching models/tools at runtime, or exposing the orchestrator's 65 tools as an MCP server to Hermes Agent / Claude Desktop / Cursor / Cline / Continue / Zed / Windsurf / Goose. Triggers on "start a session", "send to session", "run council", "ultraplan", "ultrareview", "autoloop", "ultraapp", "Forge tab", "build a web app", "one-click app", "AppSpec", "autonomous iteration", "iterate until goal", "deep paper review", "auto research", "switch model", "multi-agent", "coding session", "session inbox", "cursor agent", "opencode", "mcp server", "clawo-mcp", "hermes mcp", "model context protocol", "ultracode", "dynamic workflow", "fanout", "fan-out", "best-of-N", "steer turn", "interrupt turn", "fork thread", "rollback turns".
 metadata:
   {
     "openclaw":
       {
         "emoji": "🤖",
-        "requires": { "anyBins": ["claude", "codex", "gemini", "agent"] },
+        "requires": { "anyBins": ["claude", "codex", "gemini", "agy", "agent"] },
         "install":
           [
             {
@@ -52,6 +52,7 @@ Claw Orchestrator — persistent multi-engine coding session manager for claw-st
 | `claude` | `claude` | Persistent subprocess | Multi-turn, complex tasks |
 | `codex` | `codex exec` | Per-message spawn | One-shot execution |
 | `gemini` | `gemini -p` | Per-message spawn | One-shot execution |
+| `agy` | `agy -p` | Per-message spawn | Antigravity (Gemini CLI successor); plain-text, auto conversation resume |
 | `cursor` | `agent -p` | Per-message spawn | One-shot execution |
 | `opencode` | `opencode run` | Per-message spawn | Provider-agnostic (`provider/model`) |
 
@@ -62,6 +63,7 @@ Claw Orchestrator — persistent multi-engine coding session manager for claw-st
 session_start({ name: "myproject", cwd: "/path/to/project", engine: "claude" })
 session_start({ name: "codex-task", cwd: "/path/to/project", engine: "codex" })
 session_start({ name: "gemini-task", cwd: "/path/to/project", engine: "gemini" })
+session_start({ name: "agy-task", cwd: "/path/to/project", engine: "agy" })
 session_start({ name: "cursor-task", cwd: "/path/to/project", engine: "cursor" })
 session_start({ name: "opencode-task", cwd: "/path/to/project", engine: "opencode", model: "anthropic/claude-sonnet-4" })
 
@@ -80,7 +82,7 @@ session_stop({ name: "myproject" })
 
 | Parameter | Description |
 |-----------|-------------|
-| `engine` | `claude` (default), `codex`, `gemini`, `cursor`, `opencode` |
+| `engine` | `claude` (default), `codex`, `gemini`, `agy`, `cursor`, `opencode` |
 | `model` | Model name or alias (`fable`, `opus`, `sonnet`, `haiku`, `gpt-5.5`, `gemini-pro`, `composer-2`) |
 | `permissionMode` | `acceptEdits`, `auto`, `plan`, `bypassPermissions`, `default` |
 | `effort` | `low`, `medium`, `high`, `xhigh`, `max`, `auto` (`xhigh` is Opus 4.7-only, between `high` and `max`) |

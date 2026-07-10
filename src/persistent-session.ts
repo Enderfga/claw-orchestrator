@@ -25,6 +25,7 @@ import {
   getModelPricing,
 } from './types.js';
 import { resolveAlias, getContextWindow, isClaudeModel } from './models.js';
+import { sanitizeSecrets } from './sanitize.js';
 
 import {
   CONTEXT_HIGH_THRESHOLD,
@@ -344,14 +345,7 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
     });
 
     this.proc.stderr?.on('data', (data: Buffer) => {
-      const sanitized = data
-        .toString()
-        .replace(/sk-[a-zA-Z0-9_-]{10,}/g, 'sk-***')
-        .replace(/ANTHROPIC_API_KEY=[^\s]+/g, 'ANTHROPIC_API_KEY=***')
-        .replace(/OPENAI_API_KEY=[^\s]+/g, 'OPENAI_API_KEY=***')
-        .replace(/GEMINI_API_KEY=[^\s]+/g, 'GEMINI_API_KEY=***')
-        .replace(/Bearer [a-zA-Z0-9_-]+/g, 'Bearer ***');
-      this.emit(SESSION_EVENT.LOG, `[stderr] ${sanitized}`);
+      this.emit(SESSION_EVENT.LOG, `[stderr] ${sanitizeSecrets(data.toString())}`);
     });
 
     this.proc.on('close', (code) => {

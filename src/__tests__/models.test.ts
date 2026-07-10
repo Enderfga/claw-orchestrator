@@ -57,6 +57,8 @@ describe('lookupModel', () => {
       'codex-mini-latest',
       'gemini-3.1-pro-preview',
       'gemini-3-flash-preview',
+      'gemini-3.5-flash',
+      'gemini-3.1-pro',
       'gemini-2.5-pro',
       'gemini-2.5-flash',
       'composer-2',
@@ -94,12 +96,29 @@ describe('resolveEngineAndModel', () => {
       engine: 'gemini',
       model: 'gemini-3-flash-preview',
     });
+    expect(resolveEngineAndModel('gemini-3.5-flash')).toEqual({
+      engine: 'agy',
+      model: 'gemini-3.5-flash',
+    });
     expect(resolveEngineAndModel('composer-2')).toEqual({ engine: 'cursor', model: 'composer-2' });
   });
 
   it('resolves aliases to canonical id', () => {
     expect(resolveEngineAndModel('opus')).toEqual({ engine: 'claude', model: 'claude-opus-4-8' });
     expect(resolveEngineAndModel('gemini-flash')).toEqual({ engine: 'gemini', model: 'gemini-3-flash-preview' });
+    expect(resolveEngineAndModel('agy-pro')).toEqual({ engine: 'agy', model: 'gemini-3.1-pro' });
+  });
+
+  it('uses the agy/ prefix to force the Antigravity engine', () => {
+    expect(resolveEngineAndModel('agy/gemini-3.5-flash')).toEqual({
+      engine: 'agy',
+      model: 'gemini-3.5-flash',
+    });
+    expect(resolveEngineAndModel('agy/agy-pro')).toEqual({ engine: 'agy', model: 'gemini-3.1-pro' });
+    expect(resolveEngineAndModel('agy/claude-sonnet-5')).toEqual({
+      engine: 'agy',
+      model: 'claude-sonnet-5',
+    });
   });
 
   it('uses pattern fallback for unknown models', () => {
@@ -128,6 +147,7 @@ describe('resolveProvider', () => {
     expect(resolveProvider('anthropic/claude-opus-4-6').provider).toBe('anthropic');
     expect(resolveProvider('openai/gpt-5.4').provider).toBe('openai');
     expect(resolveProvider('google/gemini-3-flash-preview').provider).toBe('google');
+    expect(resolveProvider('agy/gemini-3.5-flash')).toEqual({ provider: 'google', apiModel: 'gemini-3.5-flash' });
     expect(resolveProvider('openai-codex/gpt-5.4').provider).toBe('openai');
   });
 
