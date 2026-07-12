@@ -12,8 +12,6 @@ SessionManager
 │   └── Wraps: codex exec --sandbox workspace-write --json (per-message spawning)
 ├── engine: 'codex-app' → PersistentCodexAppServerSession
 │   └── Wraps: codex app-server --listen stdio:// (long-running JSON-RPC; required for /goal)
-├── engine: 'gemini'    → PersistentGeminiSession
-│   └── Wraps: gemini -p --output-format stream-json (per-message spawning)
 ├── engine: 'agy'       → PersistentAgySession
 │   └── Wraps: agy -p (Google Antigravity CLI, per-message spawning, plain-text output)
 ├── engine: 'cursor'    → PersistentCursorSession
@@ -107,28 +105,6 @@ await manager.startSession({
 //   await tool('codex_goal_set', { name: 'codex-goal-task', objective: 'build a tic-tac-toe app' });
 ```
 
-### Google Gemini (`engine: 'gemini'`)
-
-Wraps the `gemini` CLI with `--output-format stream-json`. Each `send()` spawns a new process.
-
-- One-shot execution per message (no persistent subprocess)
-- Working directory carries accumulated changes across sends
-- Real token counts from stream-json `result` events (not estimated)
-- Permission modes: `bypassPermissions` → `--yolo`, `default` → `--sandbox`; `sandboxMode: 'read-only'` → `--approval-mode plan` (takes precedence)
-- Always passes `--skip-trust` to bypass the "trusted folders" gate introduced
-  in Gemini CLI 0.43 (otherwise headless runs in worktrees / arbitrary cwds
-  abort before producing output)
-- Requires `gemini` CLI installed: `npm install -g @google/gemini-cli`
-
-```typescript
-await manager.startSession({
-  name: 'gemini-task',
-  engine: 'gemini',
-  model: 'gemini-3.1-pro-preview',
-  cwd: '/project',
-});
-```
-
 ### Google Antigravity (`engine: 'agy'`)
 
 Wraps Google's **Antigravity CLI** (`agy`) — the successor to Gemini CLI (consumer
@@ -168,6 +144,14 @@ await manager.startSession({
   cwd: '/project',
 });
 ```
+
+> **Legacy: `engine: 'gemini'`.** Google sunset the consumer Gemini CLI (tiers stopped
+> serving 2026-06-18) in favour of Antigravity. The `gemini` engine still exists and
+> still works — existing callers are not broken, and `gemini-*` model strings outside
+> agy's registered slugs still route to it — but it is no longer a documented option,
+> is not version-tracked, and gets no new work. Use `agy` for Google. (Unrelated: the
+> multi-model **proxy** still talks to the Gemini **API**; that is a different
+> subsystem and is unaffected.)
 
 ### Cursor Agent (`engine: 'cursor'`)
 
@@ -265,7 +249,7 @@ Team tools (`team_list`, `team_send`) operate on the same virtual-team layer for
 |--------|------------|-------------|
 | Claude | Lists other active SessionManager sessions | Routes via cross-session inbox |
 | Codex | Lists other active SessionManager sessions | Routes via cross-session inbox |
-| Gemini | Lists other active SessionManager sessions | Routes via cross-session inbox |
+| Antigravity | Lists other active SessionManager sessions | Routes via cross-session inbox |
 | Cursor | Lists other active SessionManager sessions | Routes via cross-session inbox |
 
 Messages are delivered via the inbox system — idle sessions receive immediately, busy sessions queue for later delivery.
@@ -321,7 +305,7 @@ Integrate **any** coding agent CLI without writing engine-specific code. You pro
 
 Two protocol modes:
 - **Persistent** (`persistent: true`) — long-running subprocess with stream-json I/O over stdin/stdout (like Claude Code)
-- **One-shot** (`persistent: false`, default) — new process spawned per `send()` (like Gemini/Codex)
+- **One-shot** (`persistent: false`, default) — new process spawned per `send()` (like Codex/Antigravity)
 
 ### CustomEngineConfig
 

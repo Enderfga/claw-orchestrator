@@ -106,7 +106,7 @@ Agents can use different engines and models:
   "agents": [
     { "name": "Claude", "emoji": "🎭", "engine": "claude", "model": "opus", "persona": "Deep reasoning" },
     { "name": "Codex", "emoji": "🧠", "engine": "codex", "model": "gpt-5.5", "persona": "Fast implementation" },
-    { "name": "Gemini", "emoji": "💎", "engine": "gemini", "model": "gemini-3.1-pro-preview", "persona": "Creative solutions" }
+    { "name": "Antigravity", "emoji": "💎", "engine": "agy", "model": "agy-pro", "persona": "Creative solutions" }
   ]
 }
 ```

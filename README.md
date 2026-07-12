@@ -4,7 +4,7 @@
 
 # Claw Orchestrator
 
-> A runtime for coding agents. Wrap Claude Code, Codex, Gemini, Cursor Agent, OpenCode, or any custom CLI as persistent programmable sessions; coordinate them in multi-agent councils; run autonomous Planner / Coder / Reviewer loops; or hand a five-question interview to an Opus council that ships a deployed web app at `localhost:19000/forge/<slug>/`.
+> A runtime for coding agents. Wrap Claude Code, Codex, Antigravity, Cursor Agent, OpenCode, or any custom CLI as persistent programmable sessions; coordinate them in multi-agent councils; run autonomous Planner / Coder / Reviewer loops; or hand a five-question interview to an Opus council that ships a deployed web app at `localhost:19000/forge/<slug>/`.
 
 [![npm version](https://img.shields.io/npm/v/@enderfga/claw-orchestrator.svg)](https://www.npmjs.com/package/@enderfga/claw-orchestrator)
 [![CI](https://github.com/Enderfga/claw-orchestrator/actions/workflows/ci.yml/badge.svg)](https://github.com/Enderfga/claw-orchestrator/actions/workflows/ci.yml)
@@ -27,7 +27,7 @@ https://github.com/user-attachments/assets/fbd2b0ea-28d8-4387-9894-c29cf15ba030
 | Capability                  | What it does                                                                                                                                                                                                                    | Reference                                                  |
 | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
 | **Persistent Sessions**     | Long-lived coding agents kept alive across requests, with full context, tool, model, and worktree control.                                                                                                                      | [`sessions.md`](./skills/references/sessions.md)           |
-| **Multi-Engine Runtime**    | One interface over Claude Code, Codex, Gemini, Antigravity (agy), Cursor Agent, OpenCode, and arbitrary custom CLIs.                                                                                                                               | [`multi-engine.md`](./skills/references/multi-engine.md)   |
+| **Multi-Engine Runtime**    | One interface over Claude Code, Codex, Antigravity (agy), Cursor Agent, OpenCode, and arbitrary custom CLIs.                                                                                                                               | [`multi-engine.md`](./skills/references/multi-engine.md)   |
 | **Multi-Agent Council**     | Parallel agents in isolated git worktrees, voting on consensus until they agree.                                                                                                                                                | [`council.md`](./skills/references/council.md)             |
 | **Fan-out**                 | Run one task across N engine/model agents in parallel and collect their answers, with an optional synthesis pass — the cross-engine best-of-N / diverse-perspective primitive (no rounds or worktrees).                          | [`tools.md`](./skills/references/tools.md)                 |
 | **ultracode**               | `session_start({ ultracode: true })` lets Claude orchestrate a dynamic JS workflow and fan out to subagents per task (Claude engine).                                                                                            | [`tools.md`](./skills/references/tools.md)                 |
@@ -93,7 +93,6 @@ Register `clawo-mcp` with any MCP-compatible host: Hermes Agent, Claude Desktop,
 | ------------ | ---------- | -------------- |
 | Claude Code  | `claude`   | 2.1.207        |
 | Codex        | `codex`    | 0.144.1        |
-| Gemini       | `gemini`   | 0.43.0         |
 | Antigravity  | `agy`      | 1.1.1          |
 | Cursor Agent | `agent`    | 2026.04.08-a41fba1 |
 | OpenCode     | `opencode` | 1.17.15        |

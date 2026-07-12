@@ -34,19 +34,18 @@ uses its own default model rather than receiving the Claude `opus` / `sonnet`
 defaults. Role instructions are included in-band for engines that do not expose a
 native system-prompt flag.
 
-Engines without native multi-turn conversation (Gemini, Cursor, OpenCode, one-shot
-custom engines) spawn a fresh process per send, so the dispatcher replays that
-role's transcript in-band as a `<conversation_history>` block, oldest turns dropped
-past a character budget. Claude, Codex and Antigravity keep context themselves and
-get no replay.
+Engines without native multi-turn conversation (Cursor, OpenCode, one-shot custom
+engines) spawn a fresh process per send, so the dispatcher replays that role's
+transcript in-band as a `<conversation_history>` block, oldest turns dropped past a
+character budget. Claude, Codex and Antigravity keep context themselves and get no
+replay.
 
 The Planner runs read-only so strategy cannot turn into source edits, and that is
 enforced by the engine rather than requested politely: Claude uses plan mode,
-Gemini gets `--approval-mode plan` **plus an admin policy denying `exit_plan_mode`**
-(plan mode on its own is model-cooperative — the agent can call that tool and walk
-out of it), OpenCode gets a generated `clawo-readonly` agent that denies
-`edit`/`bash`/`external_directory` (its built-in `plan` agent is a user-overridable
-preset that denies neither), and Antigravity/Cursor use their plan modes. A custom
+Antigravity and Cursor use their plan modes, and OpenCode gets a generated
+`clawo-readonly` agent that denies `edit`/`bash`/`external_directory` (its built-in
+`plan` agent is a user-overridable preset that denies neither, so a "read-only"
+session could otherwise still author files through a shell heredoc). A custom
 Planner receives `permissionMode: 'manual'` and its `CustomEngineConfig` **must**
 map that mode to the CLI's read-only flag — if it cannot, the session refuses to
 start rather than silently running write-enabled.

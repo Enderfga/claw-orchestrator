@@ -23,7 +23,7 @@ openclaw plugins install @enderfga/claw-orchestrator --dangerously-force-unsafe-
 openclaw gateway restart
 ```
 
-> **Why `--dangerously-force-unsafe-install`?** Claw Orchestrator spawns Claude Code / Codex / Gemini / Cursor Agent / OpenCode CLI subprocesses via `child_process`, which OpenClaw's security scanner flags by design. The flag is required — there is no way to drive coding CLIs without process spawning.
+> **Why `--dangerously-force-unsafe-install`?** Claw Orchestrator spawns Claude Code / Codex / Antigravity / Cursor Agent / OpenCode CLI subprocesses via `child_process`, which OpenClaw's security scanner flags by design. The flag is required — there is no way to drive coding CLIs without process spawning.
 
 Agents automatically get access to all session, council, and management tools.
 
@@ -52,7 +52,7 @@ await manager.stopSession('backend-fix');
 - **Claude Code CLI >= 2.1** — `npm install -g @anthropic-ai/claude-code`
 - **OpenClaw >= 2026.3.0** — for plugin mode (optional)
 - **OpenAI Codex CLI >= 0.112** — `npm install -g @openai/codex` (optional, for codex engine)
-- **Gemini CLI >= 0.35** — `npm install -g @google/gemini-cli` (optional, for gemini engine)
+- **Antigravity CLI** — `curl -fsSL https://antigravity.google/cli/install.sh | bash` (optional, for the `agy` engine — Google's successor to the sunset Gemini CLI)
 
 ### Engine Authentication
 
@@ -60,7 +60,7 @@ Each engine requires its own authentication before use:
 
 - **Claude Code** — run `claude /login` or set `ANTHROPIC_API_KEY`
 - **Codex** — run `codex login` or set `OPENAI_API_KEY`
-- **Gemini** — run `gemini login` or set `GEMINI_API_KEY`
+- **Antigravity** — run `agy` once and complete the Google OAuth login
 
 The plugin does not manage authentication — it expects each CLI to be ready to run.
 
@@ -87,7 +87,7 @@ Quick config for any client:
 |---------|-------|
 | API Base URL | `http://127.0.0.1:18796/v1` |
 | API Key | The value of `OPENCLAW_SERVER_TOKEN`, or any string if auth is disabled |
-| Model | `claude-fable-5`, `claude-opus-4-8`, `claude-sonnet-5`, `gpt-5.5`, `gemini-3.1-pro-preview`, etc. |
+| Model | `claude-fable-5`, `claude-opus-4-8`, `claude-sonnet-5`, `gpt-5.5`, `agy-pro`, etc. |
 
 See [openai-compat.md](./openai-compat.md) for the full session-keying rules, `X-Session-Reset` semantics, the legacy-heuristic env var, and the `/v1/sessions` inspection endpoint.
 

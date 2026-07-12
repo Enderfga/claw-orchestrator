@@ -44,7 +44,7 @@ The server exposes an OpenAI-compatible chat completions endpoint, enabling any 
 - `gpt-*` → Codex engine
 - `composer-*` → Cursor engine
 - `gemini-3.5-flash`, `gemini-3.1-pro`, `agy-*`, `agy/*` → Antigravity (`agy`) engine
-- other `gemini-*` → Gemini engine
+- other `gemini-*` → the legacy `gemini` engine (Gemini CLI is sunset; prefer `agy`)
 
 **CORS:** `/v1/` paths allow cross-origin requests by default. Set `OPENCLAW_CORS_ORIGINS=*` to allow all origins on all paths.
 
@@ -61,7 +61,7 @@ clawo session-start [name] [options]
 | Flag | Description |
 |------|-------------|
 | `-d, --cwd <dir>` | Working directory |
-| `-e, --engine <engine>` | Engine: `claude` (default), `codex`, `codex-app`, `gemini`, `agy`, `cursor`, `opencode`, or `custom` |
+| `-e, --engine <engine>` | Engine: `claude` (default), `codex`, `codex-app`, `agy`, `cursor`, `opencode`, or `custom` |
 | `-m, --model <model>` | Model name or alias |
 | `--permission-mode <mode>` | `acceptEdits`, `plan`, `auto`, `bypassPermissions`, `manual`, `dontAsk` |
 | `--effort <level>` | `low`, `medium`, `high`, `max`, `auto` |

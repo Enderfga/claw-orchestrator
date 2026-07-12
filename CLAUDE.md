@@ -4,7 +4,7 @@ This file provides context for Claude Code when working on this project.
 
 ## Architecture
 
-Claw Orchestrator wraps coding CLIs (Claude Code, Codex, Gemini, Cursor Agent, plus
+Claw Orchestrator wraps coding CLIs (Claude Code, Codex, Antigravity, Cursor Agent, plus
 arbitrary custom CLIs) into a managed, programmable session layer for claw-style
 agent systems. Runs as a standalone CLI/server, with first-class OpenClaw plugin
 support. Key source files:
@@ -16,7 +16,7 @@ support. Key source files:
 | `src/base-oneshot-session.ts` | Abstract base class for one-shot (process-per-send) engines |
 | `src/persistent-session.ts` | Claude Code CLI wrapper (spawn, JSON protocol, stream parsing) |
 | `src/persistent-codex-session.ts` | Codex CLI wrapper (`codex exec --full-auto`) |
-| `src/persistent-gemini-session.ts` | Gemini CLI wrapper (`gemini -p --output-format stream-json`) |
+| `src/persistent-gemini-session.ts` | Gemini CLI wrapper — **legacy**: Gemini CLI is sunset, superseded by Antigravity (`agy`). Kept working for existing callers; not documented as an option and not version-tracked. |
 | `src/persistent-agy-session.ts` | Google Antigravity CLI wrapper (`agy -p`, plain text, log-harvested conversation resume) |
 | `src/persistent-cursor-session.ts` | Cursor Agent CLI wrapper (`agent -p --force --output-format stream-json`) |
 | `src/persistent-opencode-session.ts` | sst/opencode CLI wrapper (`opencode run --format json`) |
@@ -136,7 +136,7 @@ Add a new section at the top:
 ### 4. README.md sync
 
 Check and update if needed:
-- Engine Compatibility table (test with `claude --version && codex --version && gemini --version`)
+- Engine Compatibility table (test with `claude --version && codex --version && agy --version`)
 - Source tree (if files added/removed/renamed)
 - Known Limitations (if behavior changed)
 - Feature descriptions (if new features added)
@@ -181,7 +181,6 @@ Current tested versions (update on each release):
 |--------|-----|---------------|------------|
 | Claude | `claude` | 2.1.206 | Persistent subprocess, `--output-format stream-json` |
 | Codex | `codex` | 0.143.0 | `codex exec --sandbox workspace-write --skip-git-repo-check --json -C <dir>` (or `codex app-server --listen stdio://` for /goal) |
-| Gemini | `gemini` | 0.43.0 | `gemini -p <msg> --output-format stream-json --skip-trust --yolo/--sandbox` |
 | Antigravity | `agy` | 1.0.16 | `agy -p <msg> --log-file <tmp> [--conversation <id>] --dangerously-skip-permissions/--sandbox --print-timeout <n>s` |
 | Cursor | `agent` | 2026.03.30 | `agent -p <msg> --force --trust --output-format stream-json --workspace <dir>` |
 | OpenCode | `opencode` | 1.17.15 | `opencode run <msg> --format json [--model provider/model]` (read-only sessions add `--agent clawo-readonly` + `OPENCODE_CONFIG_CONTENT`) |

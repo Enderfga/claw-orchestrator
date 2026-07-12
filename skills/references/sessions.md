@@ -29,8 +29,8 @@ Key options:
 
 | Option | Description |
 |--------|-------------|
-| `engine` | `'claude'` (default), `'codex'`, `'codex-app'`, `'gemini'`, `'agy'`, `'cursor'`, `'opencode'`, or `'custom'` — see [Multi-Engine](./multi-engine.md) |
-| `model` | Model alias (`opus`, `sonnet`, `haiku`, `gemini-pro`) or full name |
+| `engine` | `'claude'` (default), `'codex'`, `'codex-app'`, `'agy'`, `'cursor'`, `'opencode'`, or `'custom'` — see [Multi-Engine](./multi-engine.md) |
+| `model` | Model alias (`fable`, `opus`, `sonnet`, `haiku`, `agy-pro`) or full name |
 | `permissionMode` | `acceptEdits`, `bypassPermissions`, `plan`, `auto`, `manual`, `dontAsk` (`default` = legacy alias for `manual`) |
 | `effort` | `low`, `medium`, `high`, `max`, `auto` |
 | `bare` | Skip hooks, LSP, auto-memory, CLAUDE.md |
@@ -162,7 +162,7 @@ SessionManager tracks consecutive failures per engine type. After 3 consecutive 
 
 ## Orphaned Process Cleanup
 
-If the plugin crashes without calling `stop()`, child CLI processes (claude, codex, gemini, agent) may become orphans. SessionManager tracks PIDs in `~/.openclaw/session-pids.json` and cleans up stale processes on startup:
+If the plugin crashes without calling `stop()`, child CLI processes (claude, codex, agy, agent, opencode) may become orphans. SessionManager tracks PIDs in `~/.openclaw/session-pids.json` and cleans up stale processes on startup:
 
 1. Reads PID file from previous run
 2. For each PID, checks if process is alive (`kill -0`)
