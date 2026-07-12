@@ -202,7 +202,7 @@ Wraps the [sst/opencode](https://github.com/sst/opencode) CLI with `run --format
 - Real token counts from `step_finish.part.tokens.{input,output,cache.read}`
 - The wrapper closes the subprocess's stdin immediately after spawn (opencode otherwise reads stdin and blocks on EOF, hanging the call)
 - Provider-agnostic: opencode's `--model` expects `provider/model` form (e.g. `anthropic/claude-sonnet-4`). The wrapper passes `--model` through only when the value contains a `/`; otherwise opencode's own default applies
-- `sandboxMode: 'read-only'` selects OpenCode's built-in `plan` agent via `--agent plan`
+- `sandboxMode: 'read-only'` spawns a generated `clawo-readonly` agent (`--agent clawo-readonly` plus an `OPENCODE_CONFIG_CONTENT` env var defining it) whose permissions deny `edit` / `bash` / `external_directory`. It deliberately does **not** use OpenCode's built-in `plan` agent: that is a user-overridable preset whose compiled rules start with `{"permission":"*","action":"allow"}` and deny neither `bash` nor `edit`, so a "read-only" session could still author files through a shell heredoc. Verified against opencode 1.17.15 by attempting a real write, which the agent cannot perform (its toolset has no write/bash tools). Note that `opencode agent list` renders compiled permission rules and does not show the tool-level restriction — trust an actual write attempt, not that view
 - Requires opencode installed: `brew install sst/tap/opencode` or `npm install -g opencode-ai`. Auth via `opencode auth login` **or** any provider env var (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, etc.) — opencode picks up either path
 - Binary: `opencode` (set `OPENCODE_BIN` env var to override)
 
