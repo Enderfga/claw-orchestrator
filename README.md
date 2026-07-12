@@ -94,7 +94,7 @@ Register `clawo-mcp` with any MCP-compatible host: Hermes Agent, Claude Desktop,
 | Claude Code  | `claude`   | 2.1.207        |
 | Codex        | `codex`    | 0.144.1        |
 | Antigravity  | `agy`      | 1.1.1          |
-| Cursor Agent | `agent`    | 2026.04.08-a41fba1 |
+| Cursor Agent | `agent`    | 2026.07.09-a3815c0 |
 | OpenCode     | `opencode` | 1.17.15        |
 | Custom CLI   | any        | —              |
 

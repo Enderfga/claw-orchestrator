@@ -155,12 +155,12 @@ await manager.startSession({
 
 ### Cursor Agent (`engine: 'cursor'`)
 
-Wraps the Cursor Agent CLI (`agent`) with `--print --output-format stream-json`. Write-enabled sessions use `--force`; `sandboxMode: 'read-only'` uses `--mode plan`. Each `send()` spawns a new process.
+Wraps the Cursor Agent CLI (`agent`) with `--print --output-format stream-json`. Write-enabled sessions use `--force`. Each `send()` spawns a new process.
 
 - One-shot execution per message (no persistent subprocess)
 - Working directory via `--workspace` flag
 - Real token counts from stream-json `result` events (camelCase: `inputTokens`, `outputTokens`, `cacheReadTokens`)
-- `--force` enables auto-approval of file changes; `sandboxMode: 'read-only'` replaces it with `--mode plan`
+- `--force` enables auto-approval of file changes. `sandboxMode: 'read-only'` does **not** use `--force`; it enforces read-only via a binding `.cursor/cli.json` deny config (`Write`/`Edit`/`Shell` denied) written into an isolated temp dir used as the process cwd, with `--workspace` pointing at the real project (the repo tree is never modified). `--mode plan` is passed too as model steering, but the deny config is the actual boundary — plan mode alone is model-cooperative and was verified to let an adversarial prompt write. Do not add `--sandbox` (it does not restrict in-workspace writes and overrides the mode). Read/grep/search remain available
 - `--trust` auto-trusts the workspace without prompting
 - Cursor uses its own model routing (e.g., `sonnet-4`, `gpt-5`, `auto`)
 - Requires Cursor Agent CLI: `curl https://cursor.com/install -fsSL | bash`

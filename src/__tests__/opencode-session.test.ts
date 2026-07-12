@@ -133,6 +133,27 @@ describe('PersistentOpencodeSession', () => {
       });
     });
 
+    it('rejects a read-only turn if the enforcement agent fails to load', async () => {
+      // opencode prints this to stdout and silently runs the DEFAULT, writable
+      // agent when --agent can't be resolved. A read-only session must fail
+      // rather than hand back output produced without its sandbox.
+      const session = new PersistentOpencodeSession({
+        name: 'test',
+        cwd: '/tmp',
+        permissionMode: 'manual',
+        sandboxMode: 'read-only',
+      });
+      await session.start();
+
+      const sendPromise = session.send('hello', { waitForComplete: true });
+      setTimeout(() => {
+        feedLines(mockProc, ['! agent "clawo-readonly" not found. Falling back to default agent']);
+        closeProc(mockProc, 0);
+      }, 10);
+
+      await expect(sendPromise).rejects.toThrow(/read-only enforcement failed/i);
+    });
+
     it('passes --model only when model contains "/"', async () => {
       const session = new PersistentOpencodeSession({
         name: 'test',

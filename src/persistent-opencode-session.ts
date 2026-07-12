@@ -26,11 +26,11 @@
  * `anthropic/claude-sonnet-4`). We pass `--model` through only when the
  * configured value contains a `/`; otherwise opencode's default applies.
  *
- * Permissions: opencode 1.1.40's `run` subcommand does not gate tool use
- * behind interactive prompts, so no skip-permissions flag is needed (and
- * `--dangerously-skip-permissions` doesn't exist on this version — yargs
- * strict mode would reject it and print help). If a future opencode version
- * reintroduces prompting on `run`, add a flag here behind a version probe.
+ * Permissions: on opencode 1.17.15's `run`, a tool that would prompt for a
+ * permission is auto-REJECTED in non-interactive mode (it does not hang), so a
+ * write-enabled session needs no skip flag. (`--dangerously-skip-permissions`,
+ * `--auto`, and `--yolo` do exist as of opencode 1.4.0 if an allow-all run is
+ * ever wanted — verified against 1.17.15.)
  */
 
 import { spawn } from 'node:child_process';
@@ -136,6 +136,11 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
       };
       let stderr = '';
       let settled = false;
+      // Read-only safety: if our injected agent fails to load, opencode prints
+      // `agent "clawo-readonly" not found. Falling back to default agent` (to
+      // stdout) and silently runs the DEFAULT, writable agent. We must never let
+      // a read-only session degrade to writable — detect that line and fail.
+      let readOnlyAgentMissing = false;
 
       const proc = spawn(this.engineBin, args, {
         cwd: this.options.cwd,
@@ -164,6 +169,9 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
           this._handleStreamEvent(event, options, state);
         } catch {
           // Non-JSON line — opencode banner or stray text. Treat as plain text.
+          if (readOnly && /\bnot found\. Falling back to default agent/i.test(line)) {
+            readOnlyAgentMissing = true;
+          }
           const fallback = line + '\n';
           // Accumulate fallback text under one stable key (the old code wrote to
           // __raw_<size> but read __raw_acc, so it never actually accumulated).
@@ -193,6 +201,21 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
 
         if (settled) return;
         settled = true;
+
+        // A read-only session whose enforcement agent failed to load ran writable.
+        // Refuse the result rather than hand back output produced without the
+        // sandbox the caller asked for.
+        if (readOnlyAgentMissing) {
+          this._recordTurnComplete();
+          reject(
+            new Error(
+              "OpenCode read-only enforcement failed: the 'clawo-readonly' agent did not load, so the session " +
+                'would have run with write access. Refusing the turn. (Check that OPENCODE_CONFIG_CONTENT is honored ' +
+                'by this opencode version.)',
+            ),
+          );
+          return;
+        }
 
         // Collapse per-part text snapshots to a single string in insertion order.
         const finalText = Array.from(state.textParts.values()).join('');

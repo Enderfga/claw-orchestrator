@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.8.1] - 2026-07-12
+
+Hardening pass after upgrading and re-verifying the OpenCode, Cursor, and Antigravity
+CLIs against their real binaries (OpenCode 1.1.40 → 1.17.15, Cursor 2026.04.08 →
+2026.07.09, Antigravity 1.1.1). Every read-only guarantee below was checked by
+attempting an actual adversarial write against the installed CLI, not by trusting a
+flag or the model's self-report.
+
+### Fixed
+- **Cursor read-only is now genuinely enforced.** `sandboxMode: 'read-only'` previously
+  relied on `--mode plan`, which Cursor documents as steering "rather than enforcing
+  permissions" — an adversarial prompt could still make edit-tool calls write files.
+  Read-only Cursor sessions now run against a binding `.cursor/cli.json` deny config
+  (`Write`/`Edit`/`Shell` denied), which was verified to hold even under `--force` and
+  even against a repository that ships a permissive config of its own. The config lives
+  in an isolated temp dir used as the process cwd (with `--workspace` pointing at the
+  real project), so the user's repository is never modified. Read/grep/search still work.
+- **Cursor tool-call metrics restored.** Cursor 2026.05+ emits `tool_call`
+  (`subtype: started|completed`) instead of the older `tool_use`/`tool_result` pair, so
+  `toolCalls`/`toolErrors` had silently stopped incrementing. Both event shapes are now
+  handled. Token accounting and assistant-text extraction were unaffected (schema
+  re-verified field-by-field).
+- **OpenCode read-only fails closed.** If the injected `clawo-readonly` enforcement agent
+  fails to load, OpenCode 1.17.15 prints a warning and silently runs the default,
+  *writable* agent. A read-only session now detects that fallback and refuses the turn
+  rather than returning output produced without its sandbox.
+
+### Changed
+- Tested-engine pins updated to Cursor Agent **2026.07.09-a3815c0** and OpenCode
+  **1.17.15**. OpenCode's `run --format json` event schema, token field path
+  (`step_finish.part.tokens`), and agent-permission config were diffed at both tags and
+  are unchanged; Antigravity 1.1.1's conversation-resume log line and all wrapper flags
+  were re-verified end-to-end. No wrapper change was required for OpenCode or Antigravity.
+
 ## [4.8.0] - 2026-07-12
 
 ### Added

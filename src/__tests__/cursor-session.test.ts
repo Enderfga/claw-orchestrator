@@ -8,6 +8,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { EventEmitter } from 'node:events';
 import { Readable } from 'node:stream';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 // Mock child_process before importing the session
 const mockSpawn = vi.fn();
@@ -105,10 +107,10 @@ describe('PersistentCursorSession', () => {
       expect(spawnArgs).toContain('sonnet-4');
     });
 
-    it('uses plan mode instead of force for read-only sessions', async () => {
+    it('enforces read-only via an isolated deny config, not just --mode plan', async () => {
       const session = new PersistentCursorSession({
         name: 'test',
-        cwd: '/tmp',
+        cwd: '/tmp/realrepo',
         permissionMode: 'manual',
         sandboxMode: 'read-only',
       });
@@ -119,9 +121,40 @@ describe('PersistentCursorSession', () => {
       await sendPromise;
 
       const spawnArgs = mockSpawn.mock.calls[0][1] as string[];
+      const spawnOpts = mockSpawn.mock.calls[0][2] as { cwd: string };
+      // --mode plan steers the model; --sandbox must NOT be added (it re-enables writes)
       expect(spawnArgs).toContain('--mode');
       expect(spawnArgs).toContain('plan');
       expect(spawnArgs).not.toContain('--force');
+      expect(spawnArgs).not.toContain('--sandbox');
+      // The real repo is the workspace, but the process cwd is an isolated temp
+      // dir carrying the binding deny config — the repo tree is never touched.
+      expect(spawnArgs).toContain('--workspace');
+      expect(spawnArgs).toContain('/tmp/realrepo');
+      expect(spawnOpts.cwd).not.toBe('/tmp/realrepo');
+      expect(spawnOpts.cwd).toContain('claw-cursor-ro-');
+      const cfg = JSON.parse(readFileSync(join(spawnOpts.cwd, '.cursor', 'cli.json'), 'utf8')) as {
+        permissions: { deny: string[] };
+      };
+      expect(cfg.permissions.deny).toEqual(expect.arrayContaining(['Write(**)', 'Edit(**)', 'Shell(**)']));
+      session.stop();
+    });
+
+    it('write-enabled sessions run from the real cwd with --force and no deny config', async () => {
+      const session = new PersistentCursorSession({
+        name: 'test',
+        cwd: '/tmp/realrepo',
+        permissionMode: 'bypassPermissions',
+      });
+      await session.start();
+      const sendPromise = session.send('hello', { waitForComplete: true });
+      setTimeout(() => closeProc(mockProc, 0), 10);
+      await sendPromise;
+      const spawnArgs = mockSpawn.mock.calls[0][1] as string[];
+      const spawnOpts = mockSpawn.mock.calls[0][2] as { cwd: string };
+      expect(spawnArgs).toContain('--force');
+      expect(spawnArgs).not.toContain('--mode');
+      expect(spawnOpts.cwd).toBe('/tmp/realrepo');
     });
 
     it('passes --workspace for cwd', async () => {
@@ -237,6 +270,28 @@ describe('PersistentCursorSession', () => {
 
       await sendPromise;
       const stats = session.getStats();
+      expect(stats.toolCalls).toBe(2);
+      expect(stats.toolErrors).toBe(1);
+    });
+
+    it('tracks the current tool_call events (Cursor 2026.05+: started/completed)', async () => {
+      const session = new PersistentCursorSession({ name: 'test', cwd: '/tmp', permissionMode: 'bypassPermissions' });
+      await session.start();
+
+      const sendPromise = session.send('hello', { waitForComplete: true });
+      setTimeout(() => {
+        feedLines(mockProc, [
+          JSON.stringify({ type: 'tool_call', subtype: 'started', name: 'edit' }),
+          JSON.stringify({ type: 'tool_call', subtype: 'completed', name: 'edit', status: 'completed' }),
+          JSON.stringify({ type: 'tool_call', subtype: 'started', name: 'shell' }),
+          JSON.stringify({ type: 'tool_call', subtype: 'completed', name: 'shell', status: 'error' }),
+        ]);
+        closeProc(mockProc, 0);
+      }, 10);
+
+      await sendPromise;
+      const stats = session.getStats();
+      // Count once per call (on 'started'); error read off the 'completed' event.
       expect(stats.toolCalls).toBe(2);
       expect(stats.toolErrors).toBe(1);
     });

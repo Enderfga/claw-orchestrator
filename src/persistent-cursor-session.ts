@@ -13,6 +13,9 @@
 
 import { spawn } from 'node:child_process';
 import * as readline from 'node:readline';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 
 import type { SessionConfig, SessionSendOptions, StreamEvent, TurnResult } from './types.js';
 import { estimateTokens } from './models.js';
@@ -20,10 +23,33 @@ import { sanitizeSecrets } from './sanitize.js';
 import { SESSION_EVENT } from './constants.js';
 import { BaseOneShotSession } from './base-oneshot-session.js';
 
+/**
+ * Enforced read-only for Cursor Agent.
+ *
+ * `--mode plan` is NOT a permission boundary — Cursor's docs say the mode
+ * "influences how the agent approaches tasks rather than enforcing permissions",
+ * and it was verified empirically to let an adversarial prompt write files
+ * (edit-tool calls went through). Cursor's ACTUAL enforcement is the permission
+ * config (`.cursor/cli.json`): "Deny rules take precedence over allow rules",
+ * and a `deny` was verified to hold even under `--force` and even against a
+ * repo that ships a permissive config of its own.
+ *
+ * `allow: []` means default-allow, so read / grep / search / list still work;
+ * only the write vectors are denied. We write this config into a throwaway temp
+ * dir and run Cursor with that dir as its process cwd (Cursor reads the config
+ * from cwd) while pointing `--workspace` at the real project — so the user's
+ * repository is never touched.
+ */
+const READ_ONLY_CLI_CONFIG = JSON.stringify({
+  permissions: { allow: [], deny: ['Write(**)', 'Edit(**)', 'Shell(**)'] },
+});
+
 // ─── PersistentCursorSession ────────────────────────────────────────────────
 
 export class PersistentCursorSession extends BaseOneShotSession {
   private _currentRl: readline.Interface | null = null;
+  /** Throwaway dir holding the read-only `.cursor/cli.json`; removed on stop(). */
+  private _roConfigDir?: string;
 
   constructor(config: SessionConfig, cursorBin?: string) {
     super(config, cursorBin || process.env.CURSOR_BIN || 'agent', {
@@ -33,6 +59,16 @@ export class PersistentCursorSession extends BaseOneShotSession {
       supportsCachedTokens: true,
       engineDisplayName: 'Cursor',
     });
+  }
+
+  /** Materialize the read-only permission config once; return the dir to use as cwd. */
+  private _ensureReadOnlyConfigDir(): string {
+    if (this._roConfigDir) return this._roConfigDir;
+    const dir = path.join(os.tmpdir(), `claw-cursor-ro-${this.sessionId}`);
+    fs.mkdirSync(path.join(dir, '.cursor'), { recursive: true });
+    fs.writeFileSync(path.join(dir, '.cursor', 'cli.json'), READ_ONLY_CLI_CONFIG, 'utf8');
+    this._roConfigDir = dir;
+    return dir;
   }
 
   protected override _cleanupProc(): void {
@@ -45,13 +81,26 @@ export class PersistentCursorSession extends BaseOneShotSession {
       this.currentProc.stdout?.destroy();
       this.currentProc.stderr?.destroy();
     }
+    if (this._roConfigDir) {
+      try {
+        fs.rmSync(this._roConfigDir, { recursive: true, force: true });
+      } catch {
+        // Never created / already gone.
+      }
+      this._roConfigDir = undefined;
+    }
     super._cleanupProc();
   }
 
   protected _run(message: string, options: SessionSendOptions): Promise<TurnResult> {
     // agent -p <prompt> [--force | --mode plan] --trust --output-format stream-json
+    const readOnly = this.options.sandboxMode === 'read-only';
     const args: string[] = ['-p', message];
-    if (this.options.sandboxMode === 'read-only') args.push('--mode', 'plan');
+    // `--mode plan` steers the model toward read-only behavior; the binding
+    // guarantee comes from the deny config injected via the process cwd below.
+    // Do NOT add `--sandbox` here — it does not restrict in-workspace writes and
+    // was verified to override the mode and re-enable them.
+    if (readOnly) args.push('--mode', 'plan');
     else args.push('--force');
     args.push('--trust', '--output-format', 'stream-json');
 
@@ -61,6 +110,11 @@ export class PersistentCursorSession extends BaseOneShotSession {
 
     const timeout = options.timeout || 300_000;
 
+    // Read-only sessions run with an isolated temp dir as their process cwd so
+    // Cursor loads our deny config (`.cursor/cli.json`) from there while still
+    // operating on the real project via `--workspace`. The repo is never touched.
+    const spawnCwd = readOnly ? this._ensureReadOnlyConfigDir() : this.options.cwd;
+
     return new Promise<TurnResult>((resolve, reject) => {
       const resultText = { value: '' };
       let stderr = '';
@@ -68,7 +122,7 @@ export class PersistentCursorSession extends BaseOneShotSession {
       let gotUsageFromEvents = false;
 
       const proc = spawn(this.engineBin, args, {
-        cwd: this.options.cwd,
+        cwd: spawnCwd,
         env: { ...process.env },
         stdio: ['pipe', 'pipe', 'pipe'],
       });
@@ -158,6 +212,13 @@ export class PersistentCursorSession extends BaseOneShotSession {
     });
   }
 
+  /** Detect an errored tool call across the shapes Cursor has used for it. */
+  private _cursorToolErrored(event: Record<string, unknown>): boolean {
+    if (event.is_error === true) return true;
+    const status = (event.status as string) || ((event.result as Record<string, unknown>)?.status as string);
+    return status === 'error' || status === 'failed';
+  }
+
   // ─── Stream Event Handling ────────────────────────────────────────────
 
   private _handleStreamEvent(
@@ -217,6 +278,33 @@ export class PersistentCursorSession extends BaseOneShotSession {
         break;
       }
 
+      // Cursor 2026.05+ emits `tool_call` with `subtype: 'started' | 'completed'`
+      // (one event each) instead of the older `tool_use` / `tool_result` pair.
+      // Count once on 'started'; read error state off the 'completed' event
+      // (there is no top-level `is_error` on a separate result event anymore).
+      case 'tool_call': {
+        const subtype = event.subtype as string | undefined;
+        if (subtype === 'started') {
+          this._stats.toolCalls++;
+          try {
+            options.callbacks?.onToolUse?.(event);
+          } catch {
+            // User callback error
+          }
+          this.emit(SESSION_EVENT.TOOL_USE, event);
+        } else if (subtype === 'completed') {
+          try {
+            options.callbacks?.onToolResult?.(event);
+          } catch {
+            // User callback error
+          }
+          if (this._cursorToolErrored(event)) this._stats.toolErrors++;
+          this.emit(SESSION_EVENT.TOOL_RESULT, event);
+        }
+        break;
+      }
+
+      // Legacy event names (older Cursor builds) — keep for back-compat.
       case 'tool_use':
         this._stats.toolCalls++;
         try {
