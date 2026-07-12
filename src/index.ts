@@ -20,6 +20,7 @@ import {
   type CouncilConfig,
   type AgentPersona,
   type EngineType,
+  type CustomEngineConfig,
 } from './types.js';
 import type { FanoutConfig } from './fanout.js';
 
@@ -70,6 +71,54 @@ interface PluginAPI {
   }): void;
   registerService(def: { id: string; start: () => void; stop: () => void }): void;
 }
+
+const CUSTOM_ENGINE_SCHEMA = {
+  type: 'object',
+  description: 'Custom engine config (required when the corresponding engine is "custom").',
+  properties: {
+    name: { type: 'string', description: 'Engine display name' },
+    bin: { type: 'string', description: 'Binary path or command' },
+    binEnv: { type: 'string', description: 'Env var that overrides bin' },
+    persistent: { type: 'boolean', description: 'true=long-running subprocess, false=spawn per send (default)' },
+    args: {
+      type: 'object',
+      description: 'CLI flag mappings',
+      properties: {
+        print: { type: 'string' },
+        outputFormat: { type: 'string' },
+        outputFormatValue: { type: 'string' },
+        inputFormat: { type: 'string' },
+        inputFormatValue: { type: 'string' },
+        skipPermissions: { type: 'string' },
+        permissionMode: { type: 'string' },
+        model: { type: 'string' },
+        systemPrompt: { type: 'string' },
+        appendSystemPrompt: { type: 'string' },
+        maxTurns: { type: 'string' },
+        resume: { type: 'string' },
+        verbose: { type: 'string' },
+        replayUserMessages: { type: 'string' },
+        includePartialMessages: { type: 'string' },
+        effort: { type: 'string' },
+        workspace: { type: 'string' },
+        extra: { type: 'array', items: { type: 'string' } },
+      },
+    },
+    permissionModes: { type: 'object', description: 'Map OpenClaw permission names to CLI values' },
+    pricing: {
+      type: 'object',
+      properties: {
+        input: { type: 'number' },
+        output: { type: 'number' },
+        cached: { type: 'number' },
+      },
+    },
+    contextWindow: { type: 'number' },
+    env: { type: 'object', description: 'Extra environment variables' },
+    sanitizePatterns: { type: 'array', maxItems: 100, items: { type: 'string' } },
+  },
+  required: ['name', 'bin', 'args'],
+} as const;
 
 /**
  * OpenClaw plugin object — standard format
@@ -203,6 +252,12 @@ const plugin = {
             description:
               'Claude engine only. Enable "ultracode" / dynamic workflows: Claude plans a JS orchestration script per substantive task and fans out to subagents. Injected as the ultracode:true settings key (not a --effort value).',
           },
+          sandboxMode: {
+            type: 'string',
+            enum: ['read-only', 'workspace-write', 'danger-full-access'],
+            description:
+              'Sandbox policy. Codex supports all values; other built-in engines map read-only to their native plan/read-only mode.',
+          },
           codexProfile: {
             type: 'string',
             description:
@@ -271,57 +326,7 @@ const plugin = {
             description:
               'AWS Bedrock service tier (sets ANTHROPIC_BEDROCK_SERVICE_TIER). Only effective when routing through Bedrock.',
           },
-          customEngine: {
-            type: 'object',
-            description:
-              'Custom engine config (required when engine="custom"). Defines how to invoke any coding agent CLI.',
-            properties: {
-              name: { type: 'string', description: 'Engine display name' },
-              bin: { type: 'string', description: 'Binary path or command' },
-              binEnv: { type: 'string', description: 'Env var that overrides bin' },
-              persistent: {
-                type: 'boolean',
-                description: 'true=long-running subprocess, false=spawn per send (default)',
-              },
-              args: {
-                type: 'object',
-                description: 'CLI flag mappings',
-                properties: {
-                  print: { type: 'string' },
-                  outputFormat: { type: 'string' },
-                  outputFormatValue: { type: 'string' },
-                  inputFormat: { type: 'string' },
-                  inputFormatValue: { type: 'string' },
-                  skipPermissions: { type: 'string' },
-                  permissionMode: { type: 'string' },
-                  model: { type: 'string' },
-                  systemPrompt: { type: 'string' },
-                  appendSystemPrompt: { type: 'string' },
-                  maxTurns: { type: 'string' },
-                  resume: { type: 'string' },
-                  verbose: { type: 'string' },
-                  replayUserMessages: { type: 'string' },
-                  includePartialMessages: { type: 'string' },
-                  effort: { type: 'string' },
-                  workspace: { type: 'string' },
-                  extra: { type: 'array', items: { type: 'string' } },
-                },
-              },
-              permissionModes: { type: 'object', description: 'Map OpenClaw permission names to CLI values' },
-              pricing: {
-                type: 'object',
-                properties: {
-                  input: { type: 'number' },
-                  output: { type: 'number' },
-                  cached: { type: 'number' },
-                },
-              },
-              contextWindow: { type: 'number' },
-              env: { type: 'object', description: 'Extra environment variables' },
-              sanitizePatterns: { type: 'array', maxItems: 100, items: { type: 'string' } },
-            },
-            required: ['name', 'bin', 'args'],
-          },
+          customEngine: CUSTOM_ENGINE_SCHEMA,
           resumeSessionId: {
             type: 'string',
             description:
@@ -1453,7 +1458,7 @@ const plugin = {
     api.registerTool({
       name: 'autoloop_start',
       description:
-        'Start a v2 autoloop run in chat mode. The user converses with the persistent Planner (Claude Opus by default) to design plan.md and goal.json; subagents (Coder/Reviewer) are spawned later via the Planner when the plan is ready. Returns a run_id and the Planner session name. See skills/references/autoloop.md for the operator reference.',
+        'Start a v2 autoloop run in chat mode. Planner, Coder, and Reviewer default to Claude (opus/sonnet/sonnet) but each role can use a different engine/model. Coder and Reviewer are spawned later by the Planner after plan approval. Returns a run_id and the Planner session name.',
       parameters: {
         type: 'object',
         properties: {
@@ -1462,7 +1467,28 @@ const plugin = {
             description: 'Stable run identifier (used to address subsequent chat / status calls)',
           },
           workspace: { type: 'string', description: 'Path to the git workspace where the run lives' },
-          planner_model: { type: 'string', description: 'Model alias for Planner (default: opus)' },
+          planner_engine: { type: 'string', enum: ENGINE_TYPES, description: 'Planner engine (default: claude)' },
+          planner_model: {
+            type: 'string',
+            description: 'Planner model (default: opus for Claude; engine default otherwise)',
+          },
+          planner_custom_engine: CUSTOM_ENGINE_SCHEMA,
+          coder_engine: { type: 'string', enum: ENGINE_TYPES, description: 'Default Coder engine (default: claude)' },
+          coder_model: {
+            type: 'string',
+            description: 'Default Coder model (default: sonnet for Claude; engine default otherwise)',
+          },
+          coder_custom_engine: CUSTOM_ENGINE_SCHEMA,
+          reviewer_engine: {
+            type: 'string',
+            enum: ENGINE_TYPES,
+            description: 'Default Reviewer engine (default: claude)',
+          },
+          reviewer_model: {
+            type: 'string',
+            description: 'Default Reviewer model (default: sonnet for Claude; engine default otherwise)',
+          },
+          reviewer_custom_engine: CUSTOM_ENGINE_SCHEMA,
           send_timeout_ms: { type: 'number', description: 'Per-message wall-clock cap (default 600000 = 10 min)' },
         },
         required: ['run_id', 'workspace'],
@@ -1471,7 +1497,15 @@ const plugin = {
         const result = await getManager().autoloopStart({
           runId: args.run_id as string,
           workspace: sanitizeCwd(args.workspace as string)!,
+          plannerEngine: args.planner_engine as EngineType | undefined,
           plannerModel: args.planner_model as string | undefined,
+          plannerCustomEngine: args.planner_custom_engine as CustomEngineConfig | undefined,
+          coderEngine: args.coder_engine as EngineType | undefined,
+          coderModel: args.coder_model as string | undefined,
+          coderCustomEngine: args.coder_custom_engine as CustomEngineConfig | undefined,
+          reviewerEngine: args.reviewer_engine as EngineType | undefined,
+          reviewerModel: args.reviewer_model as string | undefined,
+          reviewerCustomEngine: args.reviewer_custom_engine as CustomEngineConfig | undefined,
           sendTimeoutMs: args.send_timeout_ms as number | undefined,
         });
         return {

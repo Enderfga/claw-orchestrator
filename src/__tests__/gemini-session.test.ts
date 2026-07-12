@@ -8,6 +8,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { EventEmitter } from 'node:events';
 import { Readable } from 'node:stream';
+import { readFileSync } from 'node:fs';
 
 // Mock child_process before importing the session
 const mockSpawn = vi.fn();
@@ -104,6 +105,30 @@ describe('PersistentGeminiSession', () => {
       expect(spawnArgs).toContain('gemini-2.5-pro');
       // Gemini CLI 0.43 trusted-folders gate — must always be bypassed for headless runs.
       expect(spawnArgs).toContain('--skip-trust');
+    });
+
+    it('uses plan approval mode for read-only sessions', async () => {
+      const session = new PersistentGeminiSession({
+        name: 'test',
+        cwd: '/tmp',
+        permissionMode: 'manual',
+        sandboxMode: 'read-only',
+      });
+      await session.start();
+
+      const sendPromise = session.send('hello', { waitForComplete: true });
+      setTimeout(() => closeProc(mockProc, 0), 10);
+      await sendPromise;
+
+      const spawnArgs = mockSpawn.mock.calls[0][1] as string[];
+      expect(spawnArgs).toContain('--approval-mode');
+      expect(spawnArgs).toContain('plan');
+      expect(spawnArgs).not.toContain('--yolo');
+      const policyIndex = spawnArgs.indexOf('--admin-policy');
+      expect(policyIndex).toBeGreaterThan(-1);
+      const policy = readFileSync(spawnArgs[policyIndex + 1], 'utf8');
+      expect(policy).toContain('toolName = "exit_plan_mode"');
+      expect(policy).toContain('decision = "deny"');
     });
 
     it('uses --sandbox for default permissionMode', async () => {

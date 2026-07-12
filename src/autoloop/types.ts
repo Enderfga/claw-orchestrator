@@ -6,6 +6,9 @@ import type { AnyAutoloopMessage, PushChannel, PushLevel } from './messages.js';
 
 export type AutoloopStatus = 'planning' | 'running' | 'paused' | 'terminated' | 'crashed';
 
+/** The three autoloop roles. Single source of truth — dispatcher and SessionManager both use it. */
+export type AutoloopRoleName = 'planner' | 'coder' | 'reviewer';
+
 export interface AutoloopState {
   run_id: string;
   status: AutoloopStatus;

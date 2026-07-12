@@ -28,7 +28,7 @@ SessionManager
 
 ### Claude Code (`engine: 'claude'`)
 
-Default engine. Long-running subprocess with streaming JSON I/O. Tested with Claude Code CLI **2.1.206**.
+Default engine. Long-running subprocess with streaming JSON I/O. Tested with Claude Code CLI **2.1.207**.
 
 - Persistent multi-turn conversations
 - Real-time streaming (text, tool_use, tool_result, system events)
@@ -54,7 +54,7 @@ await manager.startSession({
 
 ### OpenAI Codex (`engine: 'codex'`)
 
-Wraps the `codex exec` subcommand. Each `send()` spawns a new process. Tested with `codex` CLI **0.143.0**.
+Wraps the `codex exec` subcommand. Each `send()` spawns a new process. Tested with `codex` CLI **0.144.1**.
 
 - Non-interactive execution via `codex exec --sandbox workspace-write --json` (replaces the deprecated `--full-auto` flag from earlier Codex versions)
 - Real per-turn `usage` from the `turn.completed` JSON event (input, output, cached, reasoning tokens)
@@ -63,6 +63,7 @@ Wraps the `codex exec` subcommand. Each `send()` spawns a new process. Tested wi
 - `codexProfile` → `--profile <name>` (named config profile from `~/.codex/config.toml`)
 - Per-session continuity: the `thread_id` from the first turn's `thread.started` event is captured and reused via `codex exec resume <id>` for subsequent sends, so the model sees prior turns
 - One-shot execution per message (no persistent subprocess between sends)
+- Captures the real Codex thread ID and persists it, so later sends and process-level session resume use `codex exec resume <thread_id>`
 - Working directory passed via `-C` flag
 - Default model: `gpt-5.5`
 - Requires `codex` CLI >= 0.119 (for `exec resume`): `npm install -g @openai/codex`
@@ -113,7 +114,7 @@ Wraps the `gemini` CLI with `--output-format stream-json`. Each `send()` spawns 
 - One-shot execution per message (no persistent subprocess)
 - Working directory carries accumulated changes across sends
 - Real token counts from stream-json `result` events (not estimated)
-- Permission modes: `bypassPermissions` → `--yolo`, `default` → `--sandbox`
+- Permission modes: `bypassPermissions` → `--yolo`, `default` → `--sandbox`; `sandboxMode: 'read-only'` → `--approval-mode plan` (takes precedence)
 - Always passes `--skip-trust` to bypass the "trusted folders" gate introduced
   in Gemini CLI 0.43 (otherwise headless runs in worktrees / arbitrary cwds
   abort before producing output)
@@ -132,7 +133,7 @@ await manager.startSession({
 
 Wraps Google's **Antigravity CLI** (`agy`) — the successor to Gemini CLI (consumer
 Gemini CLI tiers stopped serving 2026-06-18). Each `send()` spawns a new process
-in print mode. Verified against `agy` **1.0.16**.
+in print mode. Verified against `agy` **1.1.1**.
 
 - One-shot execution per message (no persistent subprocess)
 - **Plain-text output** — agy has no structured/stream-json mode, so stdout is
@@ -143,9 +144,10 @@ in print mode. Verified against `agy` **1.0.16**.
   externally via `resumeSessionId` (bare UUID only); read it back from
   `getStats().agyConversationId`
 - Permission modes: `bypassPermissions` → `--dangerously-skip-permissions`,
-  `default` → `--sandbox` (terminal-restricted). Other modes run agy's own
-  approval flow, which blocks in headless print mode — use `bypassPermissions`
-  for autonomous work
+  `default` → `--sandbox` (terminal-restricted), and
+  `sandboxMode: 'read-only'` → `--mode plan` (takes precedence). Other modes
+  run agy's own approval flow, which blocks in headless print mode — use
+  `bypassPermissions` for autonomous write-enabled work
 - agy enforces its own print timeout (default 5m); the engine derives
   `--print-timeout` from the send timeout so the wrapper timer decides
 - Unknown `--model` slugs do **not** error — agy silently falls back to its
@@ -169,12 +171,12 @@ await manager.startSession({
 
 ### Cursor Agent (`engine: 'cursor'`)
 
-Wraps the Cursor Agent CLI (`agent`) with `--print --force --output-format stream-json`. Each `send()` spawns a new process.
+Wraps the Cursor Agent CLI (`agent`) with `--print --output-format stream-json`. Write-enabled sessions use `--force`; `sandboxMode: 'read-only'` uses `--mode plan`. Each `send()` spawns a new process.
 
 - One-shot execution per message (no persistent subprocess)
 - Working directory via `--workspace` flag
 - Real token counts from stream-json `result` events (camelCase: `inputTokens`, `outputTokens`, `cacheReadTokens`)
-- `--force` enables auto-approval of all file changes
+- `--force` enables auto-approval of file changes; `sandboxMode: 'read-only'` replaces it with `--mode plan`
 - `--trust` auto-trusts the workspace without prompting
 - Cursor uses its own model routing (e.g., `sonnet-4`, `gpt-5`, `auto`)
 - Requires Cursor Agent CLI: `curl https://cursor.com/install -fsSL | bash`
@@ -200,6 +202,7 @@ Wraps the [sst/opencode](https://github.com/sst/opencode) CLI with `run --format
 - Real token counts from `step_finish.part.tokens.{input,output,cache.read}`
 - The wrapper closes the subprocess's stdin immediately after spawn (opencode otherwise reads stdin and blocks on EOF, hanging the call)
 - Provider-agnostic: opencode's `--model` expects `provider/model` form (e.g. `anthropic/claude-sonnet-4`). The wrapper passes `--model` through only when the value contains a `/`; otherwise opencode's own default applies
+- `sandboxMode: 'read-only'` selects OpenCode's built-in `plan` agent via `--agent plan`
 - Requires opencode installed: `brew install sst/tap/opencode` or `npm install -g opencode-ai`. Auth via `opencode auth login` **or** any provider env var (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, etc.) — opencode picks up either path
 - Binary: `opencode` (set `OPENCODE_BIN` env var to override)
 

@@ -35,10 +35,9 @@ orchestrator stalls if you skip it.
 
 ## Your tools
 
-Standard Claude Code palette in the sandbox cwd: Read, Glob, Grep, Bash.
-You technically have Write/Edit too, but Rule 3 confines you to the
-sandbox cwd. The orchestrator does not enforce this at the tool level —
-it enforces it by trusting you.
+Use the selected engine's read, search, and shell tools inside the sandbox
+cwd. You may edit only sandbox memory, scratch, and audit files. Rule 3
+forbids writes outside that cwd; engine-specific tool names may differ.
 
 The current contents of `reviewer_memory.md` are **injected as a frozen
 snapshot in your system prompt** at session start. You do not need to

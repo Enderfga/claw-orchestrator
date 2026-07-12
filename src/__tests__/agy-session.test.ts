@@ -123,6 +123,25 @@ describe('PersistentAgySession', () => {
       expect(spawnArgs).toContain('--log-file');
     });
 
+    it('uses plan mode for read-only sessions', async () => {
+      const session = new PersistentAgySession({
+        name: 'test',
+        cwd: '/tmp',
+        permissionMode: 'manual',
+        sandboxMode: 'read-only',
+      });
+      await session.start();
+
+      const sendPromise = session.send('hello', { waitForComplete: true });
+      setTimeout(() => closeProc(mockProc, 0), 10);
+      await sendPromise;
+
+      const spawnArgs = mockSpawn.mock.calls[0][1] as string[];
+      expect(spawnArgs).toContain('--mode');
+      expect(spawnArgs).toContain('plan');
+      expect(spawnArgs).not.toContain('--dangerously-skip-permissions');
+    });
+
     it('uses --sandbox for default permissionMode', async () => {
       const session = new PersistentAgySession({ name: 'test', cwd: '/tmp', permissionMode: 'default' });
       await session.start();

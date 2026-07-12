@@ -1,9 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import plugin from '../index.js';
+import { ENGINE_TYPES } from '../types.js';
 
 interface RegisteredTool {
   name: string;
   description: string;
+  parameters: Record<string, unknown>;
 }
 
 interface RegisteredRoute {
@@ -17,8 +19,8 @@ function collectRegistration(): { tools: RegisteredTool[]; routes: RegisteredRou
   const fakeApi = {
     pluginConfig: {},
     logger: { info: () => {}, error: () => {}, warn: () => {} },
-    registerTool: (def: { name: string; description: string }) => {
-      tools.push({ name: def.name, description: def.description });
+    registerTool: (def: { name: string; description: string; parameters: Record<string, unknown> }) => {
+      tools.push({ name: def.name, description: def.description, parameters: def.parameters });
     },
     on: () => {},
     registerHttpRoute: (def: { path: string }) => {
@@ -131,6 +133,27 @@ describe('plugin tool registration', () => {
     ];
     for (const name of ULTRAAPP_TOOLS) {
       expect(byName.has(name), `missing ultraapp tool: ${name}`).toBe(true);
+    }
+  });
+
+  it('exposes sandboxMode on session_start for cross-engine read-only sessions', () => {
+    const tool = byName.get('session_start');
+    expect(tool).toBeDefined();
+    const properties = (tool!.parameters.properties ?? {}) as Record<string, Record<string, unknown>>;
+    expect(properties.sandboxMode?.enum).toEqual(['read-only', 'workspace-write', 'danger-full-access']);
+  });
+
+  it('exposes independent role engines and trusted custom configs on autoloop_start', () => {
+    const tool = byName.get('autoloop_start');
+    expect(tool).toBeDefined();
+    expect(tool!.description).not.toContain('persistent Planner (Claude Opus by default)');
+    const properties = (tool!.parameters.properties ?? {}) as Record<string, Record<string, unknown>>;
+
+    for (const role of ['planner', 'coder', 'reviewer'] as const) {
+      expect(properties[`${role}_engine`]?.enum).toEqual(ENGINE_TYPES);
+      expect(properties[`${role}_model`]?.type).toBe('string');
+      expect(properties[`${role}_custom_engine`]?.type).toBe('object');
+      expect(properties[`${role}_custom_engine`]?.required).toEqual(['name', 'bin', 'args']);
     }
   });
 

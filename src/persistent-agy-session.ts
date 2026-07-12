@@ -86,7 +86,9 @@ export class PersistentAgySession extends BaseOneShotSession {
     // approval behavior — which blocks on unapproved tools in print mode, so
     // bypassPermissions (the SessionConfig default) is the practical choice
     // for headless work.
-    if (this.options.permissionMode === 'bypassPermissions' || this.options.dangerouslySkipPermissions) {
+    if (this.options.sandboxMode === 'read-only') {
+      args.push('--mode', 'plan');
+    } else if (this.options.permissionMode === 'bypassPermissions' || this.options.dangerouslySkipPermissions) {
       args.push('--dangerously-skip-permissions');
     } else if (this.options.permissionMode === 'default' || this.options.permissionMode === 'manual') {
       args.push('--sandbox');

@@ -42,6 +42,31 @@ import { sanitizeSecrets } from './sanitize.js';
 import { SESSION_EVENT } from './constants.js';
 import { BaseOneShotSession } from './base-oneshot-session.js';
 
+/**
+ * Read-only enforcement for opencode.
+ *
+ * opencode ships a `plan` agent, but it is a user-overridable preset: on a
+ * stock install its rules begin with `{"permission":"*","action":"allow"}` and
+ * deny neither `bash` nor `edit`, so a "read-only" session could still author
+ * files through a shell heredoc. We therefore define our own agent and hand it
+ * to the CLI via `OPENCODE_CONFIG_CONTENT` (verified against opencode 1.1.40:
+ * `OPENCODE_CONFIG_CONTENT=… opencode agent list` lists `clawo-readonly`), with
+ * the write paths denied at the permission-engine level.
+ */
+const READ_ONLY_AGENT = 'clawo-readonly';
+const READ_ONLY_AGENT_CONFIG = JSON.stringify({
+  agent: {
+    [READ_ONLY_AGENT]: {
+      mode: 'primary',
+      permission: {
+        edit: 'deny',
+        bash: 'deny',
+        external_directory: 'deny',
+      },
+    },
+  },
+});
+
 interface TurnState {
   /** Per-part latest text snapshot, keyed by part.id (preserves insertion order). */
   textParts: Map<string, string>;
@@ -84,6 +109,17 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
     // opencode run <message..> --format json
     const args: string[] = ['run', message, '--format', 'json'];
 
+    const readOnly = this.options.sandboxMode === 'read-only';
+    if (readOnly) {
+      // NOT opencode's built-in `plan` agent: that is a user-overridable preset
+      // whose rules start with {"permission":"*","action":"allow"} and deny
+      // neither `bash` nor `edit` — a "read-only" session could still write via
+      // a shell heredoc. Instead we inject our own agent whose permissions deny
+      // edit/bash/external_directory outright, so read-only is enforced by the
+      // permission engine rather than requested politely.
+      args.push('--agent', READ_ONLY_AGENT);
+    }
+
     // opencode wants `provider/model` format. Only pass through if it looks correct.
     if (this.options.model && this.options.model.includes('/')) {
       args.push('--model', this.options.model);
@@ -103,7 +139,7 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
 
       const proc = spawn(this.engineBin, args, {
         cwd: this.options.cwd,
-        env: { ...process.env },
+        env: readOnly ? { ...process.env, OPENCODE_CONFIG_CONTENT: READ_ONLY_AGENT_CONFIG } : { ...process.env },
         stdio: ['pipe', 'pipe', 'pipe'],
       });
       this.currentProc = proc;

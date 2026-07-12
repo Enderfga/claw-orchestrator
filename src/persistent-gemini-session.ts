@@ -13,6 +13,9 @@
 
 import { spawn } from 'node:child_process';
 import * as readline from 'node:readline';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 
 import type { SessionConfig, SessionSendOptions, StreamEvent, TurnResult } from './types.js';
 import { estimateTokens } from './models.js';
@@ -20,10 +23,37 @@ import { sanitizeSecrets } from './sanitize.js';
 import { SESSION_EVENT } from './constants.js';
 import { BaseOneShotSession } from './base-oneshot-session.js';
 
+/**
+ * Admin policy that makes `--approval-mode plan` actually binding.
+ *
+ * Plan mode on its own is model-cooperative: the agent can call the built-in
+ * `exit_plan_mode` tool and walk straight out of read-only into write mode. In
+ * Gemini's policy engine, admin policies sit at the top tier ("Admin policies
+ * always override User, Workspace, and Default policies") and a model cannot
+ * override an admin `deny` — so denying the escape hatch (plus the write tools,
+ * belt-and-braces) is what turns "read-only" from a request into a guarantee.
+ */
+const READ_ONLY_ADMIN_POLICY = [
+  '[[rule]]',
+  'toolName = "exit_plan_mode"',
+  'decision = "deny"',
+  'priority = 999',
+  'denyMessage = "read-only session: leaving plan mode is not permitted"',
+  '',
+  '[[rule]]',
+  'toolName = ["write_file", "replace"]',
+  'decision = "deny"',
+  'priority = 999',
+  'denyMessage = "read-only session: file writes are not permitted"',
+  '',
+].join('\n');
+
 // ─── PersistentGeminiSession ────────────────────────────────────────────────
 
 export class PersistentGeminiSession extends BaseOneShotSession {
   private _currentRl: readline.Interface | null = null;
+  /** Written lazily on first read-only send; removed in _cleanupProc (stop()). */
+  private _policyFilePath?: string;
 
   constructor(config: SessionConfig, geminiBin?: string) {
     super(config, geminiBin || process.env.GEMINI_BIN || 'gemini', {
@@ -32,6 +62,15 @@ export class PersistentGeminiSession extends BaseOneShotSession {
       supportsCachedTokens: true,
       engineDisplayName: 'Gemini',
     });
+  }
+
+  /** Materialize the read-only admin policy once and return its path. */
+  private _ensurePolicyFile(): string {
+    if (this._policyFilePath) return this._policyFilePath;
+    const file = path.join(os.tmpdir(), `claw-gemini-readonly-${this.sessionId}.toml`);
+    fs.writeFileSync(file, READ_ONLY_ADMIN_POLICY, 'utf8');
+    this._policyFilePath = file;
+    return file;
   }
 
   protected override _cleanupProc(): void {
@@ -44,6 +83,14 @@ export class PersistentGeminiSession extends BaseOneShotSession {
       this.currentProc.stdout?.destroy();
       this.currentProc.stderr?.destroy();
     }
+    if (this._policyFilePath) {
+      try {
+        fs.unlinkSync(this._policyFilePath);
+      } catch {
+        // Never written / already gone.
+      }
+      this._policyFilePath = undefined;
+    }
     super._cleanupProc();
   }
 
@@ -53,8 +100,13 @@ export class PersistentGeminiSession extends BaseOneShotSession {
     // with "not running in a trusted directory" before producing any output.
     const args: string[] = ['-p', message, '--output-format', 'stream-json', '--skip-trust'];
 
-    // Permission mode
-    if (this.options.permissionMode === 'bypassPermissions' || this.options.dangerouslySkipPermissions) {
+    // Permission mode. Autoloop Planner uses the shared read-only sandbox hint,
+    // which Gemini exposes as approval-mode=plan — but plan mode alone is
+    // escapable via the model's own `exit_plan_mode` tool, so we also pin an
+    // admin policy that denies it (admin tier cannot be overridden by the model).
+    if (this.options.sandboxMode === 'read-only') {
+      args.push('--approval-mode', 'plan', '--admin-policy', this._ensurePolicyFile());
+    } else if (this.options.permissionMode === 'bypassPermissions' || this.options.dangerouslySkipPermissions) {
       args.push('--yolo');
     } else if (this.options.permissionMode === 'default' || this.options.permissionMode === 'manual') {
       args.push('--sandbox');

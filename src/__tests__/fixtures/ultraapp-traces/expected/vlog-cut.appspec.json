@@ -9,14 +9,7 @@
     {
       "name": "source_video",
       "type": "file",
-      "accept": [
-        "video/mp4",
-        "video/quicktime",
-        "video/x-matroska",
-        ".mp4",
-        ".mov",
-        ".mkv"
-      ],
+      "accept": ["video/mp4", "video/quicktime", "video/x-matroska", ".mp4", ".mov", ".mkv"],
       "required": true,
       "description": "Long-form source video (vlog raw footage)."
     },
@@ -43,12 +36,8 @@
       {
         "id": "probe",
         "description": "Read source video metadata (duration, resolution, fps, audio sample rate).",
-        "inputs": [
-          "source_video"
-        ],
-        "outputs": [
-          "metadata.json"
-        ],
+        "inputs": ["source_video"],
+        "outputs": ["metadata.json"],
         "hints": {
           "tool": "ffprobe",
           "command": "ffprobe -v error -print_format json -show_format -show_streams <input>"
@@ -60,12 +49,8 @@
       {
         "id": "detect_silence",
         "description": "Run ffmpeg silencedetect on the audio track to log every silent interval at noise=-30dB.",
-        "inputs": [
-          "source_video"
-        ],
-        "outputs": [
-          "silence_log.txt"
-        ],
+        "inputs": ["source_video"],
+        "outputs": ["silence_log.txt"],
         "hints": {
           "tool": "ffmpeg",
           "command": "ffmpeg -i <input> -af silencedetect=noise=-30dB:d=<min_gap> -f null - 2> silence_log.txt"
@@ -77,13 +62,8 @@
       {
         "id": "compute_keep_intervals",
         "description": "Parse silence_log.txt for silence_start/silence_end pairs; invert them against [0, duration] to produce a list of keep-intervals.",
-        "inputs": [
-          "silence_log.txt",
-          "metadata.json"
-        ],
-        "outputs": [
-          "keep_intervals.json"
-        ],
+        "inputs": ["silence_log.txt", "metadata.json"],
+        "outputs": ["keep_intervals.json"],
         "hints": {
           "tool": "python3 or node",
           "logic": "regex 'silence_start: X' and 'silence_end: Y'; build kept segments as gaps between them"
@@ -95,13 +75,8 @@
       {
         "id": "cut_and_concat",
         "description": "Build a single ffmpeg filter_complex that trims each keep-interval from the source and concats them in order; re-encode H.264 CRF 23 preset fast + AAC.",
-        "inputs": [
-          "source_video",
-          "keep_intervals.json"
-        ],
-        "outputs": [
-          "edited_video"
-        ],
+        "inputs": ["source_video", "keep_intervals.json"],
+        "outputs": ["edited_video"],
         "hints": {
           "tool": "ffmpeg",
           "command": "ffmpeg -i <input> -filter_complex '<trim+concat per interval>' -c:v libx264 -crf 23 -preset fast -c:a aac <output.mp4>"
@@ -114,9 +89,7 @@
   },
   "runtime": {
     "needsLLM": false,
-    "binaryDeps": [
-      "ffmpeg"
-    ],
+    "binaryDeps": ["ffmpeg"],
     "estimatedRuntimeSec": 900,
     "estimatedFileSizeMB": 400,
     "typicalInputDurationMin": 45

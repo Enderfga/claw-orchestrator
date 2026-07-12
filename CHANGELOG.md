@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.8.0] - 2026-07-12
+
+### Added
+- **Per-role Autoloop engines** (closes #72). Planner, Coder, and Reviewer can independently use any built-in engine; a custom engine may additionally be supplied by a local caller. Existing runs keep the Claude defaults (`opus` for Planner, `sonnet` for Coder/Reviewer); non-Claude roles use their engine's default model when no model is supplied. Planner `spawn_subagents` can override Coder/Reviewer engine and model without accepting custom configuration data.
+- **Conversation replay for engines without native multi-turn.** Claude (persistent process), Codex (thread resume) and Antigravity (`--conversation`) carry context themselves; Gemini, Cursor, OpenCode and one-shot custom engines spawn a fresh process per send, so the dispatcher now replays the role's transcript in-band (`<conversation_history>`, oldest turns dropped past a character budget). Without this a non-Claude Planner forgot the plan it had just proposed on every turn.
+- **`sandboxMode: 'read-only'` is now enforced on every engine that accepts it**, not just Codex: Claude maps it to plan mode, Gemini to `--approval-mode plan` **plus an admin policy denying `exit_plan_mode`** (plan mode alone is model-cooperative and can be escaped), Antigravity/Cursor to their plan modes, and OpenCode to a generated `clawo-readonly` agent whose permissions deny `edit`/`bash`/`external_directory` (its built-in `plan` agent is a user-overridable preset that denies neither). A custom engine that cannot express read-only now refuses to start rather than silently running write-enabled.
+
+### Changed
+- Built-in non-Claude Autoloop roles receive their role protocol in-band. Non-Claude Planners start in their engine's read-only/plan mode.
+- Autoloop registry entries retain each role's effective engine/model selection, including successful `spawn_subagents` overrides, and are now written as an upsert — a run keeps one row instead of accumulating one per start, spawn and resume.
+- `spawn_subagents` rejects engine/model changes after the corresponding session starts, rolls back a newly started Coder if Reviewer startup fails, and drops a prior model when switching to a different engine without an explicit replacement. If a rollback stop fails, the role stays marked as started so a later engine change is rejected rather than silently reusing the old engine's process.
+- Invalid role engines, malformed or missing custom configurations, reserved session-name collisions, and failed Planner startup fail explicitly without leaving a half-created run. Deleting a run whose Planner is still starting is now rejected instead of orphaning the session. HTTP surfaces every custom-engine config complaint as a 400 rather than a 500.
+- Codex sessions persist the real thread ID, so resumed Codex Planners retain their conversation instead of starting a fresh thread.
+- Tested-engine pins updated to Claude Code **2.1.207**, Codex **0.144.1**, Gemini **0.43.0**, Antigravity **1.1.1**, Cursor Agent **2026.04.08-a41fba1**, and OpenCode **1.1.40**.
+
+### Notes
+- **Custom engines are local-only by design.** A custom engine names an executable to spawn (plus argv and env), so it may only be configured by a local caller — the MCP tool or the `SessionManager` API. The HTTP API (`POST /autoloop/new`, `POST /autoloop/<id>/resume`) accepts built-in engines only and rejects a `*_custom_engine` body field with a 400. The embedded server is often reverse-tunnelled and its token is a monitoring credential; it is not a channel for choosing what binary the host runs.
+
 ## [4.7.0] - 2026-07-10
 
 ### Added

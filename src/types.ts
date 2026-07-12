@@ -257,10 +257,11 @@ export interface SessionConfig {
    * Accepts a single URL or array. No effect when engine is not 'claude'.
    */
   pluginUrl?: string | string[];
-  // ─── Codex (codex CLI) ────────────────────────────────────────────────
+  // ─── Sandbox policy ───────────────────────────────────────────────────
   /**
-   * Codex sandbox policy. Replaces the deprecated `--full-auto` flag in Codex 0.124+.
-   * Defaults to 'workspace-write' (matches the legacy --full-auto behavior).
+   * Sandbox policy. Codex supports all values; other built-in engines consume
+   * `read-only` as their native plan/read-only mode when available.
+   * Defaults to 'workspace-write' for Codex.
    */
   sandboxMode?: 'read-only' | 'workspace-write' | 'danger-full-access';
   /**

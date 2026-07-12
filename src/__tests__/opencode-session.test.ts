@@ -106,6 +106,33 @@ describe('PersistentOpencodeSession', () => {
       expect(spawnArgs).not.toContain('--dangerously-skip-permissions');
     });
 
+    it('uses the plan agent for read-only sessions', async () => {
+      const session = new PersistentOpencodeSession({
+        name: 'test',
+        cwd: '/tmp',
+        permissionMode: 'manual',
+        sandboxMode: 'read-only',
+      });
+      await session.start();
+
+      const sendPromise = session.send('hello', { waitForComplete: true });
+      setTimeout(() => closeProc(mockProc, 0), 10);
+      await sendPromise;
+
+      const spawnArgs = mockSpawn.mock.calls[0][1] as string[];
+      expect(spawnArgs).toContain('--agent');
+      expect(spawnArgs).toContain('clawo-readonly');
+      const spawnOptions = mockSpawn.mock.calls[0][2] as { env: Record<string, string> };
+      const config = JSON.parse(spawnOptions.env.OPENCODE_CONFIG_CONTENT) as {
+        agent: Record<string, { permission: Record<string, string> }>;
+      };
+      expect(config.agent['clawo-readonly'].permission).toMatchObject({
+        edit: 'deny',
+        bash: 'deny',
+        external_directory: 'deny',
+      });
+    });
+
     it('passes --model only when model contains "/"', async () => {
       const session = new PersistentOpencodeSession({
         name: 'test',

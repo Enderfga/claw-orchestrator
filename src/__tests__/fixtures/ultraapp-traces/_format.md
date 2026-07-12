@@ -59,5 +59,5 @@ against their frozen AppSpec snapshots:
 
 To author a new trace, set `UA_DEBUG_TURNS=<dir>` on the server, drive an
 interview to completion, and the script in this directory's git history
-shows the reconstruction recipe (parse turn outputs → claude-* + user-*
+shows the reconstruction recipe (parse turn outputs → claude-_ + user-_
 JSONL entries; final on-disk `spec.json` becomes the expected snapshot).

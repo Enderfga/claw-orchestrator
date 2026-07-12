@@ -23,6 +23,7 @@ import type {
 class MockSession extends EventEmitter implements ISession {
   sessionId?: string;
   conversationId?: string;
+  threadId?: string;
   private _isReady = true;
   private _isPaused = false;
   private _isBusy = false;
@@ -181,6 +182,7 @@ vi.mock('node:fs', async () => {
         return actual.readFileSync(p, enc as BufferEncoding);
       }),
       writeFileSync: vi.fn((..._args: unknown[]) => {}),
+      appendFileSync: vi.fn((..._args: unknown[]) => {}),
       mkdirSync: vi.fn((..._args: unknown[]) => {}),
       renameSync: vi.fn((..._args: unknown[]) => {}),
       writeFile: vi.fn((_p: unknown, _d: unknown, cb: (err: null) => void) => cb(null)),
@@ -197,6 +199,7 @@ vi.mock('node:fs', async () => {
       return actual.readFileSync(p, enc as BufferEncoding);
     }),
     writeFileSync: vi.fn((..._args: unknown[]) => {}),
+    appendFileSync: vi.fn((..._args: unknown[]) => {}),
     mkdirSync: vi.fn((..._args: unknown[]) => {}),
     renameSync: vi.fn((..._args: unknown[]) => {}),
     writeFile: vi.fn((_p: unknown, _d: unknown, cb: (err: null) => void) => cb(null)),
@@ -1216,6 +1219,228 @@ describe('SessionManager', () => {
     });
   });
 
+  // ─── Autoloop role configuration ───────────────────────────────────
+
+  describe('autoloop role configuration', () => {
+    it('passes independent role engines, models, and custom configs into dispatcher sessions', async () => {
+      const coderCustomEngine = { name: 'coder-cli', bin: 'coder-cli', args: {} };
+      await mgr.autoloopStart({
+        runId: 'multi-engine',
+        workspace: '/tmp',
+        plannerEngine: 'codex',
+        coderEngine: 'custom',
+        coderModel: 'coder-model',
+        coderCustomEngine,
+        reviewerEngine: 'gemini',
+        reviewerModel: 'reviewer-model',
+      });
+      await mgr.getAutoloop('multi-engine')!.dispatcher.spawnSubagents();
+
+      expect(createdConfigs[0]).toMatchObject({
+        name: 'autoloop-multi-engine-planner',
+        engine: 'codex',
+        model: undefined,
+      });
+      expect(createdConfigs[1]).toMatchObject({
+        name: 'autoloop-multi-engine-coder',
+        engine: 'custom',
+        model: 'coder-model',
+        customEngine: coderCustomEngine,
+      });
+      expect(createdConfigs[2]).toMatchObject({
+        name: 'autoloop-multi-engine-reviewer',
+        engine: 'gemini',
+        model: 'reviewer-model',
+      });
+    });
+
+    it('suppresses a global default model for non-Claude roles with no explicit model', async () => {
+      await mgr.shutdown();
+      mgr = createManager({ defaultModel: 'global-claude-default' });
+
+      await mgr.autoloopStart({ runId: 'no-global-model', workspace: '/tmp', plannerEngine: 'codex' });
+
+      expect(createdConfigs[0]).toHaveProperty('model', undefined);
+    });
+
+    it('rejects an unknown role engine before creating a session', async () => {
+      await expect(
+        mgr.autoloopStart({
+          runId: 'bad-engine',
+          workspace: '/tmp',
+          plannerEngine: 'not-real' as 'claude',
+        }),
+      ).rejects.toThrow("Planner engine 'not-real' is not supported");
+      expect(createdConfigs).toEqual([]);
+    });
+
+    it('rejects a custom Planner without its trusted config before creating a session', async () => {
+      await expect(
+        mgr.autoloopStart({ runId: 'missing-custom', workspace: '/tmp', plannerEngine: 'custom' }),
+      ).rejects.toThrow('Planner custom engine config is required');
+      expect(createdConfigs).toEqual([]);
+    });
+
+    it('rejects malformed custom engine configs before creating a session', async () => {
+      await expect(
+        mgr.autoloopStart({
+          runId: 'malformed-custom',
+          workspace: '/tmp',
+          plannerEngine: 'custom',
+          plannerCustomEngine: {
+            name: 'bad-custom',
+            bin: 'custom-cli',
+            args: null,
+          } as unknown as NonNullable<SessionConfig['customEngine']>,
+        }),
+      ).rejects.toThrow('Planner custom engine config.args must be an object');
+      expect(createdConfigs).toEqual([]);
+
+      await expect(
+        mgr.autoloopStart({
+          runId: 'malformed-custom-flag',
+          workspace: '/tmp',
+          plannerEngine: 'custom',
+          plannerCustomEngine: {
+            name: 'bad-custom',
+            bin: 'custom-cli',
+            args: { permissionMode: 42 },
+          } as unknown as NonNullable<SessionConfig['customEngine']>,
+        }),
+      ).rejects.toThrow('Planner custom engine config.args.permissionMode must be a string');
+      expect(createdConfigs).toEqual([]);
+    });
+
+    it('rejects an autoloop whose reserved Planner session name is already active', async () => {
+      await mgr.startSession({
+        name: 'autoloop-name-collision-planner',
+        cwd: '/tmp',
+        engine: 'cursor',
+        sandboxMode: 'workspace-write',
+      });
+
+      await expect(
+        mgr.autoloopStart({ runId: 'name-collision', workspace: '/tmp', plannerEngine: 'codex' }),
+      ).rejects.toThrow("Autoloop session name 'autoloop-name-collision-planner' is already in use");
+      expect(mgr.getAutoloop('name-collision')).toBeUndefined();
+    });
+
+    it('rejects delete while an Autoloop Planner is still starting', async () => {
+      let releaseStart!: () => void;
+      const startGate = new Promise<void>((resolve) => {
+        releaseStart = resolve;
+      });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (mgr as any)._createSession = (): ISession => {
+        const mock = new MockSession();
+        mock.start = async () => {
+          await startGate;
+          mock.sessionId = 'slow-planner-session';
+          return mock;
+        };
+        mockSessions.push(mock);
+        return mock;
+      };
+
+      const starting = mgr.autoloopStart({ runId: 'slow-start', workspace: '/tmp' });
+      await vi.waitFor(() => expect(mgr.getAutoloop('slow-start')).toBeDefined());
+
+      await expect(mgr.autoloopDelete('slow-start')).rejects.toThrow("Autoloop with id 'slow-start' is still starting");
+      releaseStart();
+      await expect(starting).resolves.toMatchObject({ runId: 'slow-start' });
+    });
+
+    it('removes a failed autoloop start so the same run id can be retried', async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (mgr as any)._createSession = (): ISession => {
+        const mock = new MockSession();
+        mock.start = async () => {
+          throw new Error('planner startup failed');
+        };
+        return mock;
+      };
+
+      await expect(mgr.autoloopStart({ runId: 'retry-start', workspace: '/tmp' })).rejects.toThrow(
+        'planner startup failed',
+      );
+      expect(mgr.getAutoloop('retry-start')).toBeUndefined();
+
+      patchCreateSession(mgr);
+      await expect(mgr.autoloopStart({ runId: 'retry-start', workspace: '/tmp' })).resolves.toMatchObject({
+        runId: 'retry-start',
+      });
+    });
+
+    it('leaves the existing registry row untouched when resume startup fails', async () => {
+      const mockedFs = await import('node:fs');
+      const existsMock = vi.mocked(mockedFs.existsSync);
+      const readMock = vi.mocked(mockedFs.readFileSync);
+      const previousExists = existsMock.getMockImplementation()!;
+      const previousRead = readMock.getMockImplementation()!;
+      const entry = {
+        run_id: 'resume-no-scrub',
+        workspace: '/tmp',
+        ledger_dir: '/tmp/tasks/resume-no-scrub',
+        started_at: '2026-07-12T00:00:00.000Z',
+        planner_session: 'autoloop-resume-no-scrub-planner',
+      };
+      existsMock.mockImplementation((file) =>
+        String(file).includes('autoloop-registry.jsonl') || String(file) === entry.ledger_dir
+          ? true
+          : previousExists(file),
+      );
+      readMock.mockImplementation((file, encoding) =>
+        String(file).includes('autoloop-registry.jsonl') ? `${JSON.stringify(entry)}\n` : previousRead(file, encoding),
+      );
+      vi.mocked(mockedFs.renameSync).mockClear();
+      vi.mocked(mockedFs.appendFileSync).mockClear();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (mgr as any)._createSession = (): ISession => {
+        const mock = new MockSession();
+        mock.start = async () => {
+          throw new Error('resume planner failed');
+        };
+        return mock;
+      };
+
+      try {
+        await expect(mgr.autoloopResume('resume-no-scrub')).rejects.toThrow('resume planner failed');
+        expect(mockedFs.renameSync).not.toHaveBeenCalled();
+        const registryAppends = vi
+          .mocked(mockedFs.appendFileSync)
+          .mock.calls.filter(([file]) => String(file).includes('autoloop-registry.jsonl'));
+        expect(registryAppends).toEqual([]);
+      } finally {
+        existsMock.mockImplementation(previousExists);
+        readMock.mockImplementation(previousRead);
+      }
+    });
+
+    it('persists successful spawn engine and model overrides to the registry', async () => {
+      await mgr.autoloopStart({ runId: 'spawn-persist', workspace: '/tmp' });
+      const mockedFs = await import('node:fs');
+      vi.mocked(mockedFs.appendFileSync).mockClear();
+
+      await mgr.getAutoloop('spawn-persist')!.dispatcher.spawnSubagents({
+        coder_engine: 'codex',
+        coder_model: 'gpt-coder',
+        reviewer_engine: 'gemini',
+      });
+
+      const registryWrites = vi
+        .mocked(mockedFs.appendFileSync)
+        .mock.calls.filter(([file]) => String(file).includes('autoloop-registry.jsonl'));
+      expect(registryWrites).toHaveLength(1);
+      const entry = JSON.parse(String(registryWrites[0][1]));
+      expect(entry).toMatchObject({
+        run_id: 'spawn-persist',
+        coder_engine: 'codex',
+        coder_model: 'gpt-coder',
+        reviewer_engine: 'gemini',
+      });
+    });
+  });
+
   // ─── Persisted Sessions ─────────────────────────────────────────────
 
   describe('persisted sessions', () => {
@@ -1236,6 +1461,37 @@ describe('SessionManager', () => {
 
       await mgr.stopSession('persist-remove');
       expect(mgr.listPersistedSessions().find((p) => p.name === 'persist-remove')).toBeUndefined();
+    });
+
+    it('persists and restores sandboxMode for non-Claude sessions', async () => {
+      await mgr.startSession({
+        name: 'readonly-persist',
+        cwd: '/tmp',
+        engine: 'cursor',
+        sandboxMode: 'read-only',
+      });
+      await mgr.stopSession('readonly-persist', { keepPersisted: true });
+      await mgr.startSession({ name: 'readonly-persist', cwd: '/tmp' });
+
+      expect(createdConfigs.at(-1)).toMatchObject({
+        engine: 'cursor',
+        sandboxMode: 'read-only',
+      });
+    });
+
+    it('persists and restores the real Codex thread ID', async () => {
+      await mgr.startSession({ name: 'codex-persist', cwd: '/tmp', engine: 'codex', sandboxMode: 'read-only' });
+      lastMock().threadId = '019c6dcb-93ad-7dc1-b531-418d213b8761';
+      await mgr.sendMessage('codex-persist', 'hello');
+      await mgr.stopSession('codex-persist', { keepPersisted: true });
+
+      await mgr.startSession({ name: 'codex-persist', cwd: '/tmp' });
+
+      expect(createdConfigs.at(-1)).toMatchObject({
+        engine: 'codex',
+        sandboxMode: 'read-only',
+        resumeSessionId: '019c6dcb-93ad-7dc1-b531-418d213b8761',
+      });
     });
 
     it('persists the agy conversation UUID after first send and never the synthetic session ID', async () => {

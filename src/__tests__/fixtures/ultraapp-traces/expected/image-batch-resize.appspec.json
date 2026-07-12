@@ -48,13 +48,8 @@
       {
         "id": "resize",
         "description": "对每张输入图按 target_width 等比缩放",
-        "inputs": [
-          "images",
-          "target_width"
-        ],
-        "outputs": [
-          "resized_images"
-        ],
+        "inputs": ["images", "target_width"],
+        "outputs": ["resized_images"],
         "hints": {
           "tool": "Pillow (PIL.Image.thumbnail / resize with LANCZOS)"
         },
@@ -65,14 +60,8 @@
       {
         "id": "watermark",
         "description": "把水印按 watermark_scale_percent% × 缩放后图片宽度 等比缩放，再粘贴到右下角",
-        "inputs": [
-          "resized_images",
-          "watermark",
-          "watermark_scale_percent"
-        ],
-        "outputs": [
-          "watermarked_images"
-        ],
+        "inputs": ["resized_images", "watermark", "watermark_scale_percent"],
+        "outputs": ["watermarked_images"],
         "hints": {
           "tool": "Pillow (Image.paste with alpha mask)",
           "notes": "padding = max(round(resized_width * 0.02), 4) 像素；水印按原 alpha 通道贴；如果水印不是 RGBA，先转 RGBA"
@@ -84,12 +73,8 @@
       {
         "id": "package",
         "description": "把所有处理后的图片打成 zip，保持每张图原始格式（JPEG/PNG/WebP）和原文件名",
-        "inputs": [
-          "watermarked_images"
-        ],
-        "outputs": [
-          "processed_zip"
-        ],
+        "inputs": ["watermarked_images"],
+        "outputs": ["processed_zip"],
         "hints": {
           "tool": "Python stdlib zipfile",
           "notes": "JPEG 用 quality=95 保存以避免二次压缩明显劣化；PNG/WebP 无损保存"
@@ -102,10 +87,7 @@
   },
   "runtime": {
     "needsLLM": false,
-    "binaryDeps": [
-      "python3",
-      "Pillow>=10.0"
-    ],
+    "binaryDeps": ["python3", "Pillow>=10.0"],
     "estimatedRuntimeSec": 30,
     "estimatedFileSizeMB": 100,
     "notes": "运行时与图片数量、分辨率线性相关。Pillow LANCZOS 缩放 + alpha 粘贴在 CPU 上单线程足够；批量大时可加 multiprocessing。"

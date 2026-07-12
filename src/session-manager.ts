@@ -47,6 +47,7 @@ interface PersistedSession {
   cwd: string;
   model?: string;
   engine?: EngineType;
+  sandboxMode?: SessionConfig['sandboxMode'];
   originalCreated: string;
   lastResumed: string;
   lastActivity: number;
@@ -135,7 +136,9 @@ import {
   type SendResult,
   type PluginConfig,
   type EffortLevel,
+  ENGINE_TYPES,
   type EngineType,
+  type CustomEngineConfig,
   type AgentInfo,
   type SkillInfo,
   type RuleInfo,
@@ -259,11 +262,104 @@ export interface AutoloopRegistryEntry {
   ledger_dir: string;
   started_at: string;
   planner_session: string;
+  /** Optional for compatibility with registry rows written before role-level engine support. */
+  planner_engine?: EngineType;
+  planner_model?: string;
+  coder_engine?: EngineType;
+  coder_model?: string;
+  reviewer_engine?: EngineType;
+  reviewer_model?: string;
+}
+
+type AutoloopRoleName = 'planner' | 'coder' | 'reviewer';
+
+function isStringRecord(value: unknown): value is Record<string, string> {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    !Array.isArray(value) &&
+    Object.values(value).every((entry) => typeof entry === 'string')
+  );
+}
+
+function validateAutoloopCustomEngine(role: AutoloopRoleName, config: CustomEngineConfig): void {
+  const label = role[0].toUpperCase() + role.slice(1);
+  const raw = config as unknown as Record<string, unknown>;
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    throw new Error(`${label} custom engine config must be an object`);
+  }
+  if (typeof raw.name !== 'string' || !raw.name.trim()) {
+    throw new Error(`${label} custom engine config.name must be a non-empty string`);
+  }
+  if (typeof raw.bin !== 'string' || !raw.bin.trim()) {
+    throw new Error(`${label} custom engine config.bin must be a non-empty string`);
+  }
+  if (typeof raw.args !== 'object' || raw.args === null || Array.isArray(raw.args)) {
+    throw new Error(`${label} custom engine config.args must be an object`);
+  }
+  for (const [key, value] of Object.entries(raw.args)) {
+    if (value === undefined) continue;
+    if (key === 'extra') {
+      if (!Array.isArray(value) || value.some((entry) => typeof entry !== 'string')) {
+        throw new Error(`${label} custom engine config.args.extra must be an array of strings`);
+      }
+    } else if (typeof value !== 'string') {
+      throw new Error(`${label} custom engine config.args.${key} must be a string`);
+    }
+  }
+  if (raw.persistent !== undefined && typeof raw.persistent !== 'boolean') {
+    throw new Error(`${label} custom engine config.persistent must be a boolean`);
+  }
+  if (raw.env !== undefined && !isStringRecord(raw.env)) {
+    throw new Error(`${label} custom engine config.env must contain only string values`);
+  }
+  if (raw.permissionModes !== undefined && !isStringRecord(raw.permissionModes)) {
+    throw new Error(`${label} custom engine config.permissionModes must contain only string values`);
+  }
+  if (
+    raw.sanitizePatterns !== undefined &&
+    (!Array.isArray(raw.sanitizePatterns) || raw.sanitizePatterns.some((entry) => typeof entry !== 'string'))
+  ) {
+    throw new Error(`${label} custom engine config.sanitizePatterns must be an array of strings`);
+  }
+}
+
+function validateAutoloopRole(
+  role: AutoloopRoleName,
+  engine: EngineType | undefined,
+  customEngine: CustomEngineConfig | undefined,
+): EngineType {
+  const resolved = engine ?? 'claude';
+  const label = role[0].toUpperCase() + role.slice(1);
+  if (!ENGINE_TYPES.includes(resolved)) {
+    throw new Error(`${label} engine '${String(resolved)}' is not supported`);
+  }
+  if (resolved === 'custom') {
+    if (!customEngine) throw new Error(`${label} custom engine config is required`);
+    validateAutoloopCustomEngine(role, customEngine);
+  }
+  return resolved;
 }
 
 /** Append-only registry write. Safe under concurrent writers — append is atomic for short lines. */
 export function appendAutoloopRegistry(file: string, entry: AutoloopRegistryEntry): void {
   fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.appendFileSync(file, JSON.stringify(entry) + '\n');
+}
+
+/**
+ * Write the current row for a run, dropping any older rows for the same id.
+ *
+ * The registry is append-only and `listAutoloopsFromRegistry` dedups on read
+ * (newest wins), so correctness never depended on cleanup — but a run now emits
+ * a row at start, another on every successful `spawn_subagents`, and another on
+ * every resume, none of which were ever removed. The file grew monotonically and
+ * every list / resume parses all of it. Callers use this AFTER the operation
+ * succeeds, so a failed start still leaves the previous row intact.
+ */
+export function upsertAutoloopRegistry(file: string, entry: AutoloopRegistryEntry): void {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  removeAutoloopFromRegistry(file, entry.run_id);
   fs.appendFileSync(file, JSON.stringify(entry) + '\n');
 }
 
@@ -496,12 +592,23 @@ export class SessionManager {
     // Unified: only use resumeSessionId (claudeResumeId is an internal alias, not exposed)
     const resumeId = config.resumeSessionId ?? persisted?.claudeSessionId;
 
+    // ORDER IS LOAD-BEARING — do not "fix" it by moving `...config` up.
+    //
+    // Object spread copies own keys even when their value is `undefined`, so any
+    // key the caller sets EXPLICITLY (even to undefined) wins over the resolved
+    // fallbacks above it. That is deliberate: the autoloop dispatcher passes
+    // `model: undefined` for a non-Claude role to mean "use that engine's own
+    // default", which must NOT be replaced by the Claude-shaped global default;
+    // likewise `sandboxMode: undefined` means "no sandbox". Callers that simply
+    // omit a key (MCP session_start, HTTP /session/start, auto-resume by name)
+    // leave it absent, so the persisted/default fallback below still applies.
     const fullConfig: SessionConfig = {
       name,
       cwd: config.cwd || persisted?.cwd || process.cwd(),
       permissionMode: config.permissionMode || this.pluginConfig.defaultPermissionMode,
       effort: config.effort || this.pluginConfig.defaultEffort,
       model: config.model || persisted?.model || this.pluginConfig.defaultModel,
+      sandboxMode: config.sandboxMode ?? persisted?.sandboxMode,
       ...config,
       ...(resumeId ? { resumeSessionId: resumeId } : {}),
     };
@@ -1660,6 +1767,7 @@ export class SessionManager {
       cwd: managed.cwd,
       model: managed.config.resolvedModel || managed.config.model,
       engine: managed.config.engine,
+      sandboxMode: managed.config.sandboxMode,
       originalCreated: existing?.originalCreated || managed.created,
       lastResumed: new Date().toISOString(),
       lastActivity: managed.lastActivity,
@@ -1875,20 +1983,24 @@ export class SessionManager {
   }
 
   /**
-   * Return only IDs that can actually resume the engine. For agy,
-   * session.sessionId is synthetic (`agy-<ts>-<rand>`); only the harvested
-   * conversation UUID works with `--conversation`.
+   * Return only IDs that can actually resume the engine. Agy and Codex expose
+   * harvested conversation/thread IDs; their BaseOneShot sessionId values are
+   * synthetic wrapper identifiers and must never be persisted for resume.
    */
   private _sessionResumeId(engine: EngineType | undefined, session: ISession): string | undefined {
     if (engine === 'agy') {
       const conversationId = (session as { conversationId?: string }).conversationId;
       return isAgyConversationId(conversationId) ? conversationId : undefined;
     }
+    if (engine === 'codex') {
+      return (session as { threadId?: string }).threadId;
+    }
     return session.sessionId;
   }
 
   private _storedResumeId(engine: EngineType | undefined, id: string | undefined): string | undefined {
     if (engine === 'agy') return isAgyConversationId(id) ? id : undefined;
+    if (engine === 'codex') return id && !/^codex-\d+-/.test(id) ? id : undefined;
     return id;
   }
 
@@ -2488,6 +2600,14 @@ export class SessionManager {
   // concurrent autoloopStart recreating the same id (or autoloopChat using a
   // dispatcher mid-shutdown) during the async delete window.
   private _deletingAutoloops = new Set<string>();
+  /**
+   * Runs whose Planner is mid-startup. The delete fence was one-directional:
+   * a start could not race a delete, but a delete COULD race a start — it would
+   * resolve `true`, drop the registry row, and leave the still-starting Planner
+   * session orphaned (no run to stop it, no entry to find it by). Deleting a run
+   * that is still coming up is rejected instead.
+   */
+  private _startingAutoloops = new Set<string>();
 
   /**
    * Start a v2 autoloop in chat mode. Creates the Planner persistent session,
@@ -2498,7 +2618,15 @@ export class SessionManager {
     runId: string;
     workspace: string;
     plannerPromptPath?: string;
+    plannerEngine?: EngineType;
     plannerModel?: string;
+    plannerCustomEngine?: CustomEngineConfig;
+    coderEngine?: EngineType;
+    coderModel?: string;
+    coderCustomEngine?: CustomEngineConfig;
+    reviewerEngine?: EngineType;
+    reviewerModel?: string;
+    reviewerCustomEngine?: CustomEngineConfig;
     sendTimeoutMs?: number;
   }): Promise<{ runId: string; plannerSession: string; state: AutoloopState }> {
     if (this.autoloops.has(opts.runId)) {
@@ -2506,6 +2634,15 @@ export class SessionManager {
     }
     if (this._deletingAutoloops.has(opts.runId)) {
       throw new Error(`Autoloop with id '${opts.runId}' is being deleted`);
+    }
+    const plannerEngine = validateAutoloopRole('planner', opts.plannerEngine, opts.plannerCustomEngine);
+    const coderEngine = validateAutoloopRole('coder', opts.coderEngine, opts.coderCustomEngine);
+    const reviewerEngine = validateAutoloopRole('reviewer', opts.reviewerEngine, opts.reviewerCustomEngine);
+    for (const role of ['planner', 'coder', 'reviewer'] as const) {
+      const sessionName = `autoloop-${opts.runId}-${role}`;
+      if (this.sessions.has(sessionName) || this._pendingSessions.has(sessionName)) {
+        throw new Error(`Autoloop session name '${sessionName}' is already in use`);
+      }
     }
     const ledgerDir = path.join(opts.workspace, 'tasks', opts.runId);
     if (!fs.existsSync(ledgerDir)) {
@@ -2522,7 +2659,15 @@ export class SessionManager {
       runId: opts.runId,
       workspace: opts.workspace,
       plannerPromptPath: opts.plannerPromptPath,
+      plannerEngine,
       plannerModel: opts.plannerModel,
+      plannerCustomEngine: opts.plannerCustomEngine,
+      coderEngine,
+      coderModel: opts.coderModel,
+      coderCustomEngine: opts.coderCustomEngine,
+      reviewerEngine,
+      reviewerModel: opts.reviewerModel,
+      reviewerCustomEngine: opts.reviewerCustomEngine,
       sendTimeoutMs: opts.sendTimeoutMs,
       logger: this.logger,
       pushPolicyRef: pushPolicy,
@@ -2530,6 +2675,25 @@ export class SessionManager {
         this.logger.info?.(`[autoloop/${runId}] spawn_subagents starting Coder + Reviewer sessions`);
         await dispatcherRef?.spawnSubagents(args);
         runnerRef?.markSubagentsSpawned();
+      },
+      onRoleSelectionChanged: async (selection) => {
+        try {
+          upsertAutoloopRegistry(DEFAULT_AUTOLOOP_REGISTRY, {
+            run_id: runId,
+            workspace: opts.workspace,
+            ledger_dir: ledgerDir,
+            started_at: runnerRef?.state.started_at ?? new Date().toISOString(),
+            planner_session: dispatcherRef?.sessionNames.planner ?? `autoloop-${runId}-planner`,
+            planner_engine: plannerEngine,
+            planner_model: opts.plannerModel,
+            coder_engine: selection.coder.engine,
+            coder_model: selection.coder.model,
+            reviewer_engine: selection.reviewer.engine,
+            reviewer_model: selection.reviewer.model,
+          });
+        } catch (err) {
+          this.logger.warn?.(`[autoloop/${runId}] registry update after spawn failed: ${(err as Error).message}`);
+        }
       },
     };
     const dispatcher = new ClaudeAgentDispatcher(dispatcherConfig);
@@ -2569,17 +2733,37 @@ export class SessionManager {
       ledgerDir,
       pushPolicy,
     });
-    await runner.start();
+    this._startingAutoloops.add(opts.runId);
+    try {
+      await runner.start();
+    } catch (err) {
+      this.autoloops.delete(opts.runId);
+      try {
+        await dispatcher.shutdown('start-failed', { purge: true });
+      } catch (cleanupErr) {
+        this.logger.warn?.(`[autoloop/${runId}] cleanup after failed start failed: ${(cleanupErr as Error).message}`);
+      }
+      runner.stop();
+      throw err;
+    } finally {
+      this._startingAutoloops.delete(opts.runId);
+    }
     // Record into the cross-process registry so the dashboard / another
     // SessionManager instance can list this run even after it ends. Best
     // effort — registry failure should not block the run.
     try {
-      appendAutoloopRegistry(DEFAULT_AUTOLOOP_REGISTRY, {
+      upsertAutoloopRegistry(DEFAULT_AUTOLOOP_REGISTRY, {
         run_id: opts.runId,
         workspace: opts.workspace,
         ledger_dir: ledgerDir,
         started_at: runner.state.started_at,
         planner_session: dispatcher.sessionNames.planner,
+        planner_engine: plannerEngine,
+        planner_model: opts.plannerModel,
+        coder_engine: coderEngine,
+        coder_model: opts.coderModel,
+        reviewer_engine: reviewerEngine,
+        reviewer_model: opts.reviewerModel,
       });
     } catch (err) {
       this.logger.warn?.(`[autoloop/${runId}] registry append failed: ${(err as Error).message}`);
@@ -2705,28 +2889,42 @@ export class SessionManager {
    * is still served via /autoloop/<id>/chat_history so the dashboard can
    * replay the conversation visually.
    */
-  async autoloopResume(runId: string): Promise<AutoloopState> {
+  async autoloopResume(
+    runId: string,
+    opts: {
+      plannerCustomEngine?: CustomEngineConfig;
+      coderCustomEngine?: CustomEngineConfig;
+      reviewerCustomEngine?: CustomEngineConfig;
+    } = {},
+  ): Promise<AutoloopState> {
     const existing = this.autoloops.get(runId);
     if (existing) return existing.runner.state;
 
     const entry = listAutoloopsFromRegistry().find((e) => e.run_id === runId);
     if (!entry) throw new Error(`Autoloop run '${runId}' not found in registry`);
 
-    // Scrub the prior registry row before autoloopStart appends a new one.
-    // Without this, every resume leaves a duplicate JSONL line; listAutoloops
-    // dedups on read (newest wins), but the file grows monotonically and the
-    // postmortem ledger becomes hard to scan. Best-effort — we don't block
-    // the resume on a registry write failure.
-    try {
-      removeAutoloopFromRegistry(DEFAULT_AUTOLOOP_REGISTRY, runId);
-    } catch (err) {
-      this.logger.warn?.(`[autoloop/${runId}] registry scrub during resume failed: ${(err as Error).message}`);
-    }
+    // Validate the full restart configuration before touching the registry.
+    // Old rows omit these fields and intentionally recover the legacy Claude defaults.
+    const plannerEngine = validateAutoloopRole('planner', entry.planner_engine, opts.plannerCustomEngine);
+    const coderEngine = validateAutoloopRole('coder', entry.coder_engine, opts.coderCustomEngine);
+    const reviewerEngine = validateAutoloopRole('reviewer', entry.reviewer_engine, opts.reviewerCustomEngine);
 
+    // The registry is append-only and newest entry wins. Leave the prior row
+    // untouched while starting so a transient failure cannot erase or restore
+    // stale cross-process state. A successful start appends the replacement.
     return (
       await this.autoloopStart({
         runId: entry.run_id,
         workspace: entry.workspace,
+        plannerEngine,
+        plannerModel: entry.planner_model,
+        plannerCustomEngine: opts.plannerCustomEngine,
+        coderEngine,
+        coderModel: entry.coder_model,
+        coderCustomEngine: opts.coderCustomEngine,
+        reviewerEngine,
+        reviewerModel: entry.reviewer_model,
+        reviewerCustomEngine: opts.reviewerCustomEngine,
       })
     ).state;
   }
@@ -2741,6 +2939,12 @@ export class SessionManager {
    * Returns true if anything was removed (in-memory entry OR registry row).
    */
   async autoloopDelete(runId: string): Promise<boolean> {
+    // Refuse to tear down a run that is still coming up: its Planner session is
+    // mid-startSession, so deleting now would drop the registry row and orphan a
+    // session that finishes starting a moment later.
+    if (this._startingAutoloops.has(runId)) {
+      throw new Error(`Autoloop with id '${runId}' is still starting`);
+    }
     // Fence the async teardown so a concurrent start/chat can't race on this id.
     this._deletingAutoloops.add(runId);
     try {

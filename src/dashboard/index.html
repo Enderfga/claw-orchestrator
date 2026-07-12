@@ -27,7 +27,12 @@
         margin: 0;
         background: var(--bg);
         color: var(--text);
-        font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        font:
+          14px/1.5 -apple-system,
+          BlinkMacSystemFont,
+          'Segoe UI',
+          Roboto,
+          sans-serif;
       }
       a {
         color: var(--info);
@@ -270,8 +275,7 @@
       .entryBody {
         white-space: pre-wrap;
         word-wrap: break-word;
-        font-family:
-          ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
         font-size: 12px;
         background: #fafafa;
         padding: 8px 10px;
@@ -379,11 +383,23 @@
         align-self: flex-start;
       }
       .forge-mode[data-mode='build'],
-      .forge-mode[data-mode='building'] { background: var(--info); color: white; }
+      .forge-mode[data-mode='building'] {
+        background: var(--info);
+        color: white;
+      }
       .forge-mode[data-mode='done'],
-      .forge-mode[data-mode='build-complete'] { background: var(--accent); color: white; }
-      .forge-mode[data-mode='failed'] { background: var(--error); color: white; }
-      .forge-mode[data-mode='queued'] { background: var(--warn); color: white; }
+      .forge-mode[data-mode='build-complete'] {
+        background: var(--accent);
+        color: white;
+      }
+      .forge-mode[data-mode='failed'] {
+        background: var(--error);
+        color: white;
+      }
+      .forge-mode[data-mode='queued'] {
+        background: var(--warn);
+        color: white;
+      }
       .forge-empty {
         margin: auto;
         max-width: 440px;
@@ -402,9 +418,19 @@
         border-radius: 4px;
         font-size: 13px;
       }
-      .forge-msg.user { background: #e0eaff; align-self: flex-end; }
-      .forge-msg.assistant { background: var(--surface); border: 1px solid var(--border); }
-      .forge-msg.system { background: var(--surface-2); color: var(--muted); font-size: 12px; }
+      .forge-msg.user {
+        background: #e0eaff;
+        align-self: flex-end;
+      }
+      .forge-msg.assistant {
+        background: var(--surface);
+        border: 1px solid var(--border);
+      }
+      .forge-msg.system {
+        background: var(--surface-2);
+        color: var(--muted);
+        font-size: 12px;
+      }
       .forge-share {
         background: var(--surface);
         border: 1px solid var(--accent);
@@ -412,9 +438,20 @@
         padding: 12px;
         margin: 8px 0;
       }
-      .forge-share strong { color: var(--accent); display: block; margin-bottom: 6px; }
-      .forge-share a { color: var(--accent); word-break: break-all; }
-      .forge-share-actions { display: flex; gap: 8px; margin-top: 10px; }
+      .forge-share strong {
+        color: var(--accent);
+        display: block;
+        margin-bottom: 6px;
+      }
+      .forge-share a {
+        color: var(--accent);
+        word-break: break-all;
+      }
+      .forge-share-actions {
+        display: flex;
+        gap: 8px;
+        margin-top: 10px;
+      }
       .forge-share-actions button {
         padding: 4px 12px;
         font-size: 12px;
@@ -436,13 +473,17 @@
         font-size: 12px;
         overflow-x: auto;
       }
-      .forge-public-modal h4 { margin-bottom: 4px; }
+      .forge-public-modal h4 {
+        margin-bottom: 4px;
+      }
       .runItem .lifecycle-actions {
         display: none;
         gap: 4px;
         margin-top: 4px;
       }
-      .runItem:hover .lifecycle-actions { display: flex; }
+      .runItem:hover .lifecycle-actions {
+        display: flex;
+      }
       .lifecycle-actions button {
         font-size: 10px;
         padding: 2px 6px;
@@ -451,7 +492,9 @@
         border-radius: 3px;
         cursor: pointer;
       }
-      .lifecycle-actions button:hover { background: var(--surface-2); }
+      .lifecycle-actions button:hover {
+        background: var(--surface-2);
+      }
       .forge-question {
         background: var(--surface);
         border: 1px solid var(--border);
@@ -459,9 +502,21 @@
         padding: 12px;
         margin: 8px 0;
       }
-      .forge-question .ctx { color: var(--muted); font-size: 12px; margin-bottom: 8px; }
-      .forge-question .q { font-weight: 600; margin-bottom: 8px; }
-      .forge-question .opts { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+      .forge-question .ctx {
+        color: var(--muted);
+        font-size: 12px;
+        margin-bottom: 8px;
+      }
+      .forge-question .q {
+        font-weight: 600;
+        margin-bottom: 8px;
+      }
+      .forge-question .opts {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        margin-bottom: 8px;
+      }
       .forge-question .opt {
         padding: 4px 10px;
         border: 1px solid var(--border);
@@ -470,8 +525,14 @@
         font-size: 12px;
         background: var(--surface);
       }
-      .forge-question .opt.recommended { border-color: var(--accent); }
-      .forge-question .opt.selected { background: var(--accent); color: white; border-color: var(--accent); }
+      .forge-question .opt.recommended {
+        border-color: var(--accent);
+      }
+      .forge-question .opt.selected {
+        background: var(--accent);
+        color: white;
+        border-color: var(--accent);
+      }
       .forge-input {
         display: grid;
         grid-template-columns: 1fr auto;
@@ -500,7 +561,10 @@
         color: white;
         cursor: pointer;
       }
-      .forge-input button:disabled { opacity: 0.4; cursor: not-allowed; }
+      .forge-input button:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+      }
       .forge-spec {
         border-left: 1px solid var(--border);
         padding: 16px;
@@ -509,7 +573,9 @@
         display: flex;
         flex-direction: column;
       }
-      .forge-spec h3 { margin: 0 0 8px 0; }
+      .forge-spec h3 {
+        margin: 0 0 8px 0;
+      }
       .forge-spec textarea {
         width: 100%;
         font-family: ui-monospace, SFMono-Regular, monospace;
@@ -532,7 +598,10 @@
         background: var(--surface);
         cursor: pointer;
       }
-      .forge-spec-msg { font-size: 11px; color: var(--muted); }
+      .forge-spec-msg {
+        font-size: 11px;
+        color: var(--muted);
+      }
       #forgeNew,
       #councilNew,
       #autoloopNew {
@@ -561,7 +630,9 @@
         justify-content: center;
         z-index: 100;
       }
-      .modal-root[hidden] { display: none; }
+      .modal-root[hidden] {
+        display: none;
+      }
       .modal {
         background: var(--surface);
         border-radius: 8px;
@@ -576,7 +647,10 @@
         padding: 14px 20px;
         border-bottom: 1px solid var(--border);
       }
-      .modal-header h2 { margin: 0; font-size: 15px; }
+      .modal-header h2 {
+        margin: 0;
+        font-size: 15px;
+      }
       .modal-header button {
         background: transparent;
         border: none;
@@ -637,8 +711,14 @@
         margin: 80px auto 0;
         max-width: 420px;
       }
-      .empty-cta h2 { margin: 0 0 8px; font-size: 16px; }
-      .empty-cta p { margin: 0 0 16px; color: var(--muted); }
+      .empty-cta h2 {
+        margin: 0 0 8px;
+        font-size: 16px;
+      }
+      .empty-cta p {
+        margin: 0 0 16px;
+        color: var(--muted);
+      }
       .empty-cta button {
         padding: 8px 16px;
         border-radius: 4px;
@@ -658,10 +738,24 @@
         cursor: pointer;
         font-weight: 600;
       }
-      #forgeStartBuild:disabled { opacity: 0.4; cursor: not-allowed; }
-      .forge-versions { margin-top: 12px; }
-      .forge-versions h4 { margin: 0 0 6px 0; font-size: 12px; color: var(--muted); text-transform: uppercase; }
-      .version-list { list-style: none; padding: 0; margin: 0; }
+      #forgeStartBuild:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+      }
+      .forge-versions {
+        margin-top: 12px;
+      }
+      .forge-versions h4 {
+        margin: 0 0 6px 0;
+        font-size: 12px;
+        color: var(--muted);
+        text-transform: uppercase;
+      }
+      .version-list {
+        list-style: none;
+        padding: 0;
+        margin: 0;
+      }
       .version-row {
         display: flex;
         gap: 8px;
@@ -677,8 +771,14 @@
         font-family: monospace;
         font-weight: 600;
       }
-      .version-meta { color: var(--muted); }
-      .version-row a { color: var(--accent); text-decoration: none; word-break: break-all; }
+      .version-meta {
+        color: var(--muted);
+      }
+      .version-row a {
+        color: var(--accent);
+        text-decoration: none;
+        word-break: break-all;
+      }
       .version-row button {
         margin-left: auto;
         padding: 2px 8px;
@@ -688,7 +788,10 @@
         border-radius: 3px;
         cursor: pointer;
       }
-      .version-row button:disabled { opacity: 0.4; cursor: not-allowed; }
+      .version-row button:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+      }
     </style>
   </head>
   <body>
@@ -733,19 +836,11 @@
           <div data-for-tab="council" style="display: contents">
             <label>
               Task
-              <textarea
-                name="task"
-                rows="3"
-                placeholder="What should the council achieve?"
-              ></textarea>
+              <textarea name="task" rows="3" placeholder="What should the council achieve?"></textarea>
             </label>
             <label>
               Project directory
-              <input
-                name="projectDir"
-                type="text"
-                placeholder="/abs/path/to/workspace"
-              />
+              <input name="projectDir" type="text" placeholder="/abs/path/to/workspace" />
             </label>
             <label>
               Max rounds
@@ -756,11 +851,7 @@
           <div data-for-tab="autoloop" style="display: contents">
             <label>
               Workspace
-              <input
-                name="workspace"
-                type="text"
-                placeholder="/abs/path/to/git/workspace"
-              />
+              <input name="workspace" type="text" placeholder="/abs/path/to/git/workspace" />
             </label>
             <label>
               Planner model (optional)
@@ -807,11 +898,11 @@
       };
 
       const $ = (id) => document.getElementById(id);
-      const fmtTime = (iso) =>
-        iso ? new Date(iso).toLocaleTimeString(undefined, { hour12: false }) : '';
+      const fmtTime = (iso) => (iso ? new Date(iso).toLocaleTimeString(undefined, { hour12: false }) : '');
       const escapeHtml = (s) =>
-        String(s ?? '').replace(/[&<>"']/g, (c) =>
-          ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c],
+        String(s ?? '').replace(
+          /[&<>"']/g,
+          (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c],
         );
 
       // ─── Tab switching ────────────────────────────────────────────
@@ -826,11 +917,7 @@
           b.setAttribute('aria-selected', String(b.dataset.tab === tab));
         });
         $('sidebarTitle').textContent =
-          tab === 'autoloop'
-            ? 'Autoloop runs'
-            : tab === 'council'
-              ? 'Council sessions'
-              : 'Forge apps';
+          tab === 'autoloop' ? 'Autoloop runs' : tab === 'council' ? 'Council sessions' : 'Forge apps';
         $('forgeNew').hidden = tab !== 'forge';
         $('councilNew').hidden = tab !== 'council';
         $('autoloopNew').hidden = tab !== 'autoloop';
@@ -879,11 +966,7 @@
         const noun = labels[state.tab] || 'run';
         if (state.runs.length === 0) {
           const triggerId =
-            state.tab === 'autoloop'
-              ? 'autoloopNew'
-              : state.tab === 'council'
-                ? 'councilNew'
-                : 'forgeNew';
+            state.tab === 'autoloop' ? 'autoloopNew' : state.tab === 'council' ? 'councilNew' : 'forgeNew';
           $('main').innerHTML = `
             <div class="empty empty-cta">
               <h2>No ${escapeHtml(noun)}s yet</h2>
@@ -892,8 +975,7 @@
             </div>
           `;
         } else {
-          $('main').innerHTML =
-            '<div class="empty" style="margin-top:80px">Select a run to view.</div>';
+          $('main').innerHTML = '<div class="empty" style="margin-top:80px">Select a run to view.</div>';
         }
       }
 
@@ -901,20 +983,15 @@
       async function refreshList() {
         try {
           const url =
-            state.tab === 'autoloop'
-              ? '/autoloop/list'
-              : state.tab === 'council'
-                ? '/council/list'
-                : '/ultraapp/list';
-          const opts = state.tab === 'forge' ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' } : {};
+            state.tab === 'autoloop' ? '/autoloop/list' : state.tab === 'council' ? '/council/list' : '/ultraapp/list';
+          const opts =
+            state.tab === 'forge'
+              ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }
+              : {};
           const r = await fetch(url, opts);
           const j = await r.json();
           state.runs =
-            state.tab === 'autoloop'
-              ? j.runs || []
-              : state.tab === 'council'
-                ? j.councils || []
-                : j.runs || [];
+            state.tab === 'autoloop' ? j.runs || [] : state.tab === 'council' ? j.councils || [] : j.runs || [];
           renderList();
           // Refresh the empty-state CTA — runs may have just appeared or
           // disappeared, and renderEmptyMain's text depends on state.runs.length.
@@ -929,12 +1006,8 @@
       function renderList() {
         const ul = $('runlist');
         if (state.runs.length === 0) {
-          const noun =
-            state.tab === 'autoloop' ? 'runs' : state.tab === 'council' ? 'councils' : 'apps';
-          ul.innerHTML =
-            '<li class="empty" style="padding:20px;list-style:none">No active ' +
-            noun +
-            '.</li>';
+          const noun = state.tab === 'autoloop' ? 'runs' : state.tab === 'council' ? 'councils' : 'apps';
+          ul.innerHTML = '<li class="empty" style="padding:20px;list-style:none">No active ' + noun + '.</li>';
           return;
         }
         const html = state.runs
@@ -998,12 +1071,26 @@
               const id = el.dataset.id;
               if (state.tab === 'autoloop') {
                 if (action !== 'delete') return;
-                if (!confirm(`Delete autoloop run "${id}"? The registry entry is removed; the ledger directory under tasks/${id}/ is kept on disk.`)) return;
+                if (
+                  !confirm(
+                    `Delete autoloop run "${id}"? The registry entry is removed; the ledger directory under tasks/${id}/ is kept on disk.`,
+                  )
+                )
+                  return;
                 try {
-                  const r = await fetch(`/autoloop/${encodeURIComponent(id)}/delete`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+                  const r = await fetch(`/autoloop/${encodeURIComponent(id)}/delete`, {
+                    method: 'POST',
+                    headers: { 'content-type': 'application/json' },
+                    body: '{}',
+                  });
                   if (!r.ok) {
                     let detail = `HTTP ${r.status}`;
-                    try { const j = await r.json(); if (j && j.error) detail = j.error; } catch { /* ignore */ }
+                    try {
+                      const j = await r.json();
+                      if (j && j.error) detail = j.error;
+                    } catch {
+                      /* ignore */
+                    }
                     alert(`Delete failed: ${detail}`);
                     return;
                   }
@@ -1020,7 +1107,11 @@
                 refreshList();
                 return;
               }
-              if (action === 'delete' && !confirm('Delete this run? Container, image, and on-disk artifacts are removed.')) return;
+              if (
+                action === 'delete' &&
+                !confirm('Delete this run? Container, image, and on-disk artifacts are removed.')
+              )
+                return;
               await forgeLifecycleAction(id, action);
               refreshList();
             });
@@ -1272,7 +1363,11 @@
           });
           const j = await r.json();
           if (!j.ok) {
-            renderChatEntry({ role: 'system', kind: 'error', text: '[error] ' + action + ': ' + (j.error || 'unknown') });
+            renderChatEntry({
+              role: 'system',
+              kind: 'error',
+              text: '[error] ' + action + ': ' + (j.error || 'unknown'),
+            });
           }
           if (action === 'delete' && j.ok && state.forge.runId === runId) {
             // Run is gone — close it and refresh sidebar
@@ -1856,10 +1951,7 @@
         const s = state.council.session;
         if (!s) return;
         $('c-status').innerHTML = `<span class="badge ${s.status}">${s.status}</span>`;
-        const rounds =
-          s.responses && s.responses.length > 0
-            ? Math.max(...s.responses.map((r) => r.round))
-            : 0;
+        const rounds = s.responses && s.responses.length > 0 ? Math.max(...s.responses.map((r) => r.round)) : 0;
         $('c-round').textContent = rounds;
         $('c-agents').textContent = (s.config?.agents || []).map((a) => a.name).join(', ');
         $('c-task').textContent = s.task || '';
@@ -1944,8 +2036,7 @@
       // both, switching visible fields by state.tab.
       function openLauncherModal() {
         const root = $('modalRoot');
-        $('modalTitle').textContent =
-          state.tab === 'council' ? 'New Council session' : 'New Autoloop run';
+        $('modalTitle').textContent = state.tab === 'council' ? 'New Council session' : 'New Autoloop run';
         root.querySelectorAll('[data-for-tab]').forEach((el) => {
           const visible = el.dataset.forTab === state.tab;
           el.style.display = visible ? 'contents' : 'none';

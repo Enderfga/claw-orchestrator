@@ -1,9 +1,7 @@
 /**
- * ClaudeAgentDispatcher — wires the v2 runner to real persistent Claude
- * sessions managed by SessionManager.
- *
- * S2 scope: Planner only (chat-mode, no subagents yet). Coder/Reviewer
- * delivery throws — S4 wires them in.
+ * ClaudeAgentDispatcher — wires the v2 runner to real persistent coding
+ * sessions managed by SessionManager. The historical class name is retained
+ * for compatibility; each Autoloop role may use a different engine.
  *
  * Naming convention:
  *   autoloop-<run_id>-planner
@@ -26,10 +24,18 @@ import { fileURLToPath } from 'node:url';
 
 import type { SessionManager } from '../session-manager.js';
 import type { Logger } from '../logger.js';
+import { ENGINE_TYPES, type CustomEngineConfig, type EngineType } from '../types.js';
 import { nullLogger } from '../logger.js';
 import { spawn } from 'node:child_process';
 import { type AnyAutoloopMessage, Msg } from './messages.js';
-import { LEDGER_SCHEMA_VERSION, type AgentDispatcher, type AutoloopState, type PushPolicy } from './types.js';
+import {
+  LEDGER_SCHEMA_VERSION,
+  type AgentDispatcher,
+  type AutoloopRoleName,
+  type AutoloopState,
+  type PushPolicy,
+} from './types.js';
+
 import {
   applyPlannerToolCalls,
   parsePlannerReply,
@@ -37,6 +43,13 @@ import {
   type SpawnSubagentsArgs,
 } from './planner-tools.js';
 import { extractIterComplete, extractReviewComplete, parseAgentReply } from './agent-tools.js';
+
+/**
+ * Character budget for the replayed transcript handed to engines without native
+ * conversation (see hasNativeConversation). Oldest turns are dropped first, so a
+ * long run keeps the recent context instead of growing the prompt forever.
+ */
+const REPLAY_CHAR_BUDGET = 24_000;
 
 /**
  * Files inside <ledger>/reviewer_sandbox/ that survive `stageReviewSandbox`.
@@ -62,12 +75,18 @@ export interface ClaudeAgentDispatcherConfig {
   /** Override Coder/Reviewer prompt paths (defaults walk-up to configs/autoloop-{coder,reviewer}-prompt.md). */
   coderPromptPath?: string;
   reviewerPromptPath?: string;
-  /** Model alias for Planner (default: 'opus'). */
+  /** Planner engine/model (default: claude/opus). */
+  plannerEngine?: EngineType;
   plannerModel?: string;
-  /** Default Coder model (default: 'sonnet'). Can be overridden per spawn_subagents call. */
+  plannerCustomEngine?: CustomEngineConfig;
+  /** Coder defaults. Engine/model can be overridden per spawn_subagents call. */
+  coderEngine?: EngineType;
   coderModel?: string;
-  /** Default Reviewer model (default: 'sonnet'). */
+  coderCustomEngine?: CustomEngineConfig;
+  /** Reviewer defaults. Engine/model can be overridden per spawn_subagents call. */
+  reviewerEngine?: EngineType;
   reviewerModel?: string;
+  reviewerCustomEngine?: CustomEngineConfig;
   /** Per-message wall-clock cap. Default 10 min. */
   sendTimeoutMs?: number;
   logger?: Logger;
@@ -88,6 +107,11 @@ export interface ClaudeAgentDispatcherConfig {
   pushPolicyRef?: PushPolicy;
   /** Called when Planner emits spawn_subagents. S4 implements; S3 records the intent. */
   onSpawnSubagents?: (args: SpawnSubagentsArgs) => Promise<void>;
+  /** Persist the effective non-secret role selection after a successful spawn. */
+  onRoleSelectionChanged?: (selection: {
+    coder: { engine: EngineType; model?: string };
+    reviewer: { engine: EngineType; model?: string };
+  }) => Promise<void> | void;
 }
 
 function resolveConfigByName(filename: string): string {
@@ -111,6 +135,14 @@ interface SendMessageResult {
   error?: string;
   /** Set when even the recovery retry failed — caller surfaces as phase_error. */
   fatal?: boolean;
+}
+
+interface AutoloopRoleSelection {
+  engine: EngineType;
+  /** User-specified model. Undefined means use the role default for Claude, otherwise the engine default. */
+  model?: string;
+  /** Trusted config supplied at autoloop start/resume; never accepted from Planner output or written to the ledger. */
+  customEngine?: CustomEngineConfig;
 }
 
 interface DecisionLogEntry {
@@ -139,8 +171,10 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
   private plannerSystemPrompt: string;
   private coderSystemPrompt: string;
   private reviewerSystemPrompt: string;
-  private coderModel: string;
-  private reviewerModel: string;
+  private reviewerSessionPrompt: string | null = null;
+  private plannerSelection: AutoloopRoleSelection;
+  private coderSelection: AutoloopRoleSelection;
+  private reviewerSelection: AutoloopRoleSelection;
   /** Where Reviewer reads from. Created lazily by stageReviewSandbox(). */
   private reviewerSandboxDir: string;
   private ledgerDir: string;
@@ -157,8 +191,21 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
     this.plannerSystemPrompt = fs.readFileSync(promptPath, 'utf-8');
     this.coderSystemPrompt = fs.readFileSync(config.coderPromptPath ?? resolveDefaultCoderPrompt(), 'utf-8');
     this.reviewerSystemPrompt = fs.readFileSync(config.reviewerPromptPath ?? resolveDefaultReviewerPrompt(), 'utf-8');
-    this.coderModel = config.coderModel ?? 'sonnet';
-    this.reviewerModel = config.reviewerModel ?? 'sonnet';
+    this.plannerSelection = {
+      engine: config.plannerEngine ?? 'claude',
+      model: config.plannerModel,
+      customEngine: config.plannerCustomEngine,
+    };
+    this.coderSelection = {
+      engine: config.coderEngine ?? 'claude',
+      model: config.coderModel,
+      customEngine: config.coderCustomEngine,
+    };
+    this.reviewerSelection = {
+      engine: config.reviewerEngine ?? 'claude',
+      model: config.reviewerModel,
+      customEngine: config.reviewerCustomEngine,
+    };
     this.ledgerDir = path.join(config.workspace, 'tasks', config.runId);
     this.reviewerSandboxDir = path.join(this.ledgerDir, 'reviewer_sandbox');
   }
@@ -204,16 +251,208 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
     }
   }
 
+  private roleModel(role: AutoloopRoleName, selection: AutoloopRoleSelection): string | undefined {
+    if (selection.model !== undefined) return selection.model;
+    if (selection.engine !== 'claude') return undefined;
+    return role === 'planner' ? 'opus' : 'sonnet';
+  }
+
+  private validateSelection(role: AutoloopRoleName, selection: AutoloopRoleSelection): void {
+    const label = role[0].toUpperCase() + role.slice(1);
+    if (!ENGINE_TYPES.includes(selection.engine)) {
+      throw new Error(`${label} engine '${String(selection.engine)}' is not supported`);
+    }
+    if (selection.engine === 'custom' && !selection.customEngine) {
+      throw new Error(`${label} custom engine config is required`);
+    }
+  }
+
+  /**
+   * Stop a session we started during a failed spawn. Returns true only when the
+   * session is genuinely gone — the caller uses that to decide whether it may
+   * clear the role's `started` flag. Returning false keeps the role marked as
+   * started, which is the safe lie: a later engine change is then rejected
+   * instead of silently binding the run to a process that never went away.
+   */
+  private async stopRolledBackSession(name: string): Promise<boolean> {
+    try {
+      await this.config.manager.stopSession(name);
+      return true;
+    } catch (stopErr) {
+      this.logger.error?.(
+        `[autoloop] rollback could not stop ${name}: ${(stopErr as Error).message} — ` +
+          `leaving it marked started so a later engine change is rejected rather than silently ignored`,
+      );
+      this.appendDecisionLog({
+        kind: 'phase_error',
+        actor: 'dispatcher',
+        payload: { agent: name, phase: 'rollback_stop', error: (stopErr as Error).message },
+      });
+      return false;
+    }
+  }
+
+  /**
+   * Does this engine carry conversation across sends on its own?
+   *
+   * claude keeps one subprocess alive; codex / codex-app resume a thread; agy
+   * resumes a harvested `--conversation <uuid>`. Everything else (gemini,
+   * cursor, opencode, and non-persistent custom engines) spawns a FRESH process
+   * per send with zero memory of the last turn — for those the dispatcher must
+   * replay the transcript in-band, or the role is amnesiac and a chat-driven
+   * Planner can never remember the plan it just proposed (let alone whether the
+   * user approved it).
+   */
+  private hasNativeConversation(selection: AutoloopRoleSelection): boolean {
+    switch (selection.engine) {
+      case 'claude':
+      case 'codex':
+      case 'codex-app':
+      case 'agy':
+        return true;
+      case 'custom':
+        // A persistent custom engine is a long-running stdin/stdout process, so
+        // it keeps context the same way claude does. One-shot ones do not.
+        return selection.customEngine?.persistent === true;
+      default:
+        return false;
+    }
+  }
+
+  /**
+   * Replayed transcript for engines without native conversation. Capped so a
+   * long run can't grow the prompt without bound: we keep the most recent
+   * turns within REPLAY_CHAR_BUDGET, oldest dropped first.
+   */
+  private transcripts: Record<AutoloopRoleName, Array<{ who: 'user' | 'agent'; text: string }>> = {
+    planner: [],
+    coder: [],
+    reviewer: [],
+  };
+
+  private recordTurn(role: AutoloopRoleName, who: 'user' | 'agent', text: string): void {
+    if (!text) return;
+    const log = this.transcripts[role];
+    log.push({ who, text });
+    let budget = REPLAY_CHAR_BUDGET;
+    let keepFrom = log.length;
+    for (let i = log.length - 1; i >= 0; i--) {
+      budget -= log[i].text.length;
+      if (budget < 0) break;
+      keepFrom = i;
+    }
+    if (keepFrom > 0) log.splice(0, keepFrom);
+  }
+
+  private renderHistory(role: AutoloopRoleName, selection: AutoloopRoleSelection): string | null {
+    if (this.hasNativeConversation(selection)) return null;
+    const log = this.transcripts[role];
+    if (log.length === 0) return null;
+    const lines = log.map((entry) => `<${entry.who}>\n${entry.text}\n</${entry.who}>`);
+    return ['<conversation_history>', ...lines, '</conversation_history>'].join('\n');
+  }
+
+  private withRoleInstructions(
+    role: AutoloopRoleName,
+    selection: AutoloopRoleSelection,
+    systemPrompt: string,
+    message: string,
+  ): string {
+    if (selection.engine === 'claude') return message;
+    const parts = ['<autoloop_role_instructions>', systemPrompt.trim(), '</autoloop_role_instructions>', ''];
+    const history = this.renderHistory(role, selection);
+    if (history) parts.push(history, '');
+    parts.push('<autoloop_message>', message, '</autoloop_message>');
+    return parts.join('\n');
+  }
+
   /**
    * Start Coder + Reviewer sessions. Idempotent. Called in response to a
    * Planner spawn_subagents tool (the SessionManager wires this via
    * onSpawnSubagents).
    */
   async spawnSubagents(args: SpawnSubagentsArgs = {}): Promise<void> {
-    if (args.coder_model) this.coderModel = args.coder_model;
-    if (args.reviewer_model) this.reviewerModel = args.reviewer_model;
-    await this.ensureCoder();
-    await this.ensureReviewer();
+    const nextCoderEngine = args.coder_engine ?? this.coderSelection.engine;
+    const nextReviewerEngine = args.reviewer_engine ?? this.reviewerSelection.engine;
+    const nextCoder: AutoloopRoleSelection = {
+      ...this.coderSelection,
+      engine: nextCoderEngine,
+      model:
+        args.coder_model !== undefined
+          ? args.coder_model
+          : nextCoderEngine !== this.coderSelection.engine
+            ? undefined
+            : this.coderSelection.model,
+    };
+    const nextReviewer: AutoloopRoleSelection = {
+      ...this.reviewerSelection,
+      engine: nextReviewerEngine,
+      model:
+        args.reviewer_model !== undefined
+          ? args.reviewer_model
+          : nextReviewerEngine !== this.reviewerSelection.engine
+            ? undefined
+            : this.reviewerSelection.model,
+    };
+    this.validateSelection('coder', nextCoder);
+    this.validateSelection('reviewer', nextReviewer);
+
+    const coderChanged =
+      nextCoder.engine !== this.coderSelection.engine ||
+      this.roleModel('coder', nextCoder) !== this.roleModel('coder', this.coderSelection);
+    const reviewerChanged =
+      nextReviewer.engine !== this.reviewerSelection.engine ||
+      this.roleModel('reviewer', nextReviewer) !== this.roleModel('reviewer', this.reviewerSelection);
+    if (this.coderStarted && coderChanged) {
+      throw new Error('Cannot change Coder engine or model after its session has started');
+    }
+    if (this.reviewerStarted && reviewerChanged) {
+      throw new Error('Cannot change Reviewer engine or model after its session has started');
+    }
+
+    const previousCoder = this.coderSelection;
+    const previousReviewer = this.reviewerSelection;
+    const coderWasStarted = this.coderStarted;
+    const reviewerWasStarted = this.reviewerStarted;
+    this.coderSelection = nextCoder;
+    this.reviewerSelection = nextReviewer;
+    try {
+      await this.ensureCoder();
+      await this.ensureReviewer();
+    } catch (err) {
+      // Roll back only what THIS call started. Crucially, `<role>Started` may be
+      // cleared only when the stop actually succeeded: SessionManager.startSession
+      // returns the EXISTING session for a name that is still live and ignores the
+      // new engine/model. So if we lied about the session being gone, the next
+      // spawn_subagents would sail past the "engine cannot change after start"
+      // guard, silently reuse the old engine's process, and still record the new
+      // engine in decisions.jsonl and the registry — the exact divergence that
+      // guard exists to prevent.
+      if (!coderWasStarted && this.coderStarted) {
+        this.coderStarted = !(await this.stopRolledBackSession(this.coderName));
+      }
+      if (!reviewerWasStarted && this.reviewerStarted) {
+        this.reviewerStarted = !(await this.stopRolledBackSession(this.reviewerName));
+      }
+      this.coderSelection = previousCoder;
+      this.reviewerSelection = previousReviewer;
+      throw err;
+    }
+    const effectiveSelection = {
+      coder: { engine: nextCoder.engine, model: nextCoder.model },
+      reviewer: { engine: nextReviewer.engine, model: nextReviewer.model },
+    };
+    this.appendDecisionLog({
+      kind: 'spawn_subagents',
+      actor: 'planner',
+      payload: {
+        coder_engine: nextCoder.engine,
+        coder_model: this.roleModel('coder', nextCoder),
+        reviewer_engine: nextReviewer.engine,
+        reviewer_model: this.roleModel('reviewer', nextReviewer),
+      },
+    });
+    await this.config.onRoleSelectionChanged?.(effectiveSelection);
   }
 
   /**
@@ -245,7 +484,10 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
     }
     if (agent === 'planner') this.plannerStarted = false;
     if (agent === 'coder') this.coderStarted = false;
-    if (agent === 'reviewer') this.reviewerStarted = false;
+    if (agent === 'reviewer') {
+      this.reviewerStarted = false;
+      this.reviewerSessionPrompt = null;
+    }
     if (opts.eagerRestart) {
       if (agent === 'planner') await this.ensurePlanner();
       else if (agent === 'coder') await this.ensureCoder();
@@ -395,12 +637,15 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
 
   private async ensurePlanner(): Promise<void> {
     if (this.plannerStarted) return;
+    this.validateSelection('planner', this.plannerSelection);
     await this.config.manager.startSession({
       name: this.plannerName,
       cwd: this.config.workspace,
-      engine: 'claude',
-      model: this.config.plannerModel ?? 'opus',
-      permissionMode: 'bypassPermissions',
+      engine: this.plannerSelection.engine,
+      model: this.roleModel('planner', this.plannerSelection),
+      customEngine: this.plannerSelection.engine === 'custom' ? this.plannerSelection.customEngine : undefined,
+      permissionMode: this.plannerSelection.engine === 'claude' ? 'bypassPermissions' : 'manual',
+      sandboxMode: this.plannerSelection.engine === 'claude' ? undefined : 'read-only',
       systemPrompt: this.plannerSystemPrompt,
       // Hard role boundary: Planner must NEVER author content files itself.
       // Its only writes are plan.md / goal.json via the write_plan /
@@ -438,9 +683,13 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
       promptText = `[system] iter ${env.iter} done. verdict=${env.payload.verdict} metric=${env.payload.metric}`;
     }
 
-    const result = (await this.config.manager.sendMessage(this.plannerName, promptText, {
-      timeout: this.config.sendTimeoutMs ?? 10 * 60_000,
-    })) as SendMessageResult;
+    const result = (await this.config.manager.sendMessage(
+      this.plannerName,
+      this.withRoleInstructions('planner', this.plannerSelection, this.plannerSystemPrompt, promptText),
+      {
+        timeout: this.config.sendTimeoutMs ?? 10 * 60_000,
+      },
+    )) as SendMessageResult;
 
     if (result.error) {
       this.logger.error?.(`[autoloop] planner send error: ${result.error}`);
@@ -448,6 +697,12 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
     }
 
     const replyText = (result.output ?? '').trim();
+
+    // Feed the transcript that engines without native conversation replay next
+    // turn. Recorded AFTER the send so the current message isn't duplicated in
+    // its own history block.
+    this.recordTurn('planner', 'user', promptText);
+    this.recordTurn('planner', 'agent', replyText);
 
     // S3: parse autoloop-fenced tool calls out of the reply, apply effects,
     // and bubble emitted messages back into the runner queue.
@@ -457,15 +712,10 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
     }
     const effects: PlannerToolEffects = {
       spawnSubagents: async (args) => {
-        this.appendDecisionLog({
-          kind: 'spawn_subagents',
-          actor: 'planner',
-          payload: { args },
-        });
         if (this.config.onSpawnSubagents) {
           await this.config.onSpawnSubagents(args);
         } else {
-          this.logger.warn?.('[autoloop] spawn_subagents called but no handler installed (S4 not wired yet)');
+          this.logger.warn?.('[autoloop] spawn_subagents called but no handler is installed');
         }
       },
       updatePushPolicy: (delta) => {
@@ -552,11 +802,13 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
 
   private async ensureCoder(): Promise<void> {
     if (this.coderStarted) return;
+    this.validateSelection('coder', this.coderSelection);
     await this.config.manager.startSession({
       name: this.coderName,
       cwd: this.config.workspace,
-      engine: 'claude',
-      model: this.coderModel,
+      engine: this.coderSelection.engine,
+      model: this.roleModel('coder', this.coderSelection),
+      customEngine: this.coderSelection.engine === 'custom' ? this.coderSelection.customEngine : undefined,
       permissionMode: 'bypassPermissions',
       systemPrompt: this.coderSystemPrompt,
     });
@@ -621,7 +873,13 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
       ts: new Date().toISOString(),
     });
 
-    const result = await this.sendWithRecovery('coder', this.coderName, promptText);
+    const result = await this.sendWithRecovery(
+      'coder',
+      this.coderName,
+      this.withRoleInstructions('coder', this.coderSelection, this.coderSystemPrompt, promptText),
+    );
+    this.recordTurn('coder', 'user', promptText);
+    this.recordTurn('coder', 'agent', (result.output ?? '').trim());
     // A3: subprocess died (recovery retry exhausted). Surface as phase_error
     // rather than silently masquerading as a "clarification request"; the
     // runner's circuit breaker can then trip after enough consecutive failures.
@@ -750,16 +1008,25 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
 
   private async ensureReviewer(): Promise<void> {
     if (this.reviewerStarted) return;
+    this.validateSelection('reviewer', this.reviewerSelection);
     fs.mkdirSync(this.reviewerSandboxDir, { recursive: true });
-    await this.config.manager.startSession({
-      name: this.reviewerName,
-      cwd: this.reviewerSandboxDir,
-      engine: 'claude',
-      model: this.reviewerModel,
-      permissionMode: 'bypassPermissions',
-      systemPrompt: this.buildReviewerSystemPrompt(),
-    });
-    this.reviewerStarted = true;
+    const sessionPrompt = this.buildReviewerSystemPrompt();
+    this.reviewerSessionPrompt = sessionPrompt;
+    try {
+      await this.config.manager.startSession({
+        name: this.reviewerName,
+        cwd: this.reviewerSandboxDir,
+        engine: this.reviewerSelection.engine,
+        model: this.roleModel('reviewer', this.reviewerSelection),
+        customEngine: this.reviewerSelection.engine === 'custom' ? this.reviewerSelection.customEngine : undefined,
+        permissionMode: 'bypassPermissions',
+        systemPrompt: sessionPrompt,
+      });
+      this.reviewerStarted = true;
+    } catch (err) {
+      this.reviewerSessionPrompt = null;
+      throw err;
+    }
   }
 
   /**
@@ -830,7 +1097,18 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
       ts: new Date().toISOString(),
     });
 
-    const result = await this.sendWithRecovery('reviewer', this.reviewerName, promptText);
+    const result = await this.sendWithRecovery(
+      'reviewer',
+      this.reviewerName,
+      this.withRoleInstructions(
+        'reviewer',
+        this.reviewerSelection,
+        this.reviewerSessionPrompt ?? this.reviewerSystemPrompt,
+        promptText,
+      ),
+    );
+    this.recordTurn('reviewer', 'user', promptText);
+    this.recordTurn('reviewer', 'agent', (result.output ?? '').trim());
     if (result.fatal) {
       this.appendDecisionLog({
         kind: 'phase_error',

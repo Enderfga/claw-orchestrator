@@ -15,6 +15,7 @@ Start a persistent coding session with full CLI flag support.
 | `engine` | `'claude'` \| `'codex'` \| `'codex-app'` \| `'gemini'` \| `'agy'` \| `'cursor'` \| `'opencode'` \| `'custom'` | Engine to use (default: `claude`). `agy` wraps Google Antigravity CLI. `opencode` wraps sst/opencode (pass model as `provider/model`). Use `custom` with `customEngine` for any CLI. |
 | `model` | string | Model alias or full name |
 | `permissionMode` | string | `acceptEdits`, `bypassPermissions`, `plan`, `auto`, `manual`, `dontAsk` (`default` = legacy alias for `manual`) |
+| `sandboxMode` | `'read-only'` \| `'workspace-write'` \| `'danger-full-access'` | Sandbox policy. Codex supports all values. `read-only` is enforced on every other built-in engine too: Claude → plan mode; Gemini → `--approval-mode plan` + an admin policy denying `exit_plan_mode`; OpenCode → a generated `clawo-readonly` agent denying `edit`/`bash`; Antigravity/Cursor → plan mode. A `custom` engine must map it via `permissionModes`, or the session refuses to start. Persisted across session resume. |
 | `effort` | string | `low`, `medium`, `high`, `max`, `auto` |
 | `allowedTools` | string[] | Tools to auto-approve |
 | `disallowedTools` | string[] | Tools to deny |
@@ -537,57 +538,75 @@ Three-agent autonomous iteration loop (Planner / Coder / Reviewer) over a git wo
 
 ### `autoloop_start`
 
-Start an autoloop run. Planner is created persistent; Coder + Reviewer are spawned by the Planner once `plan.md` is ready.
+Start a chat-mode autoloop. Planner starts immediately; Coder + Reviewer start only after the Planner receives plan approval and emits `spawn_subagents`.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `cwd` | string | yes | Workspace (must be a git repo) |
-| `goal` | string | yes | High-level user goal in natural language |
-| `model` | string | | Planner model (default Opus) |
-| `coderModel` | string | | Coder subagent model |
-| `reviewerModel` | string | | Reviewer subagent model |
-| `maxIters` | number | | Cap on Coder/Reviewer rounds (default 50) |
-| `pushChannels` | string[] | | Notification channels (`wechat`, `whatsapp`, `email`) |
+| `run_id` | string | yes | Stable run identifier |
+| `workspace` | string | yes | Git workspace path |
+| `planner_engine` | EngineType | | Planner engine (default `claude`) |
+| `planner_model` | string | | Planner model (Claude default `opus`; other engines use their own default when omitted) |
+| `planner_custom_engine` | object | | Trusted `CustomEngineConfig` when Planner engine is `custom`. **Local callers only** — see below |
+| `coder_engine` | EngineType | | Default Coder engine (default `claude`) |
+| `coder_model` | string | | Default Coder model (Claude default `sonnet`) |
+| `coder_custom_engine` | object | | Trusted config when Coder may use `custom`. **Local callers only** |
+| `reviewer_engine` | EngineType | | Default Reviewer engine (default `claude`) |
+| `reviewer_model` | string | | Default Reviewer model (Claude default `sonnet`) |
+| `reviewer_custom_engine` | object | | Trusted config when Reviewer may use `custom`. **Local callers only** |
+| `send_timeout_ms` | number | | Per-message timeout (default 600000) |
+
+> **Custom engines are local-only.** A `CustomEngineConfig` names an executable to
+> spawn plus its argv and env, so it may only be supplied by a caller that already
+> runs on the host (this MCP tool, or the `SessionManager` API). The HTTP API
+> (`POST /autoloop/new`, `POST /autoloop/<id>/resume`) rejects a `*_custom_engine`
+> body field with a 400 — the embedded server is often reverse-tunnelled and its
+> token is a monitoring credential, not permission to choose what binary runs.
+> Built-in engines are fully selectable over HTTP.
+
+Custom configs are not persisted or accepted from Planner output. See [`multi-engine.md`](./multi-engine.md) for their shape.
 
 ### `autoloop_chat`
 
-Send a message into the Planner conversation (e.g. answer a clarifying question, refine the plan, kick off the subloop).
+Send a message into the Planner conversation.
 
 | Parameter | Type | Required |
 |-----------|------|----------|
-| `id` | string | yes |
-| `message` | string | yes |
+| `run_id` | string | yes |
+| `text` | string | yes |
 
 ### `autoloop_status`
 
-Get current state, phase, recent inbox messages, and ledger summary.
+Get the current state and push log.
 
 | Parameter | Type | Required |
 |-----------|------|----------|
-| `id` | string | yes |
+| `run_id` | string | yes |
 
 ### `autoloop_list`
 
-List active and recent autoloop runs (in-memory + on-disk registry, deduped by run_id).
+List active Autoloop runs in this manager process.
 
 (no params)
 
 ### `autoloop_reset_agent`
 
-Reset one of the subagent sessions (Coder or Reviewer) without losing Planner state — useful when a subagent loops on a stale belief.
+Reset one role session while retaining the role's current engine/model selection.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `id` | string | yes | Run id |
-| `agent` | `'coder'` \| `'reviewer'` | yes | Which subagent to reset |
+| `run_id` | string | yes | Run id |
+| `agent` | `'planner'` \| `'coder'` \| `'reviewer'` | yes | Role to reset; Planner requires `force: true` |
+| `force` | boolean | | Allow Planner reset |
+| `eager_restart` | boolean | | Start the replacement session immediately |
 
 ### `autoloop_stop`
 
-Terminate the run. All sessions are stopped and ledger state is finalised.
+Terminate the run and stop all role sessions.
 
 | Parameter | Type | Required |
 |-----------|------|----------|
-| `id` | string | yes |
+| `run_id` | string | yes |
+| `reason` | string | |
 
 ---
 

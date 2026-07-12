@@ -19,6 +19,7 @@
  * semantics.
  */
 
+import { ENGINE_TYPES, type EngineType } from '../types.js';
 import { type AnyAutoloopMessage, Msg, type PushChannel, type PushLevel } from './messages.js';
 
 export type PlannerToolName =
@@ -81,9 +82,9 @@ export function parsePlannerReply(reply: string): PlannerToolParseResult {
 
 export interface SpawnSubagentsArgs {
   coder_model?: string;
-  coder_engine?: string;
+  coder_engine?: EngineType;
   reviewer_model?: string;
-  reviewer_engine?: string;
+  reviewer_engine?: EngineType;
   initial_directive?: {
     goal: string;
     constraints?: string[];
@@ -93,7 +94,7 @@ export interface SpawnSubagentsArgs {
 }
 
 export interface PlannerToolEffects {
-  /** Start Coder + Reviewer persistent sessions. S4 implements this. */
+  /** Start Coder + Reviewer persistent sessions. */
   spawnSubagents: (args: SpawnSubagentsArgs) => Promise<void>;
   /** Mutate in-memory push policy (key→rule object). Unknown keys ignored. */
   updatePushPolicy: (delta: Record<string, unknown>) => void;
@@ -154,9 +155,39 @@ export async function applyPlannerToolCalls(
           break;
         }
         case 'spawn_subagents': {
-          await fx.spawnSubagents(call.args as SpawnSubagentsArgs);
+          const raw = call.args;
+          if (
+            'coder_custom_engine' in raw ||
+            'reviewer_custom_engine' in raw ||
+            'coderCustomEngine' in raw ||
+            'reviewerCustomEngine' in raw ||
+            'customEngine' in raw
+          ) {
+            throw new Error('spawn_subagents cannot include custom engine config; configure it at autoloop_start');
+          }
+          for (const field of ['coder_engine', 'reviewer_engine'] as const) {
+            const value = raw[field];
+            if (value !== undefined && (typeof value !== 'string' || !ENGINE_TYPES.includes(value as EngineType))) {
+              throw new Error(`spawn_subagents ${field} has unknown engine '${String(value)}'`);
+            }
+          }
+          for (const field of ['coder_model', 'reviewer_model'] as const) {
+            const value = raw[field];
+            if (value !== undefined && typeof value !== 'string') {
+              throw new Error(`spawn_subagents ${field} must be a string`);
+            }
+          }
+          const args: SpawnSubagentsArgs = {};
+          if (raw.coder_engine !== undefined) args.coder_engine = raw.coder_engine as EngineType;
+          if (raw.coder_model !== undefined) args.coder_model = raw.coder_model as string;
+          if (raw.reviewer_engine !== undefined) args.reviewer_engine = raw.reviewer_engine as EngineType;
+          if (raw.reviewer_model !== undefined) args.reviewer_model = raw.reviewer_model as string;
+          if (raw.initial_directive !== undefined) {
+            args.initial_directive = raw.initial_directive as SpawnSubagentsArgs['initial_directive'];
+          }
+          await fx.spawnSubagents(args);
           // If caller asked for an initial directive, fire it via the runner queue.
-          const init = (call.args as SpawnSubagentsArgs).initial_directive;
+          const init = args.initial_directive;
           if (init?.goal) {
             emitted_messages.push(
               Msg.directive(iter, {

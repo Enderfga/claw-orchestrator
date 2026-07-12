@@ -151,7 +151,12 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
       '--verbose',
       '--include-partial-messages',
       '--permission-mode',
-      this.options.permissionMode || 'acceptEdits',
+      // `sandboxMode: 'read-only'` is the engine-agnostic "look, don't touch"
+      // hint; Claude's native equivalent is plan mode. It must win over any
+      // permissionMode the caller also passed, otherwise the DEFAULT engine
+      // would accept the flag and still run write-enabled (acceptEdits) — a
+      // silent no-op on the most likely call.
+      this.options.sandboxMode === 'read-only' ? 'plan' : this.options.permissionMode || 'acceptEdits',
     ];
 
     // Model alias resolution

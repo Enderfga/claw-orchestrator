@@ -49,8 +49,11 @@ export class PersistentCursorSession extends BaseOneShotSession {
   }
 
   protected _run(message: string, options: SessionSendOptions): Promise<TurnResult> {
-    // agent -p <prompt> --force --trust --output-format stream-json
-    const args: string[] = ['-p', message, '--force', '--trust', '--output-format', 'stream-json'];
+    // agent -p <prompt> [--force | --mode plan] --trust --output-format stream-json
+    const args: string[] = ['-p', message];
+    if (this.options.sandboxMode === 'read-only') args.push('--mode', 'plan');
+    else args.push('--force');
+    args.push('--trust', '--output-format', 'stream-json');
 
     if (this.options.model) args.push('--model', this.options.model);
     // Workspace directory (prefer --workspace over cwd for explicit path)

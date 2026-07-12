@@ -16,12 +16,7 @@
       "name": "articleFile",
       "type": "file",
       "required": false,
-      "accept": [
-        ".txt",
-        ".md",
-        "text/plain",
-        "text/markdown"
-      ],
+      "accept": [".txt", ".md", "text/plain", "text/markdown"],
       "description": "Upload a .txt or .md file. Either this or articleText is required."
     }
   ],
@@ -37,13 +32,8 @@
       {
         "id": "extract-entities",
         "description": "Anthropic LLM extracts raw named entities from the article (surface form + sentence context).",
-        "inputs": [
-          "articleText",
-          "articleFile"
-        ],
-        "outputs": [
-          "entities-raw"
-        ],
+        "inputs": ["articleText", "articleFile"],
+        "outputs": ["entities-raw"],
         "hints": {
           "tool": "anthropic-sdk",
           "note": "Coalesce: if articleFile is provided, read its UTF-8 contents; otherwise use articleText.",
@@ -56,19 +46,11 @@
       {
         "id": "categorise",
         "description": "Anthropic LLM categorises each entity (person/organisation/place), dedupes, and writes a 1-2 sentence description of each entity's role in the article. Single batched call given the full article + raw entity list.",
-        "inputs": [
-          "entities-raw"
-        ],
-        "outputs": [
-          "entities-enriched"
-        ],
+        "inputs": ["entities-raw"],
+        "outputs": ["entities-enriched"],
         "hints": {
           "tool": "anthropic-sdk",
-          "categories": [
-            "person",
-            "organisation",
-            "place"
-          ],
+          "categories": ["person", "organisation", "place"],
           "model": "claude-sonnet-4-7"
         },
         "validates": {
@@ -78,19 +60,11 @@
       {
         "id": "render-report",
         "description": "Render a markdown file with three sections (People / Organisations / Places). Under each, list entities with their LLM-written description.",
-        "inputs": [
-          "entities-enriched"
-        ],
-        "outputs": [
-          "report"
-        ],
+        "inputs": ["entities-enriched"],
+        "outputs": ["report"],
         "hints": {
           "tool": "template-render",
-          "sections": [
-            "People",
-            "Organisations",
-            "Places"
-          ]
+          "sections": ["People", "Organisations", "Places"]
         },
         "validates": {
           "outputType": "file"
@@ -100,9 +74,7 @@
   },
   "runtime": {
     "needsLLM": true,
-    "llmProviders": [
-      "anthropic"
-    ],
+    "llmProviders": ["anthropic"],
     "llmModel": "claude-sonnet-4-7",
     "binaryDeps": [],
     "estimatedRuntimeSec": 20,

@@ -81,6 +81,9 @@ export class PersistentCodexSession extends BaseOneShotSession {
       supportsCachedTokens: true,
       engineDisplayName: 'Codex',
     });
+    if (config.resumeSessionId && !/^codex-\d+-/.test(config.resumeSessionId)) {
+      this.codexThreadId = config.resumeSessionId;
+    }
   }
 
   /** Expose the captured thread ID for the codex_resume tool and stats overlay. */

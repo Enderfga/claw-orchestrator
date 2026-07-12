@@ -87,11 +87,28 @@ describe('autoloop registry', () => {
       ledger_dir: path.join(tmpDir, 'ws'),
       started_at: '2026-05-13T05:00:00.000Z',
       planner_session: 'planner-r1',
+      planner_engine: 'codex',
+      planner_model: 'gpt-planner',
+      coder_engine: 'custom',
+      coder_model: 'custom-coder',
+      reviewer_engine: 'gemini',
+      reviewer_model: 'gemini-reviewer',
     });
     const rows = listAutoloopsFromRegistry(file);
     expect(rows).toHaveLength(1);
-    expect(rows[0].run_id).toBe('r1');
-    expect(rows[0].planner_session).toBe('planner-r1');
+    expect(rows[0]).toMatchObject({
+      run_id: 'r1',
+      planner_session: 'planner-r1',
+      planner_engine: 'codex',
+      planner_model: 'gpt-planner',
+      coder_engine: 'custom',
+      coder_model: 'custom-coder',
+      reviewer_engine: 'gemini',
+      reviewer_model: 'gemini-reviewer',
+    });
+    const raw = fs.readFileSync(file, 'utf-8');
+    expect(raw).not.toContain('customEngine');
+    expect(raw).not.toContain('env');
   });
 
   it('returns [] when the registry does not exist', () => {

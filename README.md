@@ -31,7 +31,7 @@ https://github.com/user-attachments/assets/fbd2b0ea-28d8-4387-9894-c29cf15ba030
 | **Multi-Agent Council**     | Parallel agents in isolated git worktrees, voting on consensus until they agree.                                                                                                                                                | [`council.md`](./skills/references/council.md)             |
 | **Fan-out**                 | Run one task across N engine/model agents in parallel and collect their answers, with an optional synthesis pass — the cross-engine best-of-N / diverse-perspective primitive (no rounds or worktrees).                          | [`tools.md`](./skills/references/tools.md)                 |
 | **ultracode**               | `session_start({ ultracode: true })` lets Claude orchestrate a dynamic JS workflow and fan out to subagents per task (Claude engine).                                                                                            | [`tools.md`](./skills/references/tools.md)                 |
-| **Autoloop**                | Three-agent autonomous workspace iteration. Chat with the Planner; it spawns Coder + Reviewer into a self-iterating subloop and pushes you on regression, target-hit, or decision points.                                       | [`autoloop.md`](./skills/references/autoloop.md)           |
+| **Autoloop**                | Three-agent autonomous workspace iteration with independent engine/model selection for Planner, Coder, and Reviewer. Chat with the Planner; it spawns Coder + Reviewer into a self-iterating subloop and pushes you on regression, target-hit, or decision points. | [`autoloop.md`](./skills/references/autoloop.md)           |
 | **Ultraapp**                | A three-agent Opus council turns a five-question interview into a deployed web app — Tailwind UI, BYOK, file-queue runtime, smoke test, all live at `localhost:19000/forge/<slug>/`.                                            | [`ultraapp.md`](./skills/references/ultraapp.md)           |
 | **Embedded Dashboard**      | Three-tab UI for Autoloop, Council, and Forge with sidebar lifecycle controls, per-run live event streaming, and cookie-based auth via a `/login` redirect.                                                                     | [`dashboard.md`](./skills/references/dashboard.md)         |
 | **OpenAI-Compatible Proxy** | `POST /v1/chat/completions` translates OpenAI requests into native Anthropic, OpenAI, and Google calls and streams responses back in OpenAI shape. Point any OpenAI-SDK client at the orchestrator without changing call sites. | [`openai-compat.md`](./skills/references/openai-compat.md) |
@@ -91,11 +91,11 @@ Register `clawo-mcp` with any MCP-compatible host: Hermes Agent, Claude Desktop,
 
 | Engine       | CLI        | Tested Version |
 | ------------ | ---------- | -------------- |
-| Claude Code  | `claude`   | 2.1.206        |
-| Codex        | `codex`    | 0.143.0        |
+| Claude Code  | `claude`   | 2.1.207        |
+| Codex        | `codex`    | 0.144.1        |
 | Gemini       | `gemini`   | 0.43.0         |
-| Antigravity  | `agy`      | 1.0.16         |
-| Cursor Agent | `agent`    | 2026.03.30     |
+| Antigravity  | `agy`      | 1.1.1          |
+| Cursor Agent | `agent`    | 2026.04.08-a41fba1 |
 | OpenCode     | `opencode` | 1.1.40         |
 | Custom CLI   | any        | —              |
 

@@ -84,6 +84,22 @@ describe('PersistentCodexSession', () => {
     expect(spawnArgs).not.toContain('--output-schema');
   });
 
+  it('starts with exec resume when resumeSessionId contains a Codex thread ID', async () => {
+    const session = new PersistentCodexSession({
+      name: 'test',
+      cwd: '/tmp',
+      resumeSessionId: '019c6dcb-93ad-7dc1-b531-418d213b8761',
+    });
+    await session.start();
+
+    const sendPromise = session.send('continue', { waitForComplete: true });
+    setTimeout(() => runTurn(mockProc, '019c6dcb-93ad-7dc1-b531-418d213b8761'), 10);
+    await sendPromise;
+
+    const spawnArgs = mockSpawn.mock.calls[0][1] as string[];
+    expect(spawnArgs.slice(0, 3)).toEqual(['exec', 'resume', '019c6dcb-93ad-7dc1-b531-418d213b8761']);
+  });
+
   it('reuses the same schema file across resume turns', async () => {
     const schema = '{"type":"object"}';
     const session = new PersistentCodexSession({ name: 'test', cwd: '/tmp', jsonSchema: schema });

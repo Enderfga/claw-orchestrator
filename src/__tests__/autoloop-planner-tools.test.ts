@@ -134,6 +134,96 @@ describe('applyPlannerToolCalls', () => {
     }
   });
 
+  it('passes valid coder and reviewer engines to the spawn effect', async () => {
+    const { fx, calls } = makeMockEffects();
+    const r = await applyPlannerToolCalls(
+      [
+        {
+          tool: 'spawn_subagents',
+          args: { coder_engine: 'codex', reviewer_engine: 'gemini' },
+        },
+      ],
+      fx,
+      0,
+    );
+
+    expect(r.errors).toEqual([]);
+    expect(calls).toEqual(['spawnSubagents:{"coder_engine":"codex","reviewer_engine":"gemini"}']);
+  });
+
+  it('only forwards the documented spawn fields to the effect', async () => {
+    const { fx, calls } = makeMockEffects();
+    const r = await applyPlannerToolCalls(
+      [
+        {
+          tool: 'spawn_subagents',
+          args: {
+            coder_engine: 'codex',
+            reviewer_model: 'reviewer-model',
+            env: { SECRET: 'must-not-cross-boundary' },
+            unknown_field: 'ignored',
+          },
+        },
+      ],
+      fx,
+      0,
+    );
+
+    expect(r.errors).toEqual([]);
+    expect(calls).toEqual(['spawnSubagents:{"coder_engine":"codex","reviewer_model":"reviewer-model"}']);
+  });
+
+  it('rejects unknown engines before spawning or emitting an initial directive', async () => {
+    const { fx, calls } = makeMockEffects();
+    const r = await applyPlannerToolCalls(
+      [
+        {
+          tool: 'spawn_subagents',
+          args: {
+            coder_engine: 'not-real',
+            initial_directive: { goal: 'must not run' },
+          },
+        },
+      ],
+      fx,
+      0,
+    );
+
+    expect(r.errors).toHaveLength(1);
+    expect(r.errors[0].error).toContain('coder_engine');
+    expect(r.errors[0].error).toContain('not-real');
+    expect(calls).toEqual([]);
+    expect(r.emitted_messages).toEqual([]);
+  });
+
+  it('rejects custom engine configs emitted by the Planner', async () => {
+    const { fx, calls } = makeMockEffects();
+    const r = await applyPlannerToolCalls(
+      [
+        {
+          tool: 'spawn_subagents',
+          args: {
+            coder_engine: 'custom',
+            coder_custom_engine: { name: 'unsafe', bin: 'unsafe-cli', args: {} },
+          },
+        },
+        {
+          tool: 'spawn_subagents',
+          args: {
+            reviewer_engine: 'custom',
+            reviewerCustomEngine: { name: 'unsafe', bin: 'unsafe-cli', args: {} },
+          },
+        },
+      ],
+      fx,
+      0,
+    );
+
+    expect(r.errors).toHaveLength(2);
+    expect(r.errors.every((entry) => entry.error.includes('custom engine config'))).toBe(true);
+    expect(calls).toEqual([]);
+  });
+
   it('pause_loop / resume_loop / terminate emit runner-targeted envelopes', async () => {
     const { fx } = makeMockEffects();
     const r = await applyPlannerToolCalls(

@@ -14,7 +14,7 @@ import * as os from 'node:os';
 import * as crypto from 'node:crypto';
 import { SessionManager } from './session-manager.js';
 import { sanitizeCwd, validateRegex } from './validation.js';
-import type { EffortLevel } from './types.js';
+import type { EffortLevel, EngineType } from './types.js';
 import { handleChatCompletion } from './openai-compat.js';
 import { getModelList } from './models.js';
 
@@ -29,6 +29,43 @@ import {
 // Grace period for server.close() to drain connections before lingering
 // SSE/keep-alive sockets are force-dropped (otherwise close() hangs forever).
 const SERVER_CLOSE_GRACE_MS = 5000;
+
+function autoloopErrorStatus(error: unknown): number {
+  const message = error instanceof Error ? error.message : String(error);
+  if (/^Autoloop run '.+' not found in registry$/.test(message)) return 404;
+  if (/^Autoloop with id '.+' (?:already exists|is being deleted|is still starting)$/.test(message)) return 409;
+  if (/^Autoloop session name '.+' is already in use$/.test(message)) return 409;
+  if (/^(?:Planner|Coder|Reviewer) engine '.+' is not supported$/.test(message)) return 400;
+  // Any custom-engine config complaint is caller error, not a server fault.
+  // The old form pinned a single dotted segment and the verb "must be", so
+  // `config.args.permissionMode must be a string` and `config.env must contain
+  // only string values` both fell through to 500 — the opposite of the split
+  // this helper exists to provide.
+  if (/^(?:Planner|Coder|Reviewer) custom engine config\b/.test(message)) return 400;
+  return 500;
+}
+
+/**
+ * Custom engines name an arbitrary executable (`bin`) plus argv and env. That
+ * is fine for a local, programmatic caller, but this HTTP surface is routinely
+ * reverse-tunnelled to a public hostname, and its auth token is a *monitoring*
+ * credential — it was never meant to confer "run any binary on the host".
+ * Accepting a custom-engine object from the request body would turn any
+ * dashboard session into remote code execution, so the network surface refuses
+ * it outright. Built-in engines (the actual ask in #72) stay fully selectable.
+ */
+const CUSTOM_ENGINE_BODY_KEYS = ['planner_custom_engine', 'coder_custom_engine', 'reviewer_custom_engine'] as const;
+
+function rejectCustomEngineOverHttp(body: unknown): string | null {
+  if (typeof body !== 'object' || body === null) return null;
+  const record = body as Record<string, unknown>;
+  for (const key of CUSTOM_ENGINE_BODY_KEYS) {
+    if (record[key] !== undefined && record[key] !== null) {
+      return `${key} is not accepted over HTTP: a custom engine names an executable to spawn, so it may only be configured by a local caller (MCP tool / SessionManager API). Use a built-in engine here.`;
+    }
+  }
+  return null;
+}
 
 export class EmbeddedServer {
   private server: http.Server | null = null;
@@ -724,12 +761,28 @@ export class EmbeddedServer {
 
       // ─── Autoloop — launch new (dashboard "+ New" button) ───────
       //
-      // Minimal contract: { workspace, run_id?, planner_model?, send_timeout_ms? }.
+      // Contract: workspace/run_id plus optional per-role engine/model/custom-engine config.
       // When run_id is omitted or malformed, the server generates
       // `auto-{timestamp}-{4-byte-hex}`. Power users wanting a meaningful id
       // (e.g. "ml-refactor-v2") can pass run_id explicitly.
       if (path === '/autoloop/new') {
-        const workspace = (body as { workspace?: string }).workspace;
+        const customEngineRejection = rejectCustomEngineOverHttp(body);
+        if (customEngineRejection) {
+          json(400, { ok: false, error: customEngineRejection });
+          return;
+        }
+        const input = body as {
+          workspace?: string;
+          run_id?: string;
+          planner_engine?: EngineType;
+          planner_model?: string;
+          coder_engine?: EngineType;
+          coder_model?: string;
+          reviewer_engine?: EngineType;
+          reviewer_model?: string;
+          send_timeout_ms?: number;
+        };
+        const workspace = input.workspace;
         if (typeof workspace !== 'string' || !workspace.trim()) {
           json(400, { ok: false, error: 'workspace (string) required' });
           return;
@@ -739,7 +792,7 @@ export class EmbeddedServer {
           json(400, { ok: false, error: 'workspace failed sanitization' });
           return;
         }
-        const explicitId = (body as { run_id?: string }).run_id;
+        const explicitId = input.run_id;
         const runId =
           typeof explicitId === 'string' && /^[a-zA-Z0-9_-]{1,64}$/.test(explicitId)
             ? explicitId
@@ -748,8 +801,13 @@ export class EmbeddedServer {
           const result = await this.manager.autoloopStart({
             runId,
             workspace: safeWorkspace,
-            plannerModel: (body as { planner_model?: string }).planner_model,
-            sendTimeoutMs: (body as { send_timeout_ms?: number }).send_timeout_ms,
+            plannerEngine: input.planner_engine,
+            plannerModel: input.planner_model,
+            coderEngine: input.coder_engine,
+            coderModel: input.coder_model,
+            reviewerEngine: input.reviewer_engine,
+            reviewerModel: input.reviewer_model,
+            sendTimeoutMs: input.send_timeout_ms,
           });
           json(200, {
             ok: true,
@@ -757,7 +815,7 @@ export class EmbeddedServer {
             planner_session: result.plannerSession,
           });
         } catch (err) {
-          json(400, { ok: false, error: (err as Error).message });
+          json(autoloopErrorStatus(err), { ok: false, error: (err as Error).message });
         }
         return;
       }
@@ -996,12 +1054,19 @@ export class EmbeddedServer {
       const v2ResumeMatch = path.match(/^\/autoloop\/([^/]+)\/resume$/);
       if (v2ResumeMatch) {
         const id = v2ResumeMatch[1];
+        const resumeRejection = rejectCustomEngineOverHttp(body);
+        if (resumeRejection) {
+          json(400, { ok: false, error: resumeRejection });
+          return;
+        }
         try {
-          const state = await this.manager.autoloopResume(id);
+          // No custom-engine configs here by design (see rejectCustomEngineOverHttp).
+          // A run whose roles used custom engines therefore cannot be resumed over
+          // HTTP; autoloopResume reports that as a caller error, not a 500.
+          const state = await this.manager.autoloopResume(id, {});
           json(200, { ok: true, state });
         } catch (err) {
-          const msg = (err as Error).message;
-          json(/not found/i.test(msg) ? 404 : 500, { ok: false, error: msg });
+          json(autoloopErrorStatus(err), { ok: false, error: (err as Error).message });
         }
         return;
       }

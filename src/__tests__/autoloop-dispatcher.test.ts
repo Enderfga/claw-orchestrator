@@ -28,19 +28,29 @@ interface StubCalls {
 function makeStubManager(
   opts: {
     sendOutput?: string;
+    sendOutputs?: string[];
     sendThrows?: number;
+    startThrowsFor?: 'planner' | 'coder' | 'reviewer';
     contextPercent?: number;
   } = {},
 ): { manager: SessionManager; calls: StubCalls } {
   let throwsRemaining = opts.sendThrows ?? 0;
+  let sendIndex = 0;
   const calls: StubCalls = {
-    startSession: vi.fn(async () => ({ name: 'x', state: 'ready' })),
+    startSession: vi.fn(async (config: { name: string }) => {
+      if (opts.startThrowsFor && config.name.endsWith(`-${opts.startThrowsFor}`)) {
+        throw new Error(`${opts.startThrowsFor} failed to start`);
+      }
+      return { name: 'x', state: 'ready' };
+    }),
     sendMessage: vi.fn(async () => {
       if (throwsRemaining > 0) {
         throwsRemaining -= 1;
         throw new Error('subprocess died');
       }
-      return { output: opts.sendOutput ?? '', error: undefined };
+      const output = opts.sendOutputs?.[sendIndex] ?? opts.sendOutput ?? '';
+      sendIndex += 1;
+      return { output, error: undefined };
     }),
     stopSession: vi.fn(async () => undefined),
     getStatus: vi.fn(() => ({
@@ -89,6 +99,224 @@ function makeDispatcher(
   return { dispatcher, calls, ledgerDir, workspace };
 }
 
+function findStart(calls: StubCalls, role: 'planner' | 'coder' | 'reviewer'): Record<string, unknown> {
+  const call = calls.startSession.mock.calls.find(
+    (entry) => (entry[0] as { name: string }).name === `autoloop-r1-${role}`,
+  );
+  expect(call, `${role} startSession call`).toBeDefined();
+  return call![0] as Record<string, unknown>;
+}
+
+describe('ClaudeAgentDispatcher — role engine configuration', () => {
+  it('keeps the legacy Claude model defaults when no role overrides are provided', async () => {
+    const { dispatcher, calls } = makeDispatcher();
+
+    await dispatcher.deliver(Msg.chat(0, { text: 'hello' }));
+    await dispatcher.spawnSubagents();
+
+    expect(findStart(calls, 'planner')).toMatchObject({ engine: 'claude', model: 'opus' });
+    expect(findStart(calls, 'coder')).toMatchObject({ engine: 'claude', model: 'sonnet' });
+    expect(findStart(calls, 'reviewer')).toMatchObject({ engine: 'claude', model: 'sonnet' });
+  });
+
+  it('uses each non-Claude engine without injecting a Claude model default', async () => {
+    const { dispatcher, calls } = makeDispatcher({
+      plannerEngine: 'codex',
+      coderEngine: 'gemini',
+      reviewerEngine: 'opencode',
+    });
+
+    await dispatcher.deliver(Msg.chat(0, { text: 'hello' }));
+    await dispatcher.spawnSubagents();
+
+    for (const [role, engine] of [
+      ['planner', 'codex'],
+      ['coder', 'gemini'],
+      ['reviewer', 'opencode'],
+    ] as const) {
+      const start = findStart(calls, role);
+      expect(start.engine).toBe(engine);
+      expect(start).toHaveProperty('model', undefined);
+    }
+  });
+
+  it('delivers the Planner protocol in-band and starts non-Claude Planners read-only', async () => {
+    const { dispatcher, calls } = makeDispatcher({ plannerEngine: 'codex' });
+
+    await dispatcher.deliver(Msg.chat(0, { text: 'inspect this repository' }));
+
+    expect(findStart(calls, 'planner')).toMatchObject({
+      permissionMode: 'manual',
+      sandboxMode: 'read-only',
+    });
+    const prompt = calls.sendMessage.mock.calls[0][1] as string;
+    expect(prompt).toContain('<autoloop_role_instructions>');
+    expect(prompt).toContain('Planner');
+    expect(prompt).toContain('inspect this repository');
+  });
+
+  it('replays prior Planner chat for one-shot engines without native conversation resume', async () => {
+    const { dispatcher, calls } = makeDispatcher(
+      { plannerEngine: 'gemini' },
+      { sendOutputs: ['FIRST_PLANNER_REPLY', 'SECOND_PLANNER_REPLY'] },
+    );
+
+    await dispatcher.deliver(Msg.chat(0, { text: 'Remember plan ORCHID and option B.' }));
+    await dispatcher.deliver(Msg.chat(0, { text: 'Continue with the plan.' }));
+
+    const secondPrompt = calls.sendMessage.mock.calls[1][1] as string;
+    expect(secondPrompt).toContain('<conversation_history>');
+    expect(secondPrompt).toContain('Remember plan ORCHID and option B.');
+    expect(secondPrompt).toContain('FIRST_PLANNER_REPLY');
+    expect(secondPrompt).toContain('Continue with the plan.');
+  });
+
+  it('delivers Coder and Reviewer protocols in-band for non-Claude engines', async () => {
+    const { dispatcher, calls, ledgerDir } = makeDispatcher({
+      coderEngine: 'codex',
+      reviewerEngine: 'gemini',
+    });
+    await dispatcher.spawnSubagents();
+
+    await dispatcher.deliver(
+      Msg.directive(0, {
+        goal: 'change one file',
+        constraints: [],
+        success_criteria: [],
+        max_attempts: 1,
+      }),
+    );
+    await dispatcher.deliver(
+      Msg.reviewRequest(0, {
+        iter: 0,
+        ledger_path: ledgerDir,
+        prior_metrics: [],
+      }),
+    );
+
+    const coderPrompt = calls.sendMessage.mock.calls[0][1] as string;
+    const reviewerPrompt = calls.sendMessage.mock.calls[1][1] as string;
+    expect(coderPrompt).toContain('<autoloop_role_instructions>');
+    expect(coderPrompt).toContain('Coder');
+    expect(coderPrompt).toContain('change one file');
+    expect(reviewerPrompt).toContain('<autoloop_role_instructions>');
+    expect(reviewerPrompt).toContain('Reviewer');
+    expect(reviewerPrompt).toContain('[review_request iter=0]');
+  });
+
+  it('passes explicit role models and custom engine configs through to startSession', async () => {
+    const plannerCustomEngine = {
+      name: 'planner-cli',
+      bin: 'planner-cli',
+      args: {},
+      env: { TEST_TOKEN: 'planner-secret-sentinel' },
+    };
+    const coderCustomEngine = { name: 'coder-cli', bin: 'coder-cli', args: {} };
+    const reviewerCustomEngine = { name: 'reviewer-cli', bin: 'reviewer-cli', args: {} };
+    const { dispatcher, calls } = makeDispatcher({
+      plannerEngine: 'custom',
+      plannerModel: 'planner-model',
+      plannerCustomEngine,
+      coderEngine: 'custom',
+      coderModel: 'coder-model',
+      coderCustomEngine,
+      reviewerEngine: 'custom',
+      reviewerModel: 'reviewer-model',
+      reviewerCustomEngine,
+    });
+
+    await dispatcher.deliver(Msg.chat(0, { text: 'hello' }));
+    await dispatcher.spawnSubagents();
+
+    expect(findStart(calls, 'planner')).toMatchObject({
+      engine: 'custom',
+      model: 'planner-model',
+      customEngine: plannerCustomEngine,
+    });
+    expect(findStart(calls, 'coder')).toMatchObject({
+      engine: 'custom',
+      model: 'coder-model',
+      customEngine: coderCustomEngine,
+    });
+    expect(findStart(calls, 'reviewer')).toMatchObject({
+      engine: 'custom',
+      model: 'reviewer-model',
+      customEngine: reviewerCustomEngine,
+    });
+  });
+
+  it('rejects a custom role before startSession when its trusted config is missing', async () => {
+    const { dispatcher, calls } = makeDispatcher({ plannerEngine: 'custom' });
+
+    await expect(dispatcher.deliver(Msg.chat(0, { text: 'hello' }))).rejects.toThrow(
+      'Planner custom engine config is required',
+    );
+    expect(calls.startSession).not.toHaveBeenCalled();
+  });
+
+  it('applies spawn engine overrides and recomputes implicit model defaults', async () => {
+    const { dispatcher, calls } = makeDispatcher({ reviewerEngine: 'gemini', reviewerModel: 'gemini-explicit' });
+
+    await dispatcher.spawnSubagents({ coder_engine: 'codex' });
+
+    expect(findStart(calls, 'coder')).toHaveProperty('model', undefined);
+    expect(findStart(calls, 'coder').engine).toBe('codex');
+    expect(findStart(calls, 'reviewer')).toMatchObject({ engine: 'gemini', model: 'gemini-explicit' });
+  });
+
+  it('drops a prior model when spawn changes only the engine', async () => {
+    const { dispatcher, calls } = makeDispatcher({
+      coderEngine: 'claude',
+      coderModel: 'claude-specific-model',
+    });
+
+    await dispatcher.spawnSubagents({ coder_engine: 'codex' });
+
+    expect(findStart(calls, 'coder')).toMatchObject({ engine: 'codex', model: undefined });
+  });
+
+  it('uses the current role engine when eagerly resetting a spawned subagent', async () => {
+    const { dispatcher, calls } = makeDispatcher();
+    await dispatcher.spawnSubagents({ coder_engine: 'codex', coder_model: 'gpt-coder' });
+
+    await dispatcher.resetAgent('coder', { eagerRestart: true });
+
+    const coderStarts = calls.startSession.mock.calls
+      .map((entry) => entry[0] as Record<string, unknown>)
+      .filter((config) => config.name === 'autoloop-r1-coder');
+    expect(coderStarts).toHaveLength(2);
+    expect(coderStarts[1]).toMatchObject({ engine: 'codex', model: 'gpt-coder' });
+  });
+
+  it('rejects engine changes after a subagent session has started', async () => {
+    const { dispatcher, calls } = makeDispatcher();
+    await dispatcher.spawnSubagents();
+
+    await expect(dispatcher.spawnSubagents({ coder_engine: 'codex' })).rejects.toThrow(
+      'Cannot change Coder engine or model after its session has started',
+    );
+
+    await dispatcher.resetAgent('coder', { eagerRestart: true });
+    const coderStarts = calls.startSession.mock.calls
+      .map((entry) => entry[0] as Record<string, unknown>)
+      .filter((config) => config.name === 'autoloop-r1-coder');
+    expect(coderStarts).toHaveLength(2);
+    expect(coderStarts[1]).toMatchObject({ engine: 'claude', model: 'sonnet' });
+  });
+
+  it('stops a newly started Coder when Reviewer startup fails', async () => {
+    const { dispatcher, calls } = makeDispatcher({}, { startThrowsFor: 'reviewer' });
+
+    await expect(dispatcher.spawnSubagents()).rejects.toThrow('reviewer failed to start');
+
+    expect(calls.stopSession).toHaveBeenCalledWith('autoloop-r1-coder');
+    calls.startSession.mockImplementation(async () => ({ name: 'x', state: 'ready' }));
+    await dispatcher.spawnSubagents();
+    expect(findStart(calls, 'coder')).toBeDefined();
+    expect(findStart(calls, 'reviewer')).toBeDefined();
+  });
+});
+
 describe('ClaudeAgentDispatcher — frozen reviewer memory', () => {
   it('injects reviewer_memory.md contents into the Reviewer system prompt at startSession', async () => {
     const { dispatcher, calls, ledgerDir } = makeDispatcher();
@@ -116,6 +344,27 @@ describe('ClaudeAgentDispatcher — frozen reviewer memory', () => {
     );
     const sp = (reviewerStart![0] as { systemPrompt: string }).systemPrompt;
     expect(sp).not.toContain('<frozen_memory_snapshot>');
+  });
+
+  it('keeps the non-Claude Reviewer memory snapshot frozen after session start', async () => {
+    const { dispatcher, calls, ledgerDir } = makeDispatcher({ reviewerEngine: 'gemini' });
+    const sandbox = path.join(ledgerDir, 'reviewer_sandbox');
+    fs.mkdirSync(sandbox, { recursive: true });
+    fs.writeFileSync(path.join(sandbox, 'reviewer_memory.md'), 'frozen-old-memory');
+    await dispatcher.spawnSubagents();
+    fs.writeFileSync(path.join(sandbox, 'reviewer_memory.md'), 'new-memory-must-wait-for-reset');
+
+    await dispatcher.deliver(
+      Msg.reviewRequest(0, {
+        iter: 0,
+        ledger_path: ledgerDir,
+        prior_metrics: [],
+      }),
+    );
+
+    const prompt = calls.sendMessage.mock.calls[0][1] as string;
+    expect(prompt).toContain('frozen-old-memory');
+    expect(prompt).not.toContain('new-memory-must-wait-for-reset');
   });
 });
 

@@ -213,6 +213,83 @@ describe('POST /autoloop/new', () => {
     expect(j.run_id).toBe('my-custom-id');
   });
 
+  it('passes independent role engines and models to autoloopStart', async () => {
+    const r = await fetch(`http://127.0.0.1:${port}/autoloop/new`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({
+        workspace: '/tmp',
+        run_id: 'multi-engine-http',
+        planner_engine: 'codex',
+        planner_model: 'gpt-planner',
+        coder_engine: 'opencode',
+        coder_model: 'anthropic/claude-sonnet-5',
+        reviewer_engine: 'gemini',
+        reviewer_model: 'gemini-reviewer',
+      }),
+    });
+
+    expect(r.status).toBe(200);
+    expect(manager.autoloopStart).toHaveBeenLastCalledWith({
+      runId: 'multi-engine-http',
+      workspace: fs.realpathSync('/tmp'),
+      plannerEngine: 'codex',
+      plannerModel: 'gpt-planner',
+      coderEngine: 'opencode',
+      coderModel: 'anthropic/claude-sonnet-5',
+      reviewerEngine: 'gemini',
+      reviewerModel: 'gemini-reviewer',
+      sendTimeoutMs: undefined,
+    });
+  });
+
+  // A custom engine names an executable to spawn. This HTTP surface is routinely
+  // reverse-tunnelled to a public hostname and its token is a monitoring
+  // credential, so accepting one from the request body would turn any dashboard
+  // session into remote code execution. Built-in engines stay selectable.
+  it('refuses a custom engine supplied over HTTP instead of spawning its binary', async () => {
+    vi.mocked(manager.autoloopStart).mockClear();
+    for (const key of ['planner_custom_engine', 'coder_custom_engine', 'reviewer_custom_engine']) {
+      const r = await fetch(`http://127.0.0.1:${port}/autoloop/new`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          workspace: '/tmp',
+          run_id: `rce-${key}`,
+          [`${key.split('_')[0]}_engine`]: 'custom',
+          [key]: { name: 'pwn', bin: '/bin/sh', args: { extra: ['-c', 'echo owned'] } },
+        }),
+      });
+      expect(r.status).toBe(400);
+      const payload = (await r.json()) as { ok: boolean; error: string };
+      expect(payload.ok).toBe(false);
+      expect(payload.error).toContain('not accepted over HTTP');
+      expect(manager.autoloopStart).not.toHaveBeenCalled();
+    }
+  });
+
+  it('returns 400 when autoloop role configuration is invalid', async () => {
+    vi.mocked(manager.autoloopStart).mockRejectedValueOnce(new Error("Planner engine 'not-real' is not supported"));
+    const r = await fetch(`http://127.0.0.1:${port}/autoloop/new`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ workspace: '/tmp', planner_engine: 'not-real' }),
+    });
+    expect(r.status).toBe(400);
+  });
+
+  it('returns 409 when an Autoloop reserved session name is already active', async () => {
+    vi.mocked(manager.autoloopStart).mockRejectedValueOnce(
+      new Error("Autoloop session name 'autoloop-conflict-planner' is already in use"),
+    );
+    const r = await fetch(`http://127.0.0.1:${port}/autoloop/new`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ workspace: '/tmp', run_id: 'conflict' }),
+    });
+    expect(r.status).toBe(409);
+  });
+
   it('rejects a malformed run_id (server-generates instead)', async () => {
     const r = await fetch(`http://127.0.0.1:${port}/autoloop/new`, {
       method: 'POST',
@@ -393,6 +470,61 @@ describe('POST /autoloop/:id/resume + GET /autoloop/:id/chat_history', () => {
     expect(j.ok).toBe(true);
     expect(j.state.run_id).toBe('run-rsm');
     expect(j.state.status).toBe('planning');
+    expect(manager.autoloopResume).toHaveBeenCalledWith('run-rsm', {
+      plannerCustomEngine: undefined,
+      coderCustomEngine: undefined,
+      reviewerCustomEngine: undefined,
+    });
+  });
+
+  it('resumes without accepting a custom engine from the request body', async () => {
+    vi.spyOn(manager, 'autoloopResume').mockResolvedValue({
+      run_id: 'custom-rsm',
+      status: 'planning',
+      iter: 0,
+      subagents_spawned: false,
+      started_at: '2026-05-13T10:00:00.000Z',
+      workspace: '/tmp',
+      ledger_dir: '/tmp/tasks/custom-rsm',
+      push_log_count: 0,
+      status_reason: null,
+      consecutive_phase_errors: 0,
+      recent_phase_errors: [],
+      metric_history: [],
+      last_activity_at: 0,
+    });
+    const r = await fetch(`http://127.0.0.1:${port}/autoloop/custom-rsm/resume`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({}),
+    });
+
+    expect(r.status).toBe(200);
+    expect(manager.autoloopResume).toHaveBeenLastCalledWith('custom-rsm', {});
+  });
+
+  it('refuses a custom engine supplied to resume over HTTP', async () => {
+    const resumeSpy = vi.spyOn(manager, 'autoloopResume');
+    const r = await fetch(`http://127.0.0.1:${port}/autoloop/custom-rsm/resume`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ planner_custom_engine: { name: 'pwn', bin: '/bin/sh', args: {} } }),
+    });
+
+    expect(r.status).toBe(400);
+    const payload = (await r.json()) as { ok: boolean; error: string };
+    expect(payload.error).toContain('not accepted over HTTP');
+    expect(resumeSpy).not.toHaveBeenCalled();
+  });
+
+  it('resume returns 400 when a custom engine config is required', async () => {
+    vi.spyOn(manager, 'autoloopResume').mockRejectedValue(new Error('Planner custom engine config is required'));
+    const r = await fetch(`http://127.0.0.1:${port}/autoloop/custom-missing/resume`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: '{}',
+    });
+    expect(r.status).toBe(400);
   });
 
   it('resume returns 404 when registry has no record', async () => {
@@ -403,6 +535,18 @@ describe('POST /autoloop/:id/resume + GET /autoloop/:id/chat_history', () => {
       body: '{}',
     });
     expect(r.status).toBe(404);
+  });
+
+  it('resume returns 500 for engine runtime failures rather than treating them as bad config', async () => {
+    vi.spyOn(manager, 'autoloopResume').mockRejectedValue(
+      new Error("Engine 'claude' circuit breaker open after 3 consecutive failures. Retry in 30s."),
+    );
+    const r = await fetch(`http://127.0.0.1:${port}/autoloop/runtime-failure/resume`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: '{}',
+    });
+    expect(r.status).toBe(500);
   });
 
   it('chat_history reads <ledger>/chat.jsonl and returns entries', async () => {

@@ -105,6 +105,25 @@ describe('PersistentCursorSession', () => {
       expect(spawnArgs).toContain('sonnet-4');
     });
 
+    it('uses plan mode instead of force for read-only sessions', async () => {
+      const session = new PersistentCursorSession({
+        name: 'test',
+        cwd: '/tmp',
+        permissionMode: 'manual',
+        sandboxMode: 'read-only',
+      });
+      await session.start();
+
+      const sendPromise = session.send('hello', { waitForComplete: true });
+      setTimeout(() => closeProc(mockProc, 0), 10);
+      await sendPromise;
+
+      const spawnArgs = mockSpawn.mock.calls[0][1] as string[];
+      expect(spawnArgs).toContain('--mode');
+      expect(spawnArgs).toContain('plan');
+      expect(spawnArgs).not.toContain('--force');
+    });
+
     it('passes --workspace for cwd', async () => {
       const session = new PersistentCursorSession({
         name: 'test',

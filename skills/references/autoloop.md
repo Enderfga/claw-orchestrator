@@ -21,11 +21,39 @@ This page is the operator reference.
 
 ## Roles
 
-| Agent | Engine (default) | cwd | Owns |
+| Agent | Default | cwd | Owns |
 |---|---|---|---|
 | **Planner** | claude / opus | workspace | strategy, `plan.md`, `goal.json`, talking to you |
-| **Coder** | claude / sonnet (override per spawn) | workspace | code changes, eval execution |
+| **Coder** | claude / sonnet | workspace | code changes, eval execution |
 | **Reviewer** | claude / sonnet | `<workspace>/tasks/<run_id>/reviewer_sandbox/` | distrust audit; advance / hold / rollback |
+
+Each role can use any built-in engine, or a `custom` engine config supplied by a
+local caller (custom engines name an executable, so the HTTP API does not accept
+them — see [tools.md](./tools.md)). If a non-Claude role omits `model`, that CLI
+uses its own default model rather than receiving the Claude `opus` / `sonnet`
+defaults. Role instructions are included in-band for engines that do not expose a
+native system-prompt flag.
+
+Engines without native multi-turn conversation (Gemini, Cursor, OpenCode, one-shot
+custom engines) spawn a fresh process per send, so the dispatcher replays that
+role's transcript in-band as a `<conversation_history>` block, oldest turns dropped
+past a character budget. Claude, Codex and Antigravity keep context themselves and
+get no replay.
+
+The Planner runs read-only so strategy cannot turn into source edits, and that is
+enforced by the engine rather than requested politely: Claude uses plan mode,
+Gemini gets `--approval-mode plan` **plus an admin policy denying `exit_plan_mode`**
+(plan mode on its own is model-cooperative — the agent can call that tool and walk
+out of it), OpenCode gets a generated `clawo-readonly` agent that denies
+`edit`/`bash`/`external_directory` (its built-in `plan` agent is a user-overridable
+preset that denies neither), and Antigravity/Cursor use their plan modes. A custom
+Planner receives `permissionMode: 'manual'` and its `CustomEngineConfig` **must**
+map that mode to the CLI's read-only flag — if it cannot, the session refuses to
+start rather than silently running write-enabled.
+
+Coder and Reviewer engine/model choices can be overridden by the first successful
+`spawn_subagents`; later attempts to change an already-started role are rejected
+instead of silently diverging from the running session.
 
 Coder and Reviewer **never speak to you directly**. Anything they observe
 flows through the Planner. The Planner decides what to surface and what to
@@ -78,7 +106,7 @@ curl -X POST http://127.0.0.1:18789/v1/openclaw/tools/autoloop_stop \
 
 | Tool | Args | What |
 |---|---|---|
-| `autoloop_start` | `run_id`, `workspace`, `planner_model?`, `send_timeout_ms?` | Start a run; launches Planner session. |
+| `autoloop_start` | `run_id`, `workspace`, per-role `*_engine?`, `*_model?`, `*_custom_engine?`, `send_timeout_ms?` | Start a run; launches Planner and stores Coder/Reviewer defaults. Each `custom` role requires its matching config. |
 | `autoloop_chat` | `run_id`, `text` | Send a chat message to the Planner; returns the Planner's reply. |
 | `autoloop_status` | `run_id` | Current state (status, iter, push count, subagents_spawned). |
 | `autoloop_list` | — | All active runs in this manager process. |
@@ -94,7 +122,7 @@ never see the JSON — only the Planner's narrative.
 | Tool | Args | What |
 |---|---|---|
 | `notify_user` | `level` ('info' / 'warn' / 'decision' / 'error'), `summary`, `detail?`, `channel?` ('auto' / 'wechat' / 'webchat' / 'both' / 'email') | Push you out-of-band. |
-| `spawn_subagents` | `coder_model?`, `reviewer_model?`, `initial_directive?` | Start Coder + Reviewer. Only after explicit user approval. |
+| `spawn_subagents` | `coder_engine?`, `coder_model?`, `reviewer_engine?`, `reviewer_model?`, `initial_directive?` | Start Coder + Reviewer. Omitted values inherit run defaults. An engine change without a model uses the new engine's default. Once a role session has started, changing its engine/model is rejected. Custom configs cannot be emitted by Planner. Only after explicit user approval. |
 | `send_directive` | `goal`, `constraints?`, `success_criteria?`, `max_attempts?` | Next iter's instruction to Coder. |
 | `pause_loop` | `reason` | Halt subloop at next iter boundary; chat keeps working. |
 | `resume_loop` | — | Resume after pause. |
@@ -102,6 +130,22 @@ never see the JSON — only the Planner's narrative.
 | `update_push_policy` | partial PushPolicy | Mutate notification rules (e.g. when you say "tell me every iter"). |
 | `write_plan` | `content` (full plan.md body), `commit_message?` | Write `plan.md` to the workspace and git-commit. The **only** way the Planner can author plan.md — Write/Edit are stripped from the Planner session as a hard role boundary. Re-running replaces the whole file. |
 | `write_goal` | `content` (full goal.json body), `commit_message?` | Same, for `goal.json`. Content is JSON-validated before write; malformed content errors back to the Planner. |
+
+### Custom engines and resume
+
+Custom engine configs are accepted only by `autoloop_start` (or the HTTP resume
+body), never through Planner output. This keeps config fields such as `env` and
+static CLI arguments out of the Planner transcript and `decisions.jsonl`.
+The central registry persists only each role's engine and model, including the
+effective Coder/Reviewer selection after a successful spawn. Resume leaves the
+prior append-only row untouched until startup succeeds, so a transient CLI
+failure cannot erase the run. When resuming a run that uses `custom`, provide
+the matching `planner_custom_engine`, `coder_custom_engine`, or
+`reviewer_custom_engine` again; otherwise resume fails with a clear
+configuration error rather than silently switching to Claude. Custom config
+shape is validated at runtime, while its `env` and static CLI arguments remain
+out of registry and audit records. See [`multi-engine.md`](./multi-engine.md)
+for the `CustomEngineConfig` shape.
 
 ## Default push policy
 
@@ -211,13 +255,13 @@ Every JSON artifact in the ledger carries a `schema_version` field (currently
 | Endpoint | Returns |
 |---|---|
 | `GET /autoloop/list` | `{ ok, runs: AutoloopState[] }` |
-| `POST /autoloop/new` | `{ ok, run_id, planner_session }` — body `{ workspace, run_id?, planner_model?, send_timeout_ms? }` |
+| `POST /autoloop/new` | `{ ok, run_id, planner_session }` — body `{ workspace, run_id?, planner_engine?, planner_model?, planner_custom_engine?, coder_engine?, coder_model?, coder_custom_engine?, reviewer_engine?, reviewer_model?, reviewer_custom_engine?, send_timeout_ms? }` |
 | `GET /autoloop/<id>/state` | `{ ok, state: AutoloopState }` — also returns a `terminated`-state stub reconstructed from the registry for runs that aren't in this process's memory, so the dashboard can open historical runs without 404'ing. |
 | `GET /autoloop/<id>/push_log` | `{ ok, entries: PushLogEntry[] }` — served from the ledger via `autoloopStatus`, so historical runs work the same as live ones. |
 | `GET /autoloop/<id>/chat_history` | `{ ok, entries: ChatEntry[] }` — replays `<ledger>/chat.jsonl`. The dashboard fetches this when opening a run so the Planner-pane conversation survives a page refresh / cross-process / re-opening a terminated run. Returns `[]` when the file doesn't exist (e.g. runs that predate the chat-history feature). |
 | `GET /autoloop/<id>/events` | SSE: `snapshot` / `message` / `state` / `push` / `iter_done` / `planner_reply` / `planner_error` / `coder_reply` / `reviewer_reply` / `terminated`. For runs that are NOT in this process's memory (terminated, or live in another process), the endpoint emits a single-shot `snapshot` + `terminated` then closes — the dashboard's existing handlers render history without hanging. |
 | `POST /autoloop/<id>/chat` | **202** `{ ok, queued: true }` — body `{ text }`. Fire-and-forget: the Planner's reply streams back via the `/events` SSE channel as a `planner_reply` event (or `planner_error` on failure); the HTTP response intentionally does NOT wait for it, because first-contact replies routinely exceed reverse-proxy idle limits (e.g. Cloudflare Tunnel cuts at ~100s → 524). 400 on empty text, 404 when the run is not in this process's memory. The MCP `autoloop_chat` tool path keeps the synchronous await-and-return-reply semantics (it runs in-process). |
-| `POST /autoloop/<id>/resume` | `{ ok, state }` — bring a terminated run back into this process. Reads the registry entry, re-creates dispatcher + runner; `ensurePlanner` picks up the persisted `claudeSessionId` (kept on disk because autoloop terminate now passes `keepPersisted: true`) so Claude resumes the original conversation. Runs that pre-date this change get a fresh Planner; the dashboard replays `chat.jsonl` visually anyway. 404 when the registry has no record. |
+| `POST /autoloop/<id>/resume` | `{ ok, state }` — restore the role engine/model choices from the registry and re-create dispatcher + runner. Optional body fields `planner_custom_engine`, `coder_custom_engine`, `reviewer_custom_engine` must be supplied again for roles using `custom` because configs are intentionally not persisted. Existing engine-specific conversation resume behavior is reused where supported; `chat.jsonl` remains the visual history fallback. 404 when the registry has no record. |
 | `POST /autoloop/<id>/delete` | `{ ok }` — stops the runner if still alive, scrubs the row from `~/.claw-orchestrator/autoloop-registry.jsonl`, and purges `persistedSessions` so the run cannot be `/resume`'d back. The ledger directory under `<workspace>/tasks/<run_id>/` is kept on disk. 404 if the run was not present in either memory or the registry. |
 
 The 3-pane UI consumes these endpoints:

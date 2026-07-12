@@ -167,24 +167,25 @@ Both are async — start then poll status.
 
 ## Autoloop (autonomous workspace iteration)
 
-Given a git workspace, a `plan.md` (intent + scope), and a `goal.json` (success criteria — scalar metric and/or structural gates), runs BOOTSTRAP → propose → execute → measure → ratchet → repeat until the goal is met or caps fire.
+Autoloop uses three persistent roles. You chat with the Planner to define `plan.md` and `goal.json`; after explicit approval it starts a Coder/Reviewer iteration loop. Each role may use a different engine.
 
 ```javascript
 autoloop_start({
+  run_id: 'fix-parser',
   workspace: '/path/to/repo',
-  plan_path: '/path/to/repo/plan.md',
-  goal_path: '/path/to/repo/goal.json',
-  // optional: propose_engine, propose_model, ratchet_engine, ratchet_model
+  planner_engine: 'claude',
+  coder_engine: 'codex',
+  reviewer_engine: 'gemini',
 });
-autoloop_status({ id });
-autoloop_inject({ id, text: 'try lr warmup 500' });   // hint into next PROPOSE
-autoloop_resume({ workspace, task_id });              // resume after process death
-autoloop_stop({ id });
+autoloop_chat({ run_id: 'fix-parser', text: 'Read the repo and design a plan to fix the parser.' });
+autoloop_chat({ run_id: 'fix-parser', text: 'Plan approved; start the loop.' });
+autoloop_status({ run_id: 'fix-parser' });
+autoloop_stop({ run_id: 'fix-parser', reason: 'done' });
 ```
 
-Asymmetric ratchet reviewer runs in a sandbox tmpdir (no source access), only writes a single decision bit to `state.json`. Non-blocking pushes via `openclaw message send` on new-best / plateau / aspirational gate proposals / termination. SSE event stream at `GET /autoloop/<id>/events`.
+Claude roles default to Planner `opus` and Coder/Reviewer `sonnet`. A non-Claude role with no model uses that engine's own default. Custom engine configs are supplied only at start (or HTTP resume), never by Planner output. The Reviewer runs in a restaged sandbox and returns advance/hold/rollback verdicts; push policy and SSE keep long runs observable.
 
-For details and worked examples (Karpathy-style scalar improvement + paper-review style gates): see [references/autoloop.md](references/autoloop.md).
+For the full control protocol, registry/resume behavior, and ledger layout, see [references/autoloop.md](references/autoloop.md).
 
 ## Tools Overview
 

@@ -1042,6 +1042,23 @@ export class PersistentCustomSession extends EventEmitter implements ISession {
   private _appendPermissionArgs(args: string[]): void {
     const a = this.engineConfig.args;
     const mode = this.options.permissionMode;
+
+    // A custom engine is an arbitrary CLI: we have no way to derive its
+    // read-only flag. If the caller asked for a read-only sandbox and the
+    // config doesn't say how to express that, refuse to start rather than
+    // spawn a write-enabled process while the caller believes it is sandboxed.
+    // Silently ignoring the request is the one outcome we must never pick.
+    if (this.options.sandboxMode === 'read-only') {
+      const mapped = mode ? this.engineConfig.permissionModes?.[mode] : undefined;
+      if (!a.permissionMode || !mapped) {
+        throw new Error(
+          `Custom engine '${this.engineConfig.name}' cannot honor sandboxMode 'read-only': ` +
+            `set args.permissionMode and a permissionModes['${mode ?? 'manual'}'] entry that maps to the CLI's ` +
+            `read-only/plan flag, or start the session without sandboxMode.`,
+        );
+      }
+    }
+
     if (!mode || !a.permissionMode) return;
 
     // Map mode name if the engine uses different names
