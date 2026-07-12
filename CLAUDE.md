@@ -184,7 +184,7 @@ Current tested versions (update on each release):
 | Gemini | `gemini` | 0.43.0 | `gemini -p <msg> --output-format stream-json --skip-trust --yolo/--sandbox` |
 | Antigravity | `agy` | 1.0.16 | `agy -p <msg> --log-file <tmp> [--conversation <id>] --dangerously-skip-permissions/--sandbox --print-timeout <n>s` |
 | Cursor | `agent` | 2026.03.30 | `agent -p <msg> --force --trust --output-format stream-json --workspace <dir>` |
-| OpenCode | `opencode` | 1.1.40 | `opencode run <msg> --format json [--model provider/model]` |
+| OpenCode | `opencode` | 1.17.15 | `opencode run <msg> --format json [--model provider/model]` (read-only sessions add `--agent clawo-readonly` + `OPENCODE_CONFIG_CONTENT`) |
 
 **Important:** When CLI vendors change flags or output format, update the corresponding `persistent-*-session.ts` and re-run integration tests.
 

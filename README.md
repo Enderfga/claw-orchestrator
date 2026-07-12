@@ -96,7 +96,7 @@ Register `clawo-mcp` with any MCP-compatible host: Hermes Agent, Claude Desktop,
 | Gemini       | `gemini`   | 0.43.0         |
 | Antigravity  | `agy`      | 1.1.1          |
 | Cursor Agent | `agent`    | 2026.04.08-a41fba1 |
-| OpenCode     | `opencode` | 1.1.40         |
+| OpenCode     | `opencode` | 1.17.15        |
 | Custom CLI   | any        | —              |
 
 Any coding CLI that runs as a subprocess can be wired up as a custom engine — see [`multi-engine.md`](./skills/references/multi-engine.md#custom-engine-enginecustom).
