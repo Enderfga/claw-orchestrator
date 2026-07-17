@@ -252,6 +252,8 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
 
     // CLI 2.1.111 features
     if (this.options.includeHookEvents) args.push('--include-hook-events');
+    // CLI 2.1.211+: surface subagent output in the parent stream.
+    if (this.options.forwardSubagentText) args.push('--forward-subagent-text');
     if (this.options.permissionPromptTool) args.push('--permission-prompt-tool', this.options.permissionPromptTool);
 
     // Smart default: bare mode auto-enables exclude-dynamic-system-prompt-sections for better cache hits

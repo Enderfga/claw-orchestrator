@@ -86,6 +86,7 @@ session_stop({ name: "myproject" })
 |-----------|-------------|
 | `bare` | Minimal mode — no CLAUDE.md, hooks, LSP, auto-memory. Auto-enables prompt cache optimizations (see below). |
 | `includeHookEvents` | Stream hook lifecycle events (PreToolUse/PostToolUse). |
+| `forwardSubagentText` | Forward subagent text and thinking into the output stream, so sessions that fan out surface intermediate output instead of going quiet. |
 | `permissionPromptTool` | Delegate permission prompts to an MCP tool for non-interactive use. |
 | `excludeDynamicSystemPromptSections` | Move cwd/env/git from system prompt to user message for better prompt cache hits. Auto-enabled with `bare: true`. |
 | `enablePromptCaching1H` | Enable 1-hour prompt cache TTL (vs default 5-min). Auto-enabled with `bare: true`. |

@@ -219,6 +219,12 @@ export interface SessionConfig {
   // CLI 2.1.111 features
   /** Stream hook lifecycle events (PreToolUse/PostToolUse) */
   includeHookEvents?: boolean;
+  /**
+   * Forward subagent text and thinking into the stream-json output (CLI 2.1.211+).
+   * Without it the parent stream goes quiet while a subagent works, so sessions that
+   * fan out (ultracode, agent teams) surface no intermediate output.
+   */
+  forwardSubagentText?: boolean;
   /** Delegate permission prompts to an MCP tool for non-interactive use */
   permissionPromptTool?: string;
   /** Move cwd/env/git status from system prompt to user message for better prompt cache hits */

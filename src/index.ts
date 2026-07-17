@@ -271,6 +271,10 @@ const plugin = {
             type: 'boolean',
             description: 'Stream hook lifecycle events (PreToolUse/PostToolUse)',
           },
+          forwardSubagentText: {
+            type: 'boolean',
+            description: 'Forward subagent text and thinking into the output stream (Claude engine)',
+          },
           permissionPromptTool: {
             type: 'string',
             description: 'Delegate permission prompts to this MCP tool (non-interactive)',

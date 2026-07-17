@@ -32,7 +32,7 @@ Default engine. Long-running subprocess with streaming JSON I/O. Tested with Cla
 - Real-time streaming (text, tool_use, tool_result, system events)
 - Session resume via `--resume`
 - Full cost tracking from API usage data
-- Hook lifecycle events (`includeHookEvents`), permission delegation (`permissionPromptTool`), prompt cache optimization (`bare` + `excludeDynamicSystemPromptSections` + `enablePromptCaching1H`), debug control, `--from-pr` resume, and MCP channel subscriptions
+- Hook lifecycle events (`includeHookEvents`), subagent output forwarding (`forwardSubagentText`), permission delegation (`permissionPromptTool`), prompt cache optimization (`bare` + `excludeDynamicSystemPromptSections` + `enablePromptCaching1H`), debug control, `--from-pr` resume, and MCP channel subscriptions
 - Fork subagent (`forkSubagent`), tool search (`enableToolSearch`), OpenTelemetry logging toggles (`otelLogUserPrompts`, `otelLogRawApiBodies`), `xhigh` effort tier (Opus 4.7), and `stats.pluginErrors` capture — see [CLI 2.1.121 options in SKILL.md](../SKILL.md) and [tools.md](./tools.md)
 
 > **Behavior changes from upstream Claude CLI 2.1.121** (worth knowing if you set permission rules):

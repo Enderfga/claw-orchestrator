@@ -39,6 +39,7 @@ Start a persistent coding session with full CLI flag support.
 | `enableAutoMode` | boolean | Enable auto permission mode |
 | `customEngine` | object | Custom engine config (required when `engine='custom'`). See [Multi-Engine: Custom Engine](./multi-engine.md#custom-engine-enginecustom). |
 | `includeHookEvents` | boolean | Stream hook lifecycle events (PreToolUse/PostToolUse) as `system` events |
+| `forwardSubagentText` | boolean | Forward subagent text and thinking into the output stream (Claude engine, CLI 2.1.211+). Without it the parent stream stays quiet while a subagent works |
 | `permissionPromptTool` | string | MCP tool name to delegate permission prompts to (non-interactive use) |
 | `excludeDynamicSystemPromptSections` | boolean | Move cwd/env/git context from system prompt to user message for better prompt cache hits; auto-enabled with `bare: true` |
 | `enablePromptCaching1H` | boolean | Enable 1-hour prompt cache TTL (vs default 5-min); auto-enabled with `bare: true` |

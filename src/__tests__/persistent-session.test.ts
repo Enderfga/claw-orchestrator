@@ -177,6 +177,26 @@ describe('PersistentClaudeSession', () => {
       expect(args).toContain('--include-hook-events');
     });
 
+    it('includes --forward-subagent-text when set', async () => {
+      session = new PersistentClaudeSession(makeConfig({ forwardSubagentText: true }));
+      const { spawn } = await import('node:child_process');
+      const startPromise = session.start();
+      emitInitEvent(mockProc);
+      await startPromise;
+      const args = vi.mocked(spawn).mock.calls.at(-1)![1] as string[];
+      expect(args).toContain('--forward-subagent-text');
+    });
+
+    it('omits --forward-subagent-text by default', async () => {
+      session = new PersistentClaudeSession(makeConfig({}));
+      const { spawn } = await import('node:child_process');
+      const startPromise = session.start();
+      emitInitEvent(mockProc);
+      await startPromise;
+      const args = vi.mocked(spawn).mock.calls.at(-1)![1] as string[];
+      expect(args).not.toContain('--forward-subagent-text');
+    });
+
     it('includes --permission-prompt-tool when set', async () => {
       session = new PersistentClaudeSession(makeConfig({ permissionPromptTool: 'mcp__auth__decide' }));
       const { spawn } = await import('node:child_process');

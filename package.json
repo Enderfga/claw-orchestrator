@@ -1,6 +1,6 @@
 {
   "name": "@enderfga/claw-orchestrator",
-  "version": "4.8.1",
+  "version": "4.9.0",
   "description": "Claw Orchestrator — run Claude Code, Codex, Gemini, Cursor Agent, OpenCode and custom coding CLIs as one unified runtime. Drop into Hermes Agent, Claude Desktop, Cursor, Cline, Continue, Zed, Windsurf, Goose or any Model Context Protocol (MCP) host, install as an OpenClaw plugin, or run standalone. Persistent sessions, multi-agent council, ultraplan, ultrareview, autoloop, tool orchestration.",
   "type": "module",
   "main": "./dist/src/index.js",

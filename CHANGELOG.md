@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.9.0] - 2026-07-17
+
+Weekly engine sweep. Every version below was re-verified against the real binary
+rather than taken from release notes.
+
+### Added
+
+- `forwardSubagentText` session option (Claude engine) — passes `--forward-subagent-text`
+  (CLI 2.1.211+) so a session that fans out to subagents surfaces their text and thinking
+  in the output stream instead of going quiet until the subagent returns.
+
+### Changed
+
+- Tested engine versions: Claude Code 2.1.207 → 2.1.212, Codex 0.144.1 → 0.144.5,
+  OpenCode 1.17.15 → 1.18.0. Antigravity (1.1.1) and Cursor (2026.07.09) unchanged.
+  No wrapper changes were needed: OpenCode's JSON event schema, token fields, and
+  agent-fallback message are unchanged across the 1.17 → 1.18 bump, and Codex's
+  `exec --json` event schema and thread resume are unchanged across 0.144.x.
+
 ## [4.8.1] - 2026-07-12
 
 Hardening pass after upgrading and re-verifying the OpenCode, Cursor, and Antigravity
