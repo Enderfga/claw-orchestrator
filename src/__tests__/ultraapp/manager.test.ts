@@ -129,10 +129,20 @@ describe('UltraappManager', () => {
     mgr.subscribe(id, (ev) => events.push(ev as { type: string }));
 
     await mgr.startBuild(id);
-    // Allow queue to drain
+    // Allow queue to drain. The manager persists the mode *before* it emits the
+    // matching event, so polling the store alone can release this loop while the
+    // terminal event is still undelivered — wait for the event we assert on too.
+    const sawTerminalEvent = () =>
+      events.some(
+        (e) =>
+          e.type === 'build-event' &&
+          ['build-complete', 'build-failed', 'build-cancelled'].includes(
+            (e as unknown as { event: { type: string } }).event.type,
+          ),
+      );
     for (let i = 0; i < 50; i++) {
       const s = await store.readState(id);
-      if (s.mode === 'build-complete' || s.mode === 'failed') break;
+      if ((s.mode === 'build-complete' || s.mode === 'failed') && sawTerminalEvent()) break;
       await new Promise((r) => setTimeout(r, 20));
     }
 
@@ -207,9 +217,11 @@ describe('UltraappManager', () => {
     mgr.subscribe(id, (ev) => events.push(ev as { type: string }));
 
     await mgr.startBuild(id);
+    // `done` is persisted before the app-url event is emitted, so gate on both.
     for (let i = 0; i < 50; i++) {
       const s = await store.readState(id);
-      if (s.mode === 'done' || s.mode === 'failed') break;
+      const sawUrl = events.some((e) => e.type === 'app-url');
+      if ((s.mode === 'done' && sawUrl) || s.mode === 'failed') break;
       await new Promise((r) => setTimeout(r, 20));
     }
 
