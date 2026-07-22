@@ -109,23 +109,26 @@ const MODELS: ModelDef[] = [
 
   // ── OpenAI GPT-5.5 ────────────────────────────────────────────────────
   // Default Codex model. OpenAI's published standard pricing is $5/$30 per Mtok
-  // (cached 0.5) with a 1M-token context. A long-context tier applies above
-  // ~270K tokens that we don't model separately (single-tier pricing, as with
-  // every entry here).
+  // (cached 0.5) with a 1,050,000-token context. A long-context price tier
+  // applies above 272K tokens that we don't model separately (single-tier
+  // pricing, as with every entry here).
   {
     id: 'gpt-5.5',
     engine: 'codex',
     provider: 'openai',
     pricing: { input: 5, output: 30, cached: 0.5 },
-    contextWindow: 1_000_000,
+    contextWindow: 1_050_000,
   },
 
   // ── OpenAI GPT-5.6 (limited preview) ──────────────────────────────────
   // Three-tier family, API + Codex only (NOT served to ChatGPT-account Codex
   // auth — verified empirically: the API 400s with "not supported when using
   // Codex with a ChatGPT account", so we keep gpt-5.5 as the Codex default).
-  // Ids and pricing from OpenAI's official pricing page; context windows per
-  // launch coverage (1M Sol/Terra, 400K Luna — not yet on the pricing page).
+  // Ids, pricing and context windows from OpenAI's model docs: all three tiers
+  // share a 1,050,000 window and 128K max output. Note the Codex CLI ships a
+  // model config listing 272,000 for these ids — that is the CLI's own cap
+  // (272K is also the price-tier breakpoint), NOT the model's window, so it is
+  // deliberately not mirrored here.
   // Bare `gpt-5.6` is accepted by the API (likely a Sol alias) but is not a
   // documented id, so it stays unregistered and passes through verbatim.
   {
@@ -133,21 +136,21 @@ const MODELS: ModelDef[] = [
     engine: 'codex',
     provider: 'openai',
     pricing: { input: 5, output: 30, cached: 0.5 },
-    contextWindow: 1_000_000,
+    contextWindow: 1_050_000,
   },
   {
     id: 'gpt-5.6-terra',
     engine: 'codex',
     provider: 'openai',
     pricing: { input: 2.5, output: 15, cached: 0.25 },
-    contextWindow: 1_000_000,
+    contextWindow: 1_050_000,
   },
   {
     id: 'gpt-5.6-luna',
     engine: 'codex',
     provider: 'openai',
     pricing: { input: 1, output: 6, cached: 0.1 },
-    contextWindow: 400_000,
+    contextWindow: 1_050_000,
   },
 
   // ── OpenAI GPT-5.4 ────────────────────────────────────────────────────
@@ -156,21 +159,21 @@ const MODELS: ModelDef[] = [
     engine: 'codex',
     provider: 'openai',
     pricing: { input: 2.5, output: 15, cached: 0.25 },
-    contextWindow: 256_000,
+    contextWindow: 1_050_000,
   },
   {
     id: 'gpt-5.4-mini',
     engine: 'codex',
     provider: 'openai',
     pricing: { input: 0.75, output: 4.5, cached: 0.075 },
-    contextWindow: 256_000,
+    contextWindow: 400_000,
   },
   {
     id: 'gpt-5.4-nano',
     engine: 'codex',
     provider: 'openai',
     pricing: { input: 0.2, output: 1.25, cached: 0.02 },
-    contextWindow: 128_000,
+    contextWindow: 400_000,
   },
 
   // ── OpenAI Reasoning ───────────────────────────────────────────────────

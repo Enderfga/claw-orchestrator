@@ -91,11 +91,11 @@ Register `clawo-mcp` with any MCP-compatible host: Hermes Agent, Claude Desktop,
 
 | Engine       | CLI        | Tested Version |
 | ------------ | ---------- | -------------- |
-| Claude Code  | `claude`   | 2.1.212        |
-| Codex        | `codex`    | 0.144.5        |
-| Antigravity  | `agy`      | 1.1.1          |
-| Cursor Agent | `agent`    | 2026.07.09-a3815c0 |
-| OpenCode     | `opencode` | 1.18.0         |
+| Claude Code  | `claude`   | 2.1.217        |
+| Codex        | `codex`    | 0.145.0        |
+| Antigravity  | `agy`      | 1.1.5          |
+| Cursor Agent | `agent`    | 2026.07.20-8cc9c0b |
+| OpenCode     | `opencode` | 1.18.4         |
 | Custom CLI   | any        | —              |
 
 Any coding CLI that runs as a subprocess can be wired up as a custom engine — see [`multi-engine.md`](./skills/references/multi-engine.md#custom-engine-enginecustom).

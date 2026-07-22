@@ -179,11 +179,11 @@ Current tested versions (update on each release):
 
 | Engine | CLI | Tested Version | Invocation |
 |--------|-----|---------------|------------|
-| Claude | `claude` | 2.1.212 | Persistent subprocess, `--output-format stream-json` |
-| Codex | `codex` | 0.144.5 | `codex exec --sandbox workspace-write --skip-git-repo-check --json -C <dir>` (or `codex app-server --listen stdio://` for /goal) |
-| Antigravity | `agy` | 1.1.1 | `agy -p <msg> --log-file <tmp> [--conversation <id>] --dangerously-skip-permissions/--sandbox --print-timeout <n>s` |
-| Cursor | `agent` | 2026.07.09-a3815c0 | `agent -p <msg> --force/--mode plan --trust --output-format stream-json --workspace <dir>` (read-only injects a `.cursor/cli.json` deny config) |
-| OpenCode | `opencode` | 1.18.0 | `opencode run <msg> --format json [--model provider/model]` (read-only sessions add `--agent clawo-readonly` + `OPENCODE_CONFIG_CONTENT`) |
+| Claude | `claude` | 2.1.217 | Persistent subprocess, `--output-format stream-json` |
+| Codex | `codex` | 0.145.0 | `codex exec --sandbox workspace-write --skip-git-repo-check --json -C <dir>` (or `codex app-server --listen stdio://` for /goal) |
+| Antigravity | `agy` | 1.1.5 | `agy -p <msg> --log-file <tmp> [--conversation <id>] --dangerously-skip-permissions/--sandbox --print-timeout <n>s` |
+| Cursor | `agent` | 2026.07.20-8cc9c0b | `agent -p <msg> --force/--mode plan --trust --output-format stream-json --workspace <dir>` (read-only injects a `.cursor/cli.json` deny config) |
+| OpenCode | `opencode` | 1.18.4 | `opencode run <msg> --format json [--model provider/model]` (read-only sessions add `--agent clawo-readonly` + `OPENCODE_CONFIG_CONTENT`) |
 
 **Important:** When CLI vendors change flags or output format, update the corresponding `persistent-*-session.ts` and re-run integration tests.
 

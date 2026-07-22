@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.9.1] - 2026-07-22
+
+Weekly engine sweep. Every version below was re-verified against the real binary,
+including adversarial write attempts against each read-only mode.
+
+### Fixed
+
+- Corrected context windows in the model registry, which drives the context-used
+  percentage reported for a session. Every GPT-5.6 tier is 1,050,000 (Luna was
+  registered as 400,000); `gpt-5.5` 1,000,000 → 1,050,000; `gpt-5.4` 256,000 →
+  1,050,000; `gpt-5.4-mini` 256,000 → 400,000; `gpt-5.4-nano` 128,000 → 400,000.
+  Values now come from OpenAI's per-model documentation. Note that the Codex CLI
+  ships a model config reporting 272,000 for these ids — that is the CLI's own
+  cap and the long-context price breakpoint, not the model's context window, and
+  is deliberately not mirrored here.
+
+### Changed
+
+- Tested engine versions: Claude Code 2.1.212 → 2.1.217, Codex 0.144.5 → 0.145.0,
+  OpenCode 1.18.0 → 1.18.4, Antigravity 1.1.1 → 1.1.5, Cursor 2026.07.09 →
+  2026.07.20. No wrapper changes were needed: every engine's flags, event schema
+  and token fields are unchanged, and the read-only enforcement for Claude,
+  Cursor and OpenCode still holds under adversarial write attempts.
+
 ## [4.9.0] - 2026-07-17
 
 Weekly engine sweep. Every version below was re-verified against the real binary

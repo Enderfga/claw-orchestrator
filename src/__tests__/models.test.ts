@@ -187,9 +187,19 @@ describe('getModelList', () => {
 describe('getContextWindow', () => {
   it('returns correct window for known models', () => {
     expect(getContextWindow('claude-opus-4-6')).toBe(200_000);
-    expect(getContextWindow('gpt-5.4')).toBe(256_000);
+    expect(getContextWindow('gpt-5.4')).toBe(1_050_000);
     expect(getContextWindow('gemini-3-flash-preview')).toBe(1_000_000);
-    expect(getContextWindow('gpt-5.4-nano')).toBe(128_000);
+    expect(getContextWindow('gpt-5.4-nano')).toBe(400_000);
+  });
+
+  // Regression guard: these came from launch coverage and were wrong. The whole
+  // GPT-5.6 tier shares one window, and the 272K figure that the Codex CLI's
+  // bundled model config reports is that CLI's own cap (and the long-context
+  // price breakpoint), not the model's context window.
+  it('uses the documented window for every GPT-5.6 tier', () => {
+    expect(getContextWindow('gpt-5.6-sol')).toBe(1_050_000);
+    expect(getContextWindow('gpt-5.6-terra')).toBe(1_050_000);
+    expect(getContextWindow('gpt-5.6-luna')).toBe(1_050_000);
   });
 
   it('strips vendor prefix', () => {
@@ -269,13 +279,13 @@ describe('claude-fable-5', () => {
 });
 
 describe('gpt-5.5', () => {
-  it('has published standard pricing ($5/$30) and 1M context', () => {
+  it('has published standard pricing ($5/$30) and a 1,050,000 context', () => {
     const m = lookupModel('gpt-5.5');
     expect(m).toBeDefined();
     expect(m!.pricing.input).toBe(5);
     expect(m!.pricing.output).toBe(30);
     expect(m!.pricing.cached).toBe(0.5);
-    expect(m!.contextWindow).toBe(1_000_000);
+    expect(m!.contextWindow).toBe(1_050_000);
   });
 });
 
