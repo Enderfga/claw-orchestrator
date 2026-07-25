@@ -51,31 +51,40 @@ const MODELS: ModelDef[] = [
     aliases: ['fable'],
     contextWindow: 1_000_000,
   },
-  // Opus 4.x pricing is flat across the generation; 4.7/4.8 mirror 4.6's
-  // input:5 / output:25 / cached:0.5. Fast mode (Opus 4.8) bills at 2× the
-  // standard rate, but it's a human-interactive `/fast` toggle the CLI never
+  // Opus pricing is flat across 4.6 through 5: input:5 / output:25 / cached:0.5,
+  // each with a 1M-token context window. Fast mode (Opus 5 and 4.8) bills at 2×
+  // the standard rate, but it's a human-interactive `/fast` toggle the CLI never
   // enables in our headless spawn path, so we model the standard rate only.
+  // The `opus` alias points at Opus 5 because that is what the CLI's own `opus`
+  // alias resolves to (verified against the binary, CLI 2.1.220).
+  {
+    id: 'claude-opus-5',
+    engine: 'claude',
+    provider: 'anthropic',
+    pricing: { input: 5, output: 25, cached: 0.5 },
+    aliases: ['opus'],
+    contextWindow: 1_000_000,
+  },
   {
     id: 'claude-opus-4-8',
     engine: 'claude',
     provider: 'anthropic',
     pricing: { input: 5, output: 25, cached: 0.5 },
-    aliases: ['opus'],
-    contextWindow: 200_000,
+    contextWindow: 1_000_000,
   },
   {
     id: 'claude-opus-4-7',
     engine: 'claude',
     provider: 'anthropic',
     pricing: { input: 5, output: 25, cached: 0.5 },
-    contextWindow: 200_000,
+    contextWindow: 1_000_000,
   },
   {
     id: 'claude-opus-4-6',
     engine: 'claude',
     provider: 'anthropic',
     pricing: { input: 5, output: 25, cached: 0.5 },
-    contextWindow: 200_000,
+    contextWindow: 1_000_000,
   },
   // Sonnet 5 is the current-generation Sonnet and the Claude Code default as of
   // CLI 2.1.197. Native 1M-token context. We bill the standard rate ($3/$15 per
@@ -96,7 +105,7 @@ const MODELS: ModelDef[] = [
     engine: 'claude',
     provider: 'anthropic',
     pricing: { input: 3, output: 15, cached: 0.3 },
-    contextWindow: 200_000,
+    contextWindow: 1_000_000,
   },
   {
     id: 'claude-haiku-4-5',

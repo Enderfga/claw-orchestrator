@@ -35,7 +35,7 @@ describe('lookupModel', () => {
   it('finds model by alias', () => {
     const m = lookupModel('opus');
     expect(m).toBeDefined();
-    expect(m!.id).toBe('claude-opus-4-8');
+    expect(m!.id).toBe('claude-opus-5');
   });
 
   it('returns undefined for unknown model', () => {
@@ -45,6 +45,9 @@ describe('lookupModel', () => {
   it('finds all known models', () => {
     const ids = [
       'claude-fable-5',
+      'claude-opus-5',
+      'claude-opus-4-8',
+      'claude-opus-4-7',
       'claude-opus-4-6',
       'claude-sonnet-5',
       'claude-sonnet-4-6',
@@ -77,7 +80,7 @@ describe('lookupModel', () => {
 
 describe('resolveAlias', () => {
   it('resolves known aliases', () => {
-    expect(resolveAlias('opus')).toBe('claude-opus-4-8');
+    expect(resolveAlias('opus')).toBe('claude-opus-5');
     expect(resolveAlias('sonnet')).toBe('claude-sonnet-5');
     expect(resolveAlias('haiku')).toBe('claude-haiku-4-5');
     expect(resolveAlias('gemini-pro')).toBe('gemini-3.1-pro-preview');
@@ -107,7 +110,7 @@ describe('resolveEngineAndModel', () => {
   });
 
   it('resolves aliases to canonical id', () => {
-    expect(resolveEngineAndModel('opus')).toEqual({ engine: 'claude', model: 'claude-opus-4-8' });
+    expect(resolveEngineAndModel('opus')).toEqual({ engine: 'claude', model: 'claude-opus-5' });
     expect(resolveEngineAndModel('gemini-flash')).toEqual({ engine: 'gemini', model: 'gemini-3-flash-preview' });
     expect(resolveEngineAndModel('agy-pro')).toEqual({ engine: 'agy', model: 'gemini-3.1-pro' });
   });
@@ -186,10 +189,21 @@ describe('getModelList', () => {
 
 describe('getContextWindow', () => {
   it('returns correct window for known models', () => {
-    expect(getContextWindow('claude-opus-4-6')).toBe(200_000);
+    expect(getContextWindow('claude-opus-4-6')).toBe(1_000_000);
     expect(getContextWindow('gpt-5.4')).toBe(1_050_000);
     expect(getContextWindow('gemini-3-flash-preview')).toBe(1_000_000);
     expect(getContextWindow('gpt-5.4-nano')).toBe(400_000);
+  });
+
+  // Regression guard: these were registered with the pre-4.6 200K window long
+  // after Anthropic moved the Opus line and Sonnet 4.6 to a 1M-token context,
+  // which under-reported the context-used percentage by 5x.
+  it('uses the documented 1M window across the Opus line and Sonnet 4.6', () => {
+    for (const id of ['claude-opus-5', 'claude-opus-4-8', 'claude-opus-4-7', 'claude-sonnet-4-6']) {
+      expect(getContextWindow(id), id).toBe(1_000_000);
+    }
+    // Haiku 4.5 genuinely is 200K — guards against a blanket find-and-replace.
+    expect(getContextWindow('claude-haiku-4-5')).toBe(200_000);
   });
 
   // Regression guard: these came from launch coverage and were wrong. The whole
@@ -203,7 +217,7 @@ describe('getContextWindow', () => {
   });
 
   it('strips vendor prefix', () => {
-    expect(getContextWindow('anthropic/claude-opus-4-6')).toBe(200_000);
+    expect(getContextWindow('anthropic/claude-opus-4-6')).toBe(1_000_000);
   });
 
   it('returns 200k default for unknown models', () => {
@@ -307,7 +321,7 @@ describe('isGeminiModel / isClaudeModel', () => {
 describe('getAliases', () => {
   it('returns all aliases as Record', () => {
     const aliases = getAliases();
-    expect(aliases.opus).toBe('claude-opus-4-8');
+    expect(aliases.opus).toBe('claude-opus-5');
     expect(aliases.sonnet).toBe('claude-sonnet-5');
     expect(aliases['gemini-pro']).toBe('gemini-3.1-pro-preview');
   });
@@ -322,7 +336,7 @@ describe('lookupModelStrict', () => {
 
   it('returns model for alias', () => {
     const m = lookupModelStrict('opus');
-    expect(m.id).toBe('claude-opus-4-8');
+    expect(m.id).toBe('claude-opus-5');
   });
 
   it('throws for unknown model', () => {

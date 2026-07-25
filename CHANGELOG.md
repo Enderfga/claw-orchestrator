@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.10.0] - 2026-07-25
+
+Weekly engine sweep. Every version below was re-verified against the real binary,
+including adversarial write attempts against each read-only mode.
+
+### Added
+
+- Registered `claude-opus-5` in the model registry, and pointed the `opus` alias at
+  it to match what the Claude CLI's own `opus` alias resolves to. Sessions that use
+  the alias already ran on Opus 5 — the CLI resolves it — but the registry attributed
+  their cost and context window to Opus 4.8.
+
+### Fixed
+
+- Corrected context windows for the Anthropic models, which drive the context-used
+  percentage reported for a session: `claude-opus-4-8`, `claude-opus-4-7`,
+  `claude-opus-4-6` and `claude-sonnet-4-6` were all registered with a 200,000-token
+  window and are 1,000,000. A session on any of them under-reported context use by
+  5x. `claude-haiku-4-5` is unchanged at 200,000.
+
+### Changed
+
+- Tested engine versions: Claude Code 2.1.217 → 2.1.220, OpenCode 1.18.4 → 1.18.5,
+  Antigravity 1.1.5 → 1.1.7, Cursor 2026.07.20 → 2026.07.23. Codex is unchanged at
+  0.145.0. No wrapper changes were needed: every engine's flags, event schema and
+  token fields are unchanged, and the read-only enforcement for Claude, Cursor and
+  OpenCode still holds under adversarial write attempts.
+
 ## [4.9.2] - 2026-07-22
 
 ### Fixed
