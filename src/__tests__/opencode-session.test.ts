@@ -124,13 +124,41 @@ describe('PersistentOpencodeSession', () => {
       expect(spawnArgs).toContain('clawo-readonly');
       const spawnOptions = mockSpawn.mock.calls[0][2] as { env: Record<string, string> };
       const config = JSON.parse(spawnOptions.env.OPENCODE_CONFIG_CONTENT) as {
-        agent: Record<string, { permission: Record<string, string> }>;
+        agent: Record<string, { permission: Record<string, string>; tools: Record<string, boolean> }>;
       };
       expect(config.agent['clawo-readonly'].permission).toMatchObject({
         edit: 'deny',
         bash: 'deny',
         external_directory: 'deny',
       });
+    });
+
+    // Regression guard: denying only the write tools leaves the delegation path
+    // open — the agent hands the write to a subagent via `task`, and the
+    // subagent runs under the default writable agent. Asked to delegate, a
+    // session denied only edit/bash/external_directory wrote to disk every time.
+    it('closes the subagent delegation path in the read-only config', async () => {
+      const session = new PersistentOpencodeSession({
+        name: 'test',
+        cwd: '/tmp',
+        sandboxMode: 'read-only',
+      });
+      await session.start();
+
+      const sendPromise = session.send('hello', { waitForComplete: true });
+      setTimeout(() => closeProc(mockProc, 0), 10);
+      await sendPromise;
+
+      const spawnOptions = mockSpawn.mock.calls[0][2] as { env: Record<string, string> };
+      const agent = (
+        JSON.parse(spawnOptions.env.OPENCODE_CONFIG_CONTENT) as {
+          agent: Record<string, { permission: Record<string, string>; tools: Record<string, boolean> }>;
+        }
+      ).agent['clawo-readonly'];
+      expect(agent.permission.task).toBe('deny');
+      // The tool is also removed outright, so enforcement does not depend on
+      // the permission engine resolving our rules the way we expect.
+      expect(agent.tools).toMatchObject({ task: false, write: false, edit: false, bash: false });
     });
 
     it('rejects a read-only turn if the enforcement agent fails to load', async () => {

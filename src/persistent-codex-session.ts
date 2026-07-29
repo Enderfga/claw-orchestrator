@@ -100,14 +100,20 @@ export class PersistentCodexSession extends BaseOneShotSession {
   private _buildArgs(message: string): string[] {
     const args: string[] = ['exec'];
     const isResume = !!this.codexThreadId;
+    const sandbox = this.options.sandboxMode || 'workspace-write';
     if (isResume) {
-      // `codex exec resume` rejects --sandbox and -C; the sandbox policy and
-      // cwd are inherited from the original session (verified empirically
-      // against codex 0.128.0 — passing --sandbox here errors with
-      // "unexpected argument").
+      // `codex exec resume` rejects --sandbox and -C (still true as of 0.146.0:
+      // passing --sandbox errors with "unexpected argument"), so the policy has
+      // to be restated as a `-c` config override, which resume does accept.
+      //
+      // Do NOT rely on the resumed thread inheriting the first turn's sandbox.
+      // It does not: against 0.146.0, a read-only session whose first turn was
+      // spawned with `--sandbox read-only` wrote to disk on the very next turn,
+      // reproducibly, when resume was left to inherit. Restating the mode keeps
+      // a read-only session read-only for its whole life.
       args.push('resume', this.codexThreadId!, '--skip-git-repo-check', '--json');
+      args.push('-c', `sandbox_mode="${sandbox}"`);
     } else {
-      const sandbox = this.options.sandboxMode || 'workspace-write';
       args.push('--sandbox', sandbox, '--skip-git-repo-check', '--json');
       if (this.options.cwd) args.push('-C', this.options.cwd);
     }

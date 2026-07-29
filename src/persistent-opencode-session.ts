@@ -49,9 +49,13 @@ import { BaseOneShotSession } from './base-oneshot-session.js';
  * stock install its rules begin with `{"permission":"*","action":"allow"}` and
  * deny neither `bash` nor `edit`, so a "read-only" session could still author
  * files through a shell heredoc. We therefore define our own agent and hand it
- * to the CLI via `OPENCODE_CONFIG_CONTENT` (verified against opencode 1.1.40:
- * `OPENCODE_CONFIG_CONTENT=… opencode agent list` lists `clawo-readonly`), with
- * the write paths denied at the permission-engine level.
+ * to the CLI via `OPENCODE_CONFIG_CONTENT`, with the write paths denied at the
+ * permission-engine level AND the corresponding tools removed.
+ *
+ * Verify this config only with adversarial writes, and include prompts that ask
+ * the agent to delegate — `opencode agent list` renders compiled rules that look
+ * identical for a safe and an unsafe agent, and a probe that only asks the agent
+ * to write directly passes even when the delegation path is wide open.
  */
 const READ_ONLY_AGENT = 'clawo-readonly';
 const READ_ONLY_AGENT_CONFIG = JSON.stringify({
@@ -62,6 +66,23 @@ const READ_ONLY_AGENT_CONFIG = JSON.stringify({
         edit: 'deny',
         bash: 'deny',
         external_directory: 'deny',
+        // Denying the write tools is not enough on its own: the agent can hand
+        // the work to a subagent via `task`, and the subagent runs under the
+        // default (writable) agent, so the denials above never apply to it.
+        // Asked to "delegate this to a subagent", a session denied only
+        // edit/bash/external_directory wrote to disk on every attempt.
+        task: 'deny',
+        webfetch: 'deny',
+      },
+      // Belt-and-suspenders: drop the tools outright as well, so enforcement
+      // does not depend on the permission engine resolving our rules the way we
+      // expect. `task` is the escalation path; the rest are the direct ones.
+      tools: {
+        task: false,
+        write: false,
+        edit: false,
+        bash: false,
+        patch: false,
       },
     },
   },

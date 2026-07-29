@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.10.1] - 2026-08-01
+
+Weekly engine sweep. Two `sandboxMode: 'read-only'` guarantees did not hold and
+now do. Both were found by broadening the adversarial probe set — one to a second
+turn, one to prompts that ask the agent to delegate — and both are reproducible.
+
+### Fixed
+
+- **Codex read-only only covered the first turn.** `codex exec resume` rejects
+  `--sandbox`, and the wrapper assumed the resumed thread inherited the policy
+  from the first turn. It does not: against 0.146.0, a `read-only` session wrote
+  to disk on turn 2 on every attempt. The mode is now restated as a
+  `-c sandbox_mode="<mode>"` override on every resume, which the CLI does accept.
+  Write-enabled sessions are unaffected.
+- **OpenCode read-only could be escaped by delegating.** The generated
+  `clawo-readonly` agent denied `edit` / `bash` / `external_directory`, but not
+  `task` — so the agent handed the write to a subagent, which runs under the
+  default writable agent. Prompts that asked for delegation wrote to disk on
+  every attempt while direct-write prompts were correctly blocked, which is why
+  earlier probes missed it. The agent now denies `task` and `webfetch` as well
+  and drops those tools outright via its `tools` map. Claude and Cursor read-only
+  were checked against the same delegation prompts and hold.
+
+### Changed
+
+- Tested engine versions: Codex 0.145.0 → 0.146.0, OpenCode 1.18.5 → 1.18.9,
+  Antigravity 1.1.7 → 1.1.8. Claude Code (2.1.220) and Cursor (2026.07.23) are
+  unchanged. No other wrapper changes were needed: every engine's flags, event
+  schema and token fields are unchanged.
+
 ## [4.10.0] - 2026-07-25
 
 Weekly engine sweep. Every version below was re-verified against the real binary,

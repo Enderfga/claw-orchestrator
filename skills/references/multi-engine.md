@@ -52,7 +52,7 @@ await manager.startSession({
 
 ### OpenAI Codex (`engine: 'codex'`)
 
-Wraps the `codex exec` subcommand. Each `send()` spawns a new process. Tested with `codex` CLI **0.144.1**.
+Wraps the `codex exec` subcommand. Each `send()` spawns a new process. Tested with `codex` CLI **0.146.0**.
 
 - Non-interactive execution via `codex exec --sandbox workspace-write --json` (replaces the deprecated `--full-auto` flag from earlier Codex versions)
 - Real per-turn `usage` from the `turn.completed` JSON event (input, output, cached, reasoning tokens)
@@ -60,6 +60,7 @@ Wraps the `codex exec` subcommand. Each `send()` spawns a new process. Tested wi
 - Reasoning effort: the engine-agnostic `effort` maps to `-c model_reasoning_effort=<level>` (`max`→`xhigh`; `auto`/`ultracode` omitted)
 - `codexProfile` → `--profile <name>` (named config profile from `~/.codex/config.toml`)
 - Per-session continuity: the `thread_id` from the first turn's `thread.started` event is captured and reused via `codex exec resume <id>` for subsequent sends, so the model sees prior turns
+- `sandboxMode` maps to `--sandbox <mode>` on the first turn. **A resumed thread does not inherit it**, and `codex exec resume` rejects `--sandbox`, so the policy is restated as `-c sandbox_mode="<mode>"` on every resume. Without that, a `read-only` session goes writable from its second turn onward — verified against 0.146.0, where such a session wrote to disk on turn 2 on every attempt
 - One-shot execution per message (no persistent subprocess between sends)
 - Captures the real Codex thread ID and persists it, so later sends and process-level session resume use `codex exec resume <thread_id>`
 - Working directory passed via `-C` flag
@@ -186,7 +187,7 @@ Wraps the [sst/opencode](https://github.com/sst/opencode) CLI with `run --format
 - Real token counts from `step_finish.part.tokens.{input,output,cache.read}`
 - The wrapper closes the subprocess's stdin immediately after spawn (opencode otherwise reads stdin and blocks on EOF, hanging the call)
 - Provider-agnostic: opencode's `--model` expects `provider/model` form (e.g. `anthropic/claude-sonnet-4`). The wrapper passes `--model` through only when the value contains a `/`; otherwise opencode's own default applies
-- `sandboxMode: 'read-only'` spawns a generated `clawo-readonly` agent (`--agent clawo-readonly` plus an `OPENCODE_CONFIG_CONTENT` env var defining it) whose permissions deny `edit` / `bash` / `external_directory`. It deliberately does **not** use OpenCode's built-in `plan` agent: that is a user-overridable preset whose compiled rules start with `{"permission":"*","action":"allow"}` and deny neither `bash` nor `edit`, so a "read-only" session could still author files through a shell heredoc. Verified against opencode 1.17.15 by attempting a real write, which the agent cannot perform (its toolset has no write/bash tools). Note that `opencode agent list` renders compiled permission rules and does not show the tool-level restriction — trust an actual write attempt, not that view
+- `sandboxMode: 'read-only'` spawns a generated `clawo-readonly` agent (`--agent clawo-readonly` plus an `OPENCODE_CONFIG_CONTENT` env var defining it) that denies `edit` / `bash` / `external_directory` / `webfetch` / **`task`** at the permission level and additionally removes those tools outright via the agent's `tools` map. It deliberately does **not** use OpenCode's built-in `plan` agent: that is a user-overridable preset whose compiled rules start with `{"permission":"*","action":"allow"}` and deny neither `bash` nor `edit`, so a "read-only" session could still author files through a shell heredoc. **`task` is the load-bearing denial**: denying only the write tools leaves the delegation path open, and the agent will hand the write to a subagent that runs under the default writable agent — asked to delegate, a session denied only `edit`/`bash`/`external_directory` wrote to disk on every attempt. Verify this config only with adversarial writes, and include prompts that ask the agent to delegate; `opencode agent list` renders compiled permission rules that look identical for a safe and an unsafe agent, and a probe that only asks for a direct write passes even when the delegation path is wide open
 - Requires opencode installed: `brew install sst/tap/opencode` or `npm install -g opencode-ai`. Auth via `opencode auth login` **or** any provider env var (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, etc.) — opencode picks up either path
 - Binary: `opencode` (set `OPENCODE_BIN` env var to override)
 

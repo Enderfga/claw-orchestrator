@@ -100,6 +100,58 @@ describe('PersistentCodexSession', () => {
     expect(spawnArgs.slice(0, 3)).toEqual(['exec', 'resume', '019c6dcb-93ad-7dc1-b531-418d213b8761']);
   });
 
+  // Regression guard: `codex exec resume` rejects --sandbox, and the resumed
+  // thread does NOT inherit the first turn's sandbox policy — verified against
+  // codex 0.146.0, where a read-only session wrote to disk on its second turn.
+  // The mode has to be restated as a `-c` override on every resume, or a
+  // read-only session silently becomes writable after turn 1.
+  it('restates the sandbox mode as a -c override on resume', async () => {
+    const session = new PersistentCodexSession({
+      name: 'test',
+      cwd: '/tmp',
+      sandboxMode: 'read-only',
+    });
+    await session.start();
+
+    const p1 = session.send('first', { waitForComplete: true });
+    setTimeout(() => runTurn(mockProc, 'thread-ro'), 10);
+    await p1;
+
+    const proc2 = createMockProcess();
+    mockSpawn.mockReturnValue(proc2);
+    const p2 = session.send('second', { waitForComplete: true });
+    setTimeout(() => runTurn(proc2, 'thread-ro'), 10);
+    await p2;
+
+    const args1 = mockSpawn.mock.calls[0][1] as string[];
+    const args2 = mockSpawn.mock.calls[1][1] as string[];
+    // First turn uses the flag; resume must not (the CLI rejects it there).
+    expect(args1).toContain('--sandbox');
+    expect(args1[args1.indexOf('--sandbox') + 1]).toBe('read-only');
+    expect(args2).not.toContain('--sandbox');
+    // Resume carries the policy as a config override instead.
+    expect(args2).toContain('resume');
+    expect(args2).toContain('sandbox_mode="read-only"');
+  });
+
+  it('restates workspace-write on resume so write sessions are unaffected', async () => {
+    const session = new PersistentCodexSession({ name: 'test', cwd: '/tmp' });
+    await session.start();
+
+    const p1 = session.send('first', { waitForComplete: true });
+    setTimeout(() => runTurn(mockProc, 'thread-rw'), 10);
+    await p1;
+
+    const proc2 = createMockProcess();
+    mockSpawn.mockReturnValue(proc2);
+    const p2 = session.send('second', { waitForComplete: true });
+    setTimeout(() => runTurn(proc2, 'thread-rw'), 10);
+    await p2;
+
+    const args2 = mockSpawn.mock.calls[1][1] as string[];
+    expect(args2).toContain('sandbox_mode="workspace-write"');
+  });
+
   it('reuses the same schema file across resume turns', async () => {
     const schema = '{"type":"object"}';
     const session = new PersistentCodexSession({ name: 'test', cwd: '/tmp', jsonSchema: schema });
