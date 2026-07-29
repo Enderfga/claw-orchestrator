@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Registered MiniMax-M3 and MiniMax-M2.7 in the model registry.** The proxy
+  already forwards these through its configurable Anthropic-compatible base URL,
+  but the models were absent from `src/models.ts`, so they fell through the
+  provider pattern fallback and inherited the default 200K context window and
+  fallback pricing. They now carry their real windows (1,000,000 and 204,800
+  tokens) and pricing ($0.6/$2.4 and $0.3/$1.2 per Mtok, cache read $0.12 and
+  $0.06) and resolve to the `anthropic` provider.
+
 ## [4.10.1] - 2026-08-01
 
 Weekly engine sweep. Two `sandboxMode: 'read-only'` guarantees did not hold and

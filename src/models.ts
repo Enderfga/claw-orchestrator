@@ -294,6 +294,30 @@ const MODELS: ModelDef[] = [
     contextWindow: 200_000,
   },
 
+  // ── MiniMax (Anthropic-compatible endpoint) ────────────────────────────
+  // Served through the proxy's configurable Anthropic base URL
+  // (getAnthropicBaseUrl → ANTHROPIC_BASE_URL / OpenClaw config), so these run
+  // on the claude engine and route to the `anthropic` provider. Without an
+  // entry here they fell through resolveProvider's pattern fallback to a
+  // provider that never uses that base URL, and inherited the default 200K
+  // context window and fallback pricing instead of their real values.
+  // MiniMax-M3: 1M-token window; $0.6/$2.4 per Mtok, cache read $0.12.
+  {
+    id: 'MiniMax-M3',
+    engine: 'claude',
+    provider: 'anthropic',
+    pricing: { input: 0.6, output: 2.4, cached: 0.12 },
+    contextWindow: 1_000_000,
+  },
+  // MiniMax-M2.7: 204,800-token window; $0.3/$1.2 per Mtok, cache read $0.06.
+  {
+    id: 'MiniMax-M2.7',
+    engine: 'claude',
+    provider: 'anthropic',
+    pricing: { input: 0.3, output: 1.2, cached: 0.06 },
+    contextWindow: 204_800,
+  },
+
   // ── Legacy (backward compat) ───────────────────────────────────────────
   {
     id: 'gpt-4o',

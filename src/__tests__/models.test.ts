@@ -303,6 +303,46 @@ describe('gpt-5.5', () => {
   });
 });
 
+// Regression guard: these are served through the proxy's configurable
+// Anthropic-compatible base URL, so they must resolve to the `anthropic`
+// provider (not the pattern fallback) and carry their real windows and pricing
+// rather than the default 200K window / fallback pricing.
+describe('MiniMax-M3', () => {
+  it('is registered with a 1M context and MiniMax pricing on the anthropic provider', () => {
+    const m = lookupModel('MiniMax-M3');
+    expect(m).toBeDefined();
+    expect(m!.provider).toBe('anthropic');
+    expect(m!.contextWindow).toBe(1_000_000);
+    expect(m!.pricing.input).toBe(0.6);
+    expect(m!.pricing.output).toBe(2.4);
+    expect(m!.pricing.cached).toBe(0.12);
+  });
+
+  it('routes to the anthropic provider with correct window and pricing', () => {
+    expect(resolveProvider('MiniMax-M3')).toEqual({ provider: 'anthropic', apiModel: 'MiniMax-M3' });
+    expect(getContextWindow('MiniMax-M3')).toBe(1_000_000);
+    expect(getModelPricing('MiniMax-M3').input).toBe(0.6);
+  });
+});
+
+describe('MiniMax-M2.7', () => {
+  it('is registered with a 204,800 context and MiniMax pricing on the anthropic provider', () => {
+    const m = lookupModel('MiniMax-M2.7');
+    expect(m).toBeDefined();
+    expect(m!.provider).toBe('anthropic');
+    expect(m!.contextWindow).toBe(204_800);
+    expect(m!.pricing.input).toBe(0.3);
+    expect(m!.pricing.output).toBe(1.2);
+    expect(m!.pricing.cached).toBe(0.06);
+  });
+
+  it('routes to the anthropic provider with correct window and pricing', () => {
+    expect(resolveProvider('MiniMax-M2.7')).toEqual({ provider: 'anthropic', apiModel: 'MiniMax-M2.7' });
+    expect(getContextWindow('MiniMax-M2.7')).toBe(204_800);
+    expect(getModelPricing('MiniMax-M2.7').input).toBe(0.3);
+  });
+});
+
 describe('isGeminiModel / isClaudeModel', () => {
   it('detects gemini models', () => {
     expect(isGeminiModel('gemini-3-flash-preview')).toBe(true);
