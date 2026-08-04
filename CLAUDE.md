@@ -179,11 +179,11 @@ Current tested versions (update on each release):
 
 | Engine | CLI | Tested Version | Invocation |
 |--------|-----|---------------|------------|
-| Claude | `claude` | 2.1.220 | Persistent subprocess, `--output-format stream-json` |
+| Claude | `claude` | 2.1.221 | Persistent subprocess, `--output-format stream-json` |
 | Codex | `codex` | 0.146.0 | `codex exec --sandbox workspace-write --skip-git-repo-check --json -C <dir>` (or `codex app-server --listen stdio://` for /goal) |
-| Antigravity | `agy` | 1.1.8 | `agy -p <msg> --log-file <tmp> [--conversation <id>] --dangerously-skip-permissions/--sandbox --print-timeout <n>s` |
+| Antigravity | `agy` | 1.1.10 | `agy -p <msg> --log-file <tmp> [--conversation <id>] --dangerously-skip-permissions/--sandbox --print-timeout <n>s` |
 | Cursor | `agent` | 2026.07.23-e383d2b | `agent -p <msg> --force/--mode plan --trust --output-format stream-json --workspace <dir>` (read-only injects a `.cursor/cli.json` deny config) |
-| OpenCode | `opencode` | 1.18.9 | `opencode run <msg> --format json [--model provider/model]` (read-only sessions add `--agent clawo-readonly` + `OPENCODE_CONFIG_CONTENT`) |
+| OpenCode | `opencode` | 1.18.13 | `opencode run <msg> --format json [--model provider/model]` (read-only sessions add `--agent clawo-readonly` + `OPENCODE_CONFIG_CONTENT`) |
 
 **Important:** When CLI vendors change flags or output format, update the corresponding `persistent-*-session.ts` and re-run integration tests.
 

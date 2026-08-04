@@ -24,7 +24,7 @@ import { fileURLToPath } from 'node:url';
 
 import type { SessionManager } from '../session-manager.js';
 import type { Logger } from '../logger.js';
-import { ENGINE_TYPES, type CustomEngineConfig, type EngineType } from '../types.js';
+import { ENGINE_TYPES, engineHasNativeConversation, type CustomEngineConfig, type EngineType } from '../types.js';
 import { nullLogger } from '../logger.js';
 import { spawn } from 'node:child_process';
 import { type AnyAutoloopMessage, Msg } from './messages.js';
@@ -304,19 +304,7 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
    * user approved it).
    */
   private hasNativeConversation(selection: AutoloopRoleSelection): boolean {
-    switch (selection.engine) {
-      case 'claude':
-      case 'codex':
-      case 'codex-app':
-      case 'agy':
-        return true;
-      case 'custom':
-        // A persistent custom engine is a long-running stdin/stdout process, so
-        // it keeps context the same way claude does. One-shot ones do not.
-        return selection.customEngine?.persistent === true;
-      default:
-        return false;
-    }
+    return engineHasNativeConversation(selection.engine, selection.customEngine);
   }
 
   /**

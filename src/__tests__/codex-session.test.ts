@@ -255,6 +255,45 @@ describe('PersistentCodexSession', () => {
     session.stop();
   });
 
+  // Regression guard: BaseOneShotSession hardcoded contextPercent to 0, so any
+  // consumer gating on it — notably the openai-compat auto-compaction — could
+  // never fire for a one-shot engine, and a resumed thread grew until the CLI
+  // hard-failed on the context window instead of degrading. It has to reflect
+  // the LAST turn's input tokens: `_stats.tokensIn` is cumulative across turns,
+  // so it would keep climbing even for an engine that starts fresh each send.
+  it('reports contextPercent from the last turn, not the running total', async () => {
+    const session = new PersistentCodexSession({ name: 'test', cwd: '/tmp', model: 'gpt-5.5' });
+    await session.start();
+    expect(session.getStats().contextPercent).toBe(0);
+
+    const runTurnWithInput = (proc: ReturnType<typeof createMockProcess>, inputTokens: number) => {
+      proc.stdout.push(JSON.stringify({ type: 'thread.started', thread_id: 'thread-ctx' }) + '\n');
+      proc.stdout.push(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'ok' } }) + '\n');
+      proc.stdout.push(
+        JSON.stringify({ type: 'turn.completed', usage: { input_tokens: inputTokens, output_tokens: 1 } }) + '\n',
+      );
+      proc.stdout.push(null);
+      proc.emit('close', 0);
+    };
+
+    // gpt-5.5 has a 1,050,000-token window; 105,000 in is 10%.
+    const p1 = session.send('first', { waitForComplete: true });
+    setTimeout(() => runTurnWithInput(mockProc, 105_000), 10);
+    await p1;
+    expect(session.getStats().contextPercent).toBe(10);
+
+    // Second turn's prompt is smaller. Cumulative tokensIn is now 315k (30%),
+    // so a total-based figure would report 30 — the last turn is what counts.
+    const proc2 = createMockProcess();
+    mockSpawn.mockReturnValue(proc2);
+    const p2 = session.send('second', { waitForComplete: true });
+    setTimeout(() => runTurnWithInput(proc2, 210_000), 10);
+    await p2;
+    expect(session.getStats().tokensIn).toBe(315_000);
+    expect(session.getStats().contextPercent).toBe(20);
+    session.stop();
+  });
+
   it('passes --profile on the first turn but NOT on resume (resume rejects it)', async () => {
     const session = new PersistentCodexSession({ name: 'test', cwd: '/tmp', codexProfile: 'fast' });
     await session.start();

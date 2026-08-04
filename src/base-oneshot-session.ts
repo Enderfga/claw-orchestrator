@@ -22,7 +22,7 @@ import {
   type CostBreakdown,
   getModelPricing as _getModelPricingBase,
 } from './types.js';
-import { resolveAlias } from './models.js';
+import { resolveAlias, getContextWindow } from './models.js';
 import { MAX_HISTORY_ITEMS, DEFAULT_HISTORY_LIMIT, SESSION_EVENT } from './constants.js';
 
 // ─── Engine Configuration ──────────────────────────────────────────────────
@@ -54,6 +54,8 @@ export abstract class BaseOneShotSession extends EventEmitter implements ISessio
   private _isReady = false;
   private _isPaused = false;
   private _isBusy = false;
+  /** Input tokens for the most recent turn only — see _recordTurnInputTokens(). */
+  private _lastTurnTokensIn = 0;
   protected currentProc: ChildProcess | null = null;
   private currentRequestId = 0;
   private _startTime: string | null = null;
@@ -124,16 +126,53 @@ export abstract class BaseOneShotSession extends EventEmitter implements ISessio
     const textMessage = typeof message === 'string' ? message : JSON.stringify(message);
 
     if (!options.waitForComplete) {
-      this._run(textMessage, options).catch((err) => this.emit(SESSION_EVENT.ERROR, err));
+      const before = this._stats.tokensIn;
+      this._run(textMessage, options)
+        .then(() => this._recordTurnInputTokens(before))
+        .catch((err) => this.emit(SESSION_EVENT.ERROR, err));
       return { requestId, sent: true };
     }
 
     this._isBusy = true;
+    const tokensInBefore = this._stats.tokensIn;
     try {
       return await this._run(textMessage, options);
     } finally {
+      this._recordTurnInputTokens(tokensInBefore);
       this._isBusy = false;
     }
+  }
+
+  /**
+   * Capture this turn's own input-token count.
+   *
+   * Subclasses accumulate into `_stats.tokensIn`, so the running total is the
+   * sum over every turn — useless for "how full is the context right now".
+   * Taking the delta around `_run()` gives the size of the prompt the engine
+   * actually just processed, which for a thread-resuming engine (codex, agy) is
+   * the live thread size. Without this, `contextPercent` was pinned at 0 and any
+   * consumer gating on it — such as the openai-compat auto-compaction — could
+   * never fire for a one-shot engine, so a thread grew until the CLI hard-failed
+   * with a context-window error instead of degrading.
+   */
+  private _recordTurnInputTokens(before: number): void {
+    const delta = this._stats.tokensIn - before;
+    if (delta > 0) this._lastTurnTokensIn = delta;
+  }
+
+  /**
+   * How full the engine's context is, as a percentage of the model's window.
+   *
+   * Based on the last turn's input tokens rather than the running total: for an
+   * engine that resumes a thread that is the live prompt size, and for one that
+   * starts fresh each send it is that send's prompt. Returns 0 until a turn has
+   * reported usage, so an engine that reports nothing behaves as before.
+   */
+  private _contextPercent(): number {
+    if (this._lastTurnTokensIn <= 0) return 0;
+    const window = getContextWindow(this.options.resolvedModel || this.options.model || '');
+    if (!window) return 0;
+    return Math.min(100, Math.round((this._lastTurnTokensIn / window) * 100));
   }
 
   /** Engine-specific: spawn the CLI and return a TurnResult. */
@@ -153,7 +192,7 @@ export abstract class BaseOneShotSession extends EventEmitter implements ISessio
       isReady: this._isReady,
       startTime: this._startTime,
       lastActivity: this._stats.lastActivity,
-      contextPercent: 0,
+      contextPercent: this._contextPercent(),
       retries: 0,
       sessionId: this.sessionId,
       uptime: this._startTime ? Math.round((Date.now() - new Date(this._startTime).getTime()) / 1000) : 0,

@@ -3,7 +3,14 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
-import { MODEL_ALIASES, overrideModelPricing, getModelPricing, _resetPricingOverrides } from '../types.js';
+import {
+  MODEL_ALIASES,
+  overrideModelPricing,
+  getModelPricing,
+  _resetPricingOverrides,
+  engineHasNativeConversation,
+  ENGINE_TYPES,
+} from '../types.js';
 import { lookupModel, getAliases } from '../models.js';
 
 beforeEach(() => {
@@ -117,5 +124,42 @@ describe('MODEL_ALIASES', () => {
     expect(MODEL_ALIASES['opus']).toBeDefined();
     expect(MODEL_ALIASES['sonnet']).toBeDefined();
     expect(MODEL_ALIASES['haiku']).toBeDefined();
+  });
+});
+
+// ─── engineHasNativeConversation ─────────────────────────────────────────────
+
+describe('engineHasNativeConversation', () => {
+  // This split decides who owns the conversation history, and getting it wrong
+  // breaks in one of two directions: treat a fresh-per-send engine as if it
+  // remembered, and per-turn context (tool schemas, replayed transcript) is
+  // silently dropped; treat a thread-resuming engine as if it forgot, and that
+  // same content is re-sent every turn until the thread overflows its window.
+  it('reports engines that carry the conversation themselves', () => {
+    for (const engine of ['claude', 'codex', 'codex-app', 'agy'] as const) {
+      expect(engineHasNativeConversation(engine), engine).toBe(true);
+    }
+  });
+
+  it('reports engines that start from scratch on every send', () => {
+    for (const engine of ['gemini', 'cursor', 'opencode'] as const) {
+      expect(engineHasNativeConversation(engine), engine).toBe(false);
+    }
+  });
+
+  it('keys custom engines off the persistent flag', () => {
+    expect(engineHasNativeConversation('custom', { name: 'x', command: 'x', persistent: true })).toBe(true);
+    expect(engineHasNativeConversation('custom', { name: 'x', command: 'x', persistent: false })).toBe(false);
+    expect(engineHasNativeConversation('custom')).toBe(false);
+  });
+
+  it('classifies every registered engine type', () => {
+    for (const engine of ENGINE_TYPES) {
+      expect(typeof engineHasNativeConversation(engine), engine).toBe('boolean');
+    }
+  });
+
+  it('treats an unknown engine as non-persistent', () => {
+    expect(engineHasNativeConversation(undefined)).toBe(false);
   });
 });

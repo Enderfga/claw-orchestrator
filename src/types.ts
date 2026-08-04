@@ -40,6 +40,39 @@ export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'auto';
 export const ENGINE_TYPES = ['claude', 'codex', 'codex-app', 'gemini', 'agy', 'cursor', 'opencode', 'custom'] as const;
 export type EngineType = (typeof ENGINE_TYPES)[number];
 
+/**
+ * Does this engine carry conversation across sends on its own?
+ *
+ * claude keeps one subprocess alive; codex / codex-app resume a thread; agy
+ * resumes a harvested `--conversation <uuid>`. Everything else (gemini, cursor,
+ * opencode, and one-shot custom engines) spawns a FRESH process per send with
+ * zero memory of the last turn.
+ *
+ * The distinction decides who owns the conversation history. For an engine that
+ * carries it, anything injected into a turn stays in the transcript forever, so
+ * per-turn boilerplate accumulates and eventually overflows the context window.
+ * For an engine that does not, the same content has to be re-sent every turn or
+ * it is simply gone.
+ */
+export function engineHasNativeConversation(
+  engine: EngineType | undefined,
+  customEngine?: CustomEngineConfig,
+): boolean {
+  switch (engine) {
+    case 'claude':
+    case 'codex':
+    case 'codex-app':
+    case 'agy':
+      return true;
+    case 'custom':
+      // A persistent custom engine is a long-running stdin/stdout process, so it
+      // keeps context the same way claude does. One-shot ones do not.
+      return customEngine?.persistent === true;
+    default:
+      return false;
+  }
+}
+
 // ─── Custom Engine Config ───────────────────────────────────────────────────
 //
 // Allows users to plug in any coding agent CLI (internal or third-party)

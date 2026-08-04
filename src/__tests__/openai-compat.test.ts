@@ -10,6 +10,7 @@ import {
   formatCompletionResponse,
   formatCompletionChunk,
   buildToolPromptBlock,
+  buildToolReminderBlock,
   parseToolCallsFromText,
   serializeToolResults,
   isToolsPerMessageModeEnabled,
@@ -577,6 +578,40 @@ describe('getModelList', () => {
 });
 
 // ─── buildToolPromptBlock ───────────────────────────────────────────────────
+
+describe('buildToolReminderBlock', () => {
+  // Regression guard for the context-overflow bug: on an engine that resumes a
+  // thread (codex, agy) the schemas from turn 1 are still in the transcript, so
+  // resend turns get this block instead. It must keep the calling convention —
+  // dropping it entirely makes the CLI try to do the work itself instead of
+  // emitting a tool call — while carrying none of the schema text.
+  it('restates the calling convention without any schemas', () => {
+    const reminder = buildToolReminderBlock();
+    expect(reminder).toContain('<available_tools>');
+    expect(reminder).toContain('<tool_calls>');
+    expect(reminder).toContain('still available');
+    // The expensive part of the full block is the pretty-printed JSON Schema.
+    expect(reminder).not.toContain('Parameters:');
+    expect(reminder).not.toContain('```json');
+    expect(reminder).not.toContain('## Available Tools');
+  });
+
+  it('is far smaller than the full block it replaces', () => {
+    const tools = Array.from({ length: 40 }, (_, i) => ({
+      type: 'function' as const,
+      function: {
+        name: `tool_${i}`,
+        description: `Tool number ${i} with a reasonably long description`,
+        parameters: {
+          type: 'object',
+          properties: { a: { type: 'string' }, b: { type: 'number' }, c: { type: 'boolean' } },
+          required: ['a'],
+        },
+      },
+    }));
+    expect(buildToolReminderBlock().length).toBeLessThan(buildToolPromptBlock(tools).length / 10);
+  });
+});
 
 describe('buildToolPromptBlock', () => {
   it('returns empty string for undefined/empty tools', () => {

@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.11.0] - 2026-08-04
+
+### Fixed
+
+- The openai-compat bridge prepended the full tool-schema block to every turn on
+  any non-Claude engine. For engines that resume a thread (`codex`, `codex-app`,
+  `agy`) that block stays in the transcript, so the prompt grew by the size of the
+  whole schema set on each turn and long tool-use loops died with a context-window
+  error. Resume turns now get a short reminder of the calling convention instead —
+  at 54 tools that is ~450 characters in place of ~21,000. Engines that start
+  fresh every send (`cursor`, `opencode`, `gemini`) still get the full block,
+  because for them nothing persists. A newly created session always gets the full
+  block, as does any request whose tool list changed (the tool list is part of the
+  session key), and `OPENAI_COMPAT_TOOLS_PER_MESSAGE=1` still re-sends everything
+  every turn. Reported with measurements in #74.
+- `contextPercent` was hardcoded to `0` for every one-shot engine, so anything
+  gating on it — including the bridge's auto-compaction — could never trigger, and
+  a growing thread hard-failed instead of being compacted. It is now derived from
+  the most recent turn's input tokens against the model's context window. The
+  running `tokensIn` total is not usable for this: it sums every turn, so it climbs
+  even for engines that start from an empty prompt each send.
+
+### Added
+
+- `engineHasNativeConversation(engine, customEngine?)` is now exported from
+  `types.ts`, replacing a private copy in the autoloop dispatcher. It answers
+  whether an engine carries conversation state itself, which decides who is
+  responsible for re-sending per-turn context.
+
+### Changed
+
+- Tested engine versions: Claude Code 2.1.220 → 2.1.221, OpenCode 1.18.9 →
+  1.18.13, Antigravity 1.1.8 → 1.1.10. Codex (0.146.0) and Cursor (2026.07.23)
+  are unchanged. No wrapper changes were needed, and read-only enforcement was
+  re-verified across all four engines on the full probe matrix.
+
 ## [4.10.1] - 2026-08-01
 
 Weekly engine sweep. Two `sandboxMode: 'read-only'` guarantees did not hold and

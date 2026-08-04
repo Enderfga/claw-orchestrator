@@ -12,6 +12,7 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { randomUUID, createHash } from 'node:crypto';
 import { resolveEngineAndModel, estimateTokens } from './models.js';
+import { engineHasNativeConversation } from './types.js';
 import {
   OPENAI_COMPAT_DEFAULT_MODEL,
   OPENAI_COMPAT_AUTO_COMPACT_THRESHOLD,
@@ -242,6 +243,33 @@ export function buildToolPromptBlock(tools: OpenAIChatCompletionRequest['tools']
     '## Available Tools\n\n' +
     toolDefs +
     '\n</available_tools>'
+  );
+}
+
+/**
+ * The calling convention without the schemas, for turns that resume a thread the
+ * engine already holds.
+ *
+ * On an engine with a native conversation the full block from the first turn is
+ * still in the transcript, so re-sending the schemas every turn only grows the
+ * prompt — with a few dozen tools the pretty-printed block runs to tens of
+ * thousands of tokens per turn and overflows the context window mid-loop.
+ *
+ * Injecting nothing is not the answer either: dropping the format rules also
+ * drops the "you have no shell of your own, emit a tool call instead of running
+ * it yourself" framing, and the CLI starts trying to do the work directly.
+ */
+export function buildToolReminderBlock(): string {
+  return (
+    '<available_tools>\n' +
+    'The tools defined earlier in this conversation are still available. When you need one, respond with a JSON array wrapped in <tool_calls> tags.\n\n' +
+    'FORMAT:\n' +
+    '<tool_calls>\n' +
+    '[{"name": "tool_name", "arguments": {"param1": "value1"}}]\n' +
+    '</tool_calls>\n\n' +
+    "Do not carry out a tool's work yourself — emit the tool call and wait for its result.\n" +
+    'If you do NOT need any tools, respond normally with text only (no <tool_calls> tags).\n' +
+    '</available_tools>'
   );
 }
 
@@ -653,11 +681,34 @@ export async function handleChatCompletion(
   // message. Enables dynamic tool list updates within a single session.
   //
   // Non-claude engines: the CLI is spawned fresh per turn with no persistent
-  // system prompt, so tools must always be injected per message.
+  // system prompt, so tools must be injected per message — but WHICH block
+  // depends on whether the engine keeps the conversation itself:
+  //
+  //   - codex / codex-app / agy resume a thread, so the first turn's schemas are
+  //     still in the transcript. Re-sending them every turn only grows the
+  //     prompt; with ~50 tools that is tens of thousands of tokens per turn and
+  //     the thread overflows the context window mid-loop. Send a reminder that
+  //     restates the calling convention without the schemas.
+  //   - cursor / opencode / gemini / one-shot custom start from nothing every
+  //     send, so the full schemas have to go out every time.
+  //
+  // A fresh session always gets the full block regardless of engine, so a thread
+  // is never created without the definitions (this also covers the case where a
+  // session was evicted and is being recreated mid-conversation). A caller that
+  // changes its tool list mid-conversation also lands on the full block: the
+  // tool list is part of the session-name hash, so a different list resolves to
+  // a different session, which is a fresh create.
+  //
+  // OPENAI_COMPAT_TOOLS_PER_MESSAGE is the exception — its whole purpose is to
+  // re-send the full list every turn so the tool set can change within one
+  // session (in that mode the tool list is deliberately left out of the session
+  // hash), so it keeps getting full blocks.
   const hasTools = !!request.tools?.length;
-  const injectToolsPerTurn = hasTools && (engine !== 'claude' || isToolsPerMessageModeEnabled());
+  const perMessageMode = isToolsPerMessageModeEnabled();
+  const injectToolsPerTurn = hasTools && (engine !== 'claude' || perMessageMode);
   if (injectToolsPerTurn) {
-    const toolBlock = buildToolPromptBlock(request.tools);
+    const schemasAlreadyInThread = !needsCreate && !perMessageMode && engineHasNativeConversation(engine);
+    const toolBlock = schemasAlreadyInThread ? buildToolReminderBlock() : buildToolPromptBlock(request.tools);
     userMessage = `${toolBlock}\n\n${userMessage}`;
   }
 

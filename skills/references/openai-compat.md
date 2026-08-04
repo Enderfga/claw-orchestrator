@@ -73,6 +73,37 @@ When `OPENAI_COMPAT_STATUS_URL` is set (full HTTP URL), each chat completion sen
 
 Failures are ignored (no retries). Use this from a small local HTTP handler that forwards status into your webchat UI.
 
+## Tool definitions and where they live
+
+When the request carries `tools`, the schemas have to reach the CLI somehow. Which
+mechanism is used depends on whether the engine keeps the conversation itself.
+
+| Engine | Turn 1 | Later turns |
+|---|---|---|
+| `claude` | Schemas go into the session system prompt (`--system-prompt`) | Nothing injected — the system prompt persists |
+| `codex`, `codex-app`, `agy` | Full schema block prepended to the message | A short reminder of the calling convention, no schemas |
+| `cursor`, `opencode`, `gemini` | Full schema block prepended to the message | Full schema block again — these spawn a fresh process per send and remember nothing |
+
+The middle row is the one worth understanding. Those engines resume a thread, so
+everything injected stays in the transcript. Re-sending the full block each turn
+grows the prompt without bound — a 54-tool block runs to roughly 17k tokens, so a
+handful of turns is enough to overflow the context window mid-loop and fail the
+run outright. Sending *nothing* on resume turns is not the answer either: the
+block also carries the "emit a tool call, do not carry out the work yourself"
+framing, and without it the CLI starts doing the work directly.
+
+A fresh session always gets the full block, so a thread is never created without
+the definitions — including when a session was evicted and is being recreated. A
+caller that changes its tool list mid-conversation also gets the full block,
+because the tool list is part of the session-name hash, so a different list
+resolves to a different session.
+
+`OPENAI_COMPAT_TOOLS_PER_MESSAGE=1` opts out: it re-sends the full block on every
+turn for `claude` too, which is what makes a changing tool set work inside one
+session (in that mode the tool list is deliberately left out of the session hash).
+It costs the per-turn growth described above — only use it if the tool set really
+does change mid-conversation.
+
 ## Environment variables
 
 | Variable | Default | Purpose |
@@ -81,6 +112,7 @@ Failures are ignored (no retries). Use this from a small local HTTP handler that
 | `OPENCLAW_RATE_LIMIT` | `300` | Max requests per IP per 60-second sliding window. |
 | `OPENCLAW_CORS_ORIGINS` | (loopback only) | Set to `*` to allow all origins (the `/v1/*` paths already do this). |
 | `OPENAI_COMPAT_NEW_CONVO_HEURISTIC` | (unset) | Set to `1` to enable webchat mode (see above). |
+| `OPENAI_COMPAT_TOOLS_PER_MESSAGE` | (unset) | Set to `1` to re-send the full tool schemas on every turn (see [Tool definitions](#tool-definitions-and-where-they-live)). Needed only when the tool set changes mid-conversation; costs per-turn prompt growth. |
 | `OPENAI_COMPAT_STATUS_URL` | (unset) | If set, the bridge POSTs JSON status updates to this URL (fire-and-forget, 2s timeout). See [Status webhook](#status-webhook). |
 | `OPENCLAW_SERVE_MAX_SESSIONS` | `32` | Max concurrent OpenAI-compat sessions in serve mode. Bumped from the in-plugin default of 5 because each distinct caller now gets its own `sys-<hash>` session. |
 | `OPENCLAW_SERVE_TTL_MINUTES` | `60` | Idle TTL for OpenAI-compat sessions in serve mode. Idle sessions are reaped by a 60s background loop; persisted disk registry is kept for 7 days so a returning caller is auto-resumed. |
