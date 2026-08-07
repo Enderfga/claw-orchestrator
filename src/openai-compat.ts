@@ -725,13 +725,23 @@ export async function handleChatCompletion(
   }
 
   // For non-claude engines (Cursor, Codex, Gemini), their CLIs don't support
-  // --append-system-prompt. Prepend the upstream system prompt to the user
-  // message on EVERY turn so the model sees the caller's identity, tool
-  // definitions, and workspace context. This is done here (not at session
-  // creation) because these engines spawn a fresh CLI process per turn —
-  // there's no persistent session to carry the system prompt forward.
+  // --append-system-prompt, so the upstream system prompt is prepended to the user message here
+  // rather than at session creation: these engines spawn a fresh CLI process per turn, and for the
+  // ones that start from nothing each time the prepend is the only thing carrying the caller's
+  // identity, tool definitions and workspace context forward.
+  //
+  // For the engines that resume a conversation, though, the process being fresh does not mean the
+  // context is: the prompt is already in the transcript from the turn that put it there, so
+  // repeating it adds a full copy per hop. This block predates the native-conversation distinction
+  // and was not revisited when `schemasAlreadyInThread` introduced it a few lines below.
+  //
+  // Gated on the same predicate as the tool reminder, which also covers the case that makes this
+  // risky: `agy` recovers its conversation id by matching the log of a third-party CLI, and without
+  // that id every later send silently starts a fresh conversation. Today the unconditional prepend
+  // hides that. `nativeThreadIsLive()` returns false exactly when the id is missing, so those turns
+  // keep receiving the full prompt instead of losing their identity quietly.
   let userMessage = extracted.userMessage;
-  if (extracted.systemPrompt && engine !== 'claude') {
+  if (extracted.systemPrompt && engine !== 'claude' && !threadHasHistory) {
     userMessage = `<system>\n${extracted.systemPrompt}\n</system>\n\n${userMessage}`;
   }
 

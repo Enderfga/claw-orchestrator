@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The upstream system prompt was prepended to the user message on every turn for
+  every non-Claude engine. For engines that resume a conversation it is already in
+  the transcript, so each hop added another full copy — 60k+ characters per hop for
+  a large caller. It is now sent only when the conversation is not known to already
+  hold it, using the same predicate as the tool reminder. That predicate also covers
+  the `agy` case where a missing conversation id would otherwise mean silently
+  starting fresh: without the id the full prompt is still sent.
+
 - Tool results were re-serialized in full on every hop of a tool loop. On engines
   that resume a conversation the earlier results are already in the transcript, so
   each hop re-sent the whole history and the prompt grew quadratically: with a 30k
