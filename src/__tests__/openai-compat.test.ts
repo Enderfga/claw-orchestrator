@@ -14,6 +14,7 @@ import {
   nativeThreadIsLive,
   parseToolCallsFromText,
   serializeToolResults,
+  type OpenAIChatMessage,
   isToolsPerMessageModeEnabled,
   noToolsSystemPrompt,
   buildSessionSystemPrompt,
@@ -833,5 +834,56 @@ describe('nativeThreadIsLive', () => {
     expect(nativeThreadIsLive('claude', {})).toBe(true);
     expect(nativeThreadIsLive('custom', {})).toBe(true);
     expect(nativeThreadIsLive(undefined, {})).toBe(true);
+  });
+});
+
+describe('serializeToolResults — latestRoundOnly', () => {
+  // Growth is the point: on a resumed thread every result before the engine's last assistant turn
+  // is already in the transcript, so re-sending them makes the prompt grow quadratically across a
+  // tool loop. Scoping to the latest round keeps it linear.
+  const loop: OpenAIChatMessage[] = [
+    { role: 'user', content: 'go' },
+    {
+      role: 'assistant',
+      content: null,
+      tool_calls: [{ id: 'c1', type: 'function', function: { name: 'a', arguments: '{}' } }],
+    },
+    { role: 'tool', tool_call_id: 'c1', content: 'RESULT-ONE' },
+    {
+      role: 'assistant',
+      content: null,
+      tool_calls: [{ id: 'c2', type: 'function', function: { name: 'b', arguments: '{}' } }],
+    },
+    { role: 'tool', tool_call_id: 'c2', content: 'RESULT-TWO' },
+  ];
+
+  it('sends every result when the thread cannot be trusted to hold them', () => {
+    const out = serializeToolResults(loop, false);
+    expect(out).toContain('RESULT-ONE');
+    expect(out).toContain('RESULT-TWO');
+  });
+
+  it('sends only the results answering the latest round when the thread holds the rest', () => {
+    const out = serializeToolResults(loop, true);
+    expect(out).not.toContain('RESULT-ONE');
+    expect(out).toContain('RESULT-TWO');
+  });
+
+  it('defaults to the previous behaviour', () => {
+    expect(serializeToolResults(loop)).toContain('RESULT-ONE');
+  });
+
+  it('keeps every result when no assistant turn has happened yet', () => {
+    // First hop of a resumed session: results with no preceding assistant message are all new.
+    const noAssistant: OpenAIChatMessage[] = [
+      { role: 'user', content: 'go' },
+      { role: 'tool', tool_call_id: 'c1', content: 'RESULT-ONE' },
+    ];
+    expect(serializeToolResults(noAssistant, true)).toContain('RESULT-ONE');
+  });
+
+  it('returns empty when the latest round produced no results', () => {
+    const trailingAssistant: OpenAIChatMessage[] = [...loop, { role: 'assistant', content: 'done' }];
+    expect(serializeToolResults(trailingAssistant, true)).toBe('');
   });
 });

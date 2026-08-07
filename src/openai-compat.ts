@@ -353,8 +353,14 @@ export function parseToolCallsFromText(text: string): ParsedToolCalls {
  * Serialize tool result messages into a text block for the CLI model.
  * Converts OpenAI `tool` role messages into <tool_result> tags.
  */
-export function serializeToolResults(messages: OpenAIChatMessage[]): string {
-  const toolMessages = messages.filter((m) => m.role === 'tool');
+export function serializeToolResults(messages: OpenAIChatMessage[], latestRoundOnly = false): string {
+  // On a thread that already holds the conversation, every tool result before the engine's most
+  // recent assistant turn is already in the transcript. Re-serializing them costs the whole
+  // history again on every hop, so the prompt grows quadratically across a tool loop: with a
+  // 30k-character batch per round, hop 10 re-sends ~300k characters of results the engine has
+  // already seen. Scoping to the results that answer the latest round is what keeps it linear.
+  const scoped = latestRoundOnly ? messages.slice(messages.map((m) => m.role).lastIndexOf('assistant') + 1) : messages;
+  const toolMessages = scoped.filter((m) => m.role === 'tool');
   if (!toolMessages.length) return '';
 
   const results = toolMessages
@@ -401,6 +407,13 @@ export interface ExtractedMessage {
 export function extractUserMessage(
   messages: OpenAIChatMessage[],
   headers?: Record<string, string | string[] | undefined>,
+  /**
+   * Whether the engine's conversation already holds everything up to the caller's latest tool
+   * round. Only meaningful for engines that resume a native conversation and only once the
+   * conversation id has been captured — see nativeThreadIsLive(). Defaults to false so any caller
+   * that cannot establish that keeps the previous behaviour of sending every result.
+   */
+  threadHasHistory = false,
 ): ExtractedMessage {
   if (!messages || messages.length === 0) {
     throw new Error('messages array is empty');
@@ -430,7 +443,7 @@ export function extractUserMessage(
   // and the old tool results are already in the CLI's history.
   const lastNonSystem = [...messages].reverse().find((m) => m.role !== 'system');
   if (lastNonSystem?.role === 'tool') {
-    const toolResultBlock = serializeToolResults(messages);
+    const toolResultBlock = serializeToolResults(messages, threadHasHistory);
     const userMessages = messages.filter((m) => m.role === 'user');
     const lastUserText = userMessages.length > 0 ? textOf(userMessages[userMessages.length - 1]) : '';
     const userMessage = lastUserText ? `${toolResultBlock}\n\n${lastUserText}` : toolResultBlock;
@@ -611,18 +624,33 @@ export async function handleChatCompletion(
   const sessionName = sessionNameFromKey(sessionKey);
   const isStreaming = request.stream === true;
 
+  // Resolved before extracting, because the extraction needs to know whether the engine's
+  // conversation already holds the earlier tool results. In the tool-loop branch
+  // `isNewConversation` is always false, so there `needsCreate` reduces to `!sessionExists` and
+  // this is the same predicate the create path uses further down.
+  const existingSessions = manager.listSessions().map((s) => s.name);
+  const sessionExists = existingSessions.includes(sessionName);
+  let threadHasHistory = false;
+  if (sessionExists && engineHasNativeConversation(engine)) {
+    try {
+      threadHasHistory = nativeThreadIsLive(engine, manager.getStatus(sessionName).stats);
+    } catch {
+      threadHasHistory = false;
+    }
+  }
+
   let extracted: ExtractedMessage;
   try {
-    extracted = extractUserMessage(request.messages, headers as Record<string, string | string[] | undefined>);
+    extracted = extractUserMessage(
+      request.messages,
+      headers as Record<string, string | string[] | undefined>,
+      threadHasHistory,
+    );
   } catch (err) {
     res.writeHead(400, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: { message: (err as Error).message, type: 'invalid_request_error' } }));
     return;
   }
-
-  // Check if session exists
-  const existingSessions = manager.listSessions().map((s) => s.name);
-  const sessionExists = existingSessions.includes(sessionName);
 
   // If new conversation detected and session exists, stop old one first
   if (extracted.isNewConversation && sessionExists) {

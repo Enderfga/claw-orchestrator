@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Tool results were re-serialized in full on every hop of a tool loop. On engines
+  that resume a conversation the earlier results are already in the transcript, so
+  each hop re-sent the whole history and the prompt grew quadratically: with a 30k
+  character batch per round, hop 10 carried ~300k characters the engine had already
+  seen. Results are now scoped to the round that answers the engine's latest
+  assistant turn whenever the conversation is known to hold the rest — same
+  predicate as the tool reminder. Sessions whose thread cannot be confirmed keep
+  sending everything.
+
 - The resume-turn tool reminder was gated on the session existing in the manager's
   map, which is not the same as the engine having created a conversation.
   `start()` does not spawn a process, the conversation id is only captured later
