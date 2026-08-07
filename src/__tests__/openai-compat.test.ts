@@ -11,6 +11,7 @@ import {
   formatCompletionChunk,
   buildToolPromptBlock,
   buildToolReminderBlock,
+  nativeThreadIsLive,
   parseToolCallsFromText,
   serializeToolResults,
   isToolsPerMessageModeEnabled,
@@ -798,5 +799,39 @@ describe('formatCompletionResponse with tool_calls', () => {
     expect(resp.choices[0].finish_reason).toBe('tool_calls');
     expect(resp.choices[0].message.content).toBe('Thinking...');
     expect(resp.choices[0].message.tool_calls).toEqual(toolCalls);
+  });
+});
+
+describe('nativeThreadIsLive', () => {
+  // The regression this guards: `!needsCreate` says the session is in the manager's map, which is
+  // not the same as the engine having created a conversation. A first send that dies before
+  // `thread.started` leaves the session in the map with no id, and the next turn would then send a
+  // reminder referring to tools the engine never received — and still answer 200.
+  it('requires a captured thread id for codex', () => {
+    expect(nativeThreadIsLive('codex', {})).toBe(false);
+    expect(nativeThreadIsLive('codex', { codexThreadId: 'thread_abc' })).toBe(true);
+  });
+
+  it('requires a captured thread id for codex-app', () => {
+    expect(nativeThreadIsLive('codex-app', {})).toBe(false);
+    expect(nativeThreadIsLive('codex-app', { codexThreadId: 'thread_abc' })).toBe(true);
+  });
+
+  it('requires a harvested conversation id for agy', () => {
+    expect(nativeThreadIsLive('agy', {})).toBe(false);
+    expect(nativeThreadIsLive('agy', { agyConversationId: 'conv_abc' })).toBe(true);
+  });
+
+  it('does not confuse the two ids', () => {
+    expect(nativeThreadIsLive('codex', { agyConversationId: 'conv_abc' })).toBe(false);
+    expect(nativeThreadIsLive('agy', { codexThreadId: 'thread_abc' })).toBe(false);
+  });
+
+  it('treats engines that keep context in a live process as live', () => {
+    // claude and persistent custom engines expose no separate id, so presence in the map is the
+    // strongest signal there is; this must not regress to false.
+    expect(nativeThreadIsLive('claude', {})).toBe(true);
+    expect(nativeThreadIsLive('custom', {})).toBe(true);
+    expect(nativeThreadIsLive(undefined, {})).toBe(true);
   });
 });

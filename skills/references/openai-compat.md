@@ -81,7 +81,7 @@ mechanism is used depends on whether the engine keeps the conversation itself.
 | Engine | Turn 1 | Later turns |
 |---|---|---|
 | `claude` | Schemas go into the session system prompt (`--system-prompt`) | Nothing injected — the system prompt persists |
-| `codex`, `codex-app`, `agy` | Full schema block prepended to the message | A short reminder of the calling convention, no schemas |
+| `codex`, `codex-app`, `agy` | Full schema block prepended to the message | A short reminder of the calling convention, no schemas — but only once the conversation id has been captured; until then the full block is sent again |
 | `cursor`, `opencode`, `gemini` | Full schema block prepended to the message | Full schema block again — these spawn a fresh process per send and remember nothing |
 
 The middle row is the one worth understanding. Those engines resume a thread, so

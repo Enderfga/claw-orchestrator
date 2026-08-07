@@ -12,7 +12,7 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { randomUUID, createHash } from 'node:crypto';
 import { resolveEngineAndModel, estimateTokens } from './models.js';
-import { engineHasNativeConversation } from './types.js';
+import { engineHasNativeConversation, type EngineType, type SessionStats } from './types.js';
 import {
   OPENAI_COMPAT_DEFAULT_MODEL,
   OPENAI_COMPAT_AUTO_COMPACT_THRESHOLD,
@@ -523,8 +523,47 @@ interface SessionManagerLike {
   ): Promise<{ output: string; sessionId?: string; events: unknown[] }>;
   stopSession(name: string): Promise<void>;
   listSessions(): Array<{ name: string }>;
-  getStatus(name: string): { stats: { tokensIn: number; tokensOut: number; contextPercent: number } };
+  getStatus(name: string): {
+    stats: {
+      tokensIn: number;
+      tokensOut: number;
+      contextPercent: number;
+      // Native-conversation ids. Optional because they only exist once the engine has actually
+      // announced the conversation — see nativeThreadIsLive().
+      codexThreadId?: string;
+      agyConversationId?: string;
+    };
+  };
   compactSession(name: string): Promise<unknown>;
+}
+
+/**
+ * Whether the engine's native conversation is known to exist for this session.
+ *
+ * `!needsCreate` only says the session is in the manager's map, which is not the same thing:
+ * `start()` does not spawn a process, the conversation id is captured later (codex sets it on
+ * `thread.started`, agy harvests it from the log after the first turn), and a send that fails
+ * before that point leaves the session in the map with no id at all.
+ *
+ * The distinction matters wherever we decide to send a short reminder instead of the full state,
+ * because a reminder that refers to a conversation the engine never created is silently wrong —
+ * the request still returns 200.
+ */
+export function nativeThreadIsLive(
+  engine: EngineType | undefined,
+  stats: Pick<SessionStats, 'codexThreadId' | 'agyConversationId'>,
+): boolean {
+  switch (engine) {
+    case 'codex':
+    case 'codex-app':
+      return !!stats.codexThreadId;
+    case 'agy':
+      return !!stats.agyConversationId;
+    default:
+      // claude and persistent custom engines hold their context in a live process, so there is no
+      // separate id to check — being in the map is the strongest signal available.
+      return true;
+  }
 }
 
 export async function handleChatCompletion(
@@ -707,7 +746,15 @@ export async function handleChatCompletion(
   const perMessageMode = isToolsPerMessageModeEnabled();
   const injectToolsPerTurn = hasTools && (engine !== 'claude' || perMessageMode);
   if (injectToolsPerTurn) {
-    const schemasAlreadyInThread = !needsCreate && !perMessageMode && engineHasNativeConversation(engine);
+    let schemasAlreadyInThread = false;
+    if (!needsCreate && !perMessageMode && engineHasNativeConversation(engine)) {
+      try {
+        schemasAlreadyInThread = nativeThreadIsLive(engine, manager.getStatus(sessionName).stats);
+      } catch {
+        // getStatus throws once the session is gone from the map; that is not a live thread.
+        schemasAlreadyInThread = false;
+      }
+    }
     const toolBlock = schemasAlreadyInThread ? buildToolReminderBlock() : buildToolPromptBlock(request.tools);
     userMessage = `${toolBlock}\n\n${userMessage}`;
   }

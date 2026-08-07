@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- The resume-turn tool reminder was gated on the session existing in the manager's
+  map, which is not the same as the engine having created a conversation.
+  `start()` does not spawn a process, the conversation id is only captured later
+  (`codex` on `thread.started`, `agy` by harvesting the log after the first turn),
+  and a send that fails before that point leaves the session in the map with no id.
+  The next turn then sent a reminder referring to tools the engine had never
+  received — no schemas, no identity, no history — and still answered 200. The gate
+  now also requires the id to be present, so a conversation that was never created
+  falls back to the full block. Behaviour is unchanged once a thread is live.
+
 ## [4.11.0] - 2026-08-04
 
 ### Fixed
