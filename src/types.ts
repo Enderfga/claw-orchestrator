@@ -262,6 +262,22 @@ export interface SessionConfig {
   betas?: string | string[];
   enableAgentTeams?: boolean;
   // CLI 2.1.111 features
+  /**
+   * Policy for peer messages arriving from other Claude Code sessions on this
+   * machine (Claude engine). Delivered as a `crossSessionInbound` settings key.
+   *
+   * `accept` delivers straight into the session, `hold` parks the message until
+   * a human approves it in that session's terminal, `refuse` rejects it.
+   *
+   * Worth setting explicitly for orchestrated sessions. With no value, the CLI
+   * decides from the two sides' permission modes and holds when they differ —
+   * and an orchestrated session runs `bypassPermissions` or `acceptEdits` while
+   * a human's own terminal is usually prompting, so the default outcome for a
+   * message between them is `hold`. A held message waits for someone to approve
+   * it in a terminal nobody is watching, which for a headless session means it
+   * simply expires.
+   */
+  crossSessionInbound?: 'accept' | 'hold' | 'refuse';
   /** Stream hook lifecycle events (PreToolUse/PostToolUse) */
   includeHookEvents?: boolean;
   /**

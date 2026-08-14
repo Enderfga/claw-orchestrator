@@ -71,6 +71,42 @@ describe('PersistentClaudeSession --settings / ultracode', () => {
     mockSpawn.mockReturnValue(mockProc);
   });
 
+  // crossSessionInbound is a settings key, not a flag — `claude --help` has no
+  // cross-session option at all, so `--settings` is the only way to set it per
+  // session. The CLI validates it as an accept/hold/refuse enum.
+  it('injects crossSessionInbound when set and no settings provided', async () => {
+    const session = new PersistentClaudeSession({ name: 't', cwd: '/tmp', crossSessionInbound: 'accept' });
+    await startReady(session, mockProc);
+    const argv = mockSpawn.mock.calls[0][1] as string[];
+    expect(settingsValues(argv)).toEqual(['{"crossSessionInbound":"accept"}']);
+  });
+
+  it('omits crossSessionInbound entirely when unset', async () => {
+    const session = new PersistentClaudeSession({ name: 't', cwd: '/tmp' });
+    await startReady(session, mockProc);
+    const argv = mockSpawn.mock.calls[0][1] as string[];
+    expect(settingsValues(argv)).toEqual([]);
+  });
+
+  it('merges crossSessionInbound alongside ultracode and the caller settings', async () => {
+    const session = new PersistentClaudeSession({
+      name: 't',
+      cwd: '/tmp',
+      ultracode: true,
+      crossSessionInbound: 'refuse',
+      settings: '{"includeCoAuthoredBy":false}',
+    });
+    await startReady(session, mockProc);
+    const argv = mockSpawn.mock.calls[0][1] as string[];
+    const vals = settingsValues(argv);
+    expect(vals).toHaveLength(1);
+    expect(JSON.parse(vals[0])).toEqual({
+      includeCoAuthoredBy: false,
+      ultracode: true,
+      crossSessionInbound: 'refuse',
+    });
+  });
+
   it('injects {"ultracode":true} when ultracode is set and no settings provided', async () => {
     const session = new PersistentClaudeSession({ name: 't', cwd: '/tmp', ultracode: true });
     await startReady(session, mockProc);

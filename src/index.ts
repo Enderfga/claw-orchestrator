@@ -267,6 +267,14 @@ const plugin = {
           betas: { type: ['string', 'array'], items: { type: 'string' }, description: 'Custom beta headers' },
           enableAgentTeams: { type: 'boolean', description: 'Enable experimental agent teams' },
           enableAutoMode: { type: 'boolean', description: 'Enable auto permission mode' },
+          crossSessionInbound: {
+            type: 'string',
+            enum: ['accept', 'hold', 'refuse'],
+            description:
+              'Policy for peer messages from other Claude Code sessions (Claude engine). ' +
+              'Without it the CLI holds messages whose sender and receiver run different permission modes, ' +
+              'which is the usual case between an orchestrated session and a human terminal.',
+          },
           includeHookEvents: {
             type: 'boolean',
             description: 'Stream hook lifecycle events (PreToolUse/PostToolUse)',

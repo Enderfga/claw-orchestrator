@@ -41,6 +41,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Three engines were being driven as if they could not hold a conversation. They
 all could; the wrappers just never used it.
 
+### Added
+
+- `crossSessionInbound` session option (Claude engine): `accept` / `hold` /
+  `refuse`, setting how this session treats peer messages from other Claude Code
+  sessions on the same machine. There is no CLI flag for this — it is a settings
+  key, so it rides the existing `--settings` merge alongside `ultracode`. It is
+  worth setting explicitly on an orchestrated session: with no value the CLI
+  decides from the two sides' permission modes and holds when they differ, and an
+  orchestrated session (`bypassPermissions` / `acceptEdits`) talking to a human's
+  terminal (prompting) is exactly that case, so the message parks waiting for an
+  approval in a terminal nobody is watching. Sessions started by the orchestrator
+  do register as addressable peers and do receive messages — verified against
+  2.1.232 by sending to a live one and getting a reply.
+
 ### Fixed
 
 - **OpenCode and Cursor now continue their own conversation.** `opencode run`

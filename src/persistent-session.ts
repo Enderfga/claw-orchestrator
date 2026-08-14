@@ -115,25 +115,38 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
   }
 
   /**
-   * Build the `--settings` argv fragment, merging the `ultracode: true` key when requested.
-   * ultracode enables dynamic workflows and is a settings key, NOT a --effort value (the CLI
-   * rejects `--effort ultracode`). User-supplied settings are never dropped: inline JSON and
-   * readable settings files are parsed and merged into a single object; if that fails we fall
-   * back to passing the original --settings untouched plus a dedicated ultracode flag.
+   * Build the `--settings` argv fragment, merging in the session options that are
+   * expressed as settings keys rather than flags.
+   *
+   * Two live here today:
+   *   - `ultracode` enables dynamic workflows. It is a settings key, NOT an
+   *     `--effort` value (the CLI rejects `--effort ultracode`).
+   *   - `crossSessionInbound` sets this session's policy for peer messages from
+   *     other Claude Code sessions on the machine.
+   *
+   * User-supplied settings are never dropped: inline JSON and readable settings
+   * files are parsed and merged into a single object; if that fails we fall back
+   * to passing the original `--settings` untouched plus a second one carrying
+   * only our keys.
    */
   private buildSettingsArgs(): string[] {
+    const injected: Record<string, unknown> = {};
+    if (this.options.ultracode) injected.ultracode = true;
+    if (this.options.crossSessionInbound) injected.crossSessionInbound = this.options.crossSessionInbound;
+
     const settings = this.options.settings;
-    if (!this.options.ultracode) return settings ? ['--settings', settings] : [];
-    if (!settings) return ['--settings', '{"ultracode":true}'];
+    if (!Object.keys(injected).length) return settings ? ['--settings', settings] : [];
+    if (!settings) return ['--settings', JSON.stringify(injected)];
+
     const trimmed = settings.trim();
     try {
       const raw = trimmed.startsWith('{') ? trimmed : fs.readFileSync(trimmed, 'utf8');
       const obj = JSON.parse(raw) as Record<string, unknown>;
-      obj.ultracode = true;
+      Object.assign(obj, injected);
       return ['--settings', JSON.stringify(obj)];
     } catch {
-      // Couldn't parse/read to merge — keep the user's settings and add ultracode separately.
-      return ['--settings', settings, '--settings', '{"ultracode":true}'];
+      // Couldn't parse/read to merge — keep the user's settings and add ours separately.
+      return ['--settings', settings, '--settings', JSON.stringify(injected)];
     }
   }
 

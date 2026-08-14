@@ -38,6 +38,7 @@ Start a persistent coding session with full CLI flag support.
 | `enableAgentTeams` | boolean | Enable experimental agent teams |
 | `enableAutoMode` | boolean | Enable auto permission mode |
 | `customEngine` | object | Custom engine config (required when `engine='custom'`). See [Multi-Engine: Custom Engine](./multi-engine.md#custom-engine-enginecustom). |
+| `crossSessionInbound` | string | `accept` / `hold` / `refuse` — policy for peer messages from other Claude Code sessions on this machine (Claude engine). Delivered as a settings key; there is no CLI flag. Without it the CLI holds messages whose two sides run different permission modes, which is the usual orchestrated-session-to-human-terminal case |
 | `includeHookEvents` | boolean | Stream hook lifecycle events (PreToolUse/PostToolUse) as `system` events |
 | `forwardSubagentText` | boolean | Forward subagent text and thinking into the output stream (Claude engine, CLI 2.1.211+). Without it the parent stream stays quiet while a subagent works |
 | `permissionPromptTool` | string | MCP tool name to delegate permission prompts to (non-interactive use) |
