@@ -142,9 +142,21 @@ describe('engineHasNativeConversation', () => {
   });
 
   it('reports engines that start from scratch on every send', () => {
-    for (const engine of ['gemini', 'cursor', 'opencode'] as const) {
+    for (const engine of ['gemini'] as const) {
       expect(engineHasNativeConversation(engine), engine).toBe(false);
     }
+  });
+
+  // opencode and cursor were on the amnesiac side of this for a long time, which
+  // was never true of the CLIs: `opencode run --session <id>` and
+  // `agent -p --resume <chatId>` both continue an existing conversation, and the
+  // wrappers were already capturing the id without passing it back. Verified by
+  // a two-turn recall against the real binaries (opencode 1.18.18, cursor
+  // 2026.08.11): before the fix turn 2 answered "you never asked me to remember
+  // anything"; after it, turn 2 returns the word from turn 1.
+  it('counts opencode and cursor, which resume by id', () => {
+    expect(engineHasNativeConversation('opencode')).toBe(true);
+    expect(engineHasNativeConversation('cursor')).toBe(true);
   });
 
   it('keys custom engines off the persistent flag', () => {

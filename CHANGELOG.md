@@ -36,6 +36,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now also requires the id to be present, so a conversation that was never created
   falls back to the full block. Behaviour is unchanged once a thread is live.
 
+## [4.12.0] - 2026-08-14
+
+Three engines were being driven as if they could not hold a conversation. They
+all could; the wrappers just never used it.
+
+### Fixed
+
+- **OpenCode and Cursor now continue their own conversation.** `opencode run`
+  opens a new session unless `--session <id>` names one, and `agent -p` opens a
+  new chat unless `--resume <chatId>` does — and both wrappers were already
+  capturing that id off the event stream, then never passing it back. Every send
+  was therefore an amnesiac first turn. Verified against opencode 1.18.18 and
+  cursor 2026.08.11: before, turn 2 answers "you never asked me to remember
+  anything"; after, it returns the word from turn 1. `--continue` is deliberately
+  not used for either — it means "the most recent conversation on this machine",
+  which collides between concurrent sessions.
+- **`engineHasNativeConversation()` now counts `opencode` and `cursor`.** They sat
+  on the amnesiac side of that predicate, which was never a property of the CLIs.
+  While it lasted, the autoloop replayed a character-capped (therefore
+  truncating) transcript to them every turn, and the openai-compat bridge re-sent
+  the entire tool schema block, every tool result, and the system prompt every
+  turn. Those three savings, added in 4.11.0 for codex/agy, now apply here too.
+- **Antigravity reports real token usage.** agy grew `--output-format
+  stream-json`, whose `result` event carries input/output/cache-read tokens; the
+  wrapper had been estimating ~4 chars per token from the message text, which
+  under-counted a real turn by more than two orders of magnitude (a short prompt
+  measured 27 estimated tokens against ~15k actual). Cost for this engine was a
+  guess and is now measured. The conversation id also comes off the `init` event,
+  so the log-file scrape is now only a fallback for a turn that dies before
+  emitting anything, and a non-`SUCCESS` status is reflected in `stop_reason`.
+
 ## [4.11.0] - 2026-08-04
 
 ### Fixed

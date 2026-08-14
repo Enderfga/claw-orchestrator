@@ -81,10 +81,10 @@ mechanism is used depends on whether the engine keeps the conversation itself.
 | Engine | Turn 1 | Later turns |
 |---|---|---|
 | `claude` | Schemas go into the session system prompt (`--system-prompt`) | Nothing injected — the system prompt persists |
-| `codex`, `codex-app`, `agy` | Full schema block prepended to the message | A short reminder of the calling convention, no schemas — but only once the conversation id has been captured; until then the full block is sent again |
-| `cursor`, `opencode`, `gemini` | Full schema block prepended to the message | Full schema block again — these spawn a fresh process per send and remember nothing |
+| `codex`, `codex-app`, `agy`, `opencode`, `cursor` | Full schema block prepended to the message | A short reminder of the calling convention, no schemas — but only once the conversation id has been captured; until then the full block is sent again |
+| `gemini`, one-shot `custom` | Full schema block prepended to the message | Full schema block again — these have no resume surface, so nothing persists between sends |
 
-The middle row is the one worth understanding. Those engines resume a thread, so
+The middle row is the one worth understanding. Those engines resume a conversation by id, so
 everything injected stays in the transcript. Re-sending the full block each turn
 grows the prompt without bound — a 54-tool block runs to roughly 17k tokens, so a
 handful of turns is enough to overflow the context window mid-loop and fail the

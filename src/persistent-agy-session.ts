@@ -5,18 +5,23 @@
  * Gemini CLI stopped serving 2026-06-18). Like Codex/Gemini, each send()
  * spawns a new `agy` process in print mode.
  *
- * agy (verified against 1.0.16) has NO structured output mode — stdout is
- * the plain response text. Two behaviors make this a real engine rather
- * than a custom-engine recipe:
+ * agy speaks `--output-format stream-json` (verified against 1.1.13): one JSON
+ * object per line, with an `init` event carrying the conversation id, progress
+ * `step_update` events, and a final `result` carrying the response text and
+ * real token usage. Three behaviors make this a real engine rather than a
+ * custom-engine recipe:
  *
- *   - Conversation continuity: agy logs `Created conversation <uuid>` to
- *     its log file. We pass a private --log-file per session, harvest the
- *     ID after the first send, and pass `--conversation <id>` on subsequent
- *     sends — true multi-turn context, like Codex thread resume.
+ *   - Conversation continuity: the id arrives on the `init` event and is passed
+ *     back as `--conversation <id>` on later sends — true multi-turn context,
+ *     like Codex thread resume. The --log-file scrape is kept only as a fallback
+ *     for a turn that dies before emitting any event.
+ *   - Real usage: input/output/cache-read tokens come from the `result` event,
+ *     so cost is measured rather than guessed. Earlier versions of this wrapper
+ *     read plain text and estimated ~4 chars/token, which is now only the
+ *     fallback path when no result event arrives.
  *   - Timeout coherence: agy enforces its own --print-timeout (default 5m);
  *     we derive it from the send timeout so the two never disagree.
  *
- * Token usage is estimated (~4 chars/token) since agy emits no usage data.
  * Unknown --model values do not error — agy silently falls back to its
  * default model (verified empirically on 1.0.16).
  */
@@ -32,6 +37,27 @@ import { sanitizeSecrets } from './sanitize.js';
 import { extractCreatedAgyConversationId, isAgyConversationId } from './agy-conversation.js';
 import { SESSION_EVENT } from './constants.js';
 import { BaseOneShotSession } from './base-oneshot-session.js';
+
+/** Token usage as reported by agy's `result` event. */
+interface AgyUsage {
+  input_tokens?: number;
+  output_tokens?: number;
+  thinking_tokens?: number;
+  cache_read_tokens?: number;
+  total_tokens?: number;
+}
+
+/** One line of agy `--output-format stream-json`. Captured from agy 1.1.13. */
+interface AgyStreamEvent {
+  event?: string;
+  conversation_id?: string;
+  result?: {
+    conversation_id?: string;
+    status?: string;
+    response?: string;
+    usage?: AgyUsage;
+  };
+}
 
 // ─── PersistentAgySession ───────────────────────────────────────────────────
 
@@ -78,7 +104,13 @@ export class PersistentAgySession extends BaseOneShotSession {
    * Resume turns:  same + `--conversation <id>`
    */
   private _buildArgs(message: string, timeoutMs: number): string[] {
-    const args: string[] = ['-p', message, '--log-file', this._logFile];
+    // stream-json gives the conversation id up front, progress events while the
+    // turn runs, and a final `result` carrying the answer plus real token usage.
+    // Before this, the wrapper read plain text, scraped the id out of the log
+    // file, and had to ESTIMATE tokens — so this engine's cost was a guess.
+    // --log-file is still passed as the fallback id source for a turn that dies
+    // before emitting any event.
+    const args: string[] = ['-p', message, '--output-format', 'stream-json', '--log-file', this._logFile];
 
     // Permission mode. agy has no fine-grained permission flags (verified on
     // 1.0.16): bypass maps to --dangerously-skip-permissions, `default` maps
@@ -148,6 +180,8 @@ export class PersistentAgySession extends BaseOneShotSession {
       let resultText = '';
       let stderr = '';
       let settled = false;
+      let turnUsage: AgyUsage | undefined;
+      let turnStatus: string | undefined;
 
       const proc = spawn(this.engineBin, args, {
         cwd: this.options.cwd,
@@ -164,16 +198,61 @@ export class PersistentAgySession extends BaseOneShotSession {
         }
       }, timeout);
 
-      // Plain-text stdout — forward chunks as streaming text
-      proc.stdout?.on('data', (data: Buffer) => {
-        const chunk = data.toString();
-        resultText += chunk;
-        try {
-          options.callbacks?.onText?.(chunk);
-        } catch {
-          // User callback error
+      // stream-json stdout: one JSON object per line. `init` carries the
+      // conversation id, `step_update` reports progress, and the final `result`
+      // carries the answer plus real usage. Anything unparseable is forwarded as
+      // text so a format change degrades to the old plain-text behaviour instead
+      // of losing the turn.
+      let pending = '';
+      const handleLine = (line: string, hadNewline: boolean) => {
+        const trimmed = line.trim();
+        if (!trimmed) return;
+        let evt: AgyStreamEvent | undefined;
+        if (trimmed.startsWith('{')) {
+          try {
+            evt = JSON.parse(trimmed) as AgyStreamEvent;
+          } catch {
+            evt = undefined;
+          }
         }
-        this.emit(SESSION_EVENT.TEXT, chunk);
+        if (!evt) {
+          // Not JSON — agy fell back to (or never left) plain text. Put back the
+          // newline the line split consumed, so multi-line output is not
+          // concatenated into a single run.
+          const raw = hadNewline ? line + '\n' : line;
+          resultText += raw;
+          try {
+            options.callbacks?.onText?.(raw);
+          } catch {
+            /* user callback */
+          }
+          this.emit(SESSION_EVENT.TEXT, raw);
+          return;
+        }
+        if (evt.event === 'init' && evt.conversation_id && !this.agyConversationId) {
+          this.agyConversationId = evt.conversation_id;
+        }
+        if (evt.event === 'result' && evt.result) {
+          const r = evt.result;
+          if (r.conversation_id && !this.agyConversationId) this.agyConversationId = r.conversation_id;
+          if (typeof r.response === 'string') {
+            resultText = r.response;
+            try {
+              options.callbacks?.onText?.(r.response);
+            } catch {
+              /* user callback */
+            }
+            this.emit(SESSION_EVENT.TEXT, r.response);
+          }
+          if (r.usage) turnUsage = r.usage;
+          if (r.status && r.status !== 'SUCCESS') turnStatus = r.status;
+        }
+      };
+      proc.stdout?.on('data', (data: Buffer) => {
+        pending += data.toString();
+        const lines = pending.split('\n');
+        pending = lines.pop() ?? '';
+        for (const line of lines) handleLine(line, true);
       });
 
       proc.stderr?.on('data', (data: Buffer) => {
@@ -185,12 +264,14 @@ export class PersistentAgySession extends BaseOneShotSession {
       proc.on('close', (code) => {
         clearTimeout(timer);
         this.currentProc = null;
+        if (pending) handleLine(pending, false);
 
-        // Harvest BEFORE the settled check: a turn that hit the wrapper
-        // timeout has already rejected (settled), but agy may still have
-        // logged `Created conversation <uuid>` before being killed. Skipping
-        // the harvest here would lose the ID permanently and every later
-        // send would silently start a fresh conversation.
+        // Harvest BEFORE the settled check: a turn that hit the wrapper timeout
+        // has already rejected (settled), but agy may still have announced the
+        // conversation before being killed. Skipping this would lose the id
+        // permanently and every later send would silently start fresh. The
+        // stream normally supplies it from the `init` event; this is the
+        // fallback for a turn that died before emitting one.
         this._harvestConversationId();
 
         if (settled) return;
@@ -200,8 +281,17 @@ export class PersistentAgySession extends BaseOneShotSession {
 
         const text = resultText.replace(/\n$/, '');
 
-        // No usage events exist in agy — always estimate
-        if (text.length > 0 || code === 0) {
+        // Real usage from the `result` event. estimateTokens() is the fallback
+        // for a turn that produced no result event (killed, crashed, or an
+        // output-format change) — it is a ~4-chars-per-token guess and was the
+        // only source before agy grew a structured output mode, which is why
+        // this engine's cost figures used to be approximate.
+        if (turnUsage) {
+          this._stats.tokensIn += turnUsage.input_tokens ?? 0;
+          this._stats.tokensOut += turnUsage.output_tokens ?? 0;
+          this._stats.cachedTokens += turnUsage.cache_read_tokens ?? 0;
+          this._updateCost();
+        } else if (text.length > 0 || code === 0) {
           this._stats.tokensIn += estimateTokens(message);
           this._stats.tokensOut += estimateTokens(text);
           this._updateCost();
@@ -212,7 +302,10 @@ export class PersistentAgySession extends BaseOneShotSession {
         const event: StreamEvent = {
           type: 'result',
           result: text,
-          stop_reason: code === 0 ? 'end_turn' : 'error',
+          // agy can exit 0 while reporting a non-SUCCESS status in the result
+          // event (e.g. a turn stopped early), so the status is authoritative
+          // when present and the exit code is the fallback.
+          stop_reason: (turnStatus ? turnStatus === 'SUCCESS' : code === 0) ? 'end_turn' : 'error',
         };
 
         this.emit(SESSION_EVENT.RESULT, event);

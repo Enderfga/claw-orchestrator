@@ -158,6 +158,7 @@ await manager.startSession({
 
 Wraps the Cursor Agent CLI (`agent`) with `--print --output-format stream-json`. Write-enabled sessions use `--force`. Each `send()` spawns a new process.
 
+- Conversation continuity: the chat id from the first turn's `system` event is captured and passed back as `--resume <chatId>` on later sends, so the model sees prior turns. `--continue` is deliberately not used: it resumes "the latest chat", which collides between concurrent sessions.
 - One-shot execution per message (no persistent subprocess)
 - Working directory via `--workspace` flag
 - Real token counts from stream-json `result` events (camelCase: `inputTokens`, `outputTokens`, `cacheReadTokens`)
@@ -180,6 +181,7 @@ await manager.startSession({
 
 Wraps the [sst/opencode](https://github.com/sst/opencode) CLI with `run --format json`. Each `send()` spawns a new process.
 
+- Conversation continuity: the session id from the event envelope is captured and passed back as `--session <id>` on later sends, so the model sees prior turns. `--continue` is deliberately not used: it means "the last session on this machine", which collides between concurrent sessions.
 - One-shot execution per message (no persistent subprocess)
 - NDJSON event stream with envelope `{ type, timestamp, sessionID, ... }`
 - Event types: `text`, `reasoning`, `tool_use`, `step_start`, `step_finish`, `error`

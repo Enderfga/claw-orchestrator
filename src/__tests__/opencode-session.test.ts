@@ -106,6 +106,56 @@ describe('PersistentOpencodeSession', () => {
       expect(spawnArgs).not.toContain('--dangerously-skip-permissions');
     });
 
+    // Regression guard: `opencode run` opens a NEW session unless --session names
+    // one, so omitting it made every turn an amnesiac first turn. Verified against
+    // 1.18.18: without the flag turn 2 answers "you never asked me to remember
+    // anything"; with it, turn 2 recalls turn 1.
+    it('passes --session with the harvested id on the second turn', async () => {
+      const session = new PersistentOpencodeSession({ name: 'test', cwd: '/tmp' });
+      await session.start();
+
+      const p1 = session.send('first', { waitForComplete: true });
+      setTimeout(() => {
+        feedLines(mockProc, [JSON.stringify({ type: 'step_start', sessionID: 'ses_abc123' })]);
+        closeProc(mockProc, 0);
+      }, 10);
+      await p1;
+
+      const proc2 = createMockProcess();
+      mockSpawn.mockReturnValue(proc2);
+      const p2 = session.send('second', { waitForComplete: true });
+      setTimeout(() => closeProc(proc2, 0), 10);
+      await p2;
+
+      const args1 = mockSpawn.mock.calls[0][1] as string[];
+      const args2 = mockSpawn.mock.calls[1][1] as string[];
+      // The first turn has no id to resume yet.
+      expect(args1).not.toContain('--session');
+      expect(args2).toContain('--session');
+      expect(args2[args2.indexOf('--session') + 1]).toBe('ses_abc123');
+      // --continue means "the last session on this machine" and would collide
+      // across concurrent sessions, so it must not be used.
+      expect(args2).not.toContain('--continue');
+    });
+
+    it('resumes a persisted opencode session id from config', async () => {
+      const session = new PersistentOpencodeSession({
+        name: 'test',
+        cwd: '/tmp',
+        resumeSessionId: 'opencode-live-ses_persisted',
+      });
+      await session.start();
+
+      const p = session.send('hello', { waitForComplete: true });
+      setTimeout(() => closeProc(mockProc, 0), 10);
+      await p;
+
+      const args = mockSpawn.mock.calls[0][1] as string[];
+      expect(args).toContain('--session');
+      // The `opencode-live-` display prefix is stripped; the CLI wants the raw id.
+      expect(args[args.indexOf('--session') + 1]).toBe('ses_persisted');
+    });
+
     it('uses the plan agent for read-only sessions', async () => {
       const session = new PersistentOpencodeSession({
         name: 'test',

@@ -107,6 +107,52 @@ describe('PersistentCursorSession', () => {
       expect(spawnArgs).toContain('sonnet-4');
     });
 
+    // Regression guard: `agent -p` opens a NEW chat unless --resume names one, so
+    // omitting it made every turn amnesiac. Verified against 2026.08.11: without
+    // the flag turn 2 has no memory of turn 1; with it, turn 2 recalls it.
+    it('passes --resume with the harvested chat id on the second turn', async () => {
+      const session = new PersistentCursorSession({ name: 'test', cwd: '/tmp' });
+      await session.start();
+
+      const p1 = session.send('first', { waitForComplete: true });
+      setTimeout(() => {
+        feedLines(mockProc, [JSON.stringify({ type: 'system', session_id: 'chat-abc123' })]);
+        closeProc(mockProc, 0);
+      }, 10);
+      await p1;
+
+      const proc2 = createMockProcess();
+      mockSpawn.mockReturnValue(proc2);
+      const p2 = session.send('second', { waitForComplete: true });
+      setTimeout(() => closeProc(proc2, 0), 10);
+      await p2;
+
+      const args1 = mockSpawn.mock.calls[0][1] as string[];
+      const args2 = mockSpawn.mock.calls[1][1] as string[];
+      expect(args1).not.toContain('--resume');
+      expect(args2).toContain('--resume');
+      expect(args2[args2.indexOf('--resume') + 1]).toBe('chat-abc123');
+      // --continue resumes "the latest chat" and would collide across sessions.
+      expect(args2).not.toContain('--continue');
+    });
+
+    it('resumes a persisted cursor chat id from config', async () => {
+      const session = new PersistentCursorSession({
+        name: 'test',
+        cwd: '/tmp',
+        resumeSessionId: 'cursor-live-chat-persisted',
+      });
+      await session.start();
+
+      const p = session.send('hello', { waitForComplete: true });
+      setTimeout(() => closeProc(mockProc, 0), 10);
+      await p;
+
+      const args = mockSpawn.mock.calls[0][1] as string[];
+      expect(args).toContain('--resume');
+      expect(args[args.indexOf('--resume') + 1]).toBe('chat-persisted');
+    });
+
     it('enforces read-only via an isolated deny config, not just --mode plan', async () => {
       const session = new PersistentCursorSession({
         name: 'test',

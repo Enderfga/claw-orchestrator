@@ -51,6 +51,15 @@ export class PersistentCursorSession extends BaseOneShotSession {
   /** Throwaway dir holding the read-only `.cursor/cli.json`; removed on stop(). */
   private _roConfigDir?: string;
 
+  /**
+   * Cursor's own chat id, once the first turn has announced one.
+   *
+   * `agent -p` opens a fresh chat unless `--resume <chatId>` names an existing
+   * one. The id was already harvested off the `system` init event for
+   * `sessionId`; feeding it back is what gives this engine a real conversation.
+   */
+  private cursorChatId?: string;
+
   constructor(config: SessionConfig, cursorBin?: string) {
     super(config, cursorBin || process.env.CURSOR_BIN || 'agent', {
       enginePrefix: 'cursor',
@@ -59,6 +68,11 @@ export class PersistentCursorSession extends BaseOneShotSession {
       supportsCachedTokens: true,
       engineDisplayName: 'Cursor',
     });
+    // Process-level resume: a persisted id is the raw Cursor chat id, never one
+    // of our generated `cursor-<ts>-<rand>` handles.
+    if (config.resumeSessionId && !/^cursor-\d+-/.test(config.resumeSessionId)) {
+      this.cursorChatId = config.resumeSessionId.replace(/^cursor-live-/, '');
+    }
   }
 
   /** Materialize the read-only permission config once; return the dir to use as cwd. */
@@ -103,6 +117,13 @@ export class PersistentCursorSession extends BaseOneShotSession {
     if (readOnly) args.push('--mode', 'plan');
     else args.push('--force');
     args.push('--trust', '--output-format', 'stream-json');
+
+    // Continue Cursor's own chat rather than opening a new one each send.
+    // Verified against 2026.08.11: without it the second turn has no memory of
+    // the first; with it the same turn recalls the earlier content. `--continue`
+    // is avoided on purpose — it resumes "the latest chat", which would collide
+    // between concurrent sessions.
+    if (this.cursorChatId) args.push('--resume', this.cursorChatId);
 
     if (this.options.model) args.push('--model', this.options.model);
     // Workspace directory (prefer --workspace over cwd for explicit path)
@@ -232,6 +253,9 @@ export class PersistentCursorSession extends BaseOneShotSession {
     switch (type) {
       case 'system':
         // Init event — extract session_id if available
+        // The raw id is what `--resume` expects; the prefixed one is our
+        // display/persistence handle.
+        if (event.session_id && !this.cursorChatId) this.cursorChatId = String(event.session_id);
         if (event.session_id && !this.sessionId?.startsWith('cursor-live-')) {
           this.sessionId = `cursor-live-${event.session_id}`;
         }

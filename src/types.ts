@@ -43,16 +43,26 @@ export type EngineType = (typeof ENGINE_TYPES)[number];
 /**
  * Does this engine carry conversation across sends on its own?
  *
- * claude keeps one subprocess alive; codex / codex-app resume a thread; agy
- * resumes a harvested `--conversation <uuid>`. Everything else (gemini, cursor,
- * opencode, and one-shot custom engines) spawns a FRESH process per send with
- * zero memory of the last turn.
+ * claude keeps one subprocess alive. The one-shot engines each resume their own
+ * conversation by id: codex / codex-app via `exec resume <thread>`, agy via
+ * `--conversation <uuid>`, opencode via `--session <id>`, cursor via
+ * `--resume <chatId>`. Only gemini and one-shot custom engines are genuinely
+ * amnesiac, having no resume surface to drive.
  *
  * The distinction decides who owns the conversation history. For an engine that
  * carries it, anything injected into a turn stays in the transcript forever, so
  * per-turn boilerplate accumulates and eventually overflows the context window.
  * For an engine that does not, the same content has to be re-sent every turn or
  * it is simply gone.
+ *
+ * opencode and cursor sat on the `false` side of this for a long time, which was
+ * never a property of those CLIs — both have always had a resume flag, and our
+ * wrappers even captured the id; they just never passed it back. While that
+ * lasted, the autoloop replayed a character-capped (therefore truncating)
+ * transcript to them on every turn, and the openai-compat bridge re-sent the
+ * whole tool schema block, every tool result, and the system prompt every turn.
+ * This is an engine-capability claim, so check an entry with a real two-turn
+ * recall test against the binary before trusting it.
  */
 export function engineHasNativeConversation(
   engine: EngineType | undefined,
@@ -63,6 +73,8 @@ export function engineHasNativeConversation(
     case 'codex':
     case 'codex-app':
     case 'agy':
+    case 'opencode':
+    case 'cursor':
       return true;
     case 'custom':
       // A persistent custom engine is a long-running stdin/stdout process, so it

@@ -363,6 +363,57 @@ describe('PersistentAgySession', () => {
   // ─── plain-text output ──────────────────────────────────────────────────
 
   describe('plain-text output', () => {
+    // Regression guard: agy grew `--output-format stream-json`, whose `result`
+    // event carries real usage. Before that this wrapper estimated ~4 chars per
+    // token from the message text, which under-counted the prompt by orders of
+    // magnitude (a short prompt estimated ~27 tokens against a real ~15k).
+    it('takes token usage from the result event instead of estimating', async () => {
+      const session = new PersistentAgySession({ name: 'test', cwd: '/tmp' });
+      await session.start();
+
+      const p = session.send('hello', { waitForComplete: true });
+      setTimeout(() => {
+        feedText(
+          mockProc,
+          JSON.stringify({
+            event: 'result',
+            result: {
+              conversation_id: '11111111-2222-3333-4444-555555555555',
+              status: 'SUCCESS',
+              response: 'OK',
+              usage: { input_tokens: 14922, output_tokens: 24, cache_read_tokens: 7 },
+            },
+          }) + '\n',
+        );
+        closeProc(mockProc, 0);
+      }, 10);
+      await p;
+
+      const stats = session.getStats();
+      expect(stats.tokensIn).toBe(14922);
+      expect(stats.tokensOut).toBe(24);
+      expect(stats.cachedTokens).toBe(7);
+      // The id comes off the stream, so no log-file scrape is needed.
+      expect(session.conversationId).toBe('11111111-2222-3333-4444-555555555555');
+    });
+
+    it('takes the conversation id from the init event', async () => {
+      const session = new PersistentAgySession({ name: 'test', cwd: '/tmp' });
+      await session.start();
+
+      const p = session.send('hello', { waitForComplete: true });
+      setTimeout(() => {
+        feedText(
+          mockProc,
+          JSON.stringify({ event: 'init', conversation_id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' }) + '\n',
+        );
+        closeProc(mockProc, 0);
+      }, 10);
+      await p;
+
+      expect(session.conversationId).toBe('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
+    });
+
     it('accumulates stdout chunks and trims the trailing newline', async () => {
       const session = new PersistentAgySession({
         name: 'test',

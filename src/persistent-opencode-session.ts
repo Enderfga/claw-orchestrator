@@ -103,6 +103,17 @@ interface TurnState {
 export class PersistentOpencodeSession extends BaseOneShotSession {
   private _currentRl: readline.Interface | null = null;
 
+  /**
+   * OpenCode's own session id, once the first turn has announced one.
+   *
+   * `opencode run` starts a brand-new session unless `--session <id>` names an
+   * existing one, so without this every send was an amnesiac first turn. The id
+   * was already being harvested off the event stream for `sessionId`; it just
+   * was never fed back, which is what made this engine look like it had no
+   * conversation of its own.
+   */
+  private opencodeSessionId?: string;
+
   constructor(config: SessionConfig, opencodeBin?: string) {
     super(config, opencodeBin || process.env.OPENCODE_BIN || 'opencode', {
       enginePrefix: 'opencode',
@@ -111,6 +122,11 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
       supportsCachedTokens: true,
       engineDisplayName: 'OpenCode',
     });
+    // Process-level resume: a persisted id comes back as the raw OpenCode id,
+    // never one of our generated `opencode-<ts>-<rand>` handles.
+    if (config.resumeSessionId && !/^opencode-\d+-/.test(config.resumeSessionId)) {
+      this.opencodeSessionId = config.resumeSessionId.replace(/^opencode-live-/, '');
+    }
   }
 
   protected override _cleanupProc(): void {
@@ -127,8 +143,15 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
   }
 
   protected _run(message: string, options: SessionSendOptions): Promise<TurnResult> {
-    // opencode run <message..> --format json
+    // opencode run <message..> --format json [--session <id>]
     const args: string[] = ['run', message, '--format', 'json'];
+
+    // Continue OpenCode's own session rather than starting a fresh one. Verified
+    // against 1.18.18: without this the second turn answers "you never asked me
+    // to remember anything"; with it the same turn recalls the first turn's
+    // content. `--continue` is deliberately not used — it means "the last
+    // session on this machine", which would collide across concurrent sessions.
+    if (this.opencodeSessionId) args.push('--session', this.opencodeSessionId);
 
     const readOnly = this.options.sandboxMode === 'read-only';
     if (readOnly) {
@@ -287,8 +310,11 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
   private _handleStreamEvent(event: Record<string, unknown>, options: SessionSendOptions, state: TurnState): void {
     const type = event.type as string;
 
-    // Capture session id from envelope on first event that carries one.
+    // Capture session id from envelope on first event that carries one. The raw
+    // id is kept separately because that is the form `--session` expects; the
+    // prefixed one is our display/persistence handle.
     const sid = (event.sessionID as string) || (event.sessionId as string) || (event.session_id as string);
+    if (sid && !this.opencodeSessionId) this.opencodeSessionId = sid;
     if (sid && !this.sessionId?.startsWith('opencode-live-')) {
       this.sessionId = `opencode-live-${sid}`;
     }
