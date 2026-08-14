@@ -12,7 +12,7 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { randomUUID, createHash } from 'node:crypto';
 import { resolveEngineAndModel, estimateTokens } from './models.js';
-import { engineHasNativeConversation } from './types.js';
+import { engineHasNativeConversation, type EngineType, type SessionStats } from './types.js';
 import {
   OPENAI_COMPAT_DEFAULT_MODEL,
   OPENAI_COMPAT_AUTO_COMPACT_THRESHOLD,
@@ -353,8 +353,14 @@ export function parseToolCallsFromText(text: string): ParsedToolCalls {
  * Serialize tool result messages into a text block for the CLI model.
  * Converts OpenAI `tool` role messages into <tool_result> tags.
  */
-export function serializeToolResults(messages: OpenAIChatMessage[]): string {
-  const toolMessages = messages.filter((m) => m.role === 'tool');
+export function serializeToolResults(messages: OpenAIChatMessage[], latestRoundOnly = false): string {
+  // On a thread that already holds the conversation, every tool result before the engine's most
+  // recent assistant turn is already in the transcript. Re-serializing them costs the whole
+  // history again on every hop, so the prompt grows quadratically across a tool loop: with a
+  // 30k-character batch per round, hop 10 re-sends ~300k characters of results the engine has
+  // already seen. Scoping to the results that answer the latest round is what keeps it linear.
+  const scoped = latestRoundOnly ? messages.slice(messages.map((m) => m.role).lastIndexOf('assistant') + 1) : messages;
+  const toolMessages = scoped.filter((m) => m.role === 'tool');
   if (!toolMessages.length) return '';
 
   const results = toolMessages
@@ -401,6 +407,13 @@ export interface ExtractedMessage {
 export function extractUserMessage(
   messages: OpenAIChatMessage[],
   headers?: Record<string, string | string[] | undefined>,
+  /**
+   * Whether the engine's conversation already holds everything up to the caller's latest tool
+   * round. Only meaningful for engines that resume a native conversation and only once the
+   * conversation id has been captured — see nativeThreadIsLive(). Defaults to false so any caller
+   * that cannot establish that keeps the previous behaviour of sending every result.
+   */
+  threadHasHistory = false,
 ): ExtractedMessage {
   if (!messages || messages.length === 0) {
     throw new Error('messages array is empty');
@@ -430,7 +443,7 @@ export function extractUserMessage(
   // and the old tool results are already in the CLI's history.
   const lastNonSystem = [...messages].reverse().find((m) => m.role !== 'system');
   if (lastNonSystem?.role === 'tool') {
-    const toolResultBlock = serializeToolResults(messages);
+    const toolResultBlock = serializeToolResults(messages, threadHasHistory);
     const userMessages = messages.filter((m) => m.role === 'user');
     const lastUserText = userMessages.length > 0 ? textOf(userMessages[userMessages.length - 1]) : '';
     const userMessage = lastUserText ? `${toolResultBlock}\n\n${lastUserText}` : toolResultBlock;
@@ -523,8 +536,47 @@ interface SessionManagerLike {
   ): Promise<{ output: string; sessionId?: string; events: unknown[] }>;
   stopSession(name: string): Promise<void>;
   listSessions(): Array<{ name: string }>;
-  getStatus(name: string): { stats: { tokensIn: number; tokensOut: number; contextPercent: number } };
+  getStatus(name: string): {
+    stats: {
+      tokensIn: number;
+      tokensOut: number;
+      contextPercent: number;
+      // Native-conversation ids. Optional because they only exist once the engine has actually
+      // announced the conversation — see nativeThreadIsLive().
+      codexThreadId?: string;
+      agyConversationId?: string;
+    };
+  };
   compactSession(name: string): Promise<unknown>;
+}
+
+/**
+ * Whether the engine's native conversation is known to exist for this session.
+ *
+ * `!needsCreate` only says the session is in the manager's map, which is not the same thing:
+ * `start()` does not spawn a process, the conversation id is captured later (codex sets it on
+ * `thread.started`, agy harvests it from the log after the first turn), and a send that fails
+ * before that point leaves the session in the map with no id at all.
+ *
+ * The distinction matters wherever we decide to send a short reminder instead of the full state,
+ * because a reminder that refers to a conversation the engine never created is silently wrong —
+ * the request still returns 200.
+ */
+export function nativeThreadIsLive(
+  engine: EngineType | undefined,
+  stats: Pick<SessionStats, 'codexThreadId' | 'agyConversationId'>,
+): boolean {
+  switch (engine) {
+    case 'codex':
+    case 'codex-app':
+      return !!stats.codexThreadId;
+    case 'agy':
+      return !!stats.agyConversationId;
+    default:
+      // claude and persistent custom engines hold their context in a live process, so there is no
+      // separate id to check — being in the map is the strongest signal available.
+      return true;
+  }
 }
 
 export async function handleChatCompletion(
@@ -572,18 +624,33 @@ export async function handleChatCompletion(
   const sessionName = sessionNameFromKey(sessionKey);
   const isStreaming = request.stream === true;
 
+  // Resolved before extracting, because the extraction needs to know whether the engine's
+  // conversation already holds the earlier tool results. In the tool-loop branch
+  // `isNewConversation` is always false, so there `needsCreate` reduces to `!sessionExists` and
+  // this is the same predicate the create path uses further down.
+  const existingSessions = manager.listSessions().map((s) => s.name);
+  const sessionExists = existingSessions.includes(sessionName);
+  let threadHasHistory = false;
+  if (sessionExists && engineHasNativeConversation(engine)) {
+    try {
+      threadHasHistory = nativeThreadIsLive(engine, manager.getStatus(sessionName).stats);
+    } catch {
+      threadHasHistory = false;
+    }
+  }
+
   let extracted: ExtractedMessage;
   try {
-    extracted = extractUserMessage(request.messages, headers as Record<string, string | string[] | undefined>);
+    extracted = extractUserMessage(
+      request.messages,
+      headers as Record<string, string | string[] | undefined>,
+      threadHasHistory,
+    );
   } catch (err) {
     res.writeHead(400, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: { message: (err as Error).message, type: 'invalid_request_error' } }));
     return;
   }
-
-  // Check if session exists
-  const existingSessions = manager.listSessions().map((s) => s.name);
-  const sessionExists = existingSessions.includes(sessionName);
 
   // If new conversation detected and session exists, stop old one first
   if (extracted.isNewConversation && sessionExists) {
@@ -658,13 +725,23 @@ export async function handleChatCompletion(
   }
 
   // For non-claude engines (Cursor, Codex, Gemini), their CLIs don't support
-  // --append-system-prompt. Prepend the upstream system prompt to the user
-  // message on EVERY turn so the model sees the caller's identity, tool
-  // definitions, and workspace context. This is done here (not at session
-  // creation) because these engines spawn a fresh CLI process per turn —
-  // there's no persistent session to carry the system prompt forward.
+  // --append-system-prompt, so the upstream system prompt is prepended to the user message here
+  // rather than at session creation: these engines spawn a fresh CLI process per turn, and for the
+  // ones that start from nothing each time the prepend is the only thing carrying the caller's
+  // identity, tool definitions and workspace context forward.
+  //
+  // For the engines that resume a conversation, though, the process being fresh does not mean the
+  // context is: the prompt is already in the transcript from the turn that put it there, so
+  // repeating it adds a full copy per hop. This block predates the native-conversation distinction
+  // and was not revisited when `schemasAlreadyInThread` introduced it a few lines below.
+  //
+  // Gated on the same predicate as the tool reminder, which also covers the case that makes this
+  // risky: `agy` recovers its conversation id by matching the log of a third-party CLI, and without
+  // that id every later send silently starts a fresh conversation. Today the unconditional prepend
+  // hides that. `nativeThreadIsLive()` returns false exactly when the id is missing, so those turns
+  // keep receiving the full prompt instead of losing their identity quietly.
   let userMessage = extracted.userMessage;
-  if (extracted.systemPrompt && engine !== 'claude') {
+  if (extracted.systemPrompt && engine !== 'claude' && !threadHasHistory) {
     userMessage = `<system>\n${extracted.systemPrompt}\n</system>\n\n${userMessage}`;
   }
 
@@ -707,7 +784,15 @@ export async function handleChatCompletion(
   const perMessageMode = isToolsPerMessageModeEnabled();
   const injectToolsPerTurn = hasTools && (engine !== 'claude' || perMessageMode);
   if (injectToolsPerTurn) {
-    const schemasAlreadyInThread = !needsCreate && !perMessageMode && engineHasNativeConversation(engine);
+    let schemasAlreadyInThread = false;
+    if (!needsCreate && !perMessageMode && engineHasNativeConversation(engine)) {
+      try {
+        schemasAlreadyInThread = nativeThreadIsLive(engine, manager.getStatus(sessionName).stats);
+      } catch {
+        // getStatus throws once the session is gone from the map; that is not a live thread.
+        schemasAlreadyInThread = false;
+      }
+    }
     const toolBlock = schemasAlreadyInThread ? buildToolReminderBlock() : buildToolPromptBlock(request.tools);
     userMessage = `${toolBlock}\n\n${userMessage}`;
   }

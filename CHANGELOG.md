@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- The upstream system prompt was prepended to the user message on every turn for
+  every non-Claude engine. For engines that resume a conversation it is already in
+  the transcript, so each hop added another full copy — 60k+ characters per hop for
+  a large caller. It is now sent only when the conversation is not known to already
+  hold it, using the same predicate as the tool reminder. That predicate also covers
+  the `agy` case where a missing conversation id would otherwise mean silently
+  starting fresh: without the id the full prompt is still sent.
+
+- Tool results were re-serialized in full on every hop of a tool loop. On engines
+  that resume a conversation the earlier results are already in the transcript, so
+  each hop re-sent the whole history and the prompt grew quadratically: with a 30k
+  character batch per round, hop 10 carried ~300k characters the engine had already
+  seen. Results are now scoped to the round that answers the engine's latest
+  assistant turn whenever the conversation is known to hold the rest — same
+  predicate as the tool reminder. Sessions whose thread cannot be confirmed keep
+  sending everything.
+
+- The resume-turn tool reminder was gated on the session existing in the manager's
+  map, which is not the same as the engine having created a conversation.
+  `start()` does not spawn a process, the conversation id is only captured later
+  (`codex` on `thread.started`, `agy` by harvesting the log after the first turn),
+  and a send that fails before that point leaves the session in the map with no id.
+  The next turn then sent a reminder referring to tools the engine had never
+  received — no schemas, no identity, no history — and still answered 200. The gate
+  now also requires the id to be present, so a conversation that was never created
+  falls back to the full block. Behaviour is unchanged once a thread is live.
+
 ## [4.11.0] - 2026-08-04
 
 ### Fixed
