@@ -20,7 +20,6 @@ import {
   buildSessionSystemPrompt,
 } from '../openai-compat.js';
 import { resolveEngineAndModel, getModelList } from '../models.js';
-import type { OpenAIChatMessage } from '../openai-compat.js';
 
 // ─── resolveEngineAndModel ───────────────────────────────────────────────────
 
