@@ -56,6 +56,10 @@ export abstract class BaseOneShotSession extends EventEmitter implements ISessio
   private _isBusy = false;
   /** Input tokens for the most recent turn only — see _recordTurnInputTokens(). */
   private _lastTurnTokensIn = 0;
+  /** Set when a subclass reported the turn's prompt size itself for this turn. */
+  private _turnTokensExplicit = false;
+  /** Ensures the "cannot compact" warning is emitted once, not once per turn. */
+  private _warnedNoCompaction = false;
   protected currentProc: ChildProcess | null = null;
   private currentRequestId = 0;
   private _startTime: string | null = null;
@@ -156,8 +160,39 @@ export abstract class BaseOneShotSession extends EventEmitter implements ISessio
    * with a context-window error instead of degrading.
    */
   private _recordTurnInputTokens(before: number): void {
+    // A subclass that can read the turn's prompt size directly wins over the
+    // delta heuristic, which is only correct when `_stats.tokensIn` accumulates
+    // per-turn values. Codex reports cumulative thread totals instead, so it
+    // reports the subtraction itself — see PersistentCodexSession.
+    if (this._turnTokensExplicit) {
+      this._turnTokensExplicit = false;
+      return;
+    }
     const delta = this._stats.tokensIn - before;
     if (delta > 0) this._lastTurnTokensIn = delta;
+  }
+
+  /**
+   * Report the exact prompt size for the turn currently running, overriding the
+   * delta heuristic in `_recordTurnInputTokens()` for this turn only.
+   */
+  protected _reportTurnInputTokens(tokens: number): void {
+    if (tokens > 0) {
+      this._lastTurnTokensIn = tokens;
+      this._turnTokensExplicit = true;
+    }
+  }
+
+  /**
+   * The context window `contextPercent` is measured against.
+   *
+   * Defaults to the registry entry for the session's model. Subclasses override
+   * when the CLI enforces a smaller window than the model itself supports: the
+   * number that matters here is the one that actually fails the request, not the
+   * model's published maximum. Return 0 to disable the metric.
+   */
+  protected _effectiveContextWindow(): number {
+    return getContextWindow(this.options.resolvedModel || this.options.model || '');
   }
 
   /**
@@ -170,7 +205,7 @@ export abstract class BaseOneShotSession extends EventEmitter implements ISessio
    */
   private _contextPercent(): number {
     if (this._lastTurnTokensIn <= 0) return 0;
-    const window = getContextWindow(this.options.resolvedModel || this.options.model || '');
+    const window = this._effectiveContextWindow();
     if (!window) return 0;
     return Math.min(100, Math.round((this._lastTurnTokensIn / window) * 100));
   }
@@ -207,12 +242,27 @@ export abstract class BaseOneShotSession extends EventEmitter implements ISessio
 
   // ── compact() ──────────────────────────────────────────────────────────
 
+  /**
+   * No-op for one-shot engines, but a *visible* one.
+   *
+   * The openai-compat auto-compaction gate calls this whenever contextPercent
+   * crosses its threshold and discards the result, so an engine that cannot
+   * compact used to fail silently: the thread kept growing until the CLI hard-
+   * failed with a context-window error and nothing in the logs said why. The
+   * warning is emitted once per session — the gate re-fires every turn once the
+   * threshold is crossed, and repeating it would drown the log channel.
+   */
   async compact(_summary?: string): Promise<TurnResult> {
-    const event: StreamEvent = {
-      type: 'result',
-      result: `${this.engineCfg.engineDisplayName} engine does not support compaction`,
-    };
-    return { text: event.result as string, event };
+    const message = `${this.engineCfg.engineDisplayName} engine does not support compaction`;
+    if (!this._warnedNoCompaction) {
+      this._warnedNoCompaction = true;
+      this.emit(
+        SESSION_EVENT.LOG,
+        `[${this.engineCfg.enginePrefix}] ${message} — context will keep growing until the CLI refuses the request`,
+      );
+    }
+    const event: StreamEvent = { type: 'result', result: message };
+    return { text: message, event };
   }
 
   // ── Effort ─────────────────────────────────────────────────────────────

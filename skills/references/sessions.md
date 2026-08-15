@@ -130,6 +130,14 @@ const status = manager.getStatus('my-task');
 console.log(`Context: ${status.stats.contextPercent}%`);
 ```
 
+`contextPercent` is how full the live context is right now — the current turn's
+prompt over the window the engine actually enforces — so it rises and falls with
+the conversation. `stats.tokensIn` is the different question of how many input
+tokens the session has been billed for in total, which only ever grows.
+`compactSession()` is a no-op on engines whose CLI has no compaction command
+(`codex`, `agy`, `cursor`, `opencode`); those sessions log a warning the first
+time it is called.
+
 ### Cost Tracking
 
 ```typescript

@@ -146,6 +146,11 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
     lastActivity: null as string | null,
   };
 
+  /** This turn's own prompt size, from `tokenUsage.last` — see _estimateContextPercent(). */
+  private _lastTurnTokensIn = 0;
+  /** The window the app-server is enforcing, from `tokenUsage.modelContextWindow`. */
+  private _modelContextWindow?: number;
+
   constructor(config: SessionConfig, codexBin?: string) {
     super();
     this.codexBin = codexBin || process.env.CODEX_BIN || 'codex';
@@ -454,6 +459,15 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
           this._stats.cachedTokens = p.tokenUsage.total.cachedInputTokens;
           this._updateCost();
         }
+        // `last` is this turn's own prompt, which for a thread-resuming engine
+        // is the live context occupancy; `total` only ever grows and would pin
+        // contextPercent at 100 on any long session.
+        if (typeof p.tokenUsage?.last?.inputTokens === 'number') {
+          this._lastTurnTokensIn = p.tokenUsage.last.inputTokens;
+        }
+        if (typeof p.tokenUsage?.modelContextWindow === 'number') {
+          this._modelContextWindow = p.tokenUsage.modelContextWindow;
+        }
         break;
       }
       case 'thread/goal/updated': {
@@ -676,10 +690,20 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
     if (this._history.length > MAX_HISTORY_ITEMS) this._history.shift();
   }
 
+  /**
+   * How full the thread's context is right now.
+   *
+   * Both inputs come straight from `thread/tokenUsage/updated`: the turn's own
+   * prompt (`last`) and the window the server is actually enforcing. The
+   * registry window is only a fallback — it holds the model's published maximum
+   * (1.05M for gpt-5.x) while codex caps threads far below that, so measuring
+   * against it reads several times too low.
+   */
   private _estimateContextPercent(): number {
-    const ctx = getContextWindow(this.options.model || 'gpt-5.5');
+    if (this._lastTurnTokensIn <= 0) return 0;
+    const ctx = this._modelContextWindow ?? getContextWindow(this.options.model || 'gpt-5.5');
     if (!ctx) return 0;
-    return Math.min(100, Math.round(((this._stats.tokensIn + this._stats.tokensOut) / ctx) * 100));
+    return Math.min(100, Math.round((this._lastTurnTokensIn / ctx) * 100));
   }
 
   private _updateCost(): void {

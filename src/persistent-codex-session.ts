@@ -15,8 +15,8 @@
  */
 
 import { spawn } from 'node:child_process';
-import { writeFileSync, unlinkSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync, unlinkSync, readFileSync, readdirSync } from 'node:fs';
+import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
 
 import type { SessionConfig, SessionSendOptions, StreamEvent, TurnResult } from './types.js';
@@ -74,6 +74,32 @@ export class PersistentCodexSession extends BaseOneShotSession {
    */
   private _schemaFilePath?: string;
 
+  /**
+   * Codex's own context limit for this thread, harvested from its rollout file.
+   *
+   * The registry window is the model's published maximum (1.05M for gpt-5.x);
+   * codex enforces a much smaller one of its own (258,400 measured on 0.147.0
+   * for gpt-5.6-sol) and that is the limit a request actually dies on. Using the
+   * registry value here made `contextPercent` read ~4x low, so the auto-compaction
+   * gate stayed below its threshold right up to a hard context-window failure.
+   * Undefined until the rollout has been read; falls back to the registry.
+   */
+  private _codexContextWindow?: number;
+
+  /**
+   * Cumulative `input_tokens` codex reported at the end of the previous turn.
+   *
+   * Codex's `turn.completed.usage` is cumulative over the whole thread, not the
+   * turn — three identical trivial turns report 13,856 → 27,727 → 41,613, and
+   * each of those equals `total_token_usage.input_tokens` in the rollout exactly.
+   * Subtracting consecutive values recovers the per-turn prompt, which for a
+   * thread-resuming engine is the live context occupancy.
+   */
+  private _prevCumulativeIn?: number;
+
+  /** Guards the rollout lookup so it runs at most once per session. */
+  private _rolloutRead = false;
+
   constructor(config: SessionConfig, codexBin?: string) {
     super(config, codexBin || process.env.CODEX_BIN || 'codex', {
       enginePrefix: 'codex',
@@ -89,6 +115,79 @@ export class PersistentCodexSession extends BaseOneShotSession {
   /** Expose the captured thread ID for the codex_resume tool and stats overlay. */
   get threadId(): string | undefined {
     return this.codexThreadId;
+  }
+
+  // ── Context accounting ─────────────────────────────────────────────────
+
+  /** Codex's enforced limit when we know it, else the model registry's. */
+  protected override _effectiveContextWindow(): number {
+    return this._codexContextWindow ?? super._effectiveContextWindow();
+  }
+
+  /**
+   * Harvest what `codex exec --json` does not emit from the thread's rollout file.
+   *
+   * The JSON stream carries only `turn.completed.usage`; codex's own context
+   * limit and the pre-existing token total of a resumed thread live in
+   * `$CODEX_HOME/sessions/**\/rollout-*-<thread_id>.jsonl`. Runs at most once
+   * per session and is entirely best-effort: an unreadable, absent or
+   * `--ephemeral` thread simply leaves both values unset and the registry
+   * fallback applies.
+   */
+  private _readRollout(): void {
+    if (this._rolloutRead || !this.codexThreadId) return;
+    this._rolloutRead = true;
+    try {
+      const root = join(process.env.CODEX_HOME || join(homedir(), '.codex'), 'sessions');
+      const match = this._findRolloutFile(root, `-${this.codexThreadId}.jsonl`);
+      if (!match) return;
+
+      const text = readFileSync(match, 'utf8');
+
+      const windowMatch = /"model_context_window":\s*(\d+)/.exec(text);
+      if (windowMatch) this._codexContextWindow = Number(windowMatch[1]);
+
+      // Last entry wins — it is the thread total as of the most recent turn.
+      if (this._prevCumulativeIn === undefined) {
+        const totals = text.match(/"total_token_usage":\s*\{[^}]*\}/g);
+        const last = totals?.[totals.length - 1];
+        if (last) {
+          const parsed = JSON.parse(`{${last}}`) as { total_token_usage?: { input_tokens?: number } };
+          const seed = parsed.total_token_usage?.input_tokens;
+          if (typeof seed === 'number') this._prevCumulativeIn = seed;
+        }
+      }
+    } catch {
+      /* best effort — registry fallback covers every failure mode */
+    }
+  }
+
+  /**
+   * Locate a thread's rollout under `sessions/<year>/<month>/<day>/`.
+   *
+   * Walks newest-first and stops at the first hit, so the usual case — a thread
+   * from today — costs a handful of small readdirs. A recursive listing would
+   * instead materialize every rollout the user has ever recorded, which for a
+   * long-lived fleet is tens of thousands of paths to find one file.
+   */
+  private _findRolloutFile(root: string, suffix: string): string | undefined {
+    const newestFirst = (dir: string): string[] =>
+      readdirSync(dir, { withFileTypes: true })
+        .filter((e) => e.isDirectory())
+        .map((e) => e.name)
+        .sort()
+        .reverse();
+
+    for (const year of newestFirst(root)) {
+      for (const month of newestFirst(join(root, year))) {
+        for (const day of newestFirst(join(root, year, month))) {
+          const dir = join(root, year, month, day);
+          const hit = readdirSync(dir).find((f) => f.endsWith(suffix));
+          if (hit) return join(dir, hit);
+        }
+      }
+    }
+    return undefined;
   }
 
   /**
@@ -175,6 +274,10 @@ export class PersistentCodexSession extends BaseOneShotSession {
   }
 
   protected _run(message: string, options: SessionSendOptions): Promise<TurnResult> {
+    // Read before spawning: on a resumed thread the baseline has to be the
+    // cumulative total as of the *previous* turn, and this turn is about to
+    // append its own to the same file.
+    this._readRollout();
     const args = this._buildArgs(message);
     const timeout = options.timeout || 300_000;
 
@@ -311,12 +414,25 @@ export class PersistentCodexSession extends BaseOneShotSession {
         // Real usage from `turn.completed`. Falls back to zero rather than
         // estimated tokens — better to have an honest "0" than a guess that
         // misleads cost reporting.
+        //
+        // These are thread-cumulative, so they are *assigned*, not accumulated.
+        // Adding them summed a running total of running totals: with a constant
+        // per-turn prompt P, N turns reported P*N*(N+1)/2 against a true P*N —
+        // an (N+1)/2 overstatement that grew without bound (measured at 3.6x on
+        // a seven-turn session). The codex app-server sibling has always
+        // assigned; this brings `codex exec` in line with it.
         if (lastUsage) {
-          this._stats.tokensIn += lastUsage.input_tokens ?? 0;
-          this._stats.tokensOut += (lastUsage.output_tokens ?? 0) + (lastUsage.reasoning_output_tokens ?? 0);
-          this._stats.cachedTokens += lastUsage.cached_input_tokens ?? 0;
+          const cumulativeIn = lastUsage.input_tokens ?? 0;
+          this._reportTurnInputTokens(cumulativeIn - (this._prevCumulativeIn ?? 0));
+          this._prevCumulativeIn = cumulativeIn;
+          this._stats.tokensIn = cumulativeIn;
+          this._stats.tokensOut = (lastUsage.output_tokens ?? 0) + (lastUsage.reasoning_output_tokens ?? 0);
+          this._stats.cachedTokens = lastUsage.cached_input_tokens ?? 0;
         }
         this._updateCost();
+        // A fresh session has no rollout to read until its first turn has
+        // created one; retry now that the thread id is known.
+        this._readRollout();
         this._addHistory({ text: assistantText, code });
 
         const event: StreamEvent = {

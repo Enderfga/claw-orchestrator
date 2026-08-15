@@ -176,6 +176,13 @@ Reviewer 70 %. Override per run via `compactThresholds`. A 30 s debounce
 prevents re-fire while post-compact stats settle. Events: `compact` is
 emitted on the dispatcher EventEmitter AND appended to `decisions.jsonl`.
 
+One-shot engines (`codex`, `agy`, `cursor`, `opencode`) cannot compact — their
+CLIs expose no such command. The threshold is still meaningful there because
+`contextPercent` now tracks real occupancy, but crossing it cannot free space:
+the session emits a single warning on its log channel the first time compaction
+is requested, then the thread keeps growing until the CLI refuses the request.
+Treat that warning as the signal to start a fresh session.
+
 ## Phase-error circuit
 
 Subprocess deaths (Claude session lost), failed `git commit` in an iter, and

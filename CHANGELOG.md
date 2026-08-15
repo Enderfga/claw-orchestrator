@@ -7,34 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.12.1] - 2026-08-15
+
+Codex's token usage was being read as if it were per-turn. It is cumulative, so
+every number derived from it — session cost, context occupancy, and the
+auto-compaction gate that depends on it — was wrong. Reported in
+[#75](https://github.com/Enderfga/claw-orchestrator/issues/75).
+
 ### Fixed
 
-- The upstream system prompt was prepended to the user message on every turn for
-  every non-Claude engine. For engines that resume a conversation it is already in
-  the transcript, so each hop added another full copy — 60k+ characters per hop for
-  a large caller. It is now sent only when the conversation is not known to already
-  hold it, using the same predicate as the tool reminder. That predicate also covers
-  the `agy` case where a missing conversation id would otherwise mean silently
-  starting fresh: without the id the full prompt is still sent.
+- **Codex session cost was overstated, without bound.** `turn.completed.usage`
+  reports totals for the whole thread, not the turn, and the wrapper added each
+  one to a running sum — a sum of running totals. With a steady prompt of size P,
+  N turns reported `P*N*(N+1)/2` against a true `P*N`, so the error grew with
+  every turn: 2x at three turns, 3.5x at six. Measured against codex 0.147.0,
+  which reports `input_tokens` 13,856 → 27,727 → 41,613 for three identical
+  trivial turns, each value matching `total_token_usage` in that thread's rollout
+  file exactly. The totals are now assigned, as the app-server wrapper has always
+  done.
 
-- Tool results were re-serialized in full on every hop of a tool loop. On engines
-  that resume a conversation the earlier results are already in the transcript, so
-  each hop re-sent the whole history and the prompt grew quadratically: with a 30k
-  character batch per round, hop 10 carried ~300k characters the engine had already
-  seen. Results are now scoped to the round that answers the engine's latest
-  assistant turn whenever the conversation is known to hold the rest — same
-  predicate as the tool reminder. Sessions whose thread cannot be confirmed keep
-  sending everything.
+- **`contextPercent` measured neither the thread nor the window, on either codex
+  engine.** The numerator inherited the cumulative reading above, which can only
+  climb — so the figure was monotonic by construction and pinned at 100 on a long
+  session, regardless of how full the context actually was. The denominator was
+  the model's published window from the registry (1,050,000 for gpt-5.x) while
+  codex enforces 258,400 and fails the request there. The two errors pull in
+  opposite directions, so no correction factor could fix it. Both engines now
+  divide the turn's own prompt — which for a thread-resuming engine is the live
+  occupancy — by the limit codex reports: `exec` harvests `model_context_window`
+  from the thread's rollout file, and `app-server` reads `last` and
+  `modelContextWindow` straight off the `thread/tokenUsage/updated` notification
+  it already received. Verified end to end against 0.147.0 on both engines, with
+  the wrapper's figures checked against that thread's rollout after every turn.
 
-- The resume-turn tool reminder was gated on the session existing in the manager's
-  map, which is not the same as the engine having created a conversation.
-  `start()` does not spawn a process, the conversation id is only captured later
-  (`codex` on `thread.started`, `agy` by harvesting the log after the first turn),
-  and a send that fails before that point leaves the session in the map with no id.
-  The next turn then sent a reminder referring to tools the engine had never
-  received — no schemas, no identity, no history — and still answered 200. The gate
-  now also requires the id to be present, so a conversation that was never created
-  falls back to the full block. Behaviour is unchanged once a thread is live.
+- **Resuming a codex thread no longer reports a nearly-full context on its first
+  send.** That first `turn.completed` carries a total covering turns this process
+  never saw, which was read as one enormous prompt. The baseline is now seeded
+  from the rollout, so the first turn measures its own prompt (verified: 6% where
+  it previously read 22%). Best-effort throughout — an unreadable, absent or
+  `--ephemeral` rollout falls back to the registry window and a zero baseline.
+
+- **A one-shot engine that cannot compact now says so.** The auto-compaction gate
+  calls `compact()` and discards the result, so on `codex`, `agy`, `cursor` and
+  `opencode` the gate did nothing and left no trace: the thread grew until the
+  CLI refused it, with nothing in the log explaining why. These sessions now emit
+  one warning on their log channel the first time compaction is requested.
+
+### Changed
+
+- Codex tested version → 0.147.0. Re-ran the read-only probe matrix on it (direct
+  write, shell redirect, delegate-to-subagent, each repeated on a resumed turn):
+  no writes, so the `-c sandbox_mode=` restatement from 4.10.1 still holds.
 
 ## [4.12.0] - 2026-08-14
 
@@ -80,6 +103,33 @@ all could; the wrappers just never used it.
   guess and is now measured. The conversation id also comes off the `init` event,
   so the log-file scrape is now only a fallback for a turn that dies before
   emitting anything, and a non-`SUCCESS` status is reflected in `stop_reason`.
+
+- The upstream system prompt was prepended to the user message on every turn for
+  every non-Claude engine. For engines that resume a conversation it is already in
+  the transcript, so each hop added another full copy — 60k+ characters per hop for
+  a large caller. It is now sent only when the conversation is not known to already
+  hold it, using the same predicate as the tool reminder. That predicate also covers
+  the `agy` case where a missing conversation id would otherwise mean silently
+  starting fresh: without the id the full prompt is still sent.
+
+- Tool results were re-serialized in full on every hop of a tool loop. On engines
+  that resume a conversation the earlier results are already in the transcript, so
+  each hop re-sent the whole history and the prompt grew quadratically: with a 30k
+  character batch per round, hop 10 carried ~300k characters the engine had already
+  seen. Results are now scoped to the round that answers the engine's latest
+  assistant turn whenever the conversation is known to hold the rest — same
+  predicate as the tool reminder. Sessions whose thread cannot be confirmed keep
+  sending everything.
+
+- The resume-turn tool reminder was gated on the session existing in the manager's
+  map, which is not the same as the engine having created a conversation.
+  `start()` does not spawn a process, the conversation id is only captured later
+  (`codex` on `thread.started`, `agy` by harvesting the log after the first turn),
+  and a send that fails before that point leaves the session in the map with no id.
+  The next turn then sent a reminder referring to tools the engine had never
+  received — no schemas, no identity, no history — and still answered 200. The gate
+  now also requires the id to be present, so a conversation that was never created
+  falls back to the full block. Behaviour is unchanged once a thread is live.
 
 ## [4.11.0] - 2026-08-04
 

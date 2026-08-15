@@ -53,15 +53,16 @@ await manager.startSession({
 
 ### OpenAI Codex (`engine: 'codex'`)
 
-Wraps the `codex exec` subcommand. Each `send()` spawns a new process. Tested with `codex` CLI **0.146.0**.
+Wraps the `codex exec` subcommand. Each `send()` spawns a new process. Tested with `codex` CLI **0.147.0**.
 
 - Non-interactive execution via `codex exec --sandbox workspace-write --json` (replaces the deprecated `--full-auto` flag from earlier Codex versions)
-- Real per-turn `usage` from the `turn.completed` JSON event (input, output, cached, reasoning tokens)
+- Real `usage` from the `turn.completed` JSON event (input, output, cached, reasoning tokens). **These are cumulative over the thread, not per turn** — three identical turns on 0.147.0 report `input_tokens` 13,856 → 27,727 → 41,613, each matching `total_token_usage` in that thread's rollout exactly. They are assigned to the session totals, never added; subtracting consecutive values recovers the turn's own prompt
+- `contextPercent` is that per-turn prompt (which, for a thread-resuming engine, is the live context occupancy) over **codex's own limit**, harvested from the thread's rollout file (`model_context_window`, 258,400 on 0.147.0). The model registry holds the published window — 1,050,000 for gpt-5.x — which codex does not honour, so measuring against it reads ~4x low. Resuming a thread also seeds the token baseline from the rollout, so the first send does not mistake the whole thread history for one prompt. All of this is best-effort: an unreadable or `--ephemeral` thread falls back to the registry window
 - `item.completed` parsing distinguishes `reasoning` / `todo_list` (logged, not counted) from real tool items (`command_execution`, `file_change`, `mcp_tool_call`, `web_search`, which increment `toolCalls`; a non-zero `command_execution.exit_code` increments `toolErrors`)
 - Reasoning effort: the engine-agnostic `effort` maps to `-c model_reasoning_effort=<level>` (`max`→`xhigh`; `auto`/`ultracode` omitted)
 - `codexProfile` → `--profile <name>` (named config profile from `~/.codex/config.toml`)
 - Per-session continuity: the `thread_id` from the first turn's `thread.started` event is captured and reused via `codex exec resume <id>` for subsequent sends, so the model sees prior turns
-- `sandboxMode` maps to `--sandbox <mode>` on the first turn. **A resumed thread does not inherit it**, and `codex exec resume` rejects `--sandbox`, so the policy is restated as `-c sandbox_mode="<mode>"` on every resume. Without that, a `read-only` session goes writable from its second turn onward — verified against 0.146.0, where such a session wrote to disk on turn 2 on every attempt
+- `sandboxMode` maps to `--sandbox <mode>` on the first turn. **A resumed thread does not inherit it**, and `codex exec resume` rejects `--sandbox`, so the policy is restated as `-c sandbox_mode="<mode>"` on every resume. Without that, a `read-only` session goes writable from its second turn onward — verified against 0.146.0, where such a session wrote to disk on turn 2 on every attempt. Re-probed on 0.147.0 (direct write, shell redirect and delegate-to-subagent, each on a resumed turn): no writes
 - One-shot execution per message (no persistent subprocess between sends)
 - Captures the real Codex thread ID and persists it, so later sends and process-level session resume use `codex exec resume <thread_id>`
 - Working directory passed via `-C` flag
@@ -86,7 +87,7 @@ Wraps `codex app-server --listen stdio:// --enable goals` as a long-running JSON
 - Long-running subprocess; one `codex app-server` per session
 - JSON-RPC 2.0 over stdio with v2 protocol method names (`initialize`, `thread/start`, `turn/start`, ...)
 - Real-time streaming via `item/agentMessage/delta` notifications
-- Cumulative token tracking from `thread/tokenUsage/updated` notifications
+- Cumulative token tracking from `thread/tokenUsage/updated` notifications. The same notification's `last` breakdown and `modelContextWindow` drive `contextPercent`, so it reports live occupancy against the window the server actually enforces (258,400 on 0.147.0) rather than a running total over the model's published window
 - Goal lifecycle observation via `thread/goal/updated` and `thread/goal/cleared` notifications
 - Goal control via the `codex_goal_*` tools (which internally send the `/goal` slash command as user text — see [tools.md](./tools.md#codex-13))
 - v2 RPC tools (Codex 0.137): `codex_interrupt` (`turn/interrupt`), `codex_steer` (`turn/steer`), `codex_fork` (`thread/fork`), `codex_rollback` (`thread/rollback`), `codex_models` (`model/list`), `codex_threads` (`thread/list`). A `turn/completed` with `status: 'failed'` rejects the turn and increments `toolErrors`.

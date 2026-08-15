@@ -271,4 +271,51 @@ describe('PersistentCodexAppServerSession v2 RPCs', () => {
     expect(proc.written.some((m) => m.method === 'thread/resume')).toBe(true);
     expect(proc.written.some((m) => m.method === 'thread/start')).toBe(true);
   });
+
+  // `thread/tokenUsage/updated` carries everything contextPercent needs — this
+  // turn's own prompt (`last`) and the window the server enforces — but both
+  // were ignored in favour of the cumulative totals over the model's published
+  // window. That made the figure monotonic (it can only climb, so it pins at
+  // 100 on a long thread) and ~4x too low per turn, which is what let the
+  // openai-compat auto-compaction gate sit under its threshold until the
+  // context hard-failed. Same defect as the `codex exec` wrapper, issue #75.
+  it('derives contextPercent from the turn prompt and the server reported window', async () => {
+    const proc = createMockProc(defaultResponder());
+    const session = await startSession(proc);
+
+    proc.stdout.push(
+      JSON.stringify({
+        jsonrpc: '2.0',
+        method: 'thread/tokenUsage/updated',
+        params: {
+          threadId: 't1',
+          turnId: 'turn1',
+          tokenUsage: {
+            total: {
+              totalTokens: 250_100,
+              inputTokens: 250_000,
+              cachedInputTokens: 100_000,
+              outputTokens: 100,
+              reasoningOutputTokens: 0,
+            },
+            last: {
+              totalTokens: 129_250,
+              inputTokens: 129_200,
+              cachedInputTokens: 50_000,
+              outputTokens: 50,
+              reasoningOutputTokens: 0,
+            },
+            modelContextWindow: 258_400,
+          },
+        },
+      }) + '\n',
+    );
+    await new Promise((r) => setTimeout(r, 20));
+
+    const stats = session.getStats();
+    // Cumulative totals still drive cost — those were always right.
+    expect(stats.tokensIn).toBe(250_000);
+    // 129,200 / 258,400 = 50%. The old formula gave (250,000 + 100) / 1,050,000 = 24%.
+    expect(stats.contextPercent).toBe(50);
+  });
 });

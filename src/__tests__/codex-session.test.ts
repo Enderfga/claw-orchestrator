@@ -6,10 +6,12 @@
  * real temp dir for the schema file (auto-cleaned on stop()).
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest';
 import { EventEmitter } from 'node:events';
 import { Readable } from 'node:stream';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const mockSpawn = vi.fn();
 vi.mock('node:child_process', () => ({
@@ -42,10 +44,30 @@ function runTurn(proc: ReturnType<typeof createMockProcess>, threadId: string) {
   proc.emit('close', 0);
 }
 
+// The session harvests codex's own context window and a resumed thread's token
+// baseline from `$CODEX_HOME/sessions`. Point that at an empty temp dir so unit
+// tests never walk the developer's real rollout history.
+const codexHome = mkdtempSync(join(tmpdir(), 'clawo-codexhome-'));
+const originalCodexHome = process.env.CODEX_HOME;
+
+/** Write a rollout file where the session's lookup will find it. */
+function writeRollout(threadId: string, lines: string[]): void {
+  const dir = join(codexHome, 'sessions', '2026', '08', '15');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, `rollout-2026-08-15T20-10-40-${threadId}.jsonl`), lines.join('\n'));
+}
+
+afterAll(() => {
+  if (originalCodexHome === undefined) delete process.env.CODEX_HOME;
+  else process.env.CODEX_HOME = originalCodexHome;
+  rmSync(codexHome, { recursive: true, force: true });
+});
+
 describe('PersistentCodexSession', () => {
   let mockProc: ReturnType<typeof createMockProcess>;
 
   beforeEach(() => {
+    process.env.CODEX_HOME = codexHome;
     mockProc = createMockProcess();
     mockSpawn.mockReset();
     mockSpawn.mockReturnValue(mockProc);
@@ -276,21 +298,71 @@ describe('PersistentCodexSession', () => {
       proc.emit('close', 0);
     };
 
-    // gpt-5.5 has a 1,050,000-token window; 105,000 in is 10%.
+    // Values below are what codex puts on the wire, i.e. CUMULATIVE thread
+    // totals. gpt-5.5's registry window is 1,050,000.
+    // Turn 1: thread total 105,000 → this turn's prompt is 105,000 → 10%.
     const p1 = session.send('first', { waitForComplete: true });
     setTimeout(() => runTurnWithInput(mockProc, 105_000), 10);
     await p1;
     expect(session.getStats().contextPercent).toBe(10);
 
-    // Second turn's prompt is smaller. Cumulative tokensIn is now 315k (30%),
-    // so a total-based figure would report 30 — the last turn is what counts.
+    // Turn 2: thread total 210,000 → this turn's prompt is still 105,000, so
+    // the thread has not grown and contextPercent must not move.
     const proc2 = createMockProcess();
     mockSpawn.mockReturnValue(proc2);
     const p2 = session.send('second', { waitForComplete: true });
     setTimeout(() => runTurnWithInput(proc2, 210_000), 10);
     await p2;
-    expect(session.getStats().tokensIn).toBe(315_000);
+    expect(session.getStats().tokensIn).toBe(210_000);
+    expect(session.getStats().contextPercent).toBe(10);
+
+    // Turn 3: thread total 420,000 → the prompt doubled to 210,000 → 20%.
+    const proc3 = createMockProcess();
+    mockSpawn.mockReturnValue(proc3);
+    const p3 = session.send('third', { waitForComplete: true });
+    setTimeout(() => runTurnWithInput(proc3, 420_000), 10);
+    await p3;
+    expect(session.getStats().tokensIn).toBe(420_000);
     expect(session.getStats().contextPercent).toBe(20);
+    session.stop();
+  });
+
+  // Regression guard for the accounting error behind issue #75.
+  //
+  // `turn.completed.usage` is cumulative over the thread, not per turn — three
+  // identical trivial turns against codex 0.147.0 reported input_tokens
+  // 13,856 → 27,727 → 41,613, and each value equals `total_token_usage` in that
+  // thread's rollout file exactly (`last_token_usage` held the ~13.9k per-turn
+  // figure). Accumulating them therefore summed a series of running totals:
+  // with a constant prompt P, N turns reported P*N*(N+1)/2 instead of P*N.
+  // Cost was overstated by (N+1)/2 and grew without bound.
+  it('assigns cumulative usage rather than accumulating it', async () => {
+    const session = new PersistentCodexSession({ name: 'test', cwd: '/tmp', model: 'gpt-5.5' });
+    await session.start();
+
+    const cumulative = [13_856, 27_727, 41_613];
+    for (const [i, total] of cumulative.entries()) {
+      const proc = i === 0 ? mockProc : createMockProcess();
+      mockSpawn.mockReturnValue(proc);
+      const p = session.send(`turn ${i}`, { waitForComplete: true });
+      setTimeout(() => {
+        proc.stdout.push(JSON.stringify({ type: 'thread.started', thread_id: 'thread-cum' }) + '\n');
+        proc.stdout.push(
+          JSON.stringify({
+            type: 'turn.completed',
+            usage: { input_tokens: total, cached_input_tokens: total - 3_000, output_tokens: (i + 1) * 6 },
+          }) + '\n',
+        );
+        proc.stdout.push(null);
+        proc.emit('close', 0);
+      }, 10);
+      await p;
+    }
+
+    // The thread total, NOT 13,856 + 27,727 + 41,613 = 83,196.
+    expect(session.getStats().tokensIn).toBe(41_613);
+    expect(session.getStats().tokensOut).toBe(18);
+    expect(session.getStats().cachedTokens).toBe(38_613);
     session.stop();
   });
 
@@ -313,6 +385,83 @@ describe('PersistentCodexSession', () => {
     expect(args1).toContain('--profile');
     expect(args2).toContain('resume');
     expect(args2).not.toContain('--profile');
+    session.stop();
+  });
+
+  // The registry holds each model's PUBLISHED window (1,050,000 for gpt-5.x).
+  // Codex enforces its own, far smaller one — 258,400 measured on 0.147.0 — and
+  // that is the limit a request actually dies on, so contextPercent has to be a
+  // fraction of codex's number or it reads ~4x low and the auto-compaction gate
+  // stays under its threshold right up to a hard context-window failure.
+  // Codex does not put it on the JSON stream, only in the thread's rollout file.
+  it('measures contextPercent against codex reported window, not the registry', async () => {
+    writeRollout('thread-win', [
+      JSON.stringify({ type: 'event_msg', payload: { type: 'task_started', model_context_window: 258_400 } }),
+    ]);
+    const session = new PersistentCodexSession({ name: 'test', cwd: '/tmp', model: 'gpt-5.5' });
+    await session.start();
+
+    const p = session.send('hi', { waitForComplete: true });
+    setTimeout(() => {
+      mockProc.stdout.push(JSON.stringify({ type: 'thread.started', thread_id: 'thread-win' }) + '\n');
+      mockProc.stdout.push(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 129_200 } }) + '\n');
+      mockProc.stdout.push(null);
+      mockProc.emit('close', 0);
+    }, 10);
+    await p;
+
+    // 129,200 / 258,400 = 50%. Against the 1,050,000 registry window it is 12%.
+    expect(session.getStats().contextPercent).toBe(50);
+    session.stop();
+  });
+
+  // A resumed thread arrives with a token history this process never saw, so
+  // the first `turn.completed` reports a cumulative total covering turns that
+  // predate the session. Treating that as the turn's own prompt would report a
+  // nearly-full context on the very first send.
+  it('seeds the cumulative baseline from the rollout when resuming a thread', async () => {
+    writeRollout('thread-resume', [
+      JSON.stringify({ type: 'event_msg', payload: { type: 'task_started', model_context_window: 258_400 } }),
+      JSON.stringify({
+        type: 'event_msg',
+        payload: { type: 'token_count', info: { total_token_usage: { input_tokens: 200_000, total_tokens: 200_010 } } },
+      }),
+    ]);
+    const session = new PersistentCodexSession({
+      name: 'test',
+      cwd: '/tmp',
+      model: 'gpt-5.5',
+      resumeSessionId: 'thread-resume',
+    });
+    await session.start();
+
+    const p = session.send('continue', { waitForComplete: true });
+    setTimeout(() => {
+      mockProc.stdout.push(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 250_000 } }) + '\n');
+      mockProc.stdout.push(null);
+      mockProc.emit('close', 0);
+    }, 10);
+    await p;
+
+    // This turn's prompt is 250,000 - 200,000 = 50,000 → 19% of 258,400.
+    // Unseeded it would read the whole 250,000 as one prompt, i.e. 97%.
+    expect(session.getStats().contextPercent).toBe(19);
+    session.stop();
+  });
+
+  // The openai-compat auto-compaction gate calls compact() and discards the
+  // result, so a one-shot engine's inability to compact was invisible: the
+  // thread grew until the CLI refused it with nothing in the log explaining why.
+  it('warns once on the log channel when asked to compact', async () => {
+    const session = new PersistentCodexSession({ name: 'test', cwd: '/tmp' });
+    await session.start();
+    const logs: string[] = [];
+    session.on('log', (line: string) => logs.push(line));
+
+    await session.compact();
+    await session.compact();
+
+    expect(logs.filter((l) => l.includes('does not support compaction'))).toHaveLength(1);
     session.stop();
   });
 });

@@ -180,7 +180,7 @@ Current tested versions (update on each release):
 | Engine | CLI | Tested Version | Invocation |
 |--------|-----|---------------|------------|
 | Claude | `claude` | 2.1.232 | Persistent subprocess, `--output-format stream-json` |
-| Codex | `codex` | 0.146.0 | `codex exec --sandbox workspace-write --skip-git-repo-check --json -C <dir>` (or `codex app-server --listen stdio://` for /goal) |
+| Codex | `codex` | 0.147.0 | `codex exec --sandbox workspace-write --skip-git-repo-check --json -C <dir>` (or `codex app-server --listen stdio://` for /goal) |
 | Antigravity | `agy` | 1.1.13 | `agy -p <msg> --log-file <tmp> [--conversation <id>] --dangerously-skip-permissions/--sandbox --print-timeout <n>s` |
 | Cursor | `agent` | 2026.08.11-e8db854 | `agent -p <msg> --force/--mode plan --trust --output-format stream-json --workspace <dir>` (read-only injects a `.cursor/cli.json` deny config) |
 | OpenCode | `opencode` | 1.18.18 | `opencode run <msg> --format json [--model provider/model]` (read-only sessions add `--agent clawo-readonly` + `OPENCODE_CONFIG_CONTENT`) |
