@@ -545,6 +545,8 @@ interface SessionManagerLike {
       // announced the conversation — see nativeThreadIsLive().
       codexThreadId?: string;
       agyConversationId?: string;
+      cursorChatId?: string;
+      opencodeSessionId?: string;
     };
   };
   compactSession(name: string): Promise<unknown>;
@@ -564,7 +566,7 @@ interface SessionManagerLike {
  */
 export function nativeThreadIsLive(
   engine: EngineType | undefined,
-  stats: Pick<SessionStats, 'codexThreadId' | 'agyConversationId'>,
+  stats: Pick<SessionStats, 'codexThreadId' | 'agyConversationId' | 'cursorChatId' | 'opencodeSessionId'>,
 ): boolean {
   switch (engine) {
     case 'codex':
@@ -572,6 +574,10 @@ export function nativeThreadIsLive(
       return !!stats.codexThreadId;
     case 'agy':
       return !!stats.agyConversationId;
+    case 'cursor':
+      return !!stats.cursorChatId;
+    case 'opencode':
+      return !!stats.opencodeSessionId;
     default:
       // claude and persistent custom engines hold their context in a live process, so there is no
       // separate id to check — being in the map is the strongest signal available.
@@ -740,8 +746,16 @@ export async function handleChatCompletion(
   // that id every later send silently starts a fresh conversation. Today the unconditional prepend
   // hides that. `nativeThreadIsLive()` returns false exactly when the id is missing, so those turns
   // keep receiving the full prompt instead of losing their identity quietly.
+  //
+  // `threadHasHistory` describes the session as it was BEFORE the create block above, which is the
+  // only point the tool results could be measured against. A reset turn stops that session and
+  // starts a new one, so on that turn the value describes a conversation that no longer exists and
+  // the new thread holds nothing — hence the `!needsCreate` term, which the tool gate below has
+  // carried since 4.11.0. Recomputing after the create would not do: a freshly started session has
+  // no id yet, and for engines whose id is only captured mid-turn that is indistinguishable from a
+  // resumed thread that failed early.
   let userMessage = extracted.userMessage;
-  if (extracted.systemPrompt && engine !== 'claude' && !threadHasHistory) {
+  if (extracted.systemPrompt && engine !== 'claude' && !(threadHasHistory && !needsCreate)) {
     userMessage = `<system>\n${extracted.systemPrompt}\n</system>\n\n${userMessage}`;
   }
 

@@ -98,6 +98,16 @@ caller that changes its tool list mid-conversation also gets the full block,
 because the tool list is part of the session-name hash, so a different list
 resolves to a different session.
 
+The caller's own system prompt follows exactly the same rule on these engines: it
+is prepended to the message, and skipped only while the conversation it was sent
+to is still the one being resumed. A turn that creates a conversation always
+carries it — including a `X-Session-Reset: 1` turn, which stops the existing
+session and starts a new one. "The conversation is being resumed" means the
+engine has actually announced an id (codex's `thread.started`, agy's log, cursor's
+and opencode's session id), not merely that the session is in the manager's map: a
+first turn that died before announcing one leaves a session behind that resumes
+nothing, and those turns keep receiving the full prompt.
+
 `OPENAI_COMPAT_TOOLS_PER_MESSAGE=1` opts out: it re-sends the full block on every
 turn for `claude` too, which is what makes a changing tool set work inside one
 session (in that mode the tool list is deliberately left out of the session hash).

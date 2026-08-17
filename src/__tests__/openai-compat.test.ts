@@ -18,6 +18,7 @@ import {
   isToolsPerMessageModeEnabled,
   noToolsSystemPrompt,
   buildSessionSystemPrompt,
+  handleChatCompletion,
 } from '../openai-compat.js';
 import { resolveEngineAndModel, getModelList } from '../models.js';
 
@@ -827,6 +828,20 @@ describe('nativeThreadIsLive', () => {
     expect(nativeThreadIsLive('agy', { codexThreadId: 'thread_abc' })).toBe(false);
   });
 
+  // cursor and opencode joined engineHasNativeConversation() in 4.12.0 while this
+  // function still had no case for them, so they fell through to `default: true` —
+  // exactly the "it is in the map" signal this predicate exists to replace. Both
+  // capture a real id, so both can be checked properly.
+  it('requires a captured chat id for cursor', () => {
+    expect(nativeThreadIsLive('cursor', {})).toBe(false);
+    expect(nativeThreadIsLive('cursor', { cursorChatId: 'chat_abc' })).toBe(true);
+  });
+
+  it('requires a captured session id for opencode', () => {
+    expect(nativeThreadIsLive('opencode', {})).toBe(false);
+    expect(nativeThreadIsLive('opencode', { opencodeSessionId: 'ses_abc' })).toBe(true);
+  });
+
   it('treats engines that keep context in a live process as live', () => {
     // claude and persistent custom engines expose no separate id, so presence in the map is the
     // strongest signal there is; this must not regress to false.
@@ -884,5 +899,116 @@ describe('serializeToolResults — latestRoundOnly', () => {
   it('returns empty when the latest round produced no results', () => {
     const trailingAssistant: OpenAIChatMessage[] = [...loop, { role: 'assistant', content: 'done' }];
     expect(serializeToolResults(trailingAssistant, true)).toBe('');
+  });
+});
+
+// ─── handleChatCompletion ────────────────────────────────────────────────────
+//
+// This handler had no unit coverage, which is how a regression reached two
+// published releases: a reset turn stopped the live session, started a fresh
+// one, and then decided whether to send the caller's system prompt using a
+// `threadHasHistory` computed from the session that had just been thrown away.
+// The engine got a brand new thread with no identity and the request returned
+// 200. See issue #79.
+
+/**
+ * Fake SessionManagerLike. `listSessions()` must report the PREFIXED name, or
+ * `sessionExists` is false and a resume test passes for the wrong reason.
+ * `startSession()` clears the captured id (a new conversation has none yet) and
+ * `stopSession()` drops the session, so the create/dispose flow is real.
+ */
+function fakeManager(opts: { threadId?: string; engineIdKey?: string } = {}) {
+  const idKey = opts.engineIdKey ?? 'codexThreadId';
+  const live = new Map<string, Record<string, string | undefined>>();
+  const sent: string[] = [];
+  // The session always EXISTS; only the conversation id varies. Omitting it from
+  // listSessions() instead would make `sessionExists` false, and a test asserting
+  // "the prompt is sent" would then pass without ever reaching nativeThreadIsLive().
+  live.set('openai-demo', { [idKey]: opts.threadId });
+
+  const manager = {
+    startSession: async (config: Record<string, unknown>) => {
+      // A freshly created session has no conversation id yet.
+      live.set(config.name as string, { [idKey]: undefined });
+      return { name: config.name as string };
+    },
+    sendMessage: async (_name: string, message: string) => {
+      sent.push(message);
+      return { output: 'ok', events: [] };
+    },
+    stopSession: async (name: string) => {
+      live.delete(name);
+    },
+    listSessions: () => [...live.keys()].map((name) => ({ name })),
+    getStatus: (name: string) => ({
+      stats: { tokensIn: 0, tokensOut: 0, contextPercent: 1, ...(live.get(name) ?? {}) },
+    }),
+    compactSession: async () => ({}),
+  };
+  return { manager, sent };
+}
+
+function fakeRes() {
+  return {
+    writeHead: () => {},
+    end: () => {},
+    setHeader: () => {},
+    write: () => true,
+  } as unknown as Parameters<typeof handleChatCompletion>[3];
+}
+
+describe('handleChatCompletion — system prompt across a reset', () => {
+  const ANCHOR = 'ANCHOR-9c1f';
+  const body = {
+    model: 'gpt-5.5',
+    messages: [
+      { role: 'system', content: `You are Foo. ${ANCHOR}` },
+      { role: 'user', content: 'hello' },
+    ],
+  };
+
+  it('skips the prompt on a genuine resumed turn', async () => {
+    const { manager, sent } = fakeManager({ threadId: 'thread_abc' });
+    await handleChatCompletion(manager, { ...body }, { 'x-session-id': 'demo' }, fakeRes());
+    expect(sent[0]).not.toContain(ANCHOR);
+  });
+
+  it('sends the prompt when a reset creates a new thread', async () => {
+    const { manager, sent } = fakeManager({ threadId: 'thread_abc' });
+    await handleChatCompletion(manager, { ...body }, { 'x-session-id': 'demo', 'x-session-reset': '1' }, fakeRes());
+    expect(sent[0]).toContain(ANCHOR);
+  });
+
+  it('sends the prompt when the engine never captured a conversation id', async () => {
+    const { manager, sent } = fakeManager({ threadId: undefined });
+    await handleChatCompletion(manager, { ...body }, { 'x-session-id': 'demo' }, fakeRes());
+    expect(sent[0]).toContain(ANCHOR);
+  });
+
+  // cursor and opencode joined engineHasNativeConversation() in 4.12.0 but had no
+  // case in nativeThreadIsLive(), so they took `default: return true` — the weaker
+  // "it is in the map" predicate. A session whose first turn died before the id was
+  // announced then looked identical to a healthy one, and lost its identity on
+  // every subsequent turn, not just once.
+  it('sends the prompt to a cursor session with no captured chat id', async () => {
+    const { manager, sent } = fakeManager({ threadId: undefined, engineIdKey: 'cursorChatId' });
+    await handleChatCompletion(
+      manager,
+      { model: 'composer-2', messages: body.messages },
+      { 'x-session-id': 'demo' },
+      fakeRes(),
+    );
+    expect(sent[0]).toContain(ANCHOR);
+  });
+
+  it('skips the prompt for a cursor session that has a chat id', async () => {
+    const { manager, sent } = fakeManager({ threadId: 'chat_xyz', engineIdKey: 'cursorChatId' });
+    await handleChatCompletion(
+      manager,
+      { model: 'composer-2', messages: body.messages },
+      { 'x-session-id': 'demo' },
+      fakeRes(),
+    );
+    expect(sent[0]).not.toContain(ANCHOR);
   });
 });

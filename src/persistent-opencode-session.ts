@@ -410,4 +410,17 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
         break;
     }
   }
+
+  /**
+   * Override getStats to expose the captured session ID.
+   *
+   * Consumers use its presence to tell "this session resumes a real conversation"
+   * from "the session is merely in the manager's map". Without it a caller has to
+   * assume the conversation exists, and a session whose first turn died before the
+   * run reported an id looks identical to a healthy one.
+   */
+  getStats(): ReturnType<BaseOneShotSession['getStats']> {
+    const base = super.getStats();
+    return { ...base, opencodeSessionId: this.opencodeSessionId };
+  }
 }

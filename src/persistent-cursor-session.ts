@@ -374,4 +374,17 @@ export class PersistentCursorSession extends BaseOneShotSession {
         break;
     }
   }
+
+  /**
+   * Override getStats to expose the captured chat ID.
+   *
+   * Consumers use its presence to tell "this session resumes a real conversation"
+   * from "the session is merely in the manager's map". Without it a caller has to
+   * assume the conversation exists, and a session whose first turn died before the
+   * stream announced an id looks identical to a healthy one.
+   */
+  getStats(): ReturnType<BaseOneShotSession['getStats']> {
+    const base = super.getStats();
+    return { ...base, cursorChatId: this.cursorChatId };
+  }
 }

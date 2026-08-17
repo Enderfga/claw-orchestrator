@@ -371,6 +371,10 @@ export interface SessionStats {
   codexThreadId?: string;
   /** Antigravity conversation ID harvested from the agy log file after the first turn. Reused via `--conversation` for multi-turn context. */
   agyConversationId?: string;
+  /** Cursor chat ID captured from the stream's `session_id`. Reused via `--resume` for multi-turn context. */
+  cursorChatId?: string;
+  /** OpenCode session ID captured from the run's JSON output. Reused via `--session` for multi-turn context. */
+  opencodeSessionId?: string;
 }
 
 // ─── Hook Config ─────────────────────────────────────────────────────────────

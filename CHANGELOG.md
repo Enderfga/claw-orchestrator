@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.12.2] - 2026-08-17
+
+A regression introduced in 4.12.0 and present in 4.12.1: a turn that reset the
+conversation reached the engine without the caller's system prompt. Reported in
+[#79](https://github.com/Enderfga/claw-orchestrator/issues/79).
+
+### Fixed
+
+- **openai-compat: a reset turn silently lost the system prompt.**
+  `threadHasHistory` is resolved before message extraction, from the session that
+  exists at that moment. A reset then stops that session and starts a new one, but
+  the value was never recomputed — so on that turn the bridge concluded the prompt
+  was already in the transcript while the engine had a brand new thread holding
+  nothing, and answered 200 with no identity and no workspace context. The gate now
+  carries the `!needsCreate` term the tool-schema gate has had since 4.11.0: a turn
+  that creates a conversation always sends the prompt, a genuine resume still skips
+  it. Affects `codex`, `codex-app`, `agy`, `cursor` and `opencode`; `claude` was
+  never affected, as it receives the prompt through the session config. It matters
+  beyond hand-set headers — a proxy that retries by setting `X-Session-Reset: 1`
+  hits it on the first retry after any live turn.
+
+- **`cursor` and `opencode` claimed a live conversation they might not have.**
+  4.12.0 moved them to the native-conversation side of the bridge without giving
+  them a case in `nativeThreadIsLive()`, so they fell through to its `default:
+  true` — the "session is in the manager's map" signal that predicate exists to
+  replace. A session whose first turn died before the engine announced an id was
+  then indistinguishable from a healthy one, and lost the caller's system prompt
+  and tool schemas on every subsequent turn rather than just once. Both engines
+  already capture an id; those ids are now surfaced on `SessionStats`
+  (`cursorChatId`, `opencodeSessionId`) and checked.
+
+### Added
+
+- First unit coverage for `handleChatCompletion`. It had none, which is how the
+  above shipped: the validation for 4.12.0 exercised a multi-hop tool
+  continuation, and a tool continuation returns from message extraction before the
+  reset header is ever read, so the recreate path was never run.
+
 ## [4.12.1] - 2026-08-15
 
 Codex's token usage was being read as if it were per-turn. It is cumulative, so
