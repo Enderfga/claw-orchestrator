@@ -145,7 +145,18 @@ const plugin = {
     function getManager(): SessionManager {
       if (!manager) {
         api.logger.info('[claw-orchestrator] First use — initialising SessionManager');
-        manager = new SessionManager(rawConfig);
+        // Pass the host's logger through. Without it SessionManager falls back to
+        // createConsoleLogger, whose info/debug write to STDOUT — which silently
+        // corrupts the frame stream of any stdio-protocol host (`clawo-mcp` is
+        // exactly that, and did carry this bug). PluginAPI's logger has no
+        // `debug`, so it folds into `info`, which lands on whatever channel the
+        // host chose.
+        manager = new SessionManager(rawConfig, {
+          debug: (msg: string, ...args: unknown[]) => api.logger.info(msg, ...args),
+          info: (msg: string, ...args: unknown[]) => api.logger.info(msg, ...args),
+          warn: (msg: string, ...args: unknown[]) => api.logger.warn(msg, ...args),
+          error: (msg: string, ...args: unknown[]) => api.logger.error(msg, ...args),
+        });
         // When running as a pure MCP server (or any standalone use that
         // doesn't need the HTTP control plane), CLAWO_NO_EMBEDDED_SERVER=1
         // avoids binding port 18796 and pulling in the embedded server's

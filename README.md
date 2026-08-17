@@ -85,6 +85,22 @@ npm install -g @enderfga/claw-orchestrator   # clawo-mcp is now on PATH
 
 Register `clawo-mcp` with any MCP-compatible host: Hermes Agent, Claude Desktop, Cursor, Cline, Continue, Zed, Windsurf, Goose, and others. Per-host stdio-config snippets and the `CLAWO_MCP_TOOLS` allowlist for tight tool budgets are in [`mcp.md`](./skills/references/mcp.md).
 
+### Agent Client Protocol Agent
+
+```bash
+clawo acp        # or the dedicated binary: clawo-acp
+```
+
+MCP gives tools _to_ an agent; ACP makes you _be_ the agent. `clawo acp` speaks
+[Agent Client Protocol](https://agentclientprotocol.com) over stdio, so Zed, JetBrains,
+Neovim, Emacs, the VS Code ACP extension — or `dsh` via its `subagent-acp` provider —
+can drive Claw Orchestrator as their coding agent.
+
+Every other agent in that ecosystem is a single agent. This one is a fleet: the model
+selector is grouped by engine, so one dropdown holds Claude, Codex and Cursor models at
+once and switching it switches engine mid-session. Setup, the `dsh` YAML block, and the
+cancellation and permission limitations are in [`acp.md`](./skills/references/acp.md).
+
 ---
 
 ## Engine Compatibility

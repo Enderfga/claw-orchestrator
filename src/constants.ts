@@ -142,6 +142,8 @@ export const OPENAI_COMPAT_DEFAULT_MODEL = 'claude-sonnet-4-6';
 export const OPENAI_COMPAT_AUTO_COMPACT_THRESHOLD = 80;
 /** Session name prefix for OpenAI-compat sessions */
 export const OPENAI_COMPAT_SESSION_PREFIX = 'openai-';
+/** Session name prefix for ACP sessions. Also the prefix of the ACP session id itself. */
+export const ACP_SESSION_PREFIX = 'acp-';
 /**
  * Default for the legacy new-conversation heuristic gate.
  *

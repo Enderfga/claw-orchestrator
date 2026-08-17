@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.13.0] - 2026-08-17
+
+MCP gives tools *to* an agent; ACP makes you *be* the agent. Every agent in the
+Agent Client Protocol ecosystem is a single agent — this one is a fleet.
+
+### Added
+
+- **`clawo acp` — run the orchestrator as an Agent Client Protocol agent.** Speaks
+  ACP over JSON-RPC stdio, so Zed, JetBrains, Neovim, Emacs and the VS Code ACP
+  extension can drive it as their coding agent, as can `dsh` through its
+  `subagent-acp` provider (which takes an arbitrary command, so no plugin code is
+  needed either side). Also available as the `clawo-acp` binary. Built against
+  **stable ACP v1** (`@agentclientprotocol/sdk`, pinned `1.3.0`); ACP v2 is a draft
+  whose wire protocol may change incompatibly in any SDK release, so it is not used.
+
+- **A model selector that spans engines.** `session/new` returns a `category:"model"`
+  config option whose values are grouped by engine and built from the shared registry,
+  so one dropdown in the editor holds Claude, Codex and Cursor models at once and
+  changing it switches engine mid-session — verified by switching a live session from
+  `claude-sonnet-4-6` to `gpt-5.5` and getting the answer back from Codex. The sunset
+  `gemini` engine is omitted; `opencode` has no entries because its models are
+  open-ended `provider/model` strings with nothing to enumerate.
+
+- Session modes (`single` · `council` · `ultraplan` · `ultrareview`) are advertised and
+  switchable. Only `single` is dispatched; prompting in another returns an error naming
+  the reason rather than silently behaving like `single`.
+
+### Fixed
+
+- **A stdio-protocol host could corrupt its own frames.** `SessionManager` was
+  constructed without a logger in the plugin entry, so it fell back to the console
+  logger, whose `info`/`debug` write to **stdout** — the channel `clawo-mcp` reserves
+  for MCP frames. The host's logger is now passed through.
+
+### Known limitations
+
+- `session/cancel` settles the turn immediately, but the session layer has no mid-turn
+  cancel: the underlying session is destroyed and recreated, so partial work in that
+  turn is lost.
+- `session/request_permission` is not implemented. Permission resolves once into engine
+  CLI flags at session start and nothing can surface a mid-turn request, so the choice
+  is offered as a session config option instead.
+- `loadSession` is advertised as `false`; ACP-level resume is not wired to the engines'
+  own resume handles yet.
+
 ## [4.12.2] - 2026-08-17
 
 A regression introduced in 4.12.0 and present in 4.12.1: a turn that reset the

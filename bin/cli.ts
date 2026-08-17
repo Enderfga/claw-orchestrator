@@ -73,6 +73,19 @@ const program = new Command();
 program.name('clawo').description('Claw Orchestrator CLI').version(getCliVersion());
 
 // Serve (standalone mode — no OpenClaw needed)
+// `clawo acp` is a thin alias for the `clawo-acp` binary. It exists so the
+// server is discoverable from `clawo --help`, and so an ACP client can be
+// configured with a single command name. It re-execs rather than booting
+// in-process because the ACP entry point must own stdout from its first line —
+// anything this file printed first would land inside the protocol stream.
+program
+  .command('acp')
+  .description('Run as an Agent Client Protocol agent over stdio (for Zed, JetBrains, dsh, …)')
+  .allowUnknownOption()
+  .action(async () => {
+    await import('./acp-server.js');
+  });
+
 program
   .command('serve')
   .description('Start standalone embedded server (for use without OpenClaw)')
