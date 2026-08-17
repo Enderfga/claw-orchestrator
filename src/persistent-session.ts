@@ -312,6 +312,18 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
       ...process.env,
       PATH: process.env.PATH || '/usr/local/bin:/usr/bin:/bin',
     };
+    // Without a baseUrl the child talks to the official API — an inherited
+    // proxy-scoped ANTHROPIC_API_KEY (not sk-ant-*) would take precedence over the
+    // CLI's own login there and 401. Official-format keys are left untouched.
+    const inheritedKey = spawnEnv.ANTHROPIC_API_KEY;
+    if (
+      inheritedKey &&
+      !inheritedKey.startsWith('sk-ant-') &&
+      !this.options.baseUrl &&
+      !process.env.ANTHROPIC_BASE_URL
+    ) {
+      delete spawnEnv.ANTHROPIC_API_KEY;
+    }
     if (this.options.baseUrl) spawnEnv.ANTHROPIC_BASE_URL = this.options.baseUrl;
     if (this.options.enableAgentTeams) spawnEnv.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS = 'true';
     // Smart default: bare mode auto-enables 1H prompt caching

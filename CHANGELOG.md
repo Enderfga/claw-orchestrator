@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Claude engine sessions failed with `Invalid API key` when the host process
+  carried a proxy-scoped `ANTHROPIC_API_KEY`.** The spawn environment inherits
+  `process.env`, so a key meant for a local proxy leaked into `claude` child
+  processes that had no `baseUrl` configured; the CLI prefers such a key over its
+  own subscription login and sends it to the official API, which rejects it. The
+  key is now dropped from the child environment when it does not use the
+  official `sk-ant-` format and neither the session `baseUrl` option nor an
+  ambient `ANTHROPIC_BASE_URL` is set. Official-format keys and sessions that
+  explicitly target a proxy are unaffected.
+
 ## [4.13.2] - 2026-08-17
 
 ### Fixed

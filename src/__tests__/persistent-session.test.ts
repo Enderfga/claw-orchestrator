@@ -88,6 +88,7 @@ describe('PersistentClaudeSession', () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
   });
 
   describe('constructor', () => {
@@ -165,6 +166,56 @@ describe('PersistentClaudeSession', () => {
       // Non-Claude model with baseUrl should set _realModel and use 'opus' as the CLI model
       expect(args).toContain('--model');
       expect(args).toContain('opus');
+    });
+
+    it('drops an inherited ANTHROPIC_API_KEY when no baseUrl is configured', async () => {
+      vi.stubEnv('ANTHROPIC_API_KEY', 'proxy-key-not-for-official-api');
+      session = new PersistentClaudeSession(makeConfig());
+      const { spawn } = await import('node:child_process');
+      const startPromise = session.start();
+      emitInitEvent(mockProc);
+      await startPromise;
+
+      const opts = vi.mocked(spawn).mock.calls.at(-1)![2] as { env: NodeJS.ProcessEnv };
+      expect(opts.env.ANTHROPIC_API_KEY).toBeUndefined();
+    });
+
+    it('keeps an official-format ANTHROPIC_API_KEY even without baseUrl', async () => {
+      vi.stubEnv('ANTHROPIC_API_KEY', 'sk-ant-api03-real-key');
+      session = new PersistentClaudeSession(makeConfig());
+      const { spawn } = await import('node:child_process');
+      const startPromise = session.start();
+      emitInitEvent(mockProc);
+      await startPromise;
+
+      const opts = vi.mocked(spawn).mock.calls.at(-1)![2] as { env: NodeJS.ProcessEnv };
+      expect(opts.env.ANTHROPIC_API_KEY).toBe('sk-ant-api03-real-key');
+    });
+
+    it('keeps ANTHROPIC_API_KEY when a baseUrl is configured', async () => {
+      vi.stubEnv('ANTHROPIC_API_KEY', 'proxy-key');
+      session = new PersistentClaudeSession(makeConfig({ baseUrl: 'http://localhost:3000' }));
+      const { spawn } = await import('node:child_process');
+      const startPromise = session.start();
+      emitInitEvent(mockProc);
+      await startPromise;
+
+      const opts = vi.mocked(spawn).mock.calls.at(-1)![2] as { env: NodeJS.ProcessEnv };
+      expect(opts.env.ANTHROPIC_API_KEY).toBe('proxy-key');
+      expect(opts.env.ANTHROPIC_BASE_URL).toBe('http://localhost:3000');
+    });
+
+    it('keeps ANTHROPIC_API_KEY when the environment already sets ANTHROPIC_BASE_URL', async () => {
+      vi.stubEnv('ANTHROPIC_API_KEY', 'proxy-key');
+      vi.stubEnv('ANTHROPIC_BASE_URL', 'http://localhost:4000');
+      session = new PersistentClaudeSession(makeConfig());
+      const { spawn } = await import('node:child_process');
+      const startPromise = session.start();
+      emitInitEvent(mockProc);
+      await startPromise;
+
+      const opts = vi.mocked(spawn).mock.calls.at(-1)![2] as { env: NodeJS.ProcessEnv };
+      expect(opts.env.ANTHROPIC_API_KEY).toBe('proxy-key');
     });
 
     it('includes --include-hook-events when set', async () => {
