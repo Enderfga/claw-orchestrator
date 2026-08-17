@@ -83,7 +83,8 @@
     "jetbrains",
     "neovim",
     "antigravity",
-    "coding-agent-protocol"
+    "coding-agent-protocol",
+    "deepseek-harness"
   ],
   "author": "enderfga",
   "repository": {
