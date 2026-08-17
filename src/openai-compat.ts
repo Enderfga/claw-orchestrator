@@ -533,7 +533,7 @@ interface SessionManagerLike {
     name: string,
     message: string,
     options?: Record<string, unknown>,
-  ): Promise<{ output: string; sessionId?: string; events: unknown[] }>;
+  ): Promise<{ output: string; sessionId?: string; error?: string; events: unknown[] }>;
   stopSession(name: string): Promise<void>;
   listSessions(): Array<{ name: string }>;
   getStatus(name: string): {
@@ -916,6 +916,13 @@ async function handleNonStreaming(
       },
     });
     reportStatus('idle', 'Ready');
+    if (result.error) {
+      // A 200 wrapping CLI error text reads as a successful completion to
+      // OpenAI-compat callers — a gateway would accept it and stop falling back.
+      res.writeHead(502, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: { message: result.error, type: 'upstream_error' } }));
+      return;
+    }
     let tokensIn = 0;
     let tokensOut = 0;
     try {
@@ -1008,7 +1015,7 @@ async function handleStreaming(
 
   try {
     reportStatus('thinking', 'Processing request...');
-    await manager.sendMessage(sessionName, userMessage, {
+    const result = await manager.sendMessage(sessionName, userMessage, {
       onChunk: (chunk: string) => {
         if (hasTools) {
           bufferedText += chunk;
@@ -1024,6 +1031,14 @@ async function handleStreaming(
       },
     });
     reportStatus('idle', 'Ready');
+    if (result.error) {
+      // Headers already went out as 200; the SSE error object is the only way
+      // left to tell the caller this turn failed rather than replied.
+      writeSSE(JSON.stringify({ error: { message: result.error, type: 'upstream_error' } }));
+      writeSSE('[DONE]');
+      if (!clientDisconnected) res.end();
+      return;
+    }
 
     // Get token usage for final chunk
     let usage: { prompt_tokens: number; completion_tokens: number; total_tokens: number } | undefined;

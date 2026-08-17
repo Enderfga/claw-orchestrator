@@ -758,9 +758,14 @@ export class SessionManager {
       }
 
       if ('text' in result) {
+        // The CLI reports turn-level failures (invalid --model, auth loss) as a
+        // result event with is_error and the explanation as its text — without
+        // surfacing that here, the error text is indistinguishable from a reply.
+        const evt = (result as { event?: Record<string, unknown> }).event;
         return {
           output: result.text,
           sessionId: this._managedResumeId(managed),
+          error: evt?.is_error ? String((evt.result as string) || result.text || 'turn failed') : undefined,
           events: [],
         };
       }
