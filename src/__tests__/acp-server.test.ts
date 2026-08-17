@@ -17,6 +17,8 @@ import {
   buildModelConfigOption,
   buildPermissionConfigOption,
   flattenPromptContent,
+  parseSlashCommand,
+  resolveParkedCouncil,
 } from '../acp-server.js';
 
 describe('ACP modes', () => {
@@ -115,5 +117,93 @@ describe('flattenPromptContent', () => {
   it('returns empty for a non-array, so an empty prompt is rejected by the caller', () => {
     expect(flattenPromptContent(undefined)).toBe('');
     expect(flattenPromptContent('hello')).toBe('');
+  });
+});
+
+describe('parseSlashCommand', () => {
+  it('splits the command from its argument', () => {
+    expect(parseSlashCommand('/council_reject too risky')).toEqual({ name: 'council_reject', rest: 'too risky' });
+  });
+
+  it('accepts a bare command', () => {
+    expect(parseSlashCommand('  /council_accept  ')).toEqual({ name: 'council_accept', rest: '' });
+  });
+
+  it('is null for ordinary prose, including a mid-sentence slash', () => {
+    expect(parseSlashCommand('fix the bug in src/a.ts')).toBeNull();
+    expect(parseSlashCommand('what does /usr/bin do?')).toBeNull();
+  });
+});
+
+describe('resolveParkedCouncil', () => {
+  // A council that reaches consensus parks awaiting a human decision rather than
+  // completing, so these two commands are the only way the run ever finishes.
+  const parkedState = () =>
+    ({
+      name: 'acp-x',
+      cwd: '/tmp',
+      model: 'claude-sonnet-4-6',
+      engine: 'claude',
+      permissionMode: 'plan',
+      modeId: 'council',
+      parkedCouncilId: 'council-1',
+    }) as Parameters<typeof resolveParkedCouncil>[1];
+
+  it('accepts, clears the park, and withdraws the commands', async () => {
+    const calls: string[] = [];
+    const manager = {
+      councilAccept: async (id: string) => void calls.push(`accept:${id}`),
+    } as unknown as Parameters<typeof resolveParkedCouncil>[0];
+    const said: string[] = [];
+    const emitted: Record<string, unknown>[] = [];
+    const state = parkedState();
+
+    const done = await resolveParkedCouncil(
+      manager,
+      state,
+      { name: 'council_accept', rest: '' },
+      async (t) => void said.push(t),
+      async (u) => void emitted.push(u),
+    );
+
+    expect(done).toBe(true);
+    expect(calls).toEqual(['accept:council-1']);
+    expect(state.parkedCouncilId).toBeUndefined();
+    expect(emitted.at(-1)).toEqual({ sessionUpdate: 'available_commands_update', availableCommands: [] });
+    expect(said.join(' ')).toContain('accepted');
+  });
+
+  it('passes the text after /council_reject through as feedback', async () => {
+    const calls: string[] = [];
+    const manager = {
+      councilReject: async (id: string, feedback: string) => void calls.push(`${id}|${feedback}`),
+    } as unknown as Parameters<typeof resolveParkedCouncil>[0];
+    const state = parkedState();
+
+    await resolveParkedCouncil(
+      manager,
+      state,
+      { name: 'council_reject', rest: 'the fix breaks negative inputs' },
+      async () => {},
+      async () => {},
+    );
+
+    expect(calls).toEqual(['council-1|the fix breaks negative inputs']);
+    expect(state.parkedCouncilId).toBeUndefined();
+  });
+
+  // An ordinary prompt while parked must not be swallowed as a decision — the
+  // caller falls through and reports that a decision is still outstanding.
+  it('leaves the park intact for a non-council command', async () => {
+    const state = parkedState();
+    const done = await resolveParkedCouncil(
+      {} as Parameters<typeof resolveParkedCouncil>[0],
+      state,
+      { name: 'something_else', rest: '' },
+      async () => {},
+      async () => {},
+    );
+    expect(done).toBe(false);
+    expect(state.parkedCouncilId).toBe('council-1');
   });
 });

@@ -30,9 +30,26 @@ Agent Client Protocol ecosystem is a single agent — this one is a fleet.
   `gemini` engine is omitted; `opencode` has no entries because its models are
   open-ended `provider/model` strings with nothing to enumerate.
 
-- Session modes (`single` · `council` · `ultraplan` · `ultrareview`) are advertised and
-  switchable. Only `single` is dispatched; prompting in another returns an error naming
-  the reason rather than silently behaving like `single`.
+- **Session modes carry the orchestration.** `single` · `council` · `ultraplan` ·
+  `ultrareview` are advertised and switchable, and each dispatches:
+  - `council` runs several engines in isolated git worktrees. Each agent becomes a
+    `tool_call` the client can collapse, each round emits a `plan`, and the synthesis
+    arrives as text. Agent deltas are buffered per agent onto that agent's
+    `tool_call_update` rather than streamed into the text channel — several agents
+    speak at once, and a consumer that reads only text would receive them interleaved
+    into one unreadable blob. Defaults are far below the library's own (two agents on
+    distinct engines, three rounds, against three agents and fifteen rounds), because
+    a client is waiting; even so, a measured two-round run took ~9 minutes.
+  - Consensus **parks** the run rather than finishing it, so the turn ends at the gate
+    and `/council_accept` and `/council_reject <feedback>` are advertised through
+    `available_commands_update`. Any other prompt while parked is refused, so a second
+    run cannot start over the same worktrees.
+  - `ultraplan` and `ultrareview` are poll-only upstream, so progress is reported as
+    thought chunks and the result arrives as both a `plan` update and text.
+
+- `usage_update` reports context occupancy and **cumulative cross-engine cost** — the
+  number worth showing here, since a session that switched engines mid-way has spent on
+  both and no single-engine agent can report it.
 
 ### Fixed
 
@@ -51,6 +68,10 @@ Agent Client Protocol ecosystem is a single agent — this one is a fleet.
   is offered as a session config option instead.
 - `loadSession` is advertised as `false`; ACP-level resume is not wired to the engines'
   own resume handles yet.
+- Ultraplan has no abort path upstream, so cancelling it abandons the poll rather than
+  stopping the work.
+- `/council_accept` and `/council_reject` are covered by unit tests against a fake
+  manager but have not been exercised against a live parked council.
 
 ## [4.12.2] - 2026-08-17
 

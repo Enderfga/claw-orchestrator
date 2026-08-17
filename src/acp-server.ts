@@ -23,10 +23,24 @@ import * as acp from '@agentclientprotocol/sdk';
 
 import { ACP_SESSION_PREFIX } from './constants.js';
 import type { Logger } from './logger.js';
-import { getModelList, resolveEngineAndModel } from './models.js';
-import type { EngineType, PermissionMode } from './types.js';
+import { getContextWindow, getModelList, resolveEngineAndModel } from './models.js';
+import type { CouncilConfig, CouncilEvent, CouncilSession, EngineType, PermissionMode } from './types.js';
 
 // ─── Manager surface ────────────────────────────────────────────────────────
+
+/**
+ * The shape ultraplan and ultrareview status calls have in common.
+ *
+ * They are separate result types upstream (`plan` vs `findings`), but this
+ * adapter polls them identically, so one optional-superset avoids branching the
+ * poll loop on which mode is running.
+ */
+interface OrchestrationSnapshot {
+  status: string;
+  plan?: string;
+  findings?: string;
+  error?: string;
+}
 
 /**
  * SessionManager-like interface to avoid circular imports.
@@ -46,6 +60,20 @@ interface SessionManagerLike {
     },
   ): Promise<{ output: string; sessionId?: string }>;
   stopSession(name: string): Promise<void>;
+  getStatus?(name: string): { stats: { contextPercent?: number } };
+  getCost?(name: string): { totalUsd?: number };
+
+  councilStart?(task: string, config: CouncilConfig): CouncilSession;
+  councilStatus?(id: string): CouncilSession | undefined;
+  councilAbort?(id: string): void;
+  councilAccept?(id: string): Promise<unknown>;
+  councilReject?(id: string, feedback: string): Promise<unknown>;
+  getCouncil?(id: string): { on(event: string, cb: (e: CouncilEvent) => void): unknown } | undefined;
+
+  ultraplanStart?(task: string, opts?: { model?: string; cwd?: string; timeout?: number }): { id: string };
+  ultraplanStatus?(id: string): OrchestrationSnapshot | undefined;
+  ultrareviewStart?(cwd: string, opts?: { focus?: string; agentCount?: number }): { id: string };
+  ultrareviewStatus?(id: string): OrchestrationSnapshot | undefined;
 }
 
 // ─── Modes ──────────────────────────────────────────────────────────────────
@@ -54,9 +82,8 @@ interface SessionManagerLike {
  * Session modes advertised to the client.
  *
  * ACP renders these as a picker, which is the natural home for "what shape of
- * orchestration should this turn use". Only `single` is dispatched today; the
- * others are declared so the surface is stable, and answer that they are not
- * wired yet rather than silently behaving like `single`.
+ * orchestration should this turn use" — and it is the whole point of this agent:
+ * a single-engine agent has nothing to put here.
  */
 export const ACP_MODES: acp.SessionMode[] = [
   {
@@ -83,8 +110,43 @@ export const ACP_MODES: acp.SessionMode[] = [
 
 export const ACP_DEFAULT_MODE = 'single';
 
-/** Modes accepted by `session/set_mode` but not yet dispatched by `session/prompt`. */
-const UNIMPLEMENTED_MODES = new Set(['council', 'ultraplan', 'ultrareview']);
+/**
+ * Council defaults for the ACP path, deliberately far below the library's own.
+ *
+ * `getDefaultCouncilConfig` is tuned for a long unattended run: three agents,
+ * fifteen rounds, a thirty-minute per-agent timeout, and one session spawned per
+ * agent *per round*. Behind an editor turn that is the wrong shape entirely — a
+ * client is waiting — so the ACP path uses two agents on distinct engines and
+ * three rounds. It also names engines explicitly rather than inheriting the
+ * library defaults, which still reference the retired Gemini CLI.
+ */
+export const ACP_COUNCIL_MAX_ROUNDS = 3;
+const ACP_COUNCIL_AGENTS = [
+  {
+    name: 'Builder',
+    emoji: '🟠',
+    engine: 'claude' as EngineType,
+    persona:
+      'You are an implementation engineer. Propose the smallest correct change that satisfies the task, and say plainly what you are unsure of rather than papering over it.',
+  },
+  {
+    name: 'Critic',
+    emoji: '🟢',
+    engine: 'codex' as EngineType,
+    persona:
+      'You are an independent quality gate. Do not assume the other agent is right — look for cases where the proposal breaks, and give either a blocking issue list or a reasoned approval.',
+  },
+];
+
+/** How often the poll-only orchestrations are checked, and how long they may run. */
+const ACP_POLL_INTERVAL_MS = 3_000;
+const ACP_POLL_TIMEOUT_MS = 1_800_000;
+
+/** Slash commands offered once a council run is parked at its human gate. */
+export const ACP_COUNCIL_COMMANDS = [
+  { name: 'council_accept', description: 'Accept the council result and merge the winning agent worktree.' },
+  { name: 'council_reject', description: 'Reject the council result. Text after the command is passed as feedback.' },
+];
 
 // ─── Config options ─────────────────────────────────────────────────────────
 
@@ -187,6 +249,14 @@ interface AcpSessionState {
   modeId: string;
   /** Settles the in-flight prompt as cancelled; see `cancel()`. */
   cancelInFlight?: () => void;
+  /** Council run parked at its human gate, awaiting /council_accept or /council_reject. */
+  parkedCouncilId?: string;
+}
+
+/** Parse a leading slash command out of a prompt. */
+export function parseSlashCommand(message: string): { name: string; rest: string } | null {
+  const match = /^\/([a-z_]+)\s*([\s\S]*)$/.exec(message.trim());
+  return match ? { name: match[1], rest: match[2].trim() } : null;
 }
 
 /** `session/new` ids are ours to mint; keep them short, opaque and prefixed. */
@@ -338,14 +408,28 @@ export function createAcpAgent(manager: SessionManagerLike, options: AcpAgentOpt
       const state = stateFor(ctx.params.sessionId);
       const sessionId = ctx.params.sessionId;
 
-      if (UNIMPLEMENTED_MODES.has(state.modeId)) {
-        throw acp.RequestError.invalidParams(
-          `Mode '${state.modeId}' is advertised but not dispatched yet; switch back to '${ACP_DEFAULT_MODE}'.`,
-        );
-      }
-
       const message = flattenPromptContent(ctx.params.prompt);
       if (!message.trim()) throw acp.RequestError.invalidParams('Prompt contained no text content');
+
+      const emit = (update: Record<string, unknown>) => ctx.client.notify('session/update', { sessionId, update });
+      const say = (text: string) => emit({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } });
+
+      // A parked council owns the turn until it is accepted or rejected: any
+      // other prompt would start a second run over the same worktrees.
+      const command = parseSlashCommand(message);
+      if (state.parkedCouncilId) {
+        const decided = await resolveParkedCouncil(manager, state, command, say, emit);
+        if (decided) return { stopReason: 'end_turn' as const };
+      } else if (command && command.name.startsWith('council_')) {
+        throw acp.RequestError.invalidParams('No council is awaiting a decision.');
+      }
+
+      if (state.modeId === 'council') {
+        return runCouncilMode(manager, state, sessionId, message, emit, say, log);
+      }
+      if (state.modeId === 'ultraplan' || state.modeId === 'ultrareview') {
+        return runPollingMode(manager, state, message, emit, say);
+      }
 
       // There is no mid-turn cancel in the session layer, so cancellation is
       // modelled here: the prompt races a settle-on-cancel promise, and the
@@ -406,6 +490,7 @@ export function createAcpAgent(manager: SessionManagerLike, options: AcpAgentOpt
             update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: output } },
           });
         }
+        await emitUsage(manager, state, emit);
         return { stopReason: 'end_turn' };
       } catch (err) {
         if (cancelled) return { stopReason: 'cancelled' };
@@ -436,4 +521,280 @@ export function createAcpAgent(manager: SessionManagerLike, options: AcpAgentOpt
         )
         .catch((err) => log?.warn(`cancel teardown failed for ${state.name}: ${String(err)}`));
     });
+}
+
+// ─── Orchestration modes ────────────────────────────────────────────────────
+
+type Emit = (update: Record<string, unknown>) => Promise<void>;
+type Say = (text: string) => Promise<void>;
+
+/**
+ * Run a council behind one ACP turn.
+ *
+ * The council emits progress on an EventEmitter and parks at a human gate rather
+ * than finishing, so the translation is not a straight pipe:
+ *
+ * - Each agent becomes a `tool_call` the client can collapse, so an editor shows
+ *   who is thinking and how far along they are.
+ * - Agent deltas are buffered per agent and delivered on that agent's
+ *   `tool_call_update`, NOT streamed into `agent_message_chunk`. Several agents
+ *   speak at once, and a consumer that only reads the text stream — `dsh`'s ACP
+ *   subagent reads nothing else — would receive them interleaved into one
+ *   unreadable blob.
+ * - Only the synthesis reaches the text stream, which keeps that stream
+ *   self-sufficient without making it a transcript of everyone at once.
+ */
+async function runCouncilMode(
+  manager: SessionManagerLike,
+  state: AcpSessionState,
+  sessionId: string,
+  task: string,
+  emit: Emit,
+  say: Say,
+  log?: Logger,
+): Promise<{ stopReason: 'end_turn' | 'cancelled' | 'refusal' }> {
+  if (!manager.councilStart || !manager.getCouncil || !manager.councilStatus) {
+    throw acp.RequestError.internalError('Council is not available on this manager');
+  }
+
+  let council: CouncilSession;
+  try {
+    council = manager.councilStart(task, {
+      name: 'ACP Council',
+      agents: ACP_COUNCIL_AGENTS.map((a) => ({ ...a, permissionMode: state.permissionMode })),
+      maxRounds: ACP_COUNCIL_MAX_ROUNDS,
+      projectDir: state.cwd,
+      defaultPermissionMode: state.permissionMode,
+    });
+  } catch (err) {
+    // Council refuses to run outside a git repo, on a too-short task, and on a
+    // few other guardrails. Those are the caller's problem to fix, so report the
+    // reason rather than a bare failure.
+    throw acp.RequestError.invalidParams(`Council could not start: ${(err as Error).message}`);
+  }
+
+  const buffers = new Map<string, string>();
+  const toolCallId = (agent: string, round?: number) => `${sessionId}-${agent}-r${round ?? 0}`;
+  const emitter = manager.getCouncil(council.id);
+
+  let poll: ReturnType<typeof setInterval> | undefined;
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+
+  const terminal = new Promise<void>((resolve) => {
+    let settled = false;
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      // Clear here rather than after the await: the backstop poll and the
+      // 30-minute cap must stop the moment the run is over, or every council
+      // turn leaves a live timer behind for the rest of the process's life.
+      if (poll) clearInterval(poll);
+      if (timeout) clearTimeout(timeout);
+      resolve();
+    };
+
+    emitter?.on('council-event', (event: CouncilEvent) => {
+      const agent = event.agent ?? 'agent';
+      switch (event.type) {
+        case 'round-start':
+          void emit({
+            sessionUpdate: 'plan',
+            entries: ACP_COUNCIL_AGENTS.map((a) => ({
+              content: `Round ${event.round ?? 1}: ${a.name} (${a.engine})`,
+              priority: 'medium',
+              status: 'in_progress',
+            })),
+          });
+          break;
+        case 'agent-start':
+          buffers.set(toolCallId(agent, event.round), '');
+          void emit({
+            sessionUpdate: 'tool_call',
+            toolCallId: toolCallId(agent, event.round),
+            title: `${agent} — round ${event.round ?? 1}`,
+            kind: 'think',
+            status: 'in_progress',
+          });
+          break;
+        case 'agent-chunk': {
+          const id = toolCallId(agent, event.round);
+          buffers.set(id, (buffers.get(id) ?? '') + (event.content ?? ''));
+          break;
+        }
+        case 'agent-complete': {
+          const id = toolCallId(agent, event.round);
+          void emit({
+            sessionUpdate: 'tool_call_update',
+            toolCallId: id,
+            status: 'completed',
+            content: [{ type: 'content', content: { type: 'text', text: buffers.get(id) || '(no output)' } }],
+          });
+          break;
+        }
+        case 'error':
+          log?.warn(`council ${council.id} error: ${event.error ?? 'unknown'}`);
+          done();
+          break;
+        case 'complete':
+          done();
+          break;
+        default:
+          break;
+      }
+    });
+
+    // The emitter is live-only with no replay buffer, and a run that finishes
+    // before the first listener attaches would never resolve. Polling the status
+    // is the backstop; it is also how the parked state is detected, because
+    // parking is a status, not an event.
+    poll = setInterval(() => {
+      const snapshot = manager.councilStatus?.(council.id);
+      if (snapshot && snapshot.status !== 'running') done();
+    }, ACP_POLL_INTERVAL_MS);
+
+    timeout = setTimeout(() => {
+      manager.councilAbort?.(council.id);
+      done();
+    }, ACP_POLL_TIMEOUT_MS);
+
+    state.cancelInFlight = () => {
+      manager.councilAbort?.(council.id);
+      done();
+    };
+  });
+
+  await terminal;
+  state.cancelInFlight = undefined;
+
+  const final = manager.councilStatus(council.id);
+  const summary = final?.finalSummary?.trim();
+  await say(summary || `Council finished with status '${final?.status ?? 'unknown'}' and produced no summary.`);
+
+  // Consensus parks the run for a human decision rather than completing it, so
+  // the ACP turn ends at the gate and the decision becomes a slash command.
+  if (final?.status === 'awaiting_user') {
+    state.parkedCouncilId = council.id;
+    await emit({ sessionUpdate: 'available_commands_update', availableCommands: ACP_COUNCIL_COMMANDS });
+    await say(
+      '\n\nThe council reached consensus and is holding its worktrees for you. ' +
+        'Send `/council_accept` to merge the result, or `/council_reject <feedback>` to discard it.',
+    );
+  }
+
+  return { stopReason: final?.status === 'error' ? 'refusal' : 'end_turn' };
+}
+
+/**
+ * Run one of the poll-only orchestrations (ultraplan, ultrareview).
+ *
+ * Neither emits events — they return a handle and are polled — so progress is
+ * reported as periodic thought chunks and the result arrives as both a `plan`
+ * update and text. Ultraplan in particular has no abort path at all, so
+ * cancelling here abandons the poll rather than stopping the work.
+ */
+async function runPollingMode(
+  manager: SessionManagerLike,
+  state: AcpSessionState,
+  task: string,
+  emit: Emit,
+  say: Say,
+): Promise<{ stopReason: 'end_turn' | 'cancelled' | 'refusal' }> {
+  const isPlan = state.modeId === 'ultraplan';
+  const started = isPlan
+    ? manager.ultraplanStart?.(task, { cwd: state.cwd, model: state.model })
+    : manager.ultrareviewStart?.(state.cwd, { focus: task });
+  if (!started) throw acp.RequestError.internalError(`Mode '${state.modeId}' is not available on this manager`);
+
+  const readStatus = () => (isPlan ? manager.ultraplanStatus?.(started.id) : manager.ultrareviewStatus?.(started.id));
+
+  let cancelled = false;
+  state.cancelInFlight = () => {
+    cancelled = true;
+  };
+
+  const deadline = Date.now() + ACP_POLL_TIMEOUT_MS;
+  let snapshot = readStatus();
+  while (snapshot?.status === 'running' && Date.now() < deadline && !cancelled) {
+    await new Promise((r) => setTimeout(r, ACP_POLL_INTERVAL_MS));
+    snapshot = readStatus();
+    await emit({
+      sessionUpdate: 'agent_thought_chunk',
+      content: { type: 'text', text: '.' },
+    });
+  }
+  state.cancelInFlight = undefined;
+
+  if (cancelled) return { stopReason: 'cancelled' };
+
+  const body = (isPlan ? snapshot?.plan : snapshot?.findings) ?? '';
+  if (snapshot?.status === 'error' || !body) {
+    await say(snapshot?.error ? `${state.modeId} failed: ${snapshot.error}` : `${state.modeId} produced no output.`);
+    return { stopReason: 'refusal' };
+  }
+
+  await emit({
+    sessionUpdate: 'plan',
+    entries: [{ content: body.slice(0, 500), priority: 'high', status: 'completed' }],
+  });
+  await say(body);
+  return { stopReason: 'end_turn' };
+}
+
+/**
+ * Apply `/council_accept` or `/council_reject` to a parked run.
+ *
+ * Returns true when the prompt was a decision and the turn is finished.
+ */
+export async function resolveParkedCouncil(
+  manager: SessionManagerLike,
+  state: AcpSessionState,
+  command: { name: string; rest: string } | null,
+  say: Say,
+  emit: Emit,
+): Promise<boolean> {
+  const id = state.parkedCouncilId;
+  if (!id || !command) return false;
+
+  if (command.name === 'council_accept') {
+    await manager.councilAccept?.(id);
+    await say('Council result accepted; the winning worktree has been merged.');
+  } else if (command.name === 'council_reject') {
+    await manager.councilReject?.(id, command.rest || 'rejected via ACP');
+    await say('Council result rejected and its worktrees discarded.');
+  } else {
+    return false;
+  }
+
+  state.parkedCouncilId = undefined;
+  await emit({ sessionUpdate: 'available_commands_update', availableCommands: [] });
+  return true;
+}
+
+/**
+ * Report context occupancy and cumulative cost to the client.
+ *
+ * ACP wants absolute token counts; the session layer exposes a percentage and a
+ * window, so `used` is derived from the two. That is the honest reading — the
+ * percentage is what the engines actually report, and reconstructing a token
+ * count from it is lossy in the last digit but not in the shape.
+ *
+ * Cost is the cross-engine total, which is the number worth showing here: a
+ * session that switched from Claude to Codex mid-way has spent on both, and no
+ * single-engine agent can report that.
+ */
+async function emitUsage(manager: SessionManagerLike, state: AcpSessionState, emit: Emit): Promise<void> {
+  try {
+    const percent = manager.getStatus?.(state.name)?.stats?.contextPercent ?? 0;
+    const size = getContextWindow(state.model);
+    const cost = manager.getCost?.(state.name)?.totalUsd;
+    if (!size) return;
+    await emit({
+      sessionUpdate: 'usage_update',
+      used: Math.round((size * percent) / 100),
+      size,
+      ...(typeof cost === 'number' ? { cost: { amount: cost, currency: 'USD' } } : {}),
+    });
+  } catch {
+    // Usage is decoration. A manager that cannot report it must not break a turn.
+  }
 }

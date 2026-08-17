@@ -39,12 +39,48 @@ Implemented: `initialize`, `authenticate`, `session/new`, `session/prompt`,
 `session/new` returns the mode list; the client renders it as a picker and switches
 with `session/set_mode`.
 
-| Mode | Status |
+| Mode | What a turn does |
 |---|---|
-| `single` | **Implemented.** One engine answers the turn. |
-| `council` | Advertised, not dispatched yet — prompting in it returns an error rather than silently behaving like `single`. |
-| `ultraplan` | Same. |
-| `ultrareview` | Same. |
+| `single` | One engine answers. Text streams as `agent_message_chunk`; tool use becomes `tool_call`. |
+| `council` | Several engines debate in isolated git worktrees. Each agent becomes a `tool_call` the client can collapse, each round emits a `plan`, and the synthesis arrives as text. |
+| `ultraplan` | Long-horizon planning pass. Result arrives as a `plan` update and as text. |
+| `ultrareview` | Parallel reviewers sweep the working tree; findings arrive the same way. |
+
+### Council
+
+Council defaults here are deliberately far below the library's own — that config is
+tuned for a long unattended run (three agents, fifteen rounds, one session per agent
+*per round*), which is the wrong shape behind an editor turn. The ACP path uses **two
+agents on distinct engines (Claude and Codex) and three rounds**.
+
+It still is not fast: a measured two-round run on a one-line bug took **~9 minutes**.
+Treat council as a deliberate action, not a default.
+
+Agent deltas are buffered per agent and delivered on that agent's `tool_call_update`
+rather than streamed into the text channel. Several agents speak at once, and a
+consumer that only reads text — `dsh`'s ACP subagent reads nothing else — would
+otherwise receive them interleaved into one unreadable blob.
+
+Council requires a git repository at the session `cwd`; it creates one worktree and
+branch per agent. Its guardrails (non-git directory, too-short task, and others)
+surface as an `invalid params` error naming the reason.
+
+**Consensus parks the run rather than finishing it.** The turn ends at the gate, and
+the decision becomes a slash command, advertised through `available_commands_update`:
+
+| Command | Effect |
+|---|---|
+| `/council_accept` | Merge the winning agent's worktree. |
+| `/council_reject <feedback>` | Discard the result; the text is passed through as feedback. |
+
+Any other prompt while a council is parked is refused, so a second run cannot start
+over the same worktrees.
+
+### Ultraplan and ultrareview
+
+Neither emits events — they are started and then polled — so progress is reported as
+`agent_thought_chunk` heartbeats. Ultraplan has **no abort path at all**, so
+cancelling one abandons the poll rather than stopping the work.
 
 ## Cross-engine model selector
 
@@ -121,6 +157,17 @@ doing only one is the trap: suppress the embedded HTTP server (whose `start()`
 prints), and hand `SessionManager` an explicit stderr logger — its default
 `createConsoleLogger` writes `info`/`debug` to stdout.
 
-Verified end to end against Claude Code with a real workspace read: handshake,
-`session/new` (5 engine groups in the selector), a streamed `single`-mode turn, and
-graceful exit on stdin EOF, with stdout 100% JSON.
+Verified end to end against the real binary:
+
+- handshake, `session/new` (4 engine groups in the selector), a streamed `single`-mode
+  turn that read a workspace file under `plan` permission and relayed the answer;
+- a cross-engine model switch (`claude-sonnet-4-6` → `gpt-5.5`) answered by Codex;
+- a full `council` run in a git repo — two engines, two rounds to consensus, emitting
+  2 `plan`, 4 `tool_call`, 4 `tool_call_update`, the synthesis as text, and the two
+  gate commands;
+- `usage_update` carrying cross-engine cost;
+- graceful exit on stdin EOF.
+
+Every stdout line parsed as JSON throughout. `/council_accept` and `/council_reject`
+are covered by unit tests against a fake manager but have not been exercised against a
+live parked council.
