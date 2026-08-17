@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.13.1] - 2026-08-17
+
+Driving 4.13.0 from a real editor turned up one thing the protocol alone could not
+tell us, so this corrects both the behaviour and a documentation claim.
+
+### Added
+
+- **A slash command per session mode** — `/single`, `/council`, `/ultraplan`,
+  `/ultrareview` — advertised through `available_commands_update` when the session
+  opens. Text after the command runs in that mode straight away, so
+  `/council fix the failing test` is one step rather than three.
+
+  This exists because **whether a client renders a mode picker is up to the client**.
+  ACP defines `modes` on `session/new` and `session/set_mode`, but the VS Code ACP
+  extension (0.2.0, measured) renders config options and not modes — without a
+  command surface the orchestration modes were simply unreachable there. The docs
+  previously stated the client "renders it as a picker"; that was inferred from the
+  protocol, not observed, and is now corrected.
+
+### Fixed
+
+- Resolving a parked council restored an **empty** command list, which wiped the mode
+  commands along with the gate commands and left the client with no way back to any
+  mode. It now restores the mode commands.
+- `/single <task>` (and any mode command carrying text) passed the raw line, slash
+  command included, to the engine. The command is now stripped.
+
+### Verified in an editor
+
+4.13.0 and this release were driven from VS Code with the ACP Client extension 0.2.0:
+the agent appears in the agents list beside GitHub Copilot, Claude Code and Codex CLI,
+connects, renders the engine-grouped model dropdown and the permission selector, and
+answered a prompt about a workspace file with its tool calls shown as collapsible
+entries. Closing the editor also confirmed the server exits on client disconnect
+rather than lingering.
+
 ## [4.13.0] - 2026-08-17
 
 MCP gives tools *to* an agent; ACP makes you *be* the agent. Every agent in the

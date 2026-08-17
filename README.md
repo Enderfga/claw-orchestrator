@@ -98,8 +98,10 @@ can drive Claw Orchestrator as their coding agent.
 
 Every other agent in that ecosystem is a single agent. This one is a fleet: the model
 selector is grouped by engine, so one dropdown holds Claude, Codex and Cursor models at
-once and switching it switches engine mid-session. Setup, the `dsh` YAML block, and the
-cancellation and permission limitations are in [`acp.md`](./skills/references/acp.md).
+once and switching it switches engine mid-session, and `/council`, `/ultraplan` and
+`/ultrareview` run multi-agent orchestrations from the chat box. Setup, the `dsh` YAML
+block, and the cancellation and permission limitations are in
+[`acp.md`](./skills/references/acp.md).
 
 ---
 

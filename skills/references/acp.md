@@ -36,8 +36,16 @@ Implemented: `initialize`, `authenticate`, `session/new`, `session/prompt`,
 
 ## Session modes
 
-`session/new` returns the mode list; the client renders it as a picker and switches
-with `session/set_mode`.
+`session/new` returns the mode list and ACP defines `session/set_mode`, but **whether
+a client surfaces a mode picker is up to the client** — the VS Code ACP extension
+(0.2.0, measured) renders config options and not modes. So every mode also has a
+slash command, advertised through `available_commands_update` when the session opens:
+
+| Command | Effect |
+|---|---|
+| `/single` · `/council` · `/ultraplan` · `/ultrareview` | Switch mode. Text after the command runs in that mode straight away — `/council fix the failing test` is one step, not three. |
+
+That is the only way to reach a mode in a client that does not draw the picker.
 
 | Mode | What a turn does |
 |---|---|
@@ -161,6 +169,8 @@ Verified end to end against the real binary:
 
 - handshake, `session/new` (4 engine groups in the selector), a streamed `single`-mode
   turn that read a workspace file under `plan` permission and relayed the answer;
+- the mode slash commands: a bare `/ultraplan` switches and reports, `/single <task>`
+  switches back and runs the task in one turn;
 - a cross-engine model switch (`claude-sonnet-4-6` → `gpt-5.5`) answered by Codex;
 - a full `council` run in a git repo — two engines, two rounds to consensus, emitting
   2 `plan`, 4 `tool_call`, 4 `tool_call_update`, the synthesis as text, and the two
@@ -171,3 +181,9 @@ Verified end to end against the real binary:
 Every stdout line parsed as JSON throughout. `/council_accept` and `/council_reject`
 are covered by unit tests against a fake manager but have not been exercised against a
 live parked council.
+
+It was also driven from **VS Code with the ACP Client extension 0.2.0** — the agent
+appears in the agents list beside Copilot, Claude Code and Codex CLI, connects, renders
+the grouped model dropdown and the permission selector, and answered a prompt about a
+workspace file with its tool calls shown as collapsible entries. That run is what
+established that this client does not render modes.

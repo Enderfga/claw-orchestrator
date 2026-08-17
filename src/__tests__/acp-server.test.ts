@@ -19,6 +19,7 @@ import {
   flattenPromptContent,
   parseSlashCommand,
   resolveParkedCouncil,
+  ACP_MODE_COMMANDS,
 } from '../acp-server.js';
 
 describe('ACP modes', () => {
@@ -169,7 +170,12 @@ describe('resolveParkedCouncil', () => {
     expect(done).toBe(true);
     expect(calls).toEqual(['accept:council-1']);
     expect(state.parkedCouncilId).toBeUndefined();
-    expect(emitted.at(-1)).toEqual({ sessionUpdate: 'available_commands_update', availableCommands: [] });
+    // Restored, not cleared — an empty list would strand the client with no way
+    // back to any mode.
+    expect(emitted.at(-1)).toEqual({
+      sessionUpdate: 'available_commands_update',
+      availableCommands: ACP_MODE_COMMANDS,
+    });
     expect(said.join(' ')).toContain('accepted');
   });
 
@@ -205,5 +211,21 @@ describe('resolveParkedCouncil', () => {
     );
     expect(done).toBe(false);
     expect(state.parkedCouncilId).toBe('council-1');
+  });
+});
+
+describe('ACP_MODE_COMMANDS', () => {
+  // The VS Code ACP extension (0.2.0, measured) renders config options but not
+  // modes, so without a slash command per mode the orchestration modes are
+  // unreachable there — the picker ACP defines is advisory, not guaranteed.
+  it('offers one command per advertised mode', () => {
+    expect(ACP_MODE_COMMANDS.map((c) => c.name)).toEqual(ACP_MODES.map((m) => m.id));
+    for (const cmd of ACP_MODE_COMMANDS) expect(cmd.description.length).toBeGreaterThan(0);
+  });
+
+  it('names commands so parseSlashCommand recognises them', () => {
+    for (const cmd of ACP_MODE_COMMANDS) {
+      expect(parseSlashCommand(`/${cmd.name} do the thing`)).toEqual({ name: cmd.name, rest: 'do the thing' });
+    }
   });
 });

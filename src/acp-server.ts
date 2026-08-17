@@ -81,9 +81,13 @@ interface SessionManagerLike {
 /**
  * Session modes advertised to the client.
  *
- * ACP renders these as a picker, which is the natural home for "what shape of
- * orchestration should this turn use" — and it is the whole point of this agent:
- * a single-engine agent has nothing to put here.
+ * This is the natural home for "what shape of orchestration should this turn
+ * use", and it is the whole point of this agent: a single-engine agent has
+ * nothing to put here.
+ *
+ * Whether a client surfaces them is up to the client, though — measured against
+ * the VS Code ACP extension 0.2.0, which renders config options but not modes.
+ * So every mode also gets a slash command; see ACP_MODE_COMMANDS.
  */
 export const ACP_MODES: acp.SessionMode[] = [
   {
@@ -147,6 +151,22 @@ export const ACP_COUNCIL_COMMANDS = [
   { name: 'council_accept', description: 'Accept the council result and merge the winning agent worktree.' },
   { name: 'council_reject', description: 'Reject the council result. Text after the command is passed as feedback.' },
 ];
+
+/**
+ * One slash command per mode, so modes are reachable in clients that do not
+ * render the mode picker.
+ *
+ * `session/new` returns the mode list and ACP defines `session/set_mode`, but
+ * whether a client surfaces either is up to the client — the VS Code ACP
+ * extension renders config options and not modes, so without these the
+ * orchestration modes would be unreachable there. Text after the command runs
+ * immediately in that mode, which is a better interaction than a picker anyway:
+ * `/council fix the failing test` is one step, not three.
+ */
+export const ACP_MODE_COMMANDS = ACP_MODES.map((mode) => ({
+  name: mode.id,
+  description: `${mode.description} Text after the command runs in this mode straight away.`,
+}));
 
 // ─── Config options ─────────────────────────────────────────────────────────
 
@@ -350,6 +370,18 @@ export function createAcpAgent(manager: SessionManagerLike, options: AcpAgentOpt
       });
       log?.info(`session/new ${sessionId} engine=${engine} model=${model} cwd=${cwd}`);
 
+      // Advertise the mode commands once the client knows this session exists.
+      // Notifying before returning would reference a sessionId the client has
+      // not been told about yet, so this is deferred past the response write.
+      setTimeout(() => {
+        void ctx.client
+          .notify('session/update', {
+            sessionId,
+            update: { sessionUpdate: 'available_commands_update', availableCommands: ACP_MODE_COMMANDS },
+          })
+          .catch(() => {});
+      }, 0);
+
       return {
         sessionId,
         modes: { currentModeId: ACP_DEFAULT_MODE, availableModes: ACP_MODES },
@@ -424,11 +456,26 @@ export function createAcpAgent(manager: SessionManagerLike, options: AcpAgentOpt
         throw acp.RequestError.invalidParams('No council is awaiting a decision.');
       }
 
+      // `/council`, `/ultraplan`, … switch mode, and run the rest of the line in
+      // it when there is one. This is the only way to reach a mode in a client
+      // that does not render the picker.
+      let task = message;
+      if (command && ACP_MODES.some((m) => m.id === command.name)) {
+        state.modeId = command.name;
+        await emit({ sessionUpdate: 'current_mode_update', currentModeId: command.name });
+        if (!command.rest) {
+          const mode = ACP_MODES.find((m) => m.id === command.name);
+          await say(`Switched to **${mode?.name}**. ${mode?.description ?? ''}`);
+          return { stopReason: 'end_turn' as const };
+        }
+        task = command.rest;
+      }
+
       if (state.modeId === 'council') {
-        return runCouncilMode(manager, state, sessionId, message, emit, say, log);
+        return runCouncilMode(manager, state, sessionId, task, emit, say, log);
       }
       if (state.modeId === 'ultraplan' || state.modeId === 'ultrareview') {
-        return runPollingMode(manager, state, message, emit, say);
+        return runPollingMode(manager, state, task, emit, say);
       }
 
       // There is no mid-turn cancel in the session layer, so cancellation is
@@ -449,7 +496,7 @@ export function createAcpAgent(manager: SessionManagerLike, options: AcpAgentOpt
       // nothing streamed — which is the case for one-shot wrappers.
       let streamedChars = 0;
 
-      const turn = manager.sendMessage(state.name, message, {
+      const turn = manager.sendMessage(state.name, task, {
         onChunk: (chunk: string) => {
           if (cancelled || !chunk) return;
           streamedChars += chunk.length;
@@ -766,7 +813,10 @@ export async function resolveParkedCouncil(
   }
 
   state.parkedCouncilId = undefined;
-  await emit({ sessionUpdate: 'available_commands_update', availableCommands: [] });
+  // Restore the mode commands rather than clearing: the gate commands replaced
+  // them while the run was parked, and an empty list would leave the client with
+  // no way to reach any mode again.
+  await emit({ sessionUpdate: 'available_commands_update', availableCommands: ACP_MODE_COMMANDS });
   return true;
 }
 
