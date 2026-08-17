@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.13.2] - 2026-08-17
+
+### Fixed
+
+- **Six `autoloop_*` tools were registered but never declared in
+  `openclaw.plugin.json`.** `autoloop_start`, `autoloop_chat`, `autoloop_status`,
+  `autoloop_list`, `autoloop_reset_agent` and `autoloop_stop` have been missing from
+  the manifest since autoloop shipped, so a host that reads the declared contract
+  rather than the runtime registration never saw them. The manifest now declares all
+  69 registered tools.
+
+- **The tool count disagreed with itself in three places** — 69 actually registered,
+  65 in README.md and SKILL.md, 63 in CLAUDE.md and the manifest. All now say 69.
+
+### Added
+
+- A parity test between `openclaw.plugin.json` and the tools the plugin actually
+  registers, plus a duplicate-name check. The manifest is maintained by hand
+  alongside the code that registers tools, so it drifts silently; the test names the
+  offending tool instead of reporting a count mismatch. Verified to fail when a tool
+  is removed from the manifest.
+
+### Changed
+
+- New README banner: an architecture diagram of the real system — entrypoints,
+  session layer, engines, orchestration — replacing the previous one, which still
+  advertised the retired Gemini engine and omitted Antigravity and OpenCode.
+
 ## [4.13.1] - 2026-08-17
 
 Driving 4.13.0 from a real editor turned up one thing the protocol alone could not

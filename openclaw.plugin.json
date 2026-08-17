@@ -17,12 +17,26 @@
       },
       "defaultPermissionMode": {
         "type": "string",
-        "enum": ["acceptEdits", "bypassPermissions", "default", "delegate", "dontAsk", "plan", "auto"],
+        "enum": [
+          "acceptEdits",
+          "bypassPermissions",
+          "default",
+          "delegate",
+          "dontAsk",
+          "plan",
+          "auto"
+        ],
         "default": "acceptEdits"
       },
       "defaultEffort": {
         "type": "string",
-        "enum": ["low", "medium", "high", "max", "auto"],
+        "enum": [
+          "low",
+          "medium",
+          "high",
+          "max",
+          "auto"
+        ],
         "default": "auto"
       },
       "maxConcurrentSessions": {
@@ -60,7 +74,9 @@
   },
   "capabilities": {
     "childProcess": true,
-    "networkAccess": ["127.0.0.1"]
+    "networkAccess": [
+      "127.0.0.1"
+    ]
   },
   "contracts": {
     "tools": [
@@ -106,6 +122,12 @@
       "council_review",
       "council_accept",
       "council_reject",
+      "autoloop_start",
+      "autoloop_chat",
+      "autoloop_status",
+      "autoloop_list",
+      "autoloop_reset_agent",
+      "autoloop_stop",
       "session_send_to",
       "session_inbox",
       "session_deliver_inbox",
@@ -129,5 +151,7 @@
       "ultraapp_delete"
     ]
   },
-  "skills": ["skills/SKILL.md"]
+  "skills": [
+    "skills/SKILL.md"
+  ]
 }

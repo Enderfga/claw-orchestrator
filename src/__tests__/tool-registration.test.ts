@@ -175,3 +175,34 @@ describe('plugin tool registration', () => {
     }
   });
 });
+
+// The OpenClaw plugin manifest declares the tool contract separately from the
+// code that registers them, so the two drift silently: six `autoloop_*` tools
+// were registered for releases without ever being declared, and three files
+// quoted three different tool counts (69 registered, 65 in the README, 63 in the
+// manifest and CLAUDE.md). A host that trusts the manifest simply never sees the
+// undeclared tools. Parity is cheap to assert, so assert it rather than relying
+// on remembering the convention.
+describe('openclaw.plugin.json parity', () => {
+  it('declares exactly the tools the plugin registers', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { fileURLToPath } = await import('node:url');
+    const { dirname, join } = await import('node:path');
+    const here = dirname(fileURLToPath(import.meta.url));
+    const manifest = JSON.parse(readFileSync(join(here, '../../openclaw.plugin.json'), 'utf8')) as {
+      contracts: { tools: string[] };
+    };
+
+    const registered = collectRegistration().tools.map((t) => t.name);
+    const declared = manifest.contracts.tools;
+
+    // Sorted comparison, so the failure message names the offending tools
+    // rather than reporting an opaque count mismatch.
+    expect([...declared].sort()).toEqual([...registered].sort());
+  });
+
+  it('registers no duplicate tool names', () => {
+    const names = collectRegistration().tools.map((t) => t.name);
+    expect(new Set(names).size).toBe(names.length);
+  });
+});
