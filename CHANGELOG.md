@@ -47,6 +47,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on engines that estimate token counts the cap is best-effort — see
   `observability.md`.
 
+- **Antigravity ignored the engine-agnostic reasoning-effort setting.** The
+  first-class `agy` adapter now forwards session defaults and per-turn overrides
+  as `--effort`. Since agy accepts only `low`, `medium`, and `high`, the shared
+  `max`/`xhigh` aliases clamp to `high`. `auto` resolves unsuffixed base-model
+  slugs to `high` because the current CLI requires an explicit selection, while
+  already-qualified `-low`/`-medium`/`-high` slugs keep their own effort. A
+  conflicting per-turn override strips the old suffix before passing the new
+  effort, avoiding agy's model/effort conflict error.
+
 - **Claude engine sessions failed with `Invalid API key` when the host process
   carried a proxy-scoped `ANTHROPIC_API_KEY`.** The spawn environment inherits
   `process.env`, so a key meant for a local proxy leaked into `claude` child

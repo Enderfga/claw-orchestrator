@@ -13,7 +13,7 @@ SessionManager
 ├── engine: 'codex-app' → PersistentCodexAppServerSession
 │   └── Wraps: codex app-server --listen stdio:// (long-running JSON-RPC; required for /goal)
 ├── engine: 'agy'       → PersistentAgySession
-│   └── Wraps: agy -p (Google Antigravity CLI, per-message spawning, plain-text output)
+│   └── Wraps: agy -p (Google Antigravity CLI, per-message spawning, stream-json output)
 ├── engine: 'cursor'    → PersistentCursorSession
 │   └── Wraps: agent -p --force --trust --output-format stream-json (per-message spawning)
 ├── engine: 'opencode'  → PersistentOpencodeSession
@@ -112,16 +112,26 @@ await manager.startSession({
 
 Wraps Google's **Antigravity CLI** (`agy`) — the successor to Gemini CLI (consumer
 Gemini CLI tiers stopped serving 2026-06-18). Each `send()` spawns a new process
-in print mode. Verified against `agy` **1.1.1**.
+in print mode. Verified against `agy` **1.1.13**.
 
 - One-shot execution per message (no persistent subprocess)
-- **Plain-text output** — agy has no structured/stream-json mode, so stdout is
-  forwarded as streaming text and **token counts are estimated** (~4 chars/token)
-- **Real conversation continuity**: agy logs `Created conversation <uuid>` to its
-  log file; the engine passes a private `--log-file`, harvests the ID after the
-  first turn, and resumes with `--conversation <id>` on subsequent sends. Seed it
+- **Structured output and real usage** — `--output-format stream-json` emits an
+  `init` event with the conversation id, progress events, and a final `result`
+  with the response plus input/output/cache-read token counts. Plain text and
+  estimated usage remain as compatibility fallbacks when a result event is absent.
+- **Real conversation continuity**: the engine captures the id from stream-json
+  and resumes with `--conversation <id>` on later sends. A private `--log-file`
+  scrape remains as a fallback for turns that die before emitting `init`. Seed it
   externally via `resumeSessionId` (bare UUID only); read it back from
-  `getStats().agyConversationId`
+  `getStats().agyConversationId`.
+- **Reasoning effort**: session `effort` and per-turn `session_send` overrides map
+  to `--effort`. agy accepts `low`, `medium`, and `high`; engine-wide `max` and
+  `xhigh` clamp to `high`. agy 1.1.13 requires an effort with unsuffixed base
+  slugs such as `gemini-3.7-flash`, so `auto` resolves those to `high`; a model
+  already ending in `-low`, `-medium`, or `-high` keeps that qualified effort.
+  Per-turn overrides also work with qualified slugs: the adapter removes a
+  conflicting suffix before passing the new `--effort`, avoiding agy's conflict
+  error.
 - Permission modes: `bypassPermissions` → `--dangerously-skip-permissions`,
   `default` → `--sandbox` (terminal-restricted), and
   `sandboxMode: 'read-only'` → `--mode plan` (takes precedence). Other modes
@@ -144,6 +154,7 @@ await manager.startSession({
   name: 'antigravity-task',
   engine: 'agy',
   model: 'gemini-3.5-flash',
+  effort: 'high',
   cwd: '/project',
 });
 ```

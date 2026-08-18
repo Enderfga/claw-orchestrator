@@ -31,7 +31,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
-import type { SessionConfig, SessionSendOptions, StreamEvent, TurnResult } from './types.js';
+import type { EffortLevel, SessionConfig, SessionSendOptions, StreamEvent, TurnResult } from './types.js';
 import { estimateTokens } from './models.js';
 import { sanitizeSecrets } from './sanitize.js';
 import { extractCreatedAgyConversationId, isAgyConversationId } from './agy-conversation.js';
@@ -100,10 +100,10 @@ export class PersistentAgySession extends BaseOneShotSession {
   /**
    * Build the agy spawn args for this turn.
    *
-   * First turn:    `agy -p <msg> --log-file <tmp> [--sandbox|--dangerously-skip-permissions] [--model M] --print-timeout Ns`
+   * First turn:    `agy -p <msg> --log-file <tmp> [--sandbox|--dangerously-skip-permissions] [--model M] [--effort E] --print-timeout Ns`
    * Resume turns:  same + `--conversation <id>`
    */
-  private _buildArgs(message: string, timeoutMs: number): string[] {
+  private _buildArgs(message: string, timeoutMs: number, turnEffort?: EffortLevel): string[] {
     // stream-json gives the conversation id up front, progress events while the
     // turn runs, and a final `result` carrying the answer plus real token usage.
     // Before this, the wrapper read plain text, scraped the id out of the log
@@ -129,9 +129,35 @@ export class PersistentAgySession extends BaseOneShotSession {
     // Use the SessionManager-resolved model when available so documented
     // aliases (agy-pro → gemini-3.1-pro) do not silently fall back to agy's
     // default model.
+    // agy 1.1.5+ exposes reasoning variants through --effort. Its accepted
+    // values are narrower than the engine-agnostic EffortLevel union: only
+    // low|medium|high are valid. Preserve the caller's intent by clamping the
+    // two higher aliases to agy's ceiling. A per-turn override wins over the
+    // session default, matching session_send's documented contract.
+    //
+    // Current agy also requires an effort when --model is an unsuffixed base
+    // slug, so the provider-specific meaning of auto is high in that case. A
+    // fully-qualified `-low|-medium|-high` slug already carries its effort and
+    // needs no flag. If a caller overrides such a slug to a different effort,
+    // strip the suffix first: agy rejects conflicting --model/--effort pairs.
     const configuredModel = this.options.resolvedModel || this.options.model;
-    const model = configuredModel ? this.resolveModel(configuredModel.replace(/^agy\//, '')) : undefined;
+    let model = configuredModel ? this.resolveModel(configuredModel.replace(/^agy\//, '')) : undefined;
+    const requestedEffort = turnEffort ?? this.options.effort;
+    const explicitEffort =
+      requestedEffort === 'max' || requestedEffort === 'xhigh'
+        ? 'high'
+        : requestedEffort === 'auto'
+          ? undefined
+          : requestedEffort;
+    const modelEffortMatch = model?.match(/-(low|medium|high)$/);
+    if (model && modelEffortMatch && explicitEffort && modelEffortMatch[1] !== explicitEffort) {
+      model = model.slice(0, -modelEffortMatch[0].length);
+    }
+    const effort = explicitEffort ?? (model && !modelEffortMatch ? 'high' : undefined);
+
     if (model) args.push('--model', model);
+    if (effort) args.push('--effort', effort);
+
     if (this.agyConversationId) args.push('--conversation', this.agyConversationId);
 
     // agy enforces its own print-mode timeout (default 5m). Derive it from the
@@ -174,7 +200,7 @@ export class PersistentAgySession extends BaseOneShotSession {
 
   protected _run(message: string, options: SessionSendOptions): Promise<TurnResult> {
     const timeout = options.timeout || 300_000;
-    const args = this._buildArgs(message, timeout);
+    const args = this._buildArgs(message, timeout, options.effort);
 
     return new Promise<TurnResult>((resolve, reject) => {
       let resultText = '';
