@@ -1,0 +1,12 @@
+# Every path is owned by the maintainer, and `require_code_owner_reviews` is on
+# for `main`. Write access on this repository is deliberately not enough to land
+# code on its own: two write collaborators could otherwise approve each other
+# and merge without the maintainer, and whatever reaches `main` ships in the
+# next release.
+#
+# Repository admins are exempt from branch protection here (`enforce_admins` is
+# false) so the release flow can push `main` directly. Nothing in this file
+# affects who can publish to npm — tag creation is restricted to the owner by a
+# separate ruleset, and `publish.yml` triggers on a published release.
+
+* @Enderfga
