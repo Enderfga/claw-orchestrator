@@ -409,7 +409,12 @@ export class PersistentCodexSession extends BaseOneShotSession {
         // Drain any final partial line as an event attempt.
         if (stdoutBuf.trim()) handleEvent(stdoutBuf);
 
-        this._recordTurnComplete();
+        // One expression for the outcome: it feeds the counter here and the
+        // `stop_reason` below. Classifying on the exit code alone reported
+        // `end_turn` for a `turn.failed` that exits 0 — the same turn the reject
+        // below has always treated as a failure.
+        const ok = !turnError && code === 0;
+        this._recordTurnComplete(ok);
 
         // Real usage from `turn.completed`. Falls back to zero rather than
         // estimated tokens — better to have an honest "0" than a guess that
@@ -438,7 +443,7 @@ export class PersistentCodexSession extends BaseOneShotSession {
         const event: StreamEvent = {
           type: 'result',
           result: assistantText,
-          stop_reason: code === 0 ? 'end_turn' : 'error',
+          stop_reason: ok ? 'end_turn' : 'error',
           session_id: this.codexThreadId,
         };
 

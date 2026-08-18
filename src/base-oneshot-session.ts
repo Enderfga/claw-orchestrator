@@ -68,6 +68,7 @@ export abstract class BaseOneShotSession extends EventEmitter implements ISessio
   public sessionId?: string;
   protected _stats = {
     turns: 0,
+    turnsSucceeded: 0,
     toolCalls: 0,
     toolErrors: 0,
     tokensIn: 0,
@@ -225,6 +226,7 @@ export abstract class BaseOneShotSession extends EventEmitter implements ISessio
   getStats(): SessionStats & { sessionId?: string; uptime: number } {
     return {
       turns: this._stats.turns,
+      turnsSucceeded: this._stats.turnsSucceeded,
       toolCalls: this._stats.toolCalls,
       toolErrors: this._stats.toolErrors,
       tokensIn: this._stats.tokensIn,
@@ -365,8 +367,17 @@ export abstract class BaseOneShotSession extends EventEmitter implements ISessio
     return _getModelPricingBase(this.options.model, this.engineCfg.defaultModel);
   }
 
-  protected _recordTurnComplete(): void {
+  /**
+   * Call once from a subclass's close handler, with the same expression that
+   * decides the turn's `stop_reason` and whether its promise resolves.
+   *
+   * `ok` is a required parameter rather than a second method so that the outcome
+   * has one expression per engine: a turn classified as succeeded here cannot
+   * disagree with the `stop_reason` built beside it.
+   */
+  protected _recordTurnComplete(ok: boolean): void {
     this._stats.turns++;
+    if (ok) this._stats.turnsSucceeded++;
     this._stats.lastActivity = new Date().toISOString();
   }
 

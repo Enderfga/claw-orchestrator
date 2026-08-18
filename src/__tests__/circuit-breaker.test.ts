@@ -53,6 +53,7 @@ class MockSession extends EventEmitter implements ISession {
   getStats(): SessionStats & { sessionId?: string; uptime: number } {
     return {
       turns: 0,
+      turnsSucceeded: 0,
       toolCalls: 0,
       toolErrors: 0,
       tokensIn: 0,

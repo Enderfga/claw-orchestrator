@@ -464,4 +464,46 @@ describe('PersistentCodexSession', () => {
     expect(logs.filter((l) => l.includes('does not support compaction'))).toHaveLength(1);
     session.stop();
   });
+
+  // `turns` counts turns that reached the engine; `turnsSucceeded` counts the ones
+  // that succeeded. A `turn.failed` with exit 0 is the case that separates them:
+  // the process exits cleanly, so nothing in the exit code says the turn failed.
+  describe('turnsSucceeded', () => {
+    it('does not count a turn.failed that exits 0', async () => {
+      const session = new PersistentCodexSession({ name: 'test', cwd: '/tmp' });
+      await session.start();
+
+      const p = session.send('hi', { waitForComplete: true });
+      setTimeout(() => {
+        mockProc.stdout.push(JSON.stringify({ type: 'thread.started', thread_id: 'thread-failed' }) + '\n');
+        mockProc.stdout.push(
+          JSON.stringify({ type: 'turn.failed', error: { message: 'model refused the request' } }) + '\n',
+        );
+        mockProc.stdout.push(null);
+        mockProc.emit('close', 0);
+      }, 10);
+      await expect(p).rejects.toThrow('model refused the request');
+
+      const stats = session.getStats();
+      expect(stats.turns).toBe(1);
+      expect(stats.turnsSucceeded).toBe(0);
+      session.stop();
+    });
+
+    // Positive control: without this, the assertion above passes on a counter that
+    // is simply never incremented.
+    it('counts a clean turn', async () => {
+      const session = new PersistentCodexSession({ name: 'test', cwd: '/tmp' });
+      await session.start();
+
+      const p = session.send('hi', { waitForComplete: true });
+      setTimeout(() => runTurn(mockProc, 'thread-ok'), 10);
+      await p;
+
+      const stats = session.getStats();
+      expect(stats.turns).toBe(1);
+      expect(stats.turnsSucceeded).toBe(1);
+      session.stop();
+    });
+  });
 });

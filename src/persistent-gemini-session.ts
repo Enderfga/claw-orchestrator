@@ -176,7 +176,11 @@ export class PersistentGeminiSession extends BaseOneShotSession {
         if (settled) return;
         settled = true;
 
-        this._recordTurnComplete();
+        // 53 is the turn limit, which resolves — a completion, not a failure. The
+        // `stop_reason` below stays three-state (it distinguishes `turn_limit`), so
+        // here `ok` only feeds the counter.
+        const ok = code === 0 || code === 53;
+        this._recordTurnComplete(ok);
 
         // Fallback: estimate tokens if stream events didn't provide usage
         if (!gotUsageFromEvents && resultText.value.length > 0) {

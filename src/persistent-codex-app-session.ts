@@ -137,6 +137,7 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
   public sessionId?: string;
   private _stats = {
     turns: 0,
+    turnsSucceeded: 0,
     toolCalls: 0,
     toolErrors: 0,
     tokensIn: 0,
@@ -483,13 +484,20 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
       }
       case 'turn/completed': {
         const p = params as TurnCompletedNotification;
+        // This notification can itself report how the turn ended. The engine's
+        // TurnStatus is `completed | interrupted | failed | inProgress`, so the counter
+        // tests for completion rather than for the absence of failure: an interrupted
+        // turn — which `interrupt()` on this class produces on purpose — resolves with
+        // partial text and is not a success. `stop_reason` keeps its own two-state
+        // mapping, so `interrupted` stays out of the error bucket there.
+        const failed = p.turn?.status === 'failed';
         this._stats.turns++;
+        if (p.turn?.status === 'completed') this._stats.turnsSucceeded++;
         this._stats.lastActivity = new Date().toISOString();
         // Clear the active-turn id so a later interrupt()/steer() does not target
         // an already-finished turn (only clear if it is the turn that completed).
         if (p.turn?.id && this.currentTurnId === p.turn.id) this.currentTurnId = undefined;
         const turnText = this.turnAssistantText;
-        const failed = p.turn?.status === 'failed';
         const event: StreamEvent = {
           type: 'result',
           result: turnText,
@@ -532,6 +540,7 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
   getStats(): SessionStats & { sessionId?: string; uptime: number; goal?: ThreadGoal | null } {
     return {
       turns: this._stats.turns,
+      turnsSucceeded: this._stats.turnsSucceeded,
       toolCalls: this._stats.toolCalls,
       toolErrors: this._stats.toolErrors,
       tokensIn: this._stats.tokensIn,

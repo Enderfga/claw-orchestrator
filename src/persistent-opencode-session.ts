@@ -250,7 +250,9 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
         // Refuse the result rather than hand back output produced without the
         // sandbox the caller asked for.
         if (readOnlyAgentMissing) {
-          this._recordTurnComplete();
+          // Refused on purpose: it reached the engine, so it counts as a turn, but
+          // it is not a success by any reading.
+          this._recordTurnComplete(false);
           reject(
             new Error(
               "OpenCode read-only enforcement failed: the 'clawo-readonly' agent did not load, so the session " +
@@ -268,7 +270,10 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
         this._stats.toolCalls += state.seenTools.size;
         this._stats.toolErrors += state.erroredTools.size;
 
-        this._recordTurnComplete();
+        // One expression for the outcome, feeding the counter here and the
+        // `stop_reason` below.
+        const ok = code === 0;
+        this._recordTurnComplete(ok);
 
         // Fallback: estimate tokens if step_finish never arrived.
         if (!state.gotUsage && finalText.length > 0) {
@@ -283,7 +288,7 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
         const event: StreamEvent = {
           type: 'result',
           result: finalText,
-          stop_reason: code === 0 ? 'end_turn' : 'error',
+          stop_reason: ok ? 'end_turn' : 'error',
         };
 
         this.emit(SESSION_EVENT.RESULT, event);

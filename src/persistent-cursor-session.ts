@@ -196,7 +196,10 @@ export class PersistentCursorSession extends BaseOneShotSession {
         if (settled) return;
         settled = true;
 
-        this._recordTurnComplete();
+        // One expression for the outcome, feeding the counter here and the
+        // `stop_reason` below.
+        const ok = code === 0;
+        this._recordTurnComplete(ok);
 
         // Fallback: estimate tokens if stream events didn't provide usage
         if (!gotUsageFromEvents && resultText.value.length > 0) {
@@ -211,7 +214,7 @@ export class PersistentCursorSession extends BaseOneShotSession {
         const event: StreamEvent = {
           type: 'result',
           result: resultText.value,
-          stop_reason: code === 0 ? 'end_turn' : 'error',
+          stop_reason: ok ? 'end_turn' : 'error',
         };
 
         this.emit(SESSION_EVENT.RESULT, event);

@@ -97,6 +97,7 @@ export class PersistentCustomSession extends EventEmitter implements ISession {
   public sessionId?: string;
   private _stats = {
     turns: 0,
+    turnsSucceeded: 0,
     toolCalls: 0,
     toolErrors: 0,
     tokensIn: 0,
@@ -539,7 +540,11 @@ export class PersistentCustomSession extends EventEmitter implements ISession {
         settled = true;
 
         const now = new Date().toISOString();
+        // One expression for the outcome, feeding the counter here and the
+        // `stop_reason` below.
+        const ok = code === 0;
         this._stats.turns++;
+        if (ok) this._stats.turnsSucceeded++;
         this._stats.lastActivity = now;
 
         if (!gotUsageFromEvents && resultText.value.length > 0) {
@@ -555,7 +560,7 @@ export class PersistentCustomSession extends EventEmitter implements ISession {
         const event: StreamEvent = {
           type: 'result',
           result: resultText.value,
-          stop_reason: code === 0 ? 'end_turn' : 'error',
+          stop_reason: ok ? 'end_turn' : 'error',
         };
 
         this.emit(SESSION_EVENT.RESULT, event);
@@ -703,6 +708,13 @@ export class PersistentCustomSession extends EventEmitter implements ISession {
           this._stats.tokensOut += usage.output_tokens || 0;
           this._stats.cachedTokens += usage.cache_read_input_tokens || 0;
           this._updateCost();
+        }
+        // The result event is the only place the outcome is known, and it arrives once
+        // per send — unlike the `user` echo that drives `turns`, which the CLI also
+        // emits per tool-result batch. `is_error` is read as truthy on purpose: for a
+        // persistent `custom` engine this event comes from an arbitrary CLI.
+        if (!(event.is_error || event.stop_reason === 'error')) {
+          this._stats.turnsSucceeded++;
         }
         this.emit(SESSION_EVENT.RESULT, event);
         this.emit(SESSION_EVENT.TURN_COMPLETE, event);
@@ -911,6 +923,7 @@ export class PersistentCustomSession extends EventEmitter implements ISession {
     const ctxWindow = this.engineConfig.contextWindow ?? 200_000;
     return {
       turns: this._stats.turns,
+      turnsSucceeded: this._stats.turnsSucceeded,
       toolCalls: this._stats.toolCalls,
       toolErrors: this._stats.toolErrors,
       tokensIn: this._stats.tokensIn,

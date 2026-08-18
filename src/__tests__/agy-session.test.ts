@@ -777,4 +777,95 @@ describe('PersistentAgySession', () => {
       expect(logs.some((l) => l.includes('sk-proj-abcdef'))).toBe(false);
     });
   });
+
+  // ─── turnsSucceeded ─────────────────────────────────────────────────────
+  //
+  // agy is the engine where the exit code is the weakest of the three signals: it
+  // can exit 0 while its own result event reports a non-SUCCESS status. That turn
+  // resolves — so it used to reach the caller, and the run ledger, as a success.
+  describe('turnsSucceeded', () => {
+    it('does not count exit 0 with a non-SUCCESS status, and says so in the event', async () => {
+      const session = new PersistentAgySession({ name: 'test', cwd: '/tmp', permissionMode: 'default' });
+      await session.start();
+
+      const sendPromise = session.send('hello', { waitForComplete: true });
+      feedText(
+        mockProc,
+        JSON.stringify({
+          event: 'result',
+          // No `error` field: nothing but the status marks this turn as failed.
+          result: { conversation_id: 'c1', status: 'STOPPED', response: 'partial' },
+        }) + '\n',
+      );
+      setTimeout(() => closeProc(mockProc, 0), 10);
+
+      // It resolves — which is exactly why the status has to be read.
+      const result = (await sendPromise) as { text: string; event: { stop_reason: string } };
+      expect(result.event.stop_reason).toBe('error');
+
+      const stats = session.getStats();
+      expect(stats.turns).toBe(1);
+      expect(stats.turnsSucceeded).toBe(0);
+    });
+
+    // Regression guard: agy can report SUCCESS and still exit non-zero (it answers,
+    // then dies in cleanup). That turn's promise REJECTS, so counting it as succeeded
+    // would put the counter and the caller's outcome in direct contradiction.
+    it('does not count a SUCCESS status that exits non-zero', async () => {
+      const session = new PersistentAgySession({ name: 'test', cwd: '/tmp', permissionMode: 'default' });
+      await session.start();
+
+      const sendPromise = session.send('hello', { waitForComplete: true });
+      feedText(
+        mockProc,
+        JSON.stringify({ event: 'result', result: { conversation_id: 'c1', status: 'SUCCESS', response: 'OK' } }) +
+          '\n',
+      );
+      setTimeout(() => closeProc(mockProc, 1), 10);
+      await expect(sendPromise).rejects.toThrow(/exited with code 1/);
+
+      const stats = session.getStats();
+      expect(stats.turns).toBe(1);
+      expect(stats.turnsSucceeded).toBe(0);
+    });
+
+    // A failure agy already reported must not be erased by a later SUCCESS in the same
+    // turn: the status is recorded sticky.
+    it('does not count a turn whose earlier result event reported a failure', async () => {
+      const session = new PersistentAgySession({ name: 'test', cwd: '/tmp', permissionMode: 'default' });
+      await session.start();
+
+      const sendPromise = session.send('hello', { waitForComplete: true });
+      feedText(
+        mockProc,
+        JSON.stringify({ event: 'result', result: { conversation_id: 'c1', status: 'STOPPED', response: 'partial' } }) +
+          '\n' +
+          JSON.stringify({ event: 'result', result: { conversation_id: 'c1', status: 'SUCCESS', response: 'OK' } }) +
+          '\n',
+      );
+      setTimeout(() => closeProc(mockProc, 0), 10);
+      const result = (await sendPromise) as { event: { stop_reason: string } };
+
+      expect(result.event.stop_reason).toBe('error');
+      expect(session.getStats().turnsSucceeded).toBe(0);
+    });
+
+    it('counts a SUCCESS status', async () => {
+      const session = new PersistentAgySession({ name: 'test', cwd: '/tmp', permissionMode: 'default' });
+      await session.start();
+
+      const sendPromise = session.send('hello', { waitForComplete: true });
+      feedText(
+        mockProc,
+        JSON.stringify({ event: 'result', result: { conversation_id: 'c1', status: 'SUCCESS', response: 'OK' } }) +
+          '\n',
+      );
+      setTimeout(() => closeProc(mockProc, 0), 10);
+      await sendPromise;
+
+      const stats = session.getStats();
+      expect(stats.turns).toBe(1);
+      expect(stats.turnsSucceeded).toBe(1);
+    });
+  });
 });

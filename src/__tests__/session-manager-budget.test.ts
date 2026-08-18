@@ -80,6 +80,7 @@ class CostingSession extends EventEmitter implements ISession {
   getStats(): SessionStats & { sessionId?: string; uptime: number } {
     return {
       turns: this.turns,
+      turnsSucceeded: this.turns,
       toolCalls: this.toolCalls,
       toolErrors: 0,
       tokensIn: this.turns * 100,
