@@ -5,6 +5,85 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`turnsSucceeded` on `SessionStats` — `turns` never meant the turn
+  succeeded.** It is incremented at ten sites that mean three different things:
+  the `user` echo of a message going out before any result exists (`claude`, and
+  a persistent `custom`), reaching process close whatever the outcome (the five
+  `BaseOneShotSession` engines plus a one-shot `custom`), and a `turn/completed`
+  notification that may itself report a non-completed status (`codex-app`). None
+  of them is the reading its writer's name — `_recordTurnComplete()` — invites.
+
+  `turns` keeps its meaning and is now documented as "turns that reached the
+  engine, whatever their outcome". `turnsSucceeded` counts only the ones the
+  engine reported as successful, and the predicate is the engine's own terminal
+  verdict rather than the exit code: `codex` fails a turn that emits
+  `turn.failed` while exiting 0, `agy` requires `SUCCESS` *and* a zero exit,
+  `gemini` succeeds on exit 53 (its turn limit resolves), `codex-app` requires
+  `status: 'completed'`, and `opencode` refuses a turn on purpose when read-only
+  enforcement did not load. On the one-shot engines the counter and that turn's
+  `stop_reason` come from one expression, so they cannot disagree; `gemini` and
+  `codex-app` keep their own `stop_reason` mapping (`turn_limit`, `interrupted`)
+  and the counter is the stricter of the two.
+
+  **`turns` is not one-per-send on every engine, so the difference between the
+  two counters is the failure count on the one-shot engines only.** On `claude`
+  and a persistent `custom`, `turns` counts `user` events and the CLI emits one
+  per tool-result batch as well as the prompt echo — a send that used eight tools
+  counts nine. `turnsSucceeded` *is* one-per-send everywhere, so compare it
+  against sends there, not against `turns`. Measured against claude-code
+  stream-json, not inferred.
+
+  Exposed as `turns_succeeded` on `/v1/sessions` (openai-compat sessions) and in
+  `health().details`.
+
+### Breaking
+
+- **`SessionStats.turnsSucceeded` is required, not optional.** Source-breaking
+  for a TypeScript consumer that builds a `SessionStats` object of its own
+  (implementing `ISession`, or a test double); runtime consumers reading the
+  field are unaffected. Required on purpose: it makes `tsc` enumerate the four
+  places in `src/` that own a stats object instead of leaving one silently
+  `undefined`.
+
+- **`BaseOneShotSession._recordTurnComplete()` now takes a required `ok`
+  argument.** The class is exported, so the `protected` method is part of the
+  published subclassing surface: an out-of-tree engine subclass calling it with
+  no argument fails to compile, and in plain JS would record every turn as
+  failed.
+
+### Fixed
+
+- **A turn the engine itself reported as failed could be recorded as successful
+  work in the run ledger.** The row's `ok` was "nothing was thrown", which is a
+  weaker statement than the engine's own verdict, and three cases resolved
+  cleanly while having failed: `agy` exiting 0 with a non-SUCCESS status, a
+  `codex-app` turn cancelled through `interrupt()` (its `turn/completed` reports
+  `status: 'interrupted'`), and a `claude` or persistent `custom` CLI that dies
+  mid-turn and resolves with `stop_reason: 'process_exit'`. `ok` now reads the
+  session's own counter — the row is successful when `turnsSucceeded` moved — so
+  the ledger and `/v1/sessions` cannot disagree about the same turn. When the
+  counter cannot be read at all (a `getStats()` that throws), it falls back to
+  the old meaning rather than reporting a telemetry failure as a turn failure.
+
+  The cost of a failed turn still counts against `maxBudgetUsd`: that gate reads
+  `costUsd` and has never distinguished successful from failed work. What changes
+  is only that the row records the outcome honestly.
+
+- **`codex-app` counted an interrupted turn as a completed one.** The engine's
+  `TurnStatus` is `completed | interrupted | failed | inProgress`, and
+  `interrupt()` on that session produces `interrupted` on purpose, so testing for
+  the absence of `failed` treated a cancellation as a success.
+
+- **`agy` could report `SUCCESS` and still exit non-zero, and a failure it had
+  already reported could be erased by a later `SUCCESS` in the same turn.** The
+  status is now recorded sticky-on-failure and the exit code stays in the
+  outcome expression, so a turn whose promise rejects is never counted as one
+  that succeeded.
+
 ## [4.14.1] - 2026-08-18
 
 ### Fixed

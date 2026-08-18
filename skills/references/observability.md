@@ -43,7 +43,7 @@ every engine passes through.
 | `tokensEstimated` | `true` when the counts came from `estimateTokens()` (see below) |
 | `durationMs` | Wall-clock for the turn |
 | `toolCalls` / `toolErrors` | Per-turn deltas |
-| `ok` | `false` for a turn that threw or reported `is_error` |
+| `ok` | `false` for a turn that threw, or that the session's own `turnsSucceeded` counter did not count (see `sessions.md`). Falls back to "nothing was thrown" when the counter cannot be read |
 | `error` | Failure text, truncated to 500 chars |
 | `parent` | council id / fanout id / autoloop run id, when the turn belongs to one |
 

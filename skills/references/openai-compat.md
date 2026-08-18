@@ -148,7 +148,8 @@ Sample response:
       "model": "claude-opus-4-6",
       "cwd": "/home/user/projects",
       "created": "2026-04-09T03:12:18.441Z",
-      "turns": 14,
+      "turns": 68,
+      "turns_succeeded": 14,
       "tokens_in": 248312,
       "tokens_out": 38201,
       "cached_tokens": 198104,
@@ -158,6 +159,11 @@ Sample response:
   ]
 }
 ```
+
+`turns_succeeded` is one per request; `turns` is not comparable to it on these
+sessions — the Claude CLI emits a `user` event per tool-result batch and `turns`
+counts those, so the gap above is tool use, not failures. Compare
+`turns_succeeded` against your own request count.
 
 The single most important field is **`cached_tokens`**. If it grows turn-over-turn, the persistent CLI is being reused and Anthropic prompt caching is warming. If it stays at 0, something is killing the session every turn — check that no client is sending `X-Session-Reset` unintentionally and that `OPENAI_COMPAT_NEW_CONVO_HEURISTIC` is not set when it shouldn't be.
 
