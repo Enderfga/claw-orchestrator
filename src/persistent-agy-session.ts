@@ -294,6 +294,7 @@ export class PersistentAgySession extends BaseOneShotSession {
         } else if (text.length > 0 || code === 0) {
           this._stats.tokensIn += estimateTokens(message);
           this._stats.tokensOut += estimateTokens(text);
+          this._markTurnEstimated();
           this._updateCost();
         }
 

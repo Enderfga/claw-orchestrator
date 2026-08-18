@@ -274,6 +274,7 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
         if (!state.gotUsage && finalText.length > 0) {
           this._stats.tokensIn += estimateTokens(message);
           this._stats.tokensOut += estimateTokens(finalText);
+          this._markTurnEstimated();
           this._updateCost();
         }
 

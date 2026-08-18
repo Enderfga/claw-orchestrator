@@ -7,7 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Run ledger — a durable, cross-engine record of every turn.** Each completed
+  turn appends one JSON line to `~/.claw-orchestrator/runs/YYYY-MM-DD.jsonl`
+  (override with `CLAWO_RUNS_DIR`): session, engine, model, cwd, turn index,
+  per-turn token/cost/tool deltas, duration, success, error text, and the
+  council / fanout / autoloop id it belonged to. Until now cost and token
+  counts lived only in memory and per-session history was capped and evicted,
+  so nothing survived a restart. Writes are best-effort — a ledger failure is
+  logged and swallowed, never allowed to break the turn it describes.
+- **`clawo runs`** — query the ledger from the CLI:
+  `clawo runs [--since 30m|24h|7d|<ISO>] [--session <name>] [--engine <engine>]
+  [--parent <run id>] [-n <limit>] [--json]`. Also exposed as `GET /runs`
+  (query string or JSON body) and `manager.getRunLedger()`, both returning rows
+  plus a summary with a per-engine cost breakdown.
+- **Dashboard 24-hour spend indicator**, fed by the same endpoint.
+- `session_list` / `GET /session/list` now report `costUsd`, `budgetUsd` and
+  `budgetExhausted`, so a session that has stopped accepting turns shows why.
+- `SessionStats.tokensEstimated` marks turns whose token counts came from
+  `estimateTokens()` because the engine reported no usage. The ledger carries
+  the flag per row and `clawo runs` marks those costs with a trailing `~`, so an
+  estimate is never presented as a measurement.
+- New reference doc `skills/references/observability.md` covering the row
+  schema, the query surfaces, spend-cap semantics, and which engines report real
+  usage versus estimating it.
+
 ### Fixed
+
+- **`maxBudgetUsd` was silently ignored on every engine except Claude Code.**
+  The option is documented as "Max API spend (USD)" on `session_start`, and
+  council and fanout pass it to each agent, but the only thing it ever did was
+  append `--max-budget-usd` to the `claude` CLI — a council of Codex agents ran
+  with no cap at all. The cap is now enforced in `SessionManager`, which every
+  engine passes through: once a session's cumulative cost reaches it, further
+  sends are refused with a typed `BudgetExceededError` carrying session, engine,
+  spend and cap, before the engine is spawned. Claude Code still receives the
+  flag as well, since an in-CLI stop happens earlier and costs less. Note that
+  on engines that estimate token counts the cap is best-effort — see
+  `observability.md`.
 
 - **Claude engine sessions failed with `Invalid API key` when the host process
   carried a proxy-scoped `ANTHROPIC_API_KEY`.** The spawn environment inherits

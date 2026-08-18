@@ -75,6 +75,8 @@ export abstract class BaseOneShotSession extends EventEmitter implements ISessio
     cachedTokens: 0,
     costUsd: 0,
     lastActivity: null as string | null,
+    /** Set by _markTurnEstimated() when this turn fell back to estimateTokens(). */
+    tokensEstimated: false,
   };
 
   constructor(config: SessionConfig, bin: string, engineCfg: OneShotEngineConfig) {
@@ -128,6 +130,11 @@ export abstract class BaseOneShotSession extends EventEmitter implements ISessio
     if (!this._isReady) throw new Error('Session not ready. Call start() first.');
     const requestId = ++this.currentRequestId;
     const textMessage = typeof message === 'string' ? message : JSON.stringify(message);
+
+    // Per-turn flag: cleared here, set only if this turn takes the estimate
+    // fallback. Reading it after the turn tells the ledger whether the numbers
+    // it is about to record were measured or guessed.
+    this._stats.tokensEstimated = false;
 
     if (!options.waitForComplete) {
       const before = this._stats.tokensIn;
@@ -229,6 +236,7 @@ export abstract class BaseOneShotSession extends EventEmitter implements ISessio
       lastActivity: this._stats.lastActivity,
       contextPercent: this._contextPercent(),
       retries: 0,
+      tokensEstimated: this._stats.tokensEstimated,
       sessionId: this.sessionId,
       uptime: this._startTime ? Math.round((Date.now() - new Date(this._startTime).getTime()) / 1000) : 0,
     };
@@ -360,6 +368,15 @@ export abstract class BaseOneShotSession extends EventEmitter implements ISessio
   protected _recordTurnComplete(): void {
     this._stats.turns++;
     this._stats.lastActivity = new Date().toISOString();
+  }
+
+  /**
+   * Call from the estimateTokens() fallback branch of a subclass's _run(). Marks
+   * this turn's token counts (and therefore its cost) as estimated so the run
+   * ledger can label them instead of presenting a guess as a measurement.
+   */
+  protected _markTurnEstimated(): void {
+    this._stats.tokensEstimated = true;
   }
 
   protected _addHistory(event: { text: string; code: number | null }): void {

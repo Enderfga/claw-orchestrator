@@ -120,6 +120,15 @@ function makeDebounced(fn: () => void, ms: number): () => void {
 
 import { type Logger, createConsoleLogger } from './logger.js';
 import { CircuitBreaker } from './circuit-breaker.js';
+import {
+  appendRunRow,
+  readRunLedger,
+  summarizeRuns,
+  type RunLedgerQuery,
+  type RunLedgerRow,
+  type RunLedgerSummary,
+} from './run-ledger.js';
+import { checkBudget, isBudgetExceeded } from './budget.js';
 import { InboxManager, type SessionLookup } from './inbox-manager.js';
 import { sanitizeCwd, validateName } from './validation.js';
 import { PersistentClaudeSession } from './persistent-session.js';
@@ -200,6 +209,12 @@ interface ManagedSession {
    * thrown send still unblocks waiters.
    */
   sendChain?: Promise<unknown>;
+  /**
+   * Latched once cumulative spend reaches `config.maxBudgetUsd`. The gate in
+   * sendMessage re-derives this from getCost() anyway; the flag exists so the
+   * session listings can show *why* a session stopped accepting turns.
+   */
+  budgetExhausted?: boolean;
 }
 
 interface SendOptions {
@@ -209,6 +224,11 @@ interface SendOptions {
   timeout?: number;
   onEvent?: (event: StreamEvent) => void;
   onChunk?: (chunk: string) => void;
+  /**
+   * council id / fanout id / autoloop run id. Recorded on the run-ledger row so
+   * a multi-agent run can be reconstructed from the ledger after the fact.
+   */
+  parentRunId?: string;
 }
 
 /**
@@ -713,6 +733,15 @@ export class SessionManager {
     try {
       managed.lastActivity = Date.now();
 
+      // Spend cap, enforced here rather than per-engine. Claude Code also gets
+      // --max-budget-usd (an in-CLI stop is cheaper than an after-the-fact one),
+      // but every other engine ignores that flag, so this gate is what actually
+      // makes `maxBudgetUsd` mean something on codex/cursor/agy/opencode/custom.
+      checkBudget(this._spentUsd(managed), managed.config.maxBudgetUsd, {
+        session: name,
+        engine: managed.config.engine || 'claude',
+      });
+
       const sendOpts: Record<string, unknown> = {
         waitForComplete: true,
         timeout: options.timeout || TURN_TIMEOUT_MS,
@@ -745,37 +774,168 @@ export class SessionManager {
         };
       }
 
-      const result = await managed.session.send(message, sendOpts);
+      // Ledger bookkeeping. The snapshot/record pair brackets the one place
+      // every caller funnels through (council, fanout, autoloop, ACP,
+      // openai-compat, MCP, CLI), so a single hook covers all of them.
+      const ledgerBefore = this._statsSnapshot(managed);
+      const startedAt = Date.now();
+      let turnError: string | undefined;
 
-      // Update the resume-capable session ID if available (skip disk persist
-      // for ephemeral sessions that were started with skipPersistence)
-      const resumableId = this._managedResumeId(managed);
-      if (resumableId) {
-        managed.claudeSessionId = resumableId;
-        if (!managed.skipPersistence) {
-          this._persistSession(name, managed);
+      try {
+        const result = await managed.session.send(message, sendOpts);
+
+        // Update the resume-capable session ID if available (skip disk persist
+        // for ephemeral sessions that were started with skipPersistence)
+        const resumableId = this._managedResumeId(managed);
+        if (resumableId) {
+          managed.claudeSessionId = resumableId;
+          if (!managed.skipPersistence) {
+            this._persistSession(name, managed);
+          }
         }
-      }
 
-      if ('text' in result) {
-        // The CLI reports turn-level failures (invalid --model, auth loss) as a
-        // result event with is_error and the explanation as its text — without
-        // surfacing that here, the error text is indistinguishable from a reply.
-        const evt = (result as { event?: Record<string, unknown> }).event;
-        return {
-          output: result.text,
-          sessionId: this._managedResumeId(managed),
-          error: evt?.is_error ? String((evt.result as string) || result.text || 'turn failed') : undefined,
-          events: [],
-        };
-      }
+        if ('text' in result) {
+          // The CLI reports turn-level failures (invalid --model, auth loss) as a
+          // result event with is_error and the explanation as its text — without
+          // surfacing that here, the error text is indistinguishable from a reply.
+          const evt = (result as { event?: Record<string, unknown> }).event;
+          if (evt?.is_error) {
+            turnError = String((evt.result as string) || result.text || 'turn failed');
+          }
+          return {
+            output: result.text,
+            sessionId: this._managedResumeId(managed),
+            error: turnError,
+            events: [],
+          };
+        }
 
-      return { output: '', sessionId: this._managedResumeId(managed), events: [] };
+        return { output: '', sessionId: this._managedResumeId(managed), events: [] };
+      } catch (err) {
+        turnError = (err as Error).message;
+        throw err;
+      } finally {
+        this._recordRunTurn(name, managed, ledgerBefore, startedAt, turnError, options.parentRunId);
+      }
     } finally {
       releaseChain();
       // If this was the tail of the chain, clear it so memory doesn't grow.
       if (managed.sendChain === link) managed.sendChain = undefined;
     }
+  }
+
+  // ─── Run ledger + budget bookkeeping ───────────────────────────────────
+  //
+  // Every helper here is defensive by design: a session that throws from
+  // getCost()/getStats() (unknown model pricing, engine already torn down)
+  // must degrade to "no data" rather than fail the turn it is measuring.
+
+  /** Cumulative USD this session has spent, or 0 when the engine can't say. */
+  private _spentUsd(managed: ManagedSession): number {
+    try {
+      const total = managed.session.getCost()?.totalUsd;
+      return Number.isFinite(total) ? total : 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  private _statsSnapshot(managed: ManagedSession): {
+    turns: number;
+    tokensIn: number;
+    tokensOut: number;
+    cachedTokens: number;
+    toolCalls: number;
+    toolErrors: number;
+    costUsd: number;
+  } {
+    const empty = { turns: 0, tokensIn: 0, tokensOut: 0, cachedTokens: 0, toolCalls: 0, toolErrors: 0, costUsd: 0 };
+    try {
+      const st = managed.session.getStats();
+      return {
+        turns: st.turns || 0,
+        tokensIn: st.tokensIn || 0,
+        tokensOut: st.tokensOut || 0,
+        cachedTokens: st.cachedTokens || 0,
+        toolCalls: st.toolCalls || 0,
+        toolErrors: st.toolErrors || 0,
+        costUsd: this._spentUsd(managed),
+      };
+    } catch {
+      return empty;
+    }
+  }
+
+  /**
+   * Append one ledger row for the turn that just settled, and latch
+   * budgetExhausted when this turn took the session over its cap.
+   *
+   * Rows carry per-turn deltas rather than session totals so that summing a
+   * query gives the spend for that window without double-counting.
+   */
+  private _recordRunTurn(
+    name: string,
+    managed: ManagedSession,
+    before: ReturnType<SessionManager['_statsSnapshot']>,
+    startedAt: number,
+    error: string | undefined,
+    parent: string | undefined,
+  ): void {
+    const after = this._statsSnapshot(managed);
+    const delta = (a: number, b: number): number => Math.max(0, a - b);
+    const row: RunLedgerRow = {
+      ts: new Date().toISOString(),
+      session: name,
+      engine: (managed.config.engine || 'claude') as EngineType,
+      cwd: managed.cwd,
+      turn: after.turns || before.turns + 1,
+      tokensIn: delta(after.tokensIn, before.tokensIn),
+      tokensOut: delta(after.tokensOut, before.tokensOut),
+      cachedTokens: delta(after.cachedTokens, before.cachedTokens),
+      costUsd: Math.round(delta(after.costUsd, before.costUsd) * 10000) / 10000,
+      tokensEstimated: this._turnWasEstimated(managed),
+      durationMs: Date.now() - startedAt,
+      toolCalls: delta(after.toolCalls, before.toolCalls),
+      toolErrors: delta(after.toolErrors, before.toolErrors),
+      ok: !error,
+    };
+    // Fall back to the engine's own reported model, so a session started
+    // without an explicit `model` still records what actually answered.
+    const model = managed.config.resolvedModel || managed.config.model || this._reportedModel(managed);
+    if (model) row.model = model;
+    if (error) row.error = error.slice(0, 500);
+    if (parent) row.parent = parent;
+
+    appendRunRow(row, this.logger);
+
+    if (isBudgetExceeded(after.costUsd, managed.config.maxBudgetUsd)) {
+      managed.budgetExhausted = true;
+    }
+  }
+
+  private _reportedModel(managed: ManagedSession): string | undefined {
+    try {
+      return managed.session.getCost()?.model || undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private _turnWasEstimated(managed: ManagedSession): boolean {
+    try {
+      return managed.session.getStats().tokensEstimated === true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Query the durable run ledger. Unlike getStats()/getCost(), this survives a
+   * process restart and covers sessions this manager never owned.
+   */
+  getRunLedger(query: RunLedgerQuery = {}): { rows: RunLedgerRow[]; summary: RunLedgerSummary } {
+    const rows = readRunLedger(query, this.logger);
+    return { rows, summary: summarizeRuns(rows) };
   }
 
   async stopSession(name: string, opts: { keepPersisted?: boolean } = {}): Promise<void> {
@@ -1964,7 +2124,8 @@ export class SessionManager {
     const stats = managed.session.getStats();
     const resumeSessionId = this._managedResumeId(managed);
     if (resumeSessionId) managed.claudeSessionId = resumeSessionId;
-    return {
+    const costUsd = this._spentUsd(managed);
+    const info: SessionInfo = {
       name,
       claudeSessionId: resumeSessionId,
       created: managed.created,
@@ -1972,7 +2133,13 @@ export class SessionManager {
       model: managed.config.resolvedModel || managed.config.model,
       paused: false,
       stats,
+      costUsd: Math.round(costUsd * 10000) / 10000,
     };
+    if (managed.config.maxBudgetUsd) {
+      info.budgetUsd = managed.config.maxBudgetUsd;
+      info.budgetExhausted = managed.budgetExhausted || isBudgetExceeded(costUsd, managed.config.maxBudgetUsd);
+    }
+    return info;
   }
 
   private _resolveModel(alias: string, overrides?: Record<string, string>): string {

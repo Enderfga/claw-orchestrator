@@ -203,6 +203,7 @@ export class PersistentCursorSession extends BaseOneShotSession {
           this._stats.tokensIn += estimateTokens(message);
           this._stats.tokensOut += estimateTokens(resultText.value);
           this._updateCost();
+          this._markTurnEstimated();
         }
 
         this._addHistory({ text: resultText.value, code });

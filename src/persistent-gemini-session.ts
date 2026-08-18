@@ -182,6 +182,7 @@ export class PersistentGeminiSession extends BaseOneShotSession {
         if (!gotUsageFromEvents && resultText.value.length > 0) {
           this._stats.tokensIn += estimateTokens(message);
           this._stats.tokensOut += estimateTokens(resultText.value);
+          this._markTurnEstimated();
           this._updateCost();
         }
 

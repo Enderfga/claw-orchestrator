@@ -330,6 +330,33 @@ program
   });
 
 program
+  .command('runs')
+  .description('Show the durable run ledger — one row per turn, across engines, surviving restarts')
+  .option('-s, --since <window>', 'Only turns since this point: 30m / 24h / 7d, or an ISO timestamp', '24h')
+  .option('-n, --limit <n>', 'Max rows', '50')
+  .option('--session <name>', 'Filter by session name')
+  .option('--engine <engine>', 'Filter by engine')
+  .option('--parent <id>', 'Filter by council / fanout / autoloop run id')
+  .option('--json', 'Emit raw JSON instead of a table')
+  .action(async (opts) => {
+    const params = new URLSearchParams({ since: opts.since, limit: String(parseInt(opts.limit, 10) || 50) });
+    if (opts.session) params.set('session', opts.session);
+    if (opts.engine) params.set('engine', opts.engine);
+    if (opts.parent) params.set('parent', opts.parent);
+    const r = await api(`/runs?${params.toString()}`);
+    if (!r.ok) {
+      console.error(`Failed: ${r.error}`);
+      return;
+    }
+    if (opts.json) {
+      console.log(JSON.stringify({ rows: r.rows, summary: r.summary }, null, 2));
+      return;
+    }
+    const { formatRunTable } = await import('../src/run-ledger.js');
+    console.log(formatRunTable((r.rows || []) as Parameters<typeof formatRunTable>[0]));
+  });
+
+program
   .command('session-grep <name> <pattern>')
   .description('Search session history')
   .option('-n, --limit <n>', 'Max results', '50')

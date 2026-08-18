@@ -20,7 +20,7 @@ Start a persistent coding session with full CLI flag support.
 | `allowedTools` | string[] | Tools to auto-approve |
 | `disallowedTools` | string[] | Tools to deny |
 | `maxTurns` | number | Max agent loop turns |
-| `maxBudgetUsd` | number | Max API spend (USD) |
+| `maxBudgetUsd` | number | Max API spend (USD). Enforced by the runtime on every engine: once the session's cumulative cost reaches the cap, further sends are refused before the engine is spawned. See [observability.md](observability.md) for the accuracy caveat on engines that estimate token counts. |
 | `systemPrompt` | string | Replace system prompt |
 | `appendSystemPrompt` | string | Append to system prompt |
 | `agents` | object | Custom sub-agents JSON |

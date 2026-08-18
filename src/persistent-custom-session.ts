@@ -104,6 +104,8 @@ export class PersistentCustomSession extends EventEmitter implements ISession {
     cachedTokens: 0,
     costUsd: 0,
     lastActivity: null as string | null,
+    /** True when this turn's token counts came from estimateTokens(). */
+    tokensEstimated: false,
   };
 
   constructor(config: SessionConfig) {
@@ -340,6 +342,10 @@ export class PersistentCustomSession extends EventEmitter implements ISession {
   ): Promise<TurnResult | { requestId: number; sent: boolean }> {
     if (!this._isReady) throw new Error('Session not ready. Call start() first.');
 
+    // Cleared per turn; set only by the estimate fallback below, so the run
+    // ledger can tell measured usage from a guess.
+    this._stats.tokensEstimated = false;
+
     if (this.engineConfig.persistent) {
       return this._sendPersistent(message, options);
     } else {
@@ -540,6 +546,7 @@ export class PersistentCustomSession extends EventEmitter implements ISession {
           this._stats.tokensIn += estimateTokens(message);
           this._stats.tokensOut += estimateTokens(resultText.value);
           this._updateCost();
+          this._stats.tokensEstimated = true;
         }
 
         this._history.push({ time: now, type: 'result', event: { text: resultText.value, code } });
@@ -917,6 +924,7 @@ export class PersistentCustomSession extends EventEmitter implements ISession {
         ? Math.min(100, Math.round(((this._stats.tokensIn + this._stats.tokensOut) / ctxWindow) * 100))
         : 0,
       retries: 0,
+      tokensEstimated: this._stats.tokensEstimated,
       sessionId: this.sessionId,
       uptime: this._startTime ? Math.round((Date.now() - new Date(this._startTime).getTime()) / 1000) : 0,
     };

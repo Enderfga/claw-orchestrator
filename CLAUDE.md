@@ -23,6 +23,8 @@ support. Key source files:
 | `src/persistent-custom-session.ts` | Custom engine — any CLI via user-provided `CustomEngineConfig` |
 | `src/council.ts` | Multi-agent collaboration engine with git worktree isolation and post-processing |
 | `src/consensus.ts` | Consensus voting parser for council |
+| `src/run-ledger.ts` | Durable per-turn record (`~/.claw-orchestrator/runs/*.jsonl`) — append, query, summarize |
+| `src/budget.ts` | Runtime-enforced `maxBudgetUsd` spend cap (all engines, not just Claude Code) |
 | `src/models.ts` | Centralized model registry — pricing, aliases, engine/provider mapping |
 | `src/types.ts` | Shared types, interfaces; re-exports from `models.ts` |
 | `src/logger.ts` | Structured `Logger` interface + console implementation |
@@ -78,6 +80,7 @@ When you change functionality, update the corresponding reference file:
 | Council protocol | `skills/references/council.md` |
 | Inbox messaging | `skills/references/inbox.md` |
 | Ultraplan/Ultrareview | `skills/references/ultra.md` |
+| Run ledger / cost / spend caps | `skills/references/observability.md` |
 | CLI commands | `skills/references/cli.md` |
 | Setup / prerequisites | `skills/references/getting-started.md` |
 | New feature or tool | Also update `skills/SKILL.md` description for trigger keywords |

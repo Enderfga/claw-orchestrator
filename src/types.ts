@@ -375,6 +375,12 @@ export interface SessionStats {
   cursorChatId?: string;
   /** OpenCode session ID captured from the run's JSON output. Reused via `--session` for multi-turn context. */
   opencodeSessionId?: string;
+  /**
+   * True when the most recent turn's token counts came from estimateTokens()
+   * because the engine reported no usage. Cost derived from those counts is an
+   * estimate; the run ledger and budget docs surface it as such.
+   */
+  tokensEstimated?: boolean;
 }
 
 // ─── Hook Config ─────────────────────────────────────────────────────────────
@@ -410,6 +416,11 @@ export interface SendOptions {
   stream?: boolean;
   onChunk?: (chunk: string) => void;
   onEvent?: (event: StreamEvent) => void;
+  /**
+   * council id / fanout id / autoloop run id. Stamped onto the run-ledger row
+   * so a multi-agent run can be reassembled from the ledger afterwards.
+   */
+  parentRunId?: string;
 }
 
 // ─── Stream Events ───────────────────────────────────────────────────────────
@@ -443,6 +454,12 @@ export interface SessionInfo {
   model?: string;
   paused: boolean;
   stats: SessionStats;
+  /** Cumulative USD spent by this session, as reported by the engine's cost model. */
+  costUsd?: number;
+  /** The session's spend cap, when one was configured via `maxBudgetUsd`. */
+  budgetUsd?: number;
+  /** True once `costUsd` reached `budgetUsd` — further turns are refused. */
+  budgetExhausted?: boolean;
 }
 
 export interface SendResult {

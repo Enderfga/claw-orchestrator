@@ -443,6 +443,24 @@ export class EmbeddedServer {
         return;
       }
 
+      // Durable run ledger. Unlike /session/cost this outlives the process and
+      // covers sessions this server never owned. GET (query string) and POST
+      // (JSON body) both work; the body wins when both supply a field.
+      if (path === '/runs') {
+        const pick = (key: string): string | undefined =>
+          (body[key] as string | undefined) ?? query.get(key) ?? undefined;
+        const limitRaw = pick('limit');
+        const { rows, summary } = this.manager.getRunLedger({
+          since: pick('since'),
+          session: pick('session'),
+          engine: pick('engine'),
+          parent: pick('parent'),
+          limit: limitRaw ? Number(limitRaw) : undefined,
+        });
+        json(200, { ok: true, rows, summary });
+        return;
+      }
+
       if (path === '/session/model') {
         this.manager.setModel(body.name as string, body.model as string);
         json(200, { ok: true });

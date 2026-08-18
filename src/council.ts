@@ -492,6 +492,7 @@ export class Council extends EventEmitter {
         // Send the prompt and wait for completion
         const result = await this.manager.sendMessage(sessionName, prompt, {
           timeout: this.agentTimeoutMs,
+          parentRunId: sessionId,
           onChunk: (chunk: string) => {
             this.emitEvent({ type: 'agent-chunk', sessionId, round, agent: agent.name, content: chunk });
           },
@@ -517,7 +518,7 @@ export class Council extends EventEmitter {
             const followup = await this.manager.sendMessage(
               sessionName,
               'Stop all tool calls. Output your complete report now, including your consensus vote [CONSENSUS: YES] or [CONSENSUS: NO].',
-              { timeout: FOLLOWUP_TIMEOUT_MS },
+              { timeout: FOLLOWUP_TIMEOUT_MS, parentRunId: sessionId },
             );
             if (followup.output.trim().length > 0) {
               content = followup.output;

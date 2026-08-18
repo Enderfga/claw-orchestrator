@@ -134,6 +134,19 @@ clawo session-grep <name> <pattern> [-n, --limit <n>]
 clawo session-compact <name> [--summary <text>]
 ```
 
+## Run Ledger
+
+```bash
+clawo runs [--since <window>] [-n, --limit <n>] [--session <name>] [--engine <engine>] [--parent <id>] [--json]
+```
+
+Show the durable per-turn record kept at `~/.claw-orchestrator/runs/`. Unlike
+`session-status`, this survives restarts and covers sessions this process never
+owned. `--since` takes `30m` / `24h` / `7d` / `2w` or an ISO timestamp (default
+`24h`); `--parent` filters to one council / fanout / autoloop run. Costs marked
+with a trailing `~` came from estimated token counts. See
+[observability.md](observability.md).
+
 ## Agent Management
 
 ```bash

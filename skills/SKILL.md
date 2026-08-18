@@ -1,6 +1,6 @@
 ---
 name: claw-orchestrator
-description: Manage persistent coding sessions across Claude Code, Codex, Antigravity (agy), Cursor, and OpenCode engines. Use when orchestrating multi-engine coding agents, starting/sending/stopping sessions, running multi-agent council collaborations, cross-session messaging, ultraplan deep planning, ultrareview parallel code review, autoloop autonomous workspace iteration, ultraapp building deployable web apps from a structured Q&A interview, switching models/tools at runtime, exposing the orchestrator's 69 tools as an MCP server to Hermes Agent / Claude Desktop / Cursor / Cline / Continue / Zed / Windsurf / Goose, or running as an Agent Client Protocol (ACP) agent that Zed / JetBrains / Neovim / Emacs / VS Code / dsh can drive directly. Triggers on "start a session", "send to session", "run council", "ultraplan", "ultrareview", "autoloop", "ultraapp", "Forge tab", "build a web app", "one-click app", "AppSpec", "autonomous iteration", "iterate until goal", "deep paper review", "auto research", "switch model", "multi-agent", "coding session", "session inbox", "cursor agent", "opencode", "mcp server", "clawo-mcp", "hermes mcp", "model context protocol", "ultracode", "dynamic workflow", "fanout", "fan-out", "best-of-N", "steer turn", "interrupt turn", "fork thread", "rollback turns", "acp", "agent client protocol", "clawo acp", "zed agent", "jetbrains agent", "external agent", "dsh subagent", "deepseek harness".
+description: Manage persistent coding sessions across Claude Code, Codex, Antigravity (agy), Cursor, and OpenCode engines. Use when orchestrating multi-engine coding agents, starting/sending/stopping sessions, running multi-agent council collaborations, cross-session messaging, ultraplan deep planning, ultrareview parallel code review, autoloop autonomous workspace iteration, ultraapp building deployable web apps from a structured Q&A interview, switching models/tools at runtime, exposing the orchestrator's 69 tools as an MCP server to Hermes Agent / Claude Desktop / Cursor / Cline / Continue / Zed / Windsurf / Goose, or running as an Agent Client Protocol (ACP) agent that Zed / JetBrains / Neovim / Emacs / VS Code / dsh can drive directly. Triggers on "start a session", "send to session", "run council", "ultraplan", "ultrareview", "autoloop", "ultraapp", "Forge tab", "build a web app", "one-click app", "AppSpec", "autonomous iteration", "iterate until goal", "deep paper review", "auto research", "switch model", "multi-agent", "coding session", "session inbox", "cursor agent", "opencode", "mcp server", "clawo-mcp", "hermes mcp", "model context protocol", "ultracode", "dynamic workflow", "fanout", "fan-out", "best-of-N", "steer turn", "interrupt turn", "fork thread", "rollback turns", "acp", "agent client protocol", "clawo acp", "zed agent", "jetbrains agent", "external agent", "dsh subagent", "deepseek harness", "clawo runs", "run ledger", "how much did it cost", "token usage", "spend cap", "budget limit", "maxBudgetUsd".
 metadata:
   {
     "openclaw":
@@ -207,6 +207,22 @@ grouped by engine, so one dropdown spans Claude, Codex and Cursor and switching 
 engine mid-session.
 
 For setup, the dsh YAML block, and the cancellation/permission limits: see [references/acp.md](references/acp.md)
+
+## Cost & spend caps
+
+Every turn on every engine is appended to a durable ledger at
+`~/.claw-orchestrator/runs/YYYY-MM-DD.jsonl` — engine, model, per-turn tokens, cost, duration,
+and the council / fanout / autoloop it belonged to. Query it with `clawo runs [--since 24h]
+[--engine X] [--parent <run id>] [--json]`, `GET /runs`, or `manager.getRunLedger()`; it
+survives restarts, so it answers "what did we run today and what did it cost" after the
+sessions are gone.
+
+`maxBudgetUsd` on a session (or per council / fanout agent) is enforced by the runtime, so it
+holds on Codex, Cursor, agy, OpenCode and custom engines too — not just Claude Code. Once
+cumulative spend reaches the cap, further sends are refused before the engine is spawned.
+
+For the row schema, the query surfaces, and which engines report real token usage versus
+estimating it: see [references/observability.md](references/observability.md)
 
 ## Authentication Prerequisites
 

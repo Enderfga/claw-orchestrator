@@ -804,6 +804,7 @@
           <button class="tab" role="tab" aria-selected="false" data-tab="forge">Forge</button>
         </nav>
         <div class="grow"></div>
+        <small id="spend" title="Spend recorded in the run ledger over the last 24h, across every engine"></small>
         <small id="status">connected</small>
       </header>
 
@@ -1002,6 +1003,29 @@
         }
       }
       setInterval(refreshList, 5000);
+
+      // ─── Spend (run ledger) ───────────────────────────────────────
+      // The ledger is durable and cross-process, so this reflects every turn
+      // this host ran in the window — not just runs visible in the list above.
+      async function refreshSpend() {
+        try {
+          const r = await fetch('/runs?since=24h&limit=2000');
+          const j = await r.json();
+          if (!j.ok || !j.summary) return;
+          const s = j.summary;
+          const est = s.estimatedRows > 0 ? ' ~' : '';
+          $('spend').textContent = '24h: $' + (s.costUsd || 0).toFixed(2) + ' / ' + s.rows + ' turns' + est;
+          $('spend').title =
+            'Spend recorded in the run ledger over the last 24h, across every engine.' +
+            (s.estimatedRows > 0
+              ? ' ~ ' + s.estimatedRows + ' turn(s) used estimated token counts (engine reported no usage).'
+              : '');
+        } catch (err) {
+          /* ledger is best-effort telemetry — never break the dashboard over it */
+        }
+      }
+      refreshSpend();
+      setInterval(refreshSpend, 30000);
 
       function renderList() {
         const ul = $('runlist');

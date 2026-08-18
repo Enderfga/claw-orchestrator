@@ -150,6 +150,7 @@ export class Fanout {
       });
       const result = await this.manager.sendMessage(sessionName, spec.prompt || this.config.task, {
         timeout: this.config.agentTimeoutMs ?? DEFAULT_AGENT_TIMEOUT_MS,
+        parentRunId: this.session.id,
       });
       return {
         agent: spec.name,
@@ -197,6 +198,7 @@ export class Fanout {
       });
       const result = await this.manager.sendMessage(sessionName, prompt, {
         timeout: this.config.agentTimeoutMs ?? DEFAULT_AGENT_TIMEOUT_MS,
+        parentRunId: this.session.id,
       });
       return result.output;
     } catch (err) {
