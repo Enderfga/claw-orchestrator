@@ -1,9 +1,9 @@
 /**
  * Unit tests for PersistentAgySession
  *
- * Tests flag construction, plain-text collection, conversation-ID harvesting
- * from the agy log file, timeout coherence, and stats tracking. Uses vitest
- * mocks for child_process.spawn to avoid spawning real processes.
+ * Tests flag construction, stream-json/plain-text collection, conversation-ID
+ * capture, timeout coherence, and stats tracking. Uses vitest mocks for
+ * child_process.spawn to avoid spawning real processes.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -217,6 +217,139 @@ describe('PersistentAgySession', () => {
       const idx = spawnArgs.indexOf('--model');
       expect(idx).toBeGreaterThan(-1);
       expect(spawnArgs[idx + 1]).toBe('gemini-3.1-pro');
+    });
+
+    it('passes the session reasoning effort to agy', async () => {
+      const session = new PersistentAgySession({
+        name: 'test',
+        cwd: '/tmp',
+        permissionMode: 'bypassPermissions',
+        model: 'gemini-3.5-flash',
+        effort: 'high',
+      });
+      await session.start();
+
+      const sendPromise = session.send('hello', { waitForComplete: true });
+      setTimeout(() => closeProc(mockProc, 0), 10);
+      await sendPromise;
+
+      const spawnArgs = mockSpawn.mock.calls[0][1] as string[];
+      const idx = spawnArgs.indexOf('--effort');
+      expect(idx).toBeGreaterThan(-1);
+      expect(spawnArgs[idx + 1]).toBe('high');
+    });
+
+    it('lets a per-turn reasoning effort override the session default', async () => {
+      const session = new PersistentAgySession({
+        name: 'test',
+        cwd: '/tmp',
+        permissionMode: 'bypassPermissions',
+        effort: 'high',
+      });
+      await session.start();
+
+      const sendPromise = session.send('hello', { waitForComplete: true, effort: 'medium' });
+      setTimeout(() => closeProc(mockProc, 0), 10);
+      await sendPromise;
+
+      const spawnArgs = mockSpawn.mock.calls[0][1] as string[];
+      const idx = spawnArgs.indexOf('--effort');
+      expect(spawnArgs[idx + 1]).toBe('medium');
+      expect(spawnArgs.filter((arg) => arg === '--effort')).toHaveLength(1);
+    });
+
+    it.each(['max', 'xhigh'] as const)('maps engine-wide %s effort to agy high', async (effort) => {
+      const session = new PersistentAgySession({
+        name: 'test',
+        cwd: '/tmp',
+        permissionMode: 'bypassPermissions',
+        effort,
+      });
+      await session.start();
+
+      const sendPromise = session.send('hello', { waitForComplete: true });
+      setTimeout(() => closeProc(mockProc, 0), 10);
+      await sendPromise;
+
+      const spawnArgs = mockSpawn.mock.calls[0][1] as string[];
+      const idx = spawnArgs.indexOf('--effort');
+      expect(spawnArgs[idx + 1]).toBe('high');
+    });
+
+    it('uses agy high for an unsuffixed model when effort is auto', async () => {
+      const session = new PersistentAgySession({
+        name: 'test',
+        cwd: '/tmp',
+        permissionMode: 'bypassPermissions',
+        model: 'gemini-3.5-flash',
+        effort: 'auto',
+      });
+      await session.start();
+
+      const sendPromise = session.send('hello', { waitForComplete: true });
+      setTimeout(() => closeProc(mockProc, 0), 10);
+      await sendPromise;
+
+      const spawnArgs = mockSpawn.mock.calls[0][1] as string[];
+      const idx = spawnArgs.indexOf('--effort');
+      expect(spawnArgs[idx + 1]).toBe('high');
+    });
+
+    it('omits --effort for auto when no model is selected', async () => {
+      const session = new PersistentAgySession({
+        name: 'test',
+        cwd: '/tmp',
+        permissionMode: 'bypassPermissions',
+        effort: 'auto',
+      });
+      await session.start();
+
+      const sendPromise = session.send('hello', { waitForComplete: true });
+      setTimeout(() => closeProc(mockProc, 0), 10);
+      await sendPromise;
+
+      const spawnArgs = mockSpawn.mock.calls[0][1] as string[];
+      expect(spawnArgs).not.toContain('--effort');
+    });
+
+    it('does not duplicate effort for an effort-qualified model slug', async () => {
+      const session = new PersistentAgySession({
+        name: 'test',
+        cwd: '/tmp',
+        permissionMode: 'bypassPermissions',
+        model: 'gemini-3.7-flash-high',
+        effort: 'auto',
+      });
+      await session.start();
+
+      const sendPromise = session.send('hello', { waitForComplete: true });
+      setTimeout(() => closeProc(mockProc, 0), 10);
+      await sendPromise;
+
+      const spawnArgs = mockSpawn.mock.calls[0][1] as string[];
+      expect(spawnArgs).toContain('gemini-3.7-flash-high');
+      expect(spawnArgs).not.toContain('--effort');
+    });
+
+    it('strips a conflicting model effort suffix for a per-turn override', async () => {
+      const session = new PersistentAgySession({
+        name: 'test',
+        cwd: '/tmp',
+        permissionMode: 'bypassPermissions',
+        model: 'gemini-3.7-flash-low',
+        effort: 'auto',
+      });
+      await session.start();
+
+      const sendPromise = session.send('hello', { waitForComplete: true, effort: 'high' });
+      setTimeout(() => closeProc(mockProc, 0), 10);
+      await sendPromise;
+
+      const spawnArgs = mockSpawn.mock.calls[0][1] as string[];
+      const modelIdx = spawnArgs.indexOf('--model');
+      const effortIdx = spawnArgs.indexOf('--effort');
+      expect(spawnArgs[modelIdx + 1]).toBe('gemini-3.7-flash');
+      expect(spawnArgs[effortIdx + 1]).toBe('high');
     });
   });
 
