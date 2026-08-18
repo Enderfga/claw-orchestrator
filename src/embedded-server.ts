@@ -583,6 +583,7 @@ export class EmbeddedServer {
               cwd: s.cwd,
               created: s.created,
               turns: stats?.turns,
+              turns_succeeded: stats?.turnsSucceeded,
               tokens_in: stats?.tokensIn,
               tokens_out: stats?.tokensOut,
               cached_tokens: stats?.cachedTokens,

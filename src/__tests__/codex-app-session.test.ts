@@ -187,6 +187,45 @@ describe('PersistentCodexAppServerSession v2 RPCs', () => {
     }, 5);
     await expect(p).rejects.toThrow(/turn failed/i);
     expect(session.getStats().toolErrors).toBe(1);
+    // The notification counts the turn and reports that it failed, in the same payload.
+    expect(session.getStats().turns).toBe(1);
+    expect(session.getStats().turnsSucceeded).toBe(0);
+  });
+
+  // The engine's TurnStatus is `completed | interrupted | failed | inProgress`, and
+  // `interrupt()` on this class produces `interrupted` on purpose. Testing for the
+  // absence of `failed` counted a cancelled turn as a success.
+  it('does not count an interrupted turn as succeeded, and counts a completed one', async () => {
+    const proc = createMockProc(defaultResponder());
+    const session = await startSession(proc);
+
+    const p1 = session.send('do it', { waitForComplete: true });
+    setTimeout(() => {
+      proc.stdout.push(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          method: 'turn/completed',
+          params: { threadId: 't1', turn: { id: 'turnI', status: 'interrupted' } },
+        }) + '\n',
+      );
+    }, 5);
+    await p1.catch(() => undefined);
+    expect(session.getStats().turns).toBe(1);
+    expect(session.getStats().turnsSucceeded).toBe(0);
+
+    const p2 = session.send('do it again', { waitForComplete: true });
+    setTimeout(() => {
+      proc.stdout.push(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          method: 'turn/completed',
+          params: { threadId: 't1', turn: { id: 'turnC', status: 'completed' } },
+        }) + '\n',
+      );
+    }, 5);
+    await p2;
+    expect(session.getStats().turns).toBe(2);
+    expect(session.getStats().turnsSucceeded).toBe(1);
   });
 
   it('steer() falls back to a normal turn when idle (no in-flight turn)', async () => {

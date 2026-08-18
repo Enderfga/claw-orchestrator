@@ -798,6 +798,12 @@ export class SessionManager {
           // The CLI reports turn-level failures (invalid --model, auth loss) as a
           // result event with is_error and the explanation as its text — without
           // surfacing that here, the error text is indistinguishable from a reply.
+          //
+          // Deliberately NOT widened to `stop_reason === 'error'`: agy reaches this
+          // point with that stop reason while carrying a usable reply, and `error` is
+          // read as a hard failure downstream — openai-compat answers 502 and drops
+          // the reply, ultraplan discards the plan. The ledger learns the outcome from
+          // the session's own counter instead (see `_recordRunTurn`).
           const evt = (result as { event?: Record<string, unknown> }).event;
           if (evt?.is_error) {
             turnError = String((evt.result as string) || result.text || 'turn failed');
@@ -842,6 +848,7 @@ export class SessionManager {
 
   private _statsSnapshot(managed: ManagedSession): {
     turns: number;
+    turnsSucceeded: number;
     tokensIn: number;
     tokensOut: number;
     cachedTokens: number;
@@ -849,11 +856,21 @@ export class SessionManager {
     toolErrors: number;
     costUsd: number;
   } {
-    const empty = { turns: 0, tokensIn: 0, tokensOut: 0, cachedTokens: 0, toolCalls: 0, toolErrors: 0, costUsd: 0 };
+    const empty = {
+      turns: 0,
+      turnsSucceeded: 0,
+      tokensIn: 0,
+      tokensOut: 0,
+      cachedTokens: 0,
+      toolCalls: 0,
+      toolErrors: 0,
+      costUsd: 0,
+    };
     try {
       const st = managed.session.getStats();
       return {
         turns: st.turns || 0,
+        turnsSucceeded: st.turnsSucceeded || 0,
         tokensIn: st.tokensIn || 0,
         tokensOut: st.tokensOut || 0,
         cachedTokens: st.cachedTokens || 0,
@@ -897,7 +914,14 @@ export class SessionManager {
       durationMs: Date.now() - startedAt,
       toolCalls: delta(after.toolCalls, before.toolCalls),
       toolErrors: delta(after.toolErrors, before.toolErrors),
-      ok: !error,
+      // One signal, not two predicates: the row is successful when the session's own
+      // counter moved, so `ok` and `stats.turnsSucceeded` cannot disagree. `turns` is the
+      // guard — when no turn was recorded at all (a getStats() that threw and left both
+      // snapshots empty, so the counter cannot be read) this falls back to "nothing was
+      // thrown", which is what the field meant before. The counter is also what closes
+      // `stop_reason: 'process_exit'`: a CLI that dies mid-turn resolves without a result
+      // event, so the counter never moves and the row is no longer recorded as a success.
+      ok: !error && (after.turns > before.turns ? after.turnsSucceeded > before.turnsSucceeded : true),
     };
     // Fall back to the engine's own reported model, so a session started
     // without an explicit `model` still records what actually answered.
@@ -1325,6 +1349,7 @@ export class SessionManager {
       busy: boolean;
       paused: boolean;
       turns: number;
+      turnsSucceeded: number;
       costUsd: number;
       contextPercent: number;
       lastActivity: string | null;
@@ -1339,6 +1364,7 @@ export class SessionManager {
         busy: managed.session.isBusy,
         paused: managed.session.isPaused,
         turns: stats.turns,
+        turnsSucceeded: stats.turnsSucceeded,
         costUsd: stats.costUsd,
         contextPercent: stats.contextPercent,
         lastActivity: stats.lastActivity,

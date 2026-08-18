@@ -263,6 +263,10 @@ interface ISession {
 }
 ```
 
+`SessionStats` requires `turnsSucceeded` as well as `turns`, so an engine that
+implements this interface has to say which of its turns succeeded — the exit code
+is not the answer on every engine. See "Stats & Monitoring" in `sessions.md`.
+
 ## Team Tools Across Engines
 
 Team tools (`team_list`, `team_send`) operate on the same virtual-team layer for **every** engine: the "team" is the set of all active sessions managed by SessionManager.

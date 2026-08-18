@@ -502,6 +502,22 @@ describe('PersistentClaudeSession', () => {
       const event = { type: 'user', message: { role: 'user', content: 'hi' } };
       mockProc.stdout.emit('data', Buffer.from(JSON.stringify(event) + '\n'));
       expect(session.stats.turns).toBe(1);
+      // The echo of the message going out: no result exists yet, so nothing has
+      // succeeded. This is what keeps `turnsSucceeded` from inheriting `turns`'
+      // meaning here.
+      expect(session.stats.turnsSucceeded).toBe(0);
+    });
+
+    it('counts turnsSucceeded on a clean result and not on an is_error one', () => {
+      const ok = { type: 'result', result: 'done' };
+      mockProc.stdout.emit('data', Buffer.from(JSON.stringify(ok) + '\n'));
+      expect(session.stats.turnsSucceeded).toBe(1);
+
+      // The CLI reports turn-level failures (invalid --model, auth loss) as a
+      // result event carrying is_error.
+      const bad = { type: 'result', result: 'model not found', is_error: true };
+      mockProc.stdout.emit('data', Buffer.from(JSON.stringify(bad) + '\n'));
+      expect(session.stats.turnsSucceeded).toBe(1);
     });
 
     it('emits RESULT and TURN_COMPLETE on result event', () => {

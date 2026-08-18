@@ -274,6 +274,10 @@ describe('PersistentGeminiSession', () => {
 
       const result = await sendPromise;
       expect('event' in result && (result.event as Record<string, unknown>).stop_reason).toBe('turn_limit');
+      // The turn limit resolves, so it is a completion: it counts as succeeded.
+      const stats = session.getStats();
+      expect(stats.turns).toBe(1);
+      expect(stats.turnsSucceeded).toBe(1);
     });
 
     it('rejects on non-zero exit with no output', async () => {

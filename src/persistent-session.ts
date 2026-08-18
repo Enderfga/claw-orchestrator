@@ -43,6 +43,7 @@ import {
 
 interface InternalStats {
   turns: number;
+  turnsSucceeded: number;
   toolCalls: number;
   toolErrors: number;
   tokensIn: number;
@@ -86,6 +87,7 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
     };
     this.stats = {
       turns: 0,
+      turnsSucceeded: 0,
       toolCalls: 0,
       toolErrors: 0,
       tokensIn: 0,
@@ -591,6 +593,13 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
           this.stats.cachedTokens += usage.cache_read_input_tokens || 0;
           this._updateCost();
         }
+        // The result event is the only place the outcome is known, and it arrives once
+        // per send — unlike the `user` echo that drives `turns`, which the CLI also
+        // emits per tool-result batch. `is_error` is read as truthy on purpose: for a
+        // persistent `custom` engine this event comes from an arbitrary CLI.
+        if (!(event.is_error || event.stop_reason === 'error')) {
+          this.stats.turnsSucceeded++;
+        }
         this.emit(SESSION_EVENT.RESULT, event);
         this.emit(SESSION_EVENT.TURN_COMPLETE, event);
         this._fireHook('onTurnComplete', {
@@ -765,6 +774,7 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
   getStats(): SessionStats & { sessionId?: string; uptime: number } {
     return {
       turns: this.stats.turns,
+      turnsSucceeded: this.stats.turnsSucceeded,
       toolCalls: this.stats.toolCalls,
       toolErrors: this.stats.toolErrors,
       tokensIn: this.stats.tokensIn,

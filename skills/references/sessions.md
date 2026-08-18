@@ -138,6 +138,29 @@ tokens the session has been billed for in total, which only ever grows.
 (`codex`, `agy`, `cursor`, `opencode`); those sessions log a warning the first
 time it is called.
 
+`stats.turns` and `stats.turnsSucceeded` are the same kind of distinction.
+`turns` counts turns that reached the engine, whatever their outcome, including
+the ones that then failed. `turnsSucceeded` counts only the ones the engine
+reported as successful, and it is one per send on every engine.
+
+**The two are only comparable on the one-shot engines.** There `turns` is also
+one per send, so the difference between them is the failure count. On `claude`
+and a persistent `custom`, `turns` counts `user` events — and the CLI emits one
+per tool-result batch as well as the prompt echo, so a send that used eight tools
+counts nine. Compare `turnsSucceeded` against the number of sends there, never
+against `turns`.
+
+Which outcome counts as a success is the engine's own verdict, not the exit
+code's: `codex` fails a turn that emits `turn.failed` while exiting 0, `agy`
+requires a `SUCCESS` status *and* a zero exit (it can report success and then die
+in cleanup), `gemini` succeeds on exit 53 because its turn limit resolves,
+`codex-app` requires `status: 'completed'` so a turn cancelled through
+`interrupt()` does not count, and `opencode` refuses a turn on purpose when
+read-only enforcement did not load.
+
+The run ledger's `ok` reads this same counter, so a turn cannot be a failure on
+`/v1/sessions` and a success in `clawo runs`.
+
 ### Cost Tracking
 
 ```typescript

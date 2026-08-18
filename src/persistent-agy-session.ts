@@ -277,6 +277,8 @@ export class PersistentAgySession extends BaseOneShotSession {
             this.emit(SESSION_EVENT.TEXT, r.response);
           }
           if (r.usage) turnUsage = r.usage;
+          // Only a non-SUCCESS status is recorded, and it is sticky on purpose: a later
+          // SUCCESS in the same turn must not erase a failure agy already reported.
           if (r.status && r.status !== 'SUCCESS') turnStatus = r.status;
           if (typeof r.error === 'string' && r.error.trim()) turnError = sanitizeSecrets(r.error.trim());
         }
@@ -310,7 +312,12 @@ export class PersistentAgySession extends BaseOneShotSession {
         if (settled) return;
         settled = true;
 
-        this._recordTurnComplete();
+        // One expression for the outcome: it feeds the counter here and the `stop_reason`
+        // below, and it is the reject condition at the end of this handler. The exit code
+        // stays in the conjunction — agy can report SUCCESS and then die in cleanup, and a
+        // turn whose promise rejects is not a turn that succeeded.
+        const ok = !turnError && !turnStatus && code === 0;
+        this._recordTurnComplete(ok);
 
         const text = resultText.replace(/\n$/, '');
 
@@ -336,10 +343,10 @@ export class PersistentAgySession extends BaseOneShotSession {
         const event: StreamEvent = {
           type: 'result',
           result: text,
-          // agy can exit 0 while reporting a non-SUCCESS status in the result
-          // event (e.g. a turn stopped early), so the status is authoritative
-          // when present and the exit code is the fallback.
-          stop_reason: (turnStatus ? turnStatus === 'SUCCESS' : code === 0) ? 'end_turn' : 'error',
+          // agy can exit 0 while reporting a non-SUCCESS status or an error in the
+          // result event (e.g. a turn stopped early), so the status is
+          // authoritative when present and the exit code is the fallback.
+          stop_reason: ok ? 'end_turn' : 'error',
         };
 
         this.emit(SESSION_EVENT.RESULT, event);

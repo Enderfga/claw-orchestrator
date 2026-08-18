@@ -230,6 +230,29 @@ describe('PersistentOpencodeSession', () => {
       }, 10);
 
       await expect(sendPromise).rejects.toThrow(/read-only enforcement failed/i);
+      // The turn reached the engine and was refused on purpose: counted, not succeeded.
+      const stats = session.getStats();
+      expect(stats.turns).toBe(1);
+      expect(stats.turnsSucceeded).toBe(0);
+    });
+
+    // Positive control for the refusal above, and the only cover for this engine's
+    // normal close path.
+    it('counts a clean turn', async () => {
+      const session = new PersistentOpencodeSession({
+        name: 'test',
+        cwd: '/tmp',
+        permissionMode: 'bypassPermissions',
+      });
+      await session.start();
+
+      const sendPromise = session.send('hello', { waitForComplete: true });
+      setTimeout(() => closeProc(mockProc, 0), 10);
+      await sendPromise;
+
+      const stats = session.getStats();
+      expect(stats.turns).toBe(1);
+      expect(stats.turnsSucceeded).toBe(1);
     });
 
     it('passes --model only when model contains "/"', async () => {

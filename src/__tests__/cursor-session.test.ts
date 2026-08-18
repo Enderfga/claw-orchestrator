@@ -454,4 +454,26 @@ describe('PersistentCursorSession', () => {
       expect(logs.some((l) => l.includes('sk-12345'))).toBe(false);
     });
   });
+
+  describe('turnsSucceeded', () => {
+    it('counts a clean turn and not a non-zero exit', async () => {
+      const session = new PersistentCursorSession({ name: 'test', cwd: '/tmp', permissionMode: 'bypassPermissions' });
+      await session.start();
+
+      const p1 = session.send('hello', { waitForComplete: true });
+      setTimeout(() => closeProc(mockProc, 0), 10);
+      await p1;
+      expect(session.getStats().turnsSucceeded).toBe(1);
+
+      const proc2 = createMockProcess();
+      mockSpawn.mockReturnValue(proc2);
+      const p2 = session.send('again', { waitForComplete: true });
+      setTimeout(() => closeProc(proc2, 1), 10);
+      await expect(p2).rejects.toThrow();
+
+      const stats = session.getStats();
+      expect(stats.turns).toBe(2);
+      expect(stats.turnsSucceeded).toBe(1);
+    });
+  });
 });

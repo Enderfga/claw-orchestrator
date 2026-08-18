@@ -35,6 +35,10 @@ class MockSession extends EventEmitter implements ISession {
   stopCalled = 0;
   sendCalls: Array<{ message: string | unknown[]; options?: SessionSendOptions }> = [];
   compactCalls: string[] = [];
+  /** Overrides the result event this session resolves with. */
+  nextEvent?: Record<string, unknown>;
+  /** Overrides `turnsSucceeded`, to simulate a turn the engine did not count. */
+  turnsSucceededOverride?: number;
 
   get isReady() {
     return this._isReady;
@@ -81,13 +85,20 @@ class MockSession extends EventEmitter implements ISession {
     }
     return {
       text: `response to: ${typeof message === 'string' ? message : JSON.stringify(message)}`,
-      event: { type: 'result', result: 'done' },
+      event: this.nextEvent ?? { type: 'result', result: 'done' },
     };
+  }
+
+  private _settledSends(): Array<{ message: string | unknown[]; options?: SessionSendOptions }> {
+    return this.sendCalls.filter((c) => c.options?.waitForComplete !== false);
   }
 
   getStats(): SessionStats & { sessionId?: string; uptime: number } {
     return {
-      turns: this.sendCalls.length,
+      // A fire-and-forget send has not settled a turn, so a real engine's counters
+      // have not moved yet either.
+      turns: this._settledSends().length,
+      turnsSucceeded: this.turnsSucceededOverride ?? this._settledSends().length,
       toolCalls: 0,
       toolErrors: 0,
       tokensIn: 100,
@@ -387,6 +398,60 @@ describe('SessionManager', () => {
 
     it('throws for unknown session', async () => {
       await expect(mgr.sendMessage('nope', 'hi')).rejects.toThrow("Session 'nope' not found");
+    });
+
+    // agy resolves with `stop_reason: 'error'` while carrying a usable reply. That
+    // must NOT become `SendResult.error`: openai-compat answers 502 on a non-empty
+    // error and drops the text, and ultraplan discards the plan. The outcome is
+    // recorded in the ledger instead, from the session's own counter.
+    it('records a turn the engine did not count as ok:false without failing the caller', async () => {
+      await mgr.startSession({ name: 'sr-error', cwd: '/tmp' });
+      lastMock().nextEvent = { type: 'result', result: 'agy stopped early', stop_reason: 'error' };
+      lastMock().turnsSucceededOverride = 0;
+      const ledger = vi.mocked((await import('node:fs')).default.appendFileSync);
+      ledger.mockClear();
+
+      const result = await mgr.sendMessage('sr-error', 'hello');
+
+      // The reply still reaches the caller.
+      expect(result.error).toBeUndefined();
+      expect(result.output).toContain('hello');
+      const rows = ledger.mock.calls.map((c) => JSON.parse(String(c[1]))).filter((r) => r.session === 'sr-error');
+      expect(rows).toHaveLength(1);
+      expect(rows[0].ok).toBe(false);
+    });
+
+    // The guard: a session whose getStats() throws leaves both snapshots empty, so the
+    // counter cannot be read. A telemetry failure must not be recorded as a failed turn —
+    // the row falls back to what it meant before, "nothing was thrown".
+    it('keeps ok:true when the counter cannot be read at all', async () => {
+      await mgr.startSession({ name: 'sr-blind', cwd: '/tmp' });
+      lastMock().getStats = () => {
+        throw new Error('engine torn down');
+      };
+      const ledger = vi.mocked((await import('node:fs')).default.appendFileSync);
+      ledger.mockClear();
+
+      await mgr.sendMessage('sr-blind', 'hello');
+
+      const rows = ledger.mock.calls.map((c) => JSON.parse(String(c[1]))).filter((r) => r.session === 'sr-blind');
+      expect(rows).toHaveLength(1);
+      expect(rows[0].ok).toBe(true);
+    });
+
+    // Positive control for the assertion above: the default event still reads as a
+    // success, so `ok: false` above is the classification and not a constant.
+    it('records a clean turn as ok in the ledger', async () => {
+      await mgr.startSession({ name: 'sr-ok', cwd: '/tmp' });
+      const ledger = vi.mocked((await import('node:fs')).default.appendFileSync);
+      ledger.mockClear();
+
+      const result = await mgr.sendMessage('sr-ok', 'hello');
+
+      expect(result.error).toBeUndefined();
+      const rows = ledger.mock.calls.map((c) => JSON.parse(String(c[1]))).filter((r) => r.session === 'sr-ok');
+      expect(rows).toHaveLength(1);
+      expect(rows[0].ok).toBe(true);
     });
 
     it('passes effort and plan options through', async () => {
