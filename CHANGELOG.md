@@ -84,6 +84,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   outcome expression, so a turn whose promise rejects is never counted as one
   that succeeded.
 
+## [Unreleased]
+
+### Fixed
+
+- **`clawo runs` printed a bare `error:` label for a failed turn that carried no
+  error text.** Since the ledger's `ok` reads the session's `turnsSucceeded`
+  counter, a turn the engine declined to count as succeeded — an interrupted
+  `codex-app` turn, a non-SUCCESS `agy` turn — resolves without throwing, so
+  `ok` is `false` while `error` is absent. Those rows now read `not counted as
+  succeeded`, and `observability.md` says that `error` is not guaranteed on a
+  failed row.
+
 ## [4.14.1] - 2026-08-18
 
 ### Fixed

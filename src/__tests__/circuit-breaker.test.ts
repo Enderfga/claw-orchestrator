@@ -64,6 +64,7 @@ class MockSession extends EventEmitter implements ISession {
       startTime: null,
       lastActivity: null,
       contextPercent: 0,
+      retries: 0,
       sessionId: this.sessionId,
       uptime: 0,
     };

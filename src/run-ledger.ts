@@ -253,7 +253,10 @@ export function formatRunTable(rows: RunLedgerRow[]): string {
       pad(String(r.tokensOut ?? 0), 9),
       pad(cost, 9),
       pad(dur, 8),
-      r.ok ? 'ok' : `error: ${(r.error || '').slice(0, 60)}`,
+      // `ok: false` does not imply error text: a turn the engine declined to count as
+      // succeeded (codex-app `interrupted`, agy's non-SUCCESS status) resolves without
+      // throwing, so there is nothing to quote. Say so rather than print a bare label.
+      r.ok ? 'ok' : r.error ? `error: ${r.error.slice(0, 60)}` : 'not counted as succeeded',
     ].join(' ');
   });
   const s = summarizeRuns(rows);

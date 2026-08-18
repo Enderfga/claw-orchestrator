@@ -109,6 +109,7 @@ class MockSession extends EventEmitter implements ISession {
       startTime: new Date().toISOString(),
       lastActivity: new Date().toISOString(),
       contextPercent: 5,
+      retries: 0,
       sessionId: this.sessionId,
       uptime: 60,
     };

@@ -192,4 +192,13 @@ describe('formatRunTable', () => {
     const out = formatRunTable([row({ ok: false, error: 'engine exited 1' })]);
     expect(out).toContain('error: engine exited 1');
   });
+
+  it('does not print a bare label when a failed turn carries no error text', () => {
+    // Reachable since the ledger's `ok` reads the session's turnsSucceeded counter:
+    // an interrupted codex-app turn or a non-SUCCESS agy turn resolves without
+    // throwing, so `ok` is false while `error` is undefined.
+    const out = formatRunTable([row({ ok: false })]);
+    expect(out).toContain('not counted as succeeded');
+    expect(out).not.toMatch(/error:\s*$/m);
+  });
 });

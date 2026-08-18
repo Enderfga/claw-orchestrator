@@ -44,7 +44,7 @@ every engine passes through.
 | `durationMs` | Wall-clock for the turn |
 | `toolCalls` / `toolErrors` | Per-turn deltas |
 | `ok` | `false` for a turn that threw, or that the session's own `turnsSucceeded` counter did not count (see `sessions.md`). Falls back to "nothing was thrown" when the counter cannot be read |
-| `error` | Failure text, truncated to 500 chars |
+| `error` | Failure text, truncated to 500 chars. Absent when the turn resolved but the engine did not count it as succeeded (an interrupted or non-SUCCESS turn), so a failed row does not always carry one |
 | `parent` | council id / fanout id / autoloop run id, when the turn belongs to one |
 
 Deltas rather than totals means summing a query window gives that window's spend
