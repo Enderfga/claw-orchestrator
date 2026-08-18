@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Antigravity sessions failed outright on agy 1.1.13, and the engine-agnostic
+  reasoning-effort setting was never forwarded.** `agy models` now lists only
+  effort-qualified slugs, and the CLI rejects an unsuffixed base slug that
+  arrives without `--effort` — which is exactly what the adapter sent, so the
+  two documented aliases (`agy-flash`, `agy-pro`) could not start a turn at all.
+  Session defaults and per-turn overrides are now forwarded as `--effort`. agy
+  accepts only `low`, `medium` and `high`, so the shared `max`/`xhigh` aliases
+  clamp to `high`; `auto` resolves an unsuffixed slug to `high`; an
+  already-qualified `-low`/`-medium`/`-high` slug keeps its own effort; and a
+  conflicting per-turn override strips the suffix before passing the new effort,
+  avoiding agy's model/effort conflict error. Thanks to @metahacker (#82).
+
+  Note that agy models do not all expose the same tiers — `gemini-3.1-pro`
+  offers `low` and `high` only — so an effort a model lacks is refused by agy
+  rather than silently substituted.
+
+- **An `agy` turn that agy itself rejected surfaced as `Antigravity exited with
+  code 1`.** agy reports a rejected invocation as a stream-json `result` event
+  carrying `error` and prints nothing on stderr, so the specific message — which
+  names the values it will accept — was discarded. It is now surfaced as the
+  turn's error, including when agy exits 0 while reporting one.
+
 ## [4.14.0] - 2026-08-18
 
 ### Added
@@ -46,15 +72,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   flag as well, since an in-CLI stop happens earlier and costs less. Note that
   on engines that estimate token counts the cap is best-effort — see
   `observability.md`.
-
-- **Antigravity ignored the engine-agnostic reasoning-effort setting.** The
-  first-class `agy` adapter now forwards session defaults and per-turn overrides
-  as `--effort`. Since agy accepts only `low`, `medium`, and `high`, the shared
-  `max`/`xhigh` aliases clamp to `high`. `auto` resolves unsuffixed base-model
-  slugs to `high` because the current CLI requires an explicit selection, while
-  already-qualified `-low`/`-medium`/`-high` slugs keep their own effort. A
-  conflicting per-turn override strips the old suffix before passing the new
-  effort, avoiding agy's model/effort conflict error.
 
 - **Claude engine sessions failed with `Invalid API key` when the host process
   carried a proxy-scoped `ANTHROPIC_API_KEY`.** The spawn environment inherits

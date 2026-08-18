@@ -229,12 +229,20 @@ const MODELS: ModelDef[] = [
   // ── Google Antigravity (agy) ───────────────────────────────────────────
   // Antigravity CLI is Gemini CLI's successor (consumer Gemini CLI stopped
   // serving 2026-06-18). Consumer agy auth is subscription-based with no
-  // per-token billing, and agy emits no usage data, so token counts for this
-  // engine are ESTIMATED. Pricing mirrors Gemini API list rates so costUsd
-  // approximates equivalent API value; use overrideModelPricing() to zero it
-  // out for subscription accounting. Slugs verified against agy 1.0.16
-  // (`agy models`); agy also proxies Claude/GPT-OSS models, passed through
-  // unregistered. Unknown slugs silently fall back to agy's default model.
+  // per-token billing; pricing here mirrors Gemini API list rates so costUsd
+  // approximates equivalent API value — use overrideModelPricing() to zero it
+  // out for subscription accounting. Token counts come from the stream-json
+  // `result` event when it carries usage and fall back to estimateTokens()
+  // otherwise; the run ledger flags which of the two a turn used.
+  //
+  // Slugs verified against agy 1.1.13 (`agy models`), which lists ONLY
+  // effort-qualified names (gemini-3.7-flash-high, gemini-3.1-pro-low, …).
+  // The base slugs registered below are the halves agy composes with
+  // `--effort`, which PersistentAgySession always supplies — passing a base
+  // slug without one is a hard CLI error, not a silent fallback. Tiers are not
+  // uniform: gemini-3.1-pro has low/high only. agy also proxies Claude/GPT-OSS
+  // models and accepts qualified slugs directly; both pass through unregistered
+  // and price at their family default.
   {
     id: 'gemini-3.5-flash',
     engine: 'agy',

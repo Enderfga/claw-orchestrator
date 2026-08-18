@@ -132,6 +132,12 @@ in print mode. Verified against `agy` **1.1.13**.
   Per-turn overrides also work with qualified slugs: the adapter removes a
   conflicting suffix before passing the new `--effort`, avoiding agy's conflict
   error.
+
+  Tiers are not uniform across agy models — `gemini-3.1-pro` (the `agy-pro`
+  alias) offers `low` and `high` only, so `effort: 'medium'` on it fails with
+  `gemini-3.1-pro has no "medium" effort (available: low, high)`. The adapter
+  passes the requested effort through rather than substituting a tier the caller
+  did not ask for; run `agy models` to see the tiers a slug actually exposes.
 - Permission modes: `bypassPermissions` → `--dangerously-skip-permissions`,
   `default` → `--sandbox` (terminal-restricted), and
   `sandboxMode: 'read-only'` → `--mode plan` (takes precedence). Other modes

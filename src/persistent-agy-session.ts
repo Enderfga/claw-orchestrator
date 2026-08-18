@@ -55,6 +55,7 @@ interface AgyStreamEvent {
     conversation_id?: string;
     status?: string;
     response?: string;
+    error?: string;
     usage?: AgyUsage;
   };
 }
@@ -208,6 +209,11 @@ export class PersistentAgySession extends BaseOneShotSession {
       let settled = false;
       let turnUsage: AgyUsage | undefined;
       let turnStatus: string | undefined;
+      // agy reports a rejected invocation (bad model/effort pair, unknown slug)
+      // as a stream-json result event carrying `error`, and prints nothing on
+      // stderr. Without capturing it the caller only ever saw "Antigravity
+      // exited with code 1" — agy's own message names the valid values.
+      let turnError: string | undefined;
 
       const proc = spawn(this.engineBin, args, {
         cwd: this.options.cwd,
@@ -272,6 +278,7 @@ export class PersistentAgySession extends BaseOneShotSession {
           }
           if (r.usage) turnUsage = r.usage;
           if (r.status && r.status !== 'SUCCESS') turnStatus = r.status;
+          if (typeof r.error === 'string' && r.error.trim()) turnError = sanitizeSecrets(r.error.trim());
         }
       };
       proc.stdout?.on('data', (data: Buffer) => {
@@ -338,7 +345,11 @@ export class PersistentAgySession extends BaseOneShotSession {
         this.emit(SESSION_EVENT.RESULT, event);
         this.emit(SESSION_EVENT.TURN_COMPLETE, event);
 
-        if (code !== 0) {
+        // A captured result error means the turn failed even when agy exits 0,
+        // so surface it rather than resolving an empty string as a reply.
+        if (turnError) {
+          reject(new Error(turnError));
+        } else if (code !== 0) {
           reject(new Error(stderr || `Antigravity exited with code ${code}`));
         } else {
           resolve({ text, event });

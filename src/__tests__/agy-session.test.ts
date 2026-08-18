@@ -353,6 +353,75 @@ describe('PersistentAgySession', () => {
     });
   });
 
+  // ─── structured turn errors ─────────────────────────────────────────────
+
+  describe('turn errors', () => {
+    const ERROR_RESULT = JSON.stringify({
+      event: 'result',
+      result: {
+        conversation_id: '',
+        status: 'ERROR',
+        response: '',
+        error:
+          'invalid model selection (--model "gemini-3.1-pro" --effort "medium"): gemini-3.1-pro has no "medium" effort (available: low, high)',
+        usage: { input_tokens: 0, output_tokens: 0 },
+      },
+    });
+
+    it("surfaces agy's own message instead of the bare exit code", async () => {
+      const session = new PersistentAgySession({
+        name: 'test',
+        cwd: '/tmp',
+        permissionMode: 'bypassPermissions',
+      });
+      await session.start();
+
+      const sendPromise = session.send('hello', { waitForComplete: true });
+      feedText(mockProc, ERROR_RESULT + '\n');
+      setTimeout(() => closeProc(mockProc, 1), 10);
+
+      // agy prints the rejection on stdout as a stream-json result event and
+      // writes nothing to stderr, so without capturing `error` the caller only
+      // ever saw "Antigravity exited with code 1".
+      await expect(sendPromise).rejects.toThrow(/no "medium" effort \(available: low, high\)/);
+    });
+
+    it('rejects a result error even when the process exits 0', async () => {
+      const session = new PersistentAgySession({
+        name: 'test',
+        cwd: '/tmp',
+        permissionMode: 'bypassPermissions',
+      });
+      await session.start();
+
+      const sendPromise = session.send('hello', { waitForComplete: true });
+      feedText(mockProc, ERROR_RESULT + '\n');
+      setTimeout(() => closeProc(mockProc, 0), 10);
+
+      await expect(sendPromise).rejects.toThrow(/invalid model selection/);
+    });
+
+    it('still resolves a successful turn', async () => {
+      const session = new PersistentAgySession({
+        name: 'test',
+        cwd: '/tmp',
+        permissionMode: 'bypassPermissions',
+      });
+      await session.start();
+
+      const sendPromise = session.send('hello', { waitForComplete: true });
+      feedText(
+        mockProc,
+        JSON.stringify({ event: 'result', result: { conversation_id: 'c1', status: 'SUCCESS', response: 'OK' } }) +
+          '\n',
+      );
+      setTimeout(() => closeProc(mockProc, 0), 10);
+
+      const result = (await sendPromise) as { text: string };
+      expect(result.text).toBe('OK');
+    });
+  });
+
   // ─── conversation continuity ────────────────────────────────────────────
 
   describe('conversation continuity', () => {
