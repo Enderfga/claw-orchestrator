@@ -9,19 +9,27 @@ npm install
 npm run build
 ```
 
-**Prerequisite:** Claude Code CLI must be installed for integration testing:
-
-```bash
-npm install -g @anthropic-ai/claude-code
-```
+No coding CLI is needed to build the project or run the unit tests.
 
 ## Running Tests
 
-```bash
-# Type-check and build
-npm run build
+CI runs these four on Node 22 and 24. **All four must pass before a PR can be merged**, so
+run them before pushing rather than discovering it in review:
 
-# Integration tests (requires Claude Code CLI)
+```bash
+npm run build          # rm -rf dist && tsc
+npm run lint           # eslint src/ bin/
+npm run format:check   # prettier --check
+npm run test           # vitest
+```
+
+`npm run lint:fix` and `npm run format` fix most of what the middle two report.
+
+There is also a manual smoke test that spawns the real Claude Code CLI. It is not part of CI,
+and it needs `claude` installed and authenticated:
+
+```bash
+npm install -g @anthropic-ai/claude-code
 npx tsx scripts/test-integration.ts
 ```
 
@@ -37,8 +45,24 @@ npx tsx scripts/test-integration.ts
 - **One feature or fix per PR**
 - Use a descriptive title: `feat:`, `fix:`, `docs:`, `chore:`
 - Include a clear description of what changed and why
-- Run `npm run build` before submitting — PRs that don't build won't be reviewed
+- Run the four commands above before submitting — a red CI blocks the merge
+- A maintainer approval is required to merge; passing CI on its own does not merge a PR
 - Update `CHANGELOG.md` for user-facing changes
+
+## Documentation
+
+`skills/references/` is the single source of truth — there is no `docs/` directory. A PR that
+changes behaviour updates the matching reference file in the same PR:
+
+| What changed | Update |
+| --- | --- |
+| Tool parameters or behaviour | `skills/references/tools.md` |
+| Engine invocation or flags | `skills/references/multi-engine.md` |
+| Session lifecycle | `skills/references/sessions.md` |
+| Council, inbox, ACP, autoloop, ultra*, CLI, dashboard | the matching file in `skills/references/` |
+
+Also update `README.md` if the change moves the feature overview, the engine compatibility
+table, or the source tree.
 
 ## Issue Guidelines
 

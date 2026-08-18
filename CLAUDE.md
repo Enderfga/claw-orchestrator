@@ -44,7 +44,7 @@ npm run format:check   # Prettier check
 npm run test           # Vitest unit tests (src/__tests__/)
 ```
 
-Integration test (requires all 3 CLIs installed and authenticated):
+Integration test — a manual smoke test, not part of CI; needs `claude` installed and authenticated:
 ```bash
 npx tsx scripts/test-integration.ts
 ```
