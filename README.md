@@ -110,7 +110,7 @@ block, and the cancellation and permission limitations are in
 
 | Engine       | CLI        | Tested Version |
 | ------------ | ---------- | -------------- |
-| Claude Code  | `claude`   | 2.1.232        |
+| Claude Code  | `claude`   | 2.1.234        |
 | Codex        | `codex`    | 0.147.0        |
 | Antigravity  | `agy`      | 1.1.13         |
 | Cursor Agent | `agent`    | 2026.08.11-e8db854 |
