@@ -344,7 +344,31 @@ export interface SessionConfig {
 // ─── Session Stats ───────────────────────────────────────────────────────────
 
 export interface SessionStats {
+  /**
+   * Turns that reached the engine, whatever their outcome — NOT sends, and not
+   * successes.
+   *
+   * A turn that ran and then failed still counts here; a turn refused before the
+   * engine saw it (spend cap, wrapper timeout) does not. On the one-shot engines
+   * this is one per send. On `claude` and a persistent `custom` it counts `user`
+   * events, and the CLI emits one per tool-result batch as well as the prompt echo,
+   * so a send that used eight tools counts nine — measured against claude-code
+   * stream-json, not inferred.
+   */
   turns: number;
+  /**
+   * Turns the engine reported as successful — one per send, on every engine.
+   *
+   * The predicate is the engine's own terminal verdict, not the exit code: codex
+   * fails a turn that emits `turn.failed` while exiting 0, gemini succeeds on exit
+   * 53 (its turn limit is a completion), codex-app requires `status: 'completed'`
+   * so an interrupted turn does not count.
+   *
+   * Because `turns` is not one-per-send everywhere, the difference between the two
+   * is the failure count on the one-shot engines only. On `claude` and persistent
+   * `custom`, compare `turnsSucceeded` against the number of sends instead.
+   */
+  turnsSucceeded: number;
   toolCalls: number;
   toolErrors: number;
   tokensIn: number;
@@ -355,10 +379,16 @@ export interface SessionStats {
   startTime: string | null;
   lastActivity: string | null;
   /**
-   * Approximate context window utilization (0-100).
-   * Estimated as (tokensIn + tokensOut) / 200,000 * 100.
-   * Claude Code does not expose exact context usage via the JSON protocol,
-   * so this is a best-effort heuristic that may overcount on long conversations.
+   * How full the context is (0-100). Two different readings, by engine:
+   *
+   * - one-shot engines (4.11.0) and codex (4.12.1): the last turn's prompt over
+   *   the window the engine enforces, so it rises and falls with the conversation.
+   * - `claude` and persistent `custom`: cumulative `tokensIn + tokensOut` over the
+   *   model's registry window, so it only grows and overcounts a conversation
+   *   whose history is replayed each turn. `getContextWindow()` falls back to
+   *   200,000 for a model that is not in the registry.
+   *
+   * Distinct in either case from `tokensIn`, which is total billed input tokens.
    */
   contextPercent: number;
   /** Total API retry attempts during this session */
