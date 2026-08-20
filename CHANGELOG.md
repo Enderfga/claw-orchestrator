@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`pricingOverrides` is declared in the plugin config schema.** The capability was
+  already wired — `api.pluginConfig` reaches the `SessionManager` constructor
+  (`src/index.ts:133`, `:154`) and `overrideModelPricing()` has been there all along — but
+  the field was absent from `openclaw.plugin.json`, so on the surface most users actually
+  configure it was invisible and unvalidated.
+
+  It matters on a flat-rate plan, where per-token pricing is fiction: `models.ts` already
+  says so about agy's consumer auth (*"subscription-based with no per-token billing …
+  use `overrideModelPricing()` to zero it out for subscription accounting"*), and the
+  consequence is visible in two places — `/v1/sessions` reports a `cost_usd` nobody was
+  billed, and since 4.14.0 the run ledger writes one row of it per turn.
+
+  ```json
+  { "pricingOverrides": { "gpt-5.5": { "input": 0, "output": 0, "cached": 0 } } }
+  ```
+
+  The schema documents the sharp edge rather than hiding it: `overrideModelPricing()`
+  merges each field over the registry rate (`src/models.ts:477-486`), so a partial
+  override leaves the remaining fields at list price — zeroing `input` alone still bills
+  output at $30/Mtok.
+
 ## [6.0.0] - 2026-08-23
 
 Two things this runtime could not previously do: survive its own process dying,
