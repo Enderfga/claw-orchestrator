@@ -88,6 +88,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Claude Sonnet 5 was priced 50% too high.** The registry carried $3/$15 per
+  Mtok on purpose: $2/$10 had been announced as introductory pricing through
+  2026-08-31, and pricing the scheduled rate avoided under-reporting. Anthropic
+  has since made $2/$10 the standard price and cancelled the September increase,
+  so the entry now over-reported every Sonnet turn — including through the
+  `maxBudgetUsd` gate, which trips on these numbers, and `sonnet` is the alias
+  the CLI itself defaults to. Now $2/$10 with a $0.20 cache read.
+- **`gpt-5.6` was unregistered** and fell back to Sonnet pricing and a 200,000
+  context window, over-reporting `contextPercent` by 5.25x. It is a documented
+  model (1,050,000 window, $5/$0.50/$30 — identical to `gpt-5.6-sol`) and codex
+  0.148.0 offers it. `gpt-5.6-pro` appears in the codex binary but has no
+  model-docs page, so it stays unregistered rather than carry invented pricing.
+
+### Added
+
+- Registry entries for `claude-mythos-5` (Fable 5 parity) and for the 4.5
+  generation, `claude-sonnet-4-5` and `claude-opus-4-5` — still served, and
+  200,000-token models, so leaving them out measured them against a 1M
+  denominator.
+
 - **`clawo runs` printed a bare `error:` label for a failed turn that carried no
   error text.** Since the ledger's `ok` reads the session's `turnsSucceeded`
   counter, a turn the engine declined to count as succeeded — an interrupted

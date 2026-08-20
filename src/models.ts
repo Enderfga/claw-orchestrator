@@ -87,16 +87,32 @@ const MODELS: ModelDef[] = [
     contextWindow: 1_000_000,
   },
   // Sonnet 5 is the current-generation Sonnet and the Claude Code default as of
-  // CLI 2.1.197. Native 1M-token context. We bill the standard rate ($3/$15 per
-  // Mtok, cached read 0.1× input); Anthropic also runs a launch promo of $2/$10
-  // through 2026-08-31, but pricing the standard rate keeps cost estimates from
-  // under-reporting. The `sonnet` alias points here so it tracks the CLI's own
-  // `sonnet` default.
+  // CLI 2.1.197. Native 1M-token context. $2/$10 per Mtok, cached read 0.1× input.
+  //
+  // This entry used to carry $3/$15 deliberately: $2/$10 was announced as
+  // introductory pricing through 2026-08-31, and pricing the scheduled rate kept
+  // estimates from under-reporting. Anthropic has since made $2/$10 the standard
+  // price and cancelled the September increase, so the old reasoning now
+  // over-reports every Sonnet turn by 50% — including against `maxBudgetUsd`,
+  // which trips on these numbers. Price what the vendor charges today; a
+  // scheduled change is not a fact until it happens.
+  //
+  // The `sonnet` alias points here so it tracks the CLI's own `sonnet` default.
+  // Mythos 5 shares Fable 5's specs and pricing exactly. Invitation-only
+  // (Project Glasswing), but it is a documented id a caller can pass, and an
+  // unregistered id silently prices at the family default instead.
+  {
+    id: 'claude-mythos-5',
+    engine: 'claude',
+    provider: 'anthropic',
+    pricing: { input: 10, output: 50, cached: 1 },
+    contextWindow: 1_000_000,
+  },
   {
     id: 'claude-sonnet-5',
     engine: 'claude',
     provider: 'anthropic',
-    pricing: { input: 3, output: 15, cached: 0.3 },
+    pricing: { input: 2, output: 10, cached: 0.2 },
     aliases: ['sonnet'],
     contextWindow: 1_000_000,
   },
@@ -106,6 +122,23 @@ const MODELS: ModelDef[] = [
     provider: 'anthropic',
     pricing: { input: 3, output: 15, cached: 0.3 },
     contextWindow: 1_000_000,
+  },
+  // The 4.5 generation is legacy but still served, and it predates the 1M
+  // window — registering it is what keeps contextPercent from measuring a 200K
+  // model against a 1M denominator.
+  {
+    id: 'claude-sonnet-4-5',
+    engine: 'claude',
+    provider: 'anthropic',
+    pricing: { input: 3, output: 15, cached: 0.3 },
+    contextWindow: 200_000,
+  },
+  {
+    id: 'claude-opus-4-5',
+    engine: 'claude',
+    provider: 'anthropic',
+    pricing: { input: 5, output: 25, cached: 0.5 },
+    contextWindow: 200_000,
   },
   {
     id: 'claude-haiku-4-5',
@@ -138,8 +171,18 @@ const MODELS: ModelDef[] = [
   // model config listing 272,000 for these ids — that is the CLI's own cap
   // (272K is also the price-tier breakpoint), NOT the model's window, so it is
   // deliberately not mirrored here.
-  // Bare `gpt-5.6` is accepted by the API (likely a Sol alias) but is not a
-  // documented id, so it stays unregistered and passes through verbatim.
+  // Bare `gpt-5.6` IS documented (1,050,000 window, $5/$0.5/$30 — identical to
+  // Sol) and codex 0.148.0 offers it, so it is registered. Unregistered it fell
+  // back to Sonnet pricing and a 200K window, which over-reported contextPercent
+  // by 5.25x. `gpt-5.6-pro` appears in the codex binary but has no model-docs
+  // page (404), so it stays out rather than carry invented pricing.
+  {
+    id: 'gpt-5.6',
+    engine: 'codex',
+    provider: 'openai',
+    pricing: { input: 5, output: 30, cached: 0.5 },
+    contextWindow: 1_050_000,
+  },
   {
     id: 'gpt-5.6-sol',
     engine: 'codex',

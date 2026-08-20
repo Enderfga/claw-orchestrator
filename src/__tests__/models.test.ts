@@ -255,17 +255,58 @@ describe('getModelPricing', () => {
 });
 
 describe('claude-sonnet-5', () => {
-  it('is registered with 1M context and standard $3/$15 pricing', () => {
+  it('is registered with 1M context and standard $2/$10 pricing (cache read $0.20)', () => {
     const m = lookupModel('claude-sonnet-5');
     expect(m).toBeDefined();
     expect(m!.contextWindow).toBe(1_000_000);
-    expect(m!.pricing.input).toBe(3);
-    expect(m!.pricing.output).toBe(15);
+    expect(m!.pricing.input).toBe(2);
+    expect(m!.pricing.output).toBe(10);
+    expect(m!.pricing.cached).toBe(0.2);
+  });
+
+  it('does not carry the cancelled $3/$15 increase', () => {
+    // $2/$10 shipped as introductory pricing through 2026-08-31 and this entry
+    // deliberately priced the scheduled $3/$15 instead. Anthropic then made
+    // $2/$10 standard and cancelled the increase, so the old numbers
+    // over-reported every Sonnet turn by 50% — and now feed the maxBudgetUsd
+    // gate. Guard the direction so a revert has to be deliberate.
+    const m = lookupModel('claude-sonnet-5');
+    expect(m!.pricing.input).not.toBe(3);
+    expect(m!.pricing.output).not.toBe(15);
   });
 
   it('owns the `sonnet` alias so it tracks the CLI default', () => {
     expect(resolveAlias('sonnet')).toBe('claude-sonnet-5');
     expect(getContextWindow('sonnet')).toBe(1_000_000);
+  });
+});
+
+describe('registry entries added by the weekly sweep', () => {
+  it("registers bare gpt-5.6 at Sol's numbers, not the Sonnet fallback", () => {
+    const m = lookupModel('gpt-5.6');
+    expect(m).toBeDefined();
+    expect(m!.contextWindow).toBe(1_050_000);
+    expect(m!.pricing.input).toBe(5);
+    expect(m!.pricing.output).toBe(30);
+  });
+
+  it('leaves gpt-5.6-pro unregistered — it is in the codex binary but has no model docs', () => {
+    expect(lookupModel('gpt-5.6-pro')).toBeUndefined();
+  });
+
+  it('registers claude-mythos-5 at Fable 5 parity', () => {
+    const m = lookupModel('claude-mythos-5');
+    const fable = lookupModel('claude-fable-5');
+    expect(m).toBeDefined();
+    expect(m!.pricing).toEqual(fable!.pricing);
+    expect(m!.contextWindow).toBe(fable!.contextWindow);
+  });
+
+  it('gives the 4.5 generation its real 200K window, not the 1M of later models', () => {
+    expect(getContextWindow('claude-sonnet-4-5')).toBe(200_000);
+    expect(getContextWindow('claude-opus-4-5')).toBe(200_000);
+    // Reverse assertion: the generation that really is 1M must stay 1M.
+    expect(getContextWindow('claude-sonnet-4-6')).toBe(1_000_000);
   });
 });
 
