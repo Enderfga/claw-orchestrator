@@ -110,9 +110,9 @@ block, and the cancellation and permission limitations are in
 
 | Engine       | CLI        | Tested Version |
 | ------------ | ---------- | -------------- |
-| Claude Code  | `claude`   | 2.1.234        |
-| Codex        | `codex`    | 0.147.0        |
-| Antigravity  | `agy`      | 1.1.13         |
+| Claude Code  | `claude`   | 2.1.237        |
+| Codex        | `codex`    | 0.148.0        |
+| Antigravity  | `agy`      | 1.1.15         |
 | Cursor Agent | `agent`    | 2026.08.11-e8db854 |
 | OpenCode     | `opencode` | 1.18.18        |
 | Custom CLI   | any        | —              |

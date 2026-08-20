@@ -5,7 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [5.0.0] - 2026-08-19
+
+### Breaking
+
+- **`SessionStats.turnsSucceeded` is required, not optional.** Source-breaking
+  for a TypeScript consumer that builds a `SessionStats` object of its own
+  (implementing `ISession`, or a test double); runtime consumers reading the
+  field are unaffected. Required on purpose: it makes `tsc` enumerate the four
+  places in `src/` that own a stats object instead of leaving one silently
+  `undefined`.
+
+- **`BaseOneShotSession._recordTurnComplete()` now takes a required `ok`
+  argument.** The class is exported, so the `protected` method is part of the
+  published subclassing surface: an out-of-tree engine subclass calling it with
+  no argument fails to compile, and in plain JS would record every turn as
+  failed.
 
 ### Added
 
@@ -40,20 +55,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Exposed as `turns_succeeded` on `/v1/sessions` (openai-compat sessions) and in
   `health().details`.
 
-### Breaking
 
-- **`SessionStats.turnsSucceeded` is required, not optional.** Source-breaking
-  for a TypeScript consumer that builds a `SessionStats` object of its own
-  (implementing `ISession`, or a test double); runtime consumers reading the
-  field are unaffected. Required on purpose: it makes `tsc` enumerate the four
-  places in `src/` that own a stats object instead of leaving one silently
-  `undefined`.
+- Registry entries for `claude-mythos-5` (Fable 5 parity) and for the 4.5
+  generation, `claude-sonnet-4-5` and `claude-opus-4-5` — still served, and
+  200,000-token models, so leaving them out measured them against a 1M
+  denominator.
 
-- **`BaseOneShotSession._recordTurnComplete()` now takes a required `ok`
-  argument.** The class is exported, so the `protected` method is part of the
-  published subclassing surface: an out-of-tree engine subclass calling it with
-  no argument fails to compile, and in plain JS would record every turn as
-  failed.
+- **`clawo runs` printed a bare `error:` label for a failed turn that carried no
+  error text.** Since the ledger's `ok` reads the session's `turnsSucceeded`
+  counter, a turn the engine declined to count as succeeded — an interrupted
+  `codex-app` turn, a non-SUCCESS `agy` turn — resolves without throwing, so
+  `ok` is `false` while `error` is absent. Those rows now read `not counted as
+  succeeded`, and `observability.md` says that `error` is not guaranteed on a
+  failed row.
 
 ### Fixed
 
@@ -84,9 +98,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   outcome expression, so a turn whose promise rejects is never counted as one
   that succeeded.
 
-## [Unreleased]
-
-### Fixed
 
 - **Claude Sonnet 5 was priced 50% too high.** The registry carried $3/$15 per
   Mtok on purpose: $2/$10 had been announced as introductory pricing through
@@ -100,21 +111,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   model (1,050,000 window, $5/$0.50/$30 — identical to `gpt-5.6-sol`) and codex
   0.148.0 offers it. `gpt-5.6-pro` appears in the codex binary but has no
   model-docs page, so it stays unregistered rather than carry invented pricing.
-
-### Added
-
-- Registry entries for `claude-mythos-5` (Fable 5 parity) and for the 4.5
-  generation, `claude-sonnet-4-5` and `claude-opus-4-5` — still served, and
-  200,000-token models, so leaving them out measured them against a 1M
-  denominator.
-
-- **`clawo runs` printed a bare `error:` label for a failed turn that carried no
-  error text.** Since the ledger's `ok` reads the session's `turnsSucceeded`
-  counter, a turn the engine declined to count as succeeded — an interrupted
-  `codex-app` turn, a non-SUCCESS `agy` turn — resolves without throwing, so
-  `ok` is `false` while `error` is absent. Those rows now read `not counted as
-  succeeded`, and `observability.md` says that `error` is not guaranteed on a
-  failed row.
 
 ## [4.14.1] - 2026-08-18
 
