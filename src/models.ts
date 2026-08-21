@@ -458,17 +458,41 @@ export function getContextWindow(model: string): number {
   return known?.contextWindow ?? 200_000;
 }
 
+/**
+ * Canonical key for the runtime pricing table: strip the vendor prefix, then
+ * resolve aliases. Reads and writes MUST share this, or an override written as
+ * `opus` never gets found by a session that resolved itself to `claude-opus-5`
+ * (and vice versa).
+ */
+function pricingKey(model: string): string {
+  return resolveAlias(model.replace(/^(anthropic|openai|openai-codex|google|gemini|agy|cursor)\//g, ''));
+}
+
+/** Effective pricing for an already-canonical key: a runtime override wins over the registry. */
+function effectivePricing(key: string): ModelPricing | undefined {
+  return _pricingOverrides.get(key) ?? lookupModel(key)?.pricing;
+}
+
 /** Get pricing for a model. Falls back to sonnet pricing for unknown models. */
 export function getModelPricing(model?: string, defaultModel = 'claude-sonnet-4-6'): ModelPricing {
-  if (!model) return lookupModel(defaultModel)?.pricing ?? { input: 0, output: 0 };
-  const clean = model.replace(/^(anthropic|openai|openai-codex|google|gemini|agy|cursor)\//g, '');
-  // Check overrides first
-  const override = _pricingOverrides.get(clean);
-  if (override) return override;
-  const known = lookupModel(clean);
-  if (known) return known.pricing;
-  console.warn(`[models] Unknown model "${model}" — falling back to ${defaultModel} pricing`);
-  return lookupModel(defaultModel)?.pricing ?? { input: 0, output: 0 };
+  // No model means "the engine default" — which still goes through the override
+  // map, exactly like an explicit one. `||` and not `??`: an empty string is a
+  // missing model, not a model named "", and callers do pass one (`session_start`
+  // puts no minLength on `model`, and the config spread preserves it verbatim).
+  const direct = effectivePricing(pricingKey(model || defaultModel));
+  if (direct) return direct;
+  if (model) console.warn(`[models] Unknown model "${model}" — falling back to ${defaultModel} pricing`);
+  return effectivePricing(pricingKey(defaultModel)) ?? { input: 0, output: 0 };
+}
+
+/**
+ * Whether a runtime override was configured for this model, as opposed to the
+ * price coming from the registry. Engines that keep their own pricing table need
+ * this to tell "the user set 0" from "the registry had nothing", which the
+ * returned rate cannot express: both are zero.
+ */
+export function hasPricingOverride(model?: string, defaultModel = 'claude-sonnet-4-6'): boolean {
+  return _pricingOverrides.has(pricingKey(model || defaultModel));
 }
 
 /** Mutable pricing table for runtime overrides (backward compat). */
@@ -476,8 +500,19 @@ const _pricingOverrides = new Map<string, ModelPricing>();
 
 export function overrideModelPricing(overrides: Record<string, Partial<ModelPricing>>): void {
   for (const [model, pricing] of Object.entries(overrides)) {
-    const base = lookupModel(model)?.pricing ?? { input: 0, output: 0 };
-    _pricingOverrides.set(model, {
+    const key = pricingKey(model);
+    const known = lookupModel(key);
+    // There is no list price to merge onto, so the unspecified fields become 0
+    // — free tokens. That is a legitimate idiom (subscription accounting) and a
+    // very common typo, and the two are indistinguishable here, so say it out
+    // loud instead of guessing a price no one registered.
+    if (!known && (pricing.input === undefined || pricing.output === undefined))
+      console.warn(
+        `[models] Partial pricing override for unregistered model "${model}" — unspecified fields default to 0 (free), ` +
+          `not to any model's list price. Give both input and output, or register the model.`,
+      );
+    const base = known?.pricing ?? { input: 0, output: 0 };
+    _pricingOverrides.set(key, {
       input: pricing.input ?? base.input,
       output: pricing.output ?? base.output,
       cached: pricing.cached ?? base.cached,

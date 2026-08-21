@@ -34,7 +34,7 @@ import {
   type CustomEngineConfig,
   getModelPricing as _getModelPricingBase,
 } from './types.js';
-import { resolveAlias, estimateTokens } from './models.js';
+import { resolveAlias, estimateTokens, hasPricingOverride } from './models.js';
 import { buildSanitizer } from './sanitize.js';
 
 import {
@@ -52,9 +52,14 @@ import {
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 function getModelPricing(model: string | undefined, engineConfig: CustomEngineConfig) {
-  // Try the model registry first; fall back to engine-level pricing
+  // Try the model registry first; fall back to engine-level pricing.
+  // A user-configured override is not a fallback: an all-zero rate is what a
+  // subscription seat is *supposed* to look like, and it reads identically to
+  // "the registry had nothing", so ask which one it was rather than guessing.
+  // Without this, zeroing a model would hand back engineConfig.pricing — the
+  // opposite of what was asked for, and dearer than not overriding at all.
   const base = _getModelPricingBase(model, 'claude-sonnet-4-6');
-  if (base.input === 0 && base.output === 0 && engineConfig.pricing) {
+  if (base.input === 0 && base.output === 0 && engineConfig.pricing && !hasPricingOverride(model)) {
     return engineConfig.pricing;
   }
   return base;

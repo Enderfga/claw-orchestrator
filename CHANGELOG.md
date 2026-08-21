@@ -5,6 +5,86 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **`pricingOverrides` now applies however the session spelled its model.** The runtime
+  override map was keyed by whatever string the user typed, while `getModelPricing()`
+  stripped the vendor prefix before looking it up and never resolved aliases — so an
+  override could silently miss the session it was written for, in both directions:
+
+  - An override on `claude-opus-5` was found by a `claude` session (which canonicalises
+    `options.model` in `start()`, `src/persistent-session.ts:178-181`), but an override
+    written as `opus` was dead for every `claude` session.
+  - For the seven engines that never canonicalise, the reverse held — and because
+    `_persistSession()` stores the canonical id (`src/session-manager.ts:1959`), the same
+    session priced by its raw spelling on a first run and by the canonical id after a
+    resume, so an override could start or stop applying with no config change.
+  - A prefixed key (`openai/gpt-5.4`) could never be reached from either spelling.
+
+  Reads and writes now share one canonical key (prefix strip, then `resolveAlias`), and
+  the merge base is computed from that same key so a partial override on a prefixed id no
+  longer stores `output: 0`.
+
+- **A session with no explicit model gets its configured price.** `getModelPricing()`
+  returned the registry rate before consulting the override map whenever `model` was
+  absent, which is the normal case for codex and agy — and for non-Claude autoloop roles
+  it is deliberate (`src/session-manager.ts:619-621`). The engine default and the
+  unknown-model fallback now go through the map like an explicit model does, so the
+  flat-rate case the field exists for is actually covered.
+
+- **A partial override on an unregistered model id says so.** There is no list price to
+  merge onto, so the unspecified fields become 0 — free tokens. That is a legitimate idiom
+  and a very common typo, and they are indistinguishable at that point, so
+  `overrideModelPricing()` now warns instead of resolving it silently. Previously the
+  override also suppressed the unknown-model warning at `src/models.ts:470`, so a
+  misspelled id went from noisy to silent.
+
+### Added
+
+- **`pricingOverrides` is declared in the plugin config schema.** The capability was
+  already wired — `api.pluginConfig` reaches the `SessionManager` constructor
+  (`src/index.ts:133`, `:154`) and `overrideModelPricing()` has been there all along — but
+  the field was absent from `openclaw.plugin.json`, so on the surface most users actually
+  configure it was invisible and unvalidated.
+
+  ```json
+  { "pricingOverrides": { "gpt-5.5": { "input": 0, "output": 0, "cached": 0 } } }
+  ```
+
+  The per-model object is closed (`additionalProperties: false`), so a misspelled field
+  name such as `{"cache": 0}` is rejected instead of silently doing nothing, and keys must
+  be non-empty — `""` validated before and could never be read, since `''` is falsy and
+  `src/models.ts` returns on the absent-model branch first.
+
+- **The config schema is asserted against `PluginConfig`.** `tool-registration.test.ts`
+  compared only `manifest.contracts.tools`; nothing checked `configSchema`, which is how
+  the field could be missing in the first place. Keys are now compared with
+  compile-time exhaustiveness, and the two enums are compared by value — which caught
+  `defaultPermissionMode` still offering `delegate` (removed from `PermissionMode` in
+  4.7.0 because the CLI rejects it at spawn) and omitting `manual`, and `defaultEffort`
+  omitting `xhigh`. Both are fixed: with the host validating the manifest, the previously
+  valid `defaultPermissionMode: "manual"` failed validation and the plugin did not load.
+
+### Changed
+
+- **Zeroing a model's pricing disables `maxBudgetUsd` for it**, and
+  `skills/references/observability.md` now says so next to the recipe that recommends it.
+  The cap reads the session's accrued cost, which is pricing-derived, so a zeroed model
+  never trips it. `engine: 'claude'` keeps the CLI's own `--max-budget-usd`
+  (`src/persistent-session.ts:216`), accounted independently; no other engine has a native
+  cap.
+
+  Because the fixes above route the engine default through the override map, the recipe
+  now also reaches `cursor` and `opencode` default sessions, which both declare
+  `defaultModel: 'claude-sonnet-4-6'` — zeroing a Claude subscription zeroes those too.
+  Documented on the same page.
+
+- **Overrides that silently did nothing now take effect**, so `costUsd` will move for
+  anyone whose override was keyed by an alias or a vendor prefix. No test covered the old
+  behaviour; the existing override tests all use bare, unprefixed keys.
+
 ## [5.0.0] - 2026-08-19
 
 ### Breaking

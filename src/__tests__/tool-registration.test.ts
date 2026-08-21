@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import plugin from '../index.js';
 import { ENGINE_TYPES } from '../types.js';
+import type { PluginConfig, PermissionMode, EffortLevel } from '../types.js';
 
 interface RegisteredTool {
   name: string;
@@ -204,5 +205,55 @@ describe('openclaw.plugin.json parity', () => {
   it('registers no duplicate tool names', () => {
     const names = collectRegistration().tools.map((t) => t.name);
     expect(new Set(names).size).toBe(names.length);
+  });
+
+  // The tool contract was asserted above while `configSchema` was not, and it
+  // drifted the same way for the same reason: `pricingOverrides` was a real
+  // PluginConfig field the manifest never declared, and two enums went stale
+  // against their types. Values matter as much as keys here — the host validates
+  // config against this schema and refuses to load the plugin when it fails, so
+  // a missing enum member is not cosmetic: `defaultPermissionMode: 'manual'`,
+  // the name current CLIs use, could not be configured at all.
+  it('declares exactly the PluginConfig fields, with matching enums', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { fileURLToPath } = await import('node:url');
+    const { dirname, join } = await import('node:path');
+    const here = dirname(fileURLToPath(import.meta.url));
+    const manifest = JSON.parse(readFileSync(join(here, '../../openclaw.plugin.json'), 'utf8')) as {
+      configSchema: { properties: Record<string, { enum?: string[] }> };
+    };
+
+    // Exhaustive by construction: adding a PluginConfig field without adding it
+    // here is a compile error, so this list cannot silently fall behind.
+    const expected: Record<keyof PluginConfig, true> = {
+      claudeBin: true,
+      defaultModel: true,
+      defaultPermissionMode: true,
+      defaultEffort: true,
+      maxConcurrentSessions: true,
+      sessionTtlMinutes: true,
+      proxy: true,
+      pricingOverrides: true,
+    };
+
+    expect(Object.keys(manifest.configSchema.properties).sort()).toEqual(Object.keys(expected).sort());
+
+    // The enums are the values a host will reject config against, so compare
+    // them to the unions they mirror rather than trusting them to keep up.
+    const permissionModes: PermissionMode[] = [
+      'acceptEdits',
+      'bypassPermissions',
+      'default',
+      'manual',
+      'dontAsk',
+      'plan',
+      'auto',
+    ];
+    const effortLevels: EffortLevel[] = ['low', 'medium', 'high', 'xhigh', 'max', 'auto'];
+
+    expect([...(manifest.configSchema.properties.defaultPermissionMode.enum ?? [])].sort()).toEqual(
+      [...permissionModes].sort(),
+    );
+    expect([...(manifest.configSchema.properties.defaultEffort.enum ?? [])].sort()).toEqual([...effortLevels].sort());
   });
 });
