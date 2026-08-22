@@ -5,6 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`engine: 'grok'` — xAI Grok Build.** `grok -p <msg> --output-format json` per send.
+  Two things make it unlike the other one-shot engines. Its result object reports
+  `total_cost_usd`, so the wrapper passes the engine's own spend straight through
+  instead of multiplying tokens by a rate in `models.ts` — the run ledger and the
+  `maxBudgetUsd` gate both read what xAI actually charged, and grok's two price
+  tiers never have to be modelled. And it reports the model that answered, which
+  the router-style engines do not. Conversation continuity is `--resume <sessionId>`,
+  confirmed with a two-turn recall test; usage and cost are per-turn, checked by
+  resuming and reading turn 2 rather than assumed. `sandboxMode: 'read-only'` is
+  **refused**, not approximated: grok's plan mode is model-cooperative and its deny
+  rules have not been through the adversarial matrix, so a read-only session throws
+  rather than running writable under a read-only label.
+- `grok-4.6` in the model registry (500,000-token window, base tier $2/$0.50/$6),
+  registered for the context window and an indicative breakdown — not to price turns.
+
+### Changed
+
+- **`engine: 'cursor'` is now legacy**, the same treatment `gemini` has: the wrapper
+  still works and existing callers are not broken, but it is no longer a documented
+  option, is not version-tracked, and gets no new work. Note what this is not —
+  Cursor has not been discontinued; Anysphere was acquired by SpaceX (closed
+  2026-08-15) and the CLI has shipped since. What pushed it out of the tracked set is
+  that Cursor never reports which model actually ran (its init event says
+  `"model": "Auto"`), so every cost row is attributed to a hardcoded proxy rate.
+
+### Fixed
+
+- **The `cursor` engine resolved its binary as the bare name `agent`, which is no
+  longer unambiguous.** xAI's Grok installer symlinks `agent` to its own binary, so on
+  a machine with both, a Cursor session spawned Grok and failed the turn with
+  `error: unexpected argument '--force' found`. The wrapper now resolves
+  `cursor-agent`, the name Cursor owns; `CURSOR_BIN` still overrides.
+
 ## [5.0.0] - 2026-08-19
 
 ### Breaking

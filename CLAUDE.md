@@ -4,7 +4,7 @@ This file provides context for Claude Code when working on this project.
 
 ## Architecture
 
-Claw Orchestrator wraps coding CLIs (Claude Code, Codex, Antigravity, Cursor Agent, plus
+Claw Orchestrator wraps coding CLIs (Claude Code, Codex, Antigravity, Grok Build, plus
 arbitrary custom CLIs) into a managed, programmable session layer for claw-style
 agent systems. Runs as a standalone CLI/server, with first-class OpenClaw plugin
 support. Key source files:
@@ -18,7 +18,8 @@ support. Key source files:
 | `src/persistent-codex-session.ts` | Codex CLI wrapper (`codex exec --full-auto`) |
 | `src/persistent-gemini-session.ts` | Gemini CLI wrapper — **legacy**: Gemini CLI is sunset, superseded by Antigravity (`agy`). Kept working for existing callers; not documented as an option and not version-tracked. |
 | `src/persistent-agy-session.ts` | Google Antigravity CLI wrapper (`agy -p`, plain text, log-harvested conversation resume) |
-| `src/persistent-cursor-session.ts` | Cursor Agent CLI wrapper (`agent -p --force --output-format stream-json`) |
+| `src/persistent-cursor-session.ts` | Cursor Agent CLI wrapper — **legacy**: superseded in this lineup by Grok Build (`grok`). Kept working for existing callers; not documented as an option and not version-tracked. Binary is `cursor-agent`, never the contested `agent` name. |
+| `src/persistent-grok-session.ts` | Grok Build CLI wrapper (`grok -p --output-format json`) — engine-reported cost, resumable session id |
 | `src/persistent-opencode-session.ts` | sst/opencode CLI wrapper (`opencode run --format json`) |
 | `src/persistent-custom-session.ts` | Custom engine — any CLI via user-provided `CustomEngineConfig` |
 | `src/council.ts` | Multi-agent collaboration engine with git worktree isolation and post-processing |
@@ -188,7 +189,7 @@ Current tested versions (update on each release):
 | Claude | `claude` | 2.1.237 | Persistent subprocess, `--output-format stream-json` |
 | Codex | `codex` | 0.148.0 | `codex exec --sandbox workspace-write --skip-git-repo-check --json -C <dir>` (or `codex app-server --listen stdio://` for /goal) |
 | Antigravity | `agy` | 1.1.15 | `agy -p <msg> --log-file <tmp> [--conversation <id>] --dangerously-skip-permissions/--sandbox --print-timeout <n>s` |
-| Cursor | `agent` | 2026.08.11-e8db854 | `agent -p <msg> --force/--mode plan --trust --output-format stream-json --workspace <dir>` (read-only injects a `.cursor/cli.json` deny config) |
+| Grok | `grok` | 1.0.5 | `grok -p <msg> --output-format json --cwd <dir> [--resume <id>] [--permission-mode M] [--effort E]` (read-only refused pending an adversarial pass) |
 | OpenCode | `opencode` | 1.18.18 | `opencode run <msg> --format json [--model provider/model]` (read-only sessions add `--agent clawo-readonly` + `OPENCODE_CONFIG_CONTENT`) |
 
 **Important:** When CLI vendors change flags or output format, update the corresponding `persistent-*-session.ts` and re-run integration tests.

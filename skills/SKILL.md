@@ -1,6 +1,6 @@
 ---
 name: claw-orchestrator
-description: Manage persistent coding sessions across Claude Code, Codex, Antigravity (agy), Cursor, and OpenCode engines. Use when orchestrating multi-engine coding agents, starting/sending/stopping sessions, running multi-agent council collaborations, cross-session messaging, ultraplan deep planning, ultrareview parallel code review, autoloop autonomous workspace iteration, ultraapp building deployable web apps from a structured Q&A interview, switching models/tools at runtime, exposing the orchestrator's 69 tools as an MCP server to Hermes Agent / Claude Desktop / Cursor / Cline / Continue / Zed / Windsurf / Goose, or running as an Agent Client Protocol (ACP) agent that Zed / JetBrains / Neovim / Emacs / VS Code / dsh can drive directly. Triggers on "start a session", "send to session", "run council", "ultraplan", "ultrareview", "autoloop", "ultraapp", "Forge tab", "build a web app", "one-click app", "AppSpec", "autonomous iteration", "iterate until goal", "deep paper review", "auto research", "switch model", "multi-agent", "coding session", "session inbox", "cursor agent", "opencode", "mcp server", "clawo-mcp", "hermes mcp", "model context protocol", "ultracode", "dynamic workflow", "fanout", "fan-out", "best-of-N", "steer turn", "interrupt turn", "fork thread", "rollback turns", "acp", "agent client protocol", "clawo acp", "zed agent", "jetbrains agent", "external agent", "dsh subagent", "deepseek harness", "clawo runs", "run ledger", "how much did it cost", "token usage", "spend cap", "budget limit", "maxBudgetUsd".
+description: Manage persistent coding sessions across Claude Code, Codex, Antigravity (agy), Grok Build, and OpenCode engines. Use when orchestrating multi-engine coding agents, starting/sending/stopping sessions, running multi-agent council collaborations, cross-session messaging, ultraplan deep planning, ultrareview parallel code review, autoloop autonomous workspace iteration, ultraapp building deployable web apps from a structured Q&A interview, switching models/tools at runtime, exposing the orchestrator's 69 tools as an MCP server to Hermes Agent / Claude Desktop / Cursor / Cline / Continue / Zed / Windsurf / Goose, or running as an Agent Client Protocol (ACP) agent that Zed / JetBrains / Neovim / Emacs / VS Code / dsh can drive directly. Triggers on "start a session", "send to session", "run council", "ultraplan", "ultrareview", "autoloop", "ultraapp", "Forge tab", "build a web app", "one-click app", "AppSpec", "autonomous iteration", "iterate until goal", "deep paper review", "auto research", "switch model", "multi-agent", "coding session", "session inbox", "grok", "grok build", "opencode", "mcp server", "clawo-mcp", "hermes mcp", "model context protocol", "ultracode", "dynamic workflow", "fanout", "fan-out", "best-of-N", "steer turn", "interrupt turn", "fork thread", "rollback turns", "acp", "agent client protocol", "clawo acp", "zed agent", "jetbrains agent", "external agent", "dsh subagent", "deepseek harness", "clawo runs", "run ledger", "how much did it cost", "token usage", "spend cap", "budget limit", "maxBudgetUsd".
 metadata:
   {
     "openclaw":
@@ -36,7 +36,7 @@ metadata:
 
 # Claw Orchestrator Skill
 
-Claw Orchestrator — persistent multi-engine coding session manager for claw-style agent systems. Runs as a standalone CLI/server, with first-class OpenClaw plugin support. Wraps Claude Code, Codex, Antigravity, Cursor Agent, OpenCode, and custom CLIs into headless agentic engines with 69 tools.
+Claw Orchestrator — persistent multi-engine coding session manager for claw-style agent systems. Runs as a standalone CLI/server, with first-class OpenClaw plugin support. Wraps Claude Code, Codex, Antigravity, Grok Build, OpenCode, and custom CLIs into headless agentic engines with 69 tools.
 
 ## Engine Quick Reference
 
@@ -45,7 +45,7 @@ Claw Orchestrator — persistent multi-engine coding session manager for claw-st
 | `claude` | `claude` | Persistent subprocess | Multi-turn, complex tasks |
 | `codex` | `codex exec` | Per-message spawn | One-shot execution |
 | `agy` | `agy -p` | Per-message spawn | Google Antigravity; plain-text, auto conversation resume |
-| `cursor` | `agent -p` | Per-message spawn | One-shot execution |
+| `grok` | `grok -p` | Per-message spawn | xAI Grok Build; engine-reported cost, resumable session |
 | `opencode` | `opencode run` | Per-message spawn | Provider-agnostic (`provider/model`) |
 
 ## Core Workflow
@@ -55,7 +55,7 @@ Claw Orchestrator — persistent multi-engine coding session manager for claw-st
 session_start({ name: "myproject", cwd: "/path/to/project", engine: "claude" })
 session_start({ name: "codex-task", cwd: "/path/to/project", engine: "codex" })
 session_start({ name: "agy-task", cwd: "/path/to/project", engine: "agy" })
-session_start({ name: "cursor-task", cwd: "/path/to/project", engine: "cursor" })
+session_start({ name: "grok-task", cwd: "/path/to/project", engine: "grok" })
 session_start({ name: "opencode-task", cwd: "/path/to/project", engine: "opencode", model: "anthropic/claude-sonnet-4" })
 
 // 2. Send messages
@@ -231,5 +231,5 @@ Each engine requires its own auth before use:
 - **Claude**: `claude /login` or `ANTHROPIC_API_KEY`
 - **Codex**: `codex login` or `OPENAI_API_KEY`
 - **Antigravity**: run `agy` once and complete the Google OAuth login
-- **Cursor**: `agent login` or `CURSOR_API_KEY`
+- **Grok**: run `grok` once and sign in (grok.com account or `XAI_API_KEY`)
 - **OpenCode**: `opencode auth login` (provider-agnostic; use `provider/model` form for `model`)

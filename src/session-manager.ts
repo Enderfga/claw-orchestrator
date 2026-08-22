@@ -136,6 +136,7 @@ import { PersistentGeminiSession } from './persistent-gemini-session.js';
 import { PersistentCodexSession } from './persistent-codex-session.js';
 import { PersistentCodexAppServerSession } from './persistent-codex-app-session.js';
 import { PersistentCursorSession } from './persistent-cursor-session.js';
+import { PersistentGrokSession } from './persistent-grok-session.js';
 import { PersistentOpencodeSession } from './persistent-opencode-session.js';
 import { PersistentAgySession } from './persistent-agy-session.js';
 import { PersistentCustomSession } from './persistent-custom-session.js';
@@ -2199,6 +2200,7 @@ export class SessionManager {
   private _storedResumeId(engine: EngineType | undefined, id: string | undefined): string | undefined {
     if (engine === 'agy') return isAgyConversationId(id) ? id : undefined;
     if (engine === 'codex') return id && !/^codex-\d+-/.test(id) ? id : undefined;
+    if (engine === 'grok') return id && !/^grok-\d+-/.test(id) ? id : undefined;
     return id;
   }
 
@@ -2226,6 +2228,8 @@ export class SessionManager {
         return new PersistentCodexAppServerSession(config, process.env.CODEX_BIN);
       case 'cursor':
         return new PersistentCursorSession(config, process.env.CURSOR_BIN);
+      case 'grok':
+        return new PersistentGrokSession(config, process.env.GROK_BIN);
       case 'opencode':
         return new PersistentOpencodeSession(config, process.env.OPENCODE_BIN);
       case 'custom':

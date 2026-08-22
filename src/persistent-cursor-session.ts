@@ -61,7 +61,12 @@ export class PersistentCursorSession extends BaseOneShotSession {
   private cursorChatId?: string;
 
   constructor(config: SessionConfig, cursorBin?: string) {
-    super(config, cursorBin || process.env.CURSOR_BIN || 'agent', {
+    // `cursor-agent` before `agent`: Cursor's installer provides both names, but
+    // `agent` is generic enough that another vendor can claim it — xAI's Grok
+    // installer does exactly that, symlinking `agent` to its own binary, which
+    // then rejects `--force`/`--trust`/`--workspace` and fails the turn with
+    // "unexpected argument". The specific name is the one Cursor owns.
+    super(config, cursorBin || process.env.CURSOR_BIN || 'cursor-agent', {
       enginePrefix: 'cursor',
       defaultModel: 'claude-sonnet-4-6',
       defaultModelDisplay: 'cursor-default',

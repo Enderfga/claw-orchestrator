@@ -14,7 +14,9 @@ SessionManager
 │   └── Wraps: codex app-server --listen stdio:// (long-running JSON-RPC; required for /goal)
 ├── engine: 'agy'       → PersistentAgySession
 │   └── Wraps: agy -p (Google Antigravity CLI, per-message spawning, stream-json output)
-├── engine: 'cursor'    → PersistentCursorSession
+├── engine: 'grok'      → PersistentGrokSession
+│   └── Wraps: grok -p --output-format json (xAI Grok Build, per-message spawning)
+├── engine: 'cursor'    → PersistentCursorSession (legacy)
 │   └── Wraps: agent -p --force --trust --output-format stream-json (per-message spawning)
 ├── engine: 'opencode'  → PersistentOpencodeSession
 │   └── Wraps: opencode run --format json (per-message spawning)
@@ -173,9 +175,59 @@ await manager.startSession({
 > multi-model **proxy** still talks to the Gemini **API**; that is a different
 > subsystem and is unaffected.)
 
-### Cursor Agent (`engine: 'cursor'`)
+### Grok Build (`engine: 'grok'`)
 
-Wraps the Cursor Agent CLI (`agent`) with `--print --output-format stream-json`. Write-enabled sessions use `--force`. Each `send()` spawns a new process.
+Wraps xAI's **Grok Build** CLI. Each `send()` spawns `grok -p <msg> --output-format json`, which
+prints a single JSON object and exits. Verified against `grok` **1.0.5**.
+
+- **Cost comes from the engine, not from our price table.** The result object carries
+  `total_cost_usd`, and the wrapper writes it straight into the session's spend. Every other engine
+  here multiplies tokens by a rate in `models.ts` — the metadata most prone to going stale — so on
+  this engine the run ledger and the `maxBudgetUsd` gate both read what xAI actually charged.
+  `grok-4.6` is still registered, for its context window and an indicative breakdown; its two price
+  tiers ($2/$0.50/$6 under a 200K prompt, $4/$1/$12 at or above, charged across the whole request)
+  therefore never have to be modelled here.
+- **Real conversation continuity**: the `sessionId` from turn 1 is replayed as `--resume <id>`.
+  `--continue` is deliberately not used — it means "the most recent session for this cwd", which
+  collides between concurrent sessions. Confirmed with a two-turn recall test, not inferred.
+- Real token counts from `usage` (`input_tokens`, `output_tokens`, `cache_read_input_tokens`).
+  These are **per-turn**, not cumulative over the thread — checked by resuming and reading turn 2,
+  because the same-looking field on codex is a running total.
+- Permission modes pass straight through: grok's `--permission-mode` takes the same vocabulary we
+  use. The one exception is our `manual`, which grok spells `default`.
+- Reasoning effort maps to `--effort`; grok accepts `low|medium|high`, so `max` and `xhigh` clamp.
+- **`sandboxMode: 'read-only'` is refused, not approximated.** grok has `--permission-mode plan` and
+  `--deny` rules, but plan mode alone is model-cooperative — the shape that let an adversarial
+  prompt write through Cursor's plan mode — and the deny rules have not been through the
+  write × shell × subagent × resumed-turn matrix this project requires before claiming a boundary.
+  A read-only grok session throws rather than running writable under a read-only label.
+- Binary: `grok` (set `GROK_BIN` to override). Not `agent`: xAI's installer claims that name too,
+  and so did Cursor's.
+- Requires Grok Build: see `x.ai/cli`.
+
+```typescript
+await manager.startSession({
+  name: 'grok-task',
+  engine: 'grok',
+  model: 'grok-4.6',
+  cwd: '/project',
+});
+```
+
+### Cursor Agent (`engine: 'cursor'`) — legacy
+
+> **Legacy: `engine: 'cursor'`.** Superseded in this lineup by Grok Build (`engine: 'grok'`).
+> The `cursor` engine still exists and still works — existing callers are not broken — but it is
+> no longer a documented option, is not version-tracked, and gets no new work.
+>
+> Note what this is and is not: Cursor itself is **not** discontinued. Anysphere was acquired by
+> SpaceX (closed 2026-08-15) and folded into the SpaceXAI team, and the CLI has shipped since. Two
+> practical things pushed it out of the tracked set. Cursor never reports which model actually ran
+> — its `system` init event says `"model": "Auto"` — so a router that spans Claude, GPT and Grok
+> leaves every cost row attributed to a hardcoded proxy rate. And xAI's Grok installer now claims
+> the bare `agent` name, so the binary that name resolves to depends on install order.
+
+Wraps the Cursor Agent CLI with `--print --output-format stream-json`. Write-enabled sessions use `--force`. Each `send()` spawns a new process.
 
 - Conversation continuity: the chat id from the first turn's `system` event is captured and passed back as `--resume <chatId>` on later sends, so the model sees prior turns. `--continue` is deliberately not used: it resumes "the latest chat", which collides between concurrent sessions.
 - One-shot execution per message (no persistent subprocess)
@@ -185,7 +237,9 @@ Wraps the Cursor Agent CLI (`agent`) with `--print --output-format stream-json`.
 - `--trust` auto-trusts the workspace without prompting
 - Cursor uses its own model routing (e.g., `sonnet-4`, `gpt-5`, `auto`)
 - Requires Cursor Agent CLI: `curl https://cursor.com/install -fsSL | bash`
-- Binary: `agent` (set `CURSOR_BIN` env var to override)
+- Binary: `cursor-agent` (set `CURSOR_BIN` env var to override). The generic `agent` name is
+  deliberately not used: xAI's Grok installer symlinks `agent` to its own binary, which rejects
+  `--force`/`--trust`/`--workspace` and fails the turn with "unexpected argument"
 
 ```typescript
 await manager.startSession({

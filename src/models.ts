@@ -9,7 +9,7 @@ import type { EngineType } from './types.js';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
-export type ProviderName = 'anthropic' | 'openai' | 'google' | 'cursor' | 'custom';
+export type ProviderName = 'anthropic' | 'openai' | 'google' | 'cursor' | 'xai' | 'custom';
 
 export interface ModelPricing {
   input: number; // per 1M tokens
@@ -321,6 +321,23 @@ const MODELS: ModelDef[] = [
     contextWindow: 1_000_000,
   },
 
+  // ── xAI Grok Build ─────────────────────────────────────────────────────
+  // Registered for the context window and the informational cost breakdown only:
+  // PersistentGrokSession takes `total_cost_usd` straight from the CLI, so these
+  // rates never decide what a turn cost. That also makes grok's two-tier pricing
+  // a non-issue — $2/$0.50/$6 below a 200K prompt and $4/$1/$12 at or above it,
+  // charged across the whole request. We register the base tier, as with every
+  // other long-context tier in this file; the engine bills the right one itself.
+  // Verified against docs.x.ai/docs/models and grok 1.0.5 (`grok models`).
+  {
+    id: 'grok-4.6',
+    engine: 'grok',
+    provider: 'xai',
+    pricing: { input: 2, output: 6, cached: 0.5 },
+    aliases: ['grok'],
+    contextWindow: 500_000,
+  },
+
   // ── Cursor Composer ────────────────────────────────────────────────────
   {
     id: 'composer-2',
@@ -407,6 +424,7 @@ export function resolveEngineAndModel(model: string): { engine: EngineType; mode
     return { engine: 'codex', model };
   if (model.startsWith('composer') || model.startsWith('cursor') || model === 'auto')
     return { engine: 'cursor', model };
+  if (model.startsWith('grok')) return { engine: 'grok', model };
 
   // 3. Default: claude engine passthrough
   return { engine: 'claude', model };
@@ -416,7 +434,17 @@ export function resolveEngineAndModel(model: string): { engine: EngineType; mode
 export function resolveProvider(model: string): { provider: ProviderName; apiModel: string } {
   // Strip vendor prefixes
   let clean = model;
-  for (const prefix of ['anthropic/', 'openai/', 'openai-codex/', 'gemini/', 'google/', 'agy/', 'cursor/']) {
+  for (const prefix of [
+    'anthropic/',
+    'openai/',
+    'openai-codex/',
+    'gemini/',
+    'google/',
+    'agy/',
+    'cursor/',
+    'grok/',
+    'xai/',
+  ]) {
     if (clean.startsWith(prefix)) {
       clean = clean.slice(prefix.length);
       break;
@@ -453,7 +481,7 @@ export function resolveProvider(model: string): { provider: ProviderName; apiMod
 
 /** Get context window size for a model. Returns 200k default for unknown models. */
 export function getContextWindow(model: string): number {
-  const clean = model.replace(/^(anthropic|openai|openai-codex|google|gemini|agy|cursor)\//g, '');
+  const clean = model.replace(/^(anthropic|openai|openai-codex|google|gemini|agy|cursor|grok|xai)\//g, '');
   const known = lookupModel(clean);
   return known?.contextWindow ?? 200_000;
 }
@@ -461,7 +489,7 @@ export function getContextWindow(model: string): number {
 /** Get pricing for a model. Falls back to sonnet pricing for unknown models. */
 export function getModelPricing(model?: string, defaultModel = 'claude-sonnet-4-6'): ModelPricing {
   if (!model) return lookupModel(defaultModel)?.pricing ?? { input: 0, output: 0 };
-  const clean = model.replace(/^(anthropic|openai|openai-codex|google|gemini|agy|cursor)\//g, '');
+  const clean = model.replace(/^(anthropic|openai|openai-codex|google|gemini|agy|cursor|grok|xai)\//g, '');
   // Check overrides first
   const override = _pricingOverrides.get(clean);
   if (override) return override;

@@ -4,7 +4,7 @@
 
 # Claw Orchestrator
 
-> A runtime for coding agents. Wrap Claude Code, Codex, Antigravity, Cursor Agent, OpenCode, or any custom CLI as persistent programmable sessions; coordinate them in multi-agent councils; run autonomous Planner / Coder / Reviewer loops; or hand a five-question interview to an Opus council that ships a deployed web app at `localhost:19000/forge/<slug>/`.
+> A runtime for coding agents. Wrap Claude Code, Codex, Antigravity, Grok Build, OpenCode, or any custom CLI as persistent programmable sessions; coordinate them in multi-agent councils; run autonomous Planner / Coder / Reviewer loops; or hand a five-question interview to an Opus council that ships a deployed web app at `localhost:19000/forge/<slug>/`.
 
 [![npm version](https://img.shields.io/npm/v/@enderfga/claw-orchestrator.svg)](https://www.npmjs.com/package/@enderfga/claw-orchestrator)
 [![CI](https://github.com/Enderfga/claw-orchestrator/actions/workflows/ci.yml/badge.svg)](https://github.com/Enderfga/claw-orchestrator/actions/workflows/ci.yml)
@@ -27,7 +27,7 @@ https://github.com/user-attachments/assets/fbd2b0ea-28d8-4387-9894-c29cf15ba030
 | Capability                  | What it does                                                                                                                                                                                                                    | Reference                                                  |
 | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
 | **Persistent Sessions**     | Long-lived coding agents kept alive across requests, with full context, tool, model, and worktree control.                                                                                                                      | [`sessions.md`](./skills/references/sessions.md)           |
-| **Multi-Engine Runtime**    | One interface over Claude Code, Codex, Antigravity (agy), Cursor Agent, OpenCode, and arbitrary custom CLIs.                                                                                                                               | [`multi-engine.md`](./skills/references/multi-engine.md)   |
+| **Multi-Engine Runtime**    | One interface over Claude Code, Codex, Antigravity (agy), Grok Build, OpenCode, and arbitrary custom CLIs.                                                                                                                               | [`multi-engine.md`](./skills/references/multi-engine.md)   |
 | **Multi-Agent Council**     | Parallel agents in isolated git worktrees, voting on consensus until they agree.                                                                                                                                                | [`council.md`](./skills/references/council.md)             |
 | **Fan-out**                 | Run one task across N engine/model agents in parallel and collect their answers, with an optional synthesis pass — the cross-engine best-of-N / diverse-perspective primitive (no rounds or worktrees).                          | [`tools.md`](./skills/references/tools.md)                 |
 | **ultracode**               | `session_start({ ultracode: true })` lets Claude orchestrate a dynamic JS workflow and fan out to subagents per task (Claude engine).                                                                                            | [`tools.md`](./skills/references/tools.md)                 |
@@ -35,7 +35,7 @@ https://github.com/user-attachments/assets/fbd2b0ea-28d8-4387-9894-c29cf15ba030
 | **Ultraapp**                | A three-agent Opus council turns a five-question interview into a deployed web app — Tailwind UI, BYOK, file-queue runtime, smoke test, all live at `localhost:19000/forge/<slug>/`.                                            | [`ultraapp.md`](./skills/references/ultraapp.md)           |
 | **Embedded Dashboard**      | Three-tab UI for Autoloop, Council, and Forge with sidebar lifecycle controls, per-run live event streaming, and cookie-based auth via a `/login` redirect.                                                                     | [`dashboard.md`](./skills/references/dashboard.md)         |
 | **OpenAI-Compatible Proxy** | `POST /v1/chat/completions` translates OpenAI requests into native Anthropic, OpenAI, and Google calls and streams responses back in OpenAI shape. Point any OpenAI-SDK client at the orchestrator without changing call sites. | [`openai-compat.md`](./skills/references/openai-compat.md) |
-| **Run Ledger & Spend Caps** | Every turn on every engine is appended to a durable JSONL ledger — engine, model, tokens, cost, duration, and the council/fanout/autoloop it belonged to — queryable with `clawo runs` after a restart. `maxBudgetUsd` is enforced by the runtime, so a cap now holds on Codex, Cursor, agy and OpenCode too, not just Claude Code. | [`observability.md`](./skills/references/observability.md) |
+| **Run Ledger & Spend Caps** | Every turn on every engine is appended to a durable JSONL ledger — engine, model, tokens, cost, duration, and the council/fanout/autoloop it belonged to — queryable with `clawo runs` after a restart. `maxBudgetUsd` is enforced by the runtime, so a cap now holds on Codex, Grok, agy and OpenCode too, not just Claude Code. | [`observability.md`](./skills/references/observability.md) |
 
 The full 69-tool surface is enumerated in [`tools.md`](./skills/references/tools.md).
 
@@ -98,7 +98,7 @@ Neovim, Emacs, the VS Code ACP extension — or `dsh` via its `subagent-acp` pro
 can drive Claw Orchestrator as their coding agent.
 
 Every other agent in that ecosystem is a single agent. This one is a fleet: the model
-selector is grouped by engine, so one dropdown holds Claude, Codex and Cursor models at
+selector is grouped by engine, so one dropdown holds Claude, Codex and Grok models at
 once and switching it switches engine mid-session, and `/council`, `/ultraplan` and
 `/ultrareview` run multi-agent orchestrations from the chat box. Setup, the `dsh` YAML
 block, and the cancellation and permission limitations are in
@@ -113,7 +113,7 @@ block, and the cancellation and permission limitations are in
 | Claude Code  | `claude`   | 2.1.237        |
 | Codex        | `codex`    | 0.148.0        |
 | Antigravity  | `agy`      | 1.1.15         |
-| Cursor Agent | `agent`    | 2026.08.11-e8db854 |
+| Grok Build   | `grok`     | 1.0.5              |
 | OpenCode     | `opencode` | 1.18.18        |
 | Custom CLI   | any        | —              |
 

@@ -37,7 +37,17 @@ export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'auto';
 
 // ─── Engine ─────────────────────────────────────────────────────────────────
 
-export const ENGINE_TYPES = ['claude', 'codex', 'codex-app', 'gemini', 'agy', 'cursor', 'opencode', 'custom'] as const;
+export const ENGINE_TYPES = [
+  'claude',
+  'codex',
+  'codex-app',
+  'gemini',
+  'agy',
+  'cursor',
+  'grok',
+  'opencode',
+  'custom',
+] as const;
 export type EngineType = (typeof ENGINE_TYPES)[number];
 
 /**
@@ -61,6 +71,9 @@ export type EngineType = (typeof ENGINE_TYPES)[number];
  * lasted, the autoloop replayed a character-capped (therefore truncating)
  * transcript to them on every turn, and the openai-compat bridge re-sent the
  * whole tool schema block, every tool result, and the system prompt every turn.
+ * grok resumes by its own session UUID (`--resume <id>`), verified the same way
+ * against 1.0.5: turn 2 answered with the number turn 1 was asked to remember.
+ *
  * This is an engine-capability claim, so check an entry with a real two-turn
  * recall test against the binary before trusting it.
  */
@@ -75,6 +88,7 @@ export function engineHasNativeConversation(
     case 'agy':
     case 'opencode':
     case 'cursor':
+    case 'grok':
       return true;
     case 'custom':
       // A persistent custom engine is a long-running stdin/stdout process, so it

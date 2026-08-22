@@ -33,6 +33,7 @@ export { PersistentCodexSession } from './persistent-codex-session.js';
 export { PersistentGeminiSession } from './persistent-gemini-session.js';
 export { PersistentAgySession } from './persistent-agy-session.js';
 export { PersistentCursorSession } from './persistent-cursor-session.js';
+export { PersistentGrokSession } from './persistent-grok-session.js';
 export { PersistentOpencodeSession } from './persistent-opencode-session.js';
 export { PersistentCustomSession } from './persistent-custom-session.js';
 export { Council, getDefaultCouncilConfig } from './council.js';
