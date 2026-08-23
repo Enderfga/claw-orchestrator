@@ -697,14 +697,22 @@ export class RunKernel extends EventEmitter {
     // Claim before deleting and never release first. Releasing here used to open
     // a window in which another process could legally resume the run, only for
     // this process to delete the directory out from under its new owner.
+    let claimed = false;
     try {
       acquireLease(runId, this.ownerId);
+      claimed = true;
     } catch {
-      return false;
+      claimed = false;
     }
     this.cancel(runId);
+    // Whatever happened to the directory, this process is done with the run, so
+    // its in-memory traces go — a refusal must not leave the caller's secrets
+    // sitting in a map for a run we are no longer tracking. (`acquireLease`
+    // throws for a run that no longer exists as well as for one someone else
+    // owns, and forgetting the credentials is right in both cases.)
     this._secrets.delete(runId);
     this._tags.delete(runId);
+    if (!claimed) return false;
     deleteRunDir(runId, this.logger);
     return true;
   }

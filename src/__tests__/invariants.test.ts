@@ -991,6 +991,39 @@ describe('single owner, enforced', () => {
     expect(loadRun('unapplied-run')?.workflow).toBe('new');
   });
 
+  it("a refused delete does not leave the caller's credentials in memory", async () => {
+    // `delete` claims the run before removing it, and refuses when it cannot.
+    // The refusal path still has to forget what this process was holding for it
+    // — a secret bag kept for a run we are no longer tracking is exactly the
+    // material that must not linger.
+    const { RunKernel } = await import('../kernel/engine.js');
+    const kernel = new RunKernel();
+    kernel.setExecutor('agent', async () => ({ ok: true }));
+    const started = await kernel.start(
+      { name: 'forget', cwd: os.tmpdir(), nodes: [{ id: 'a', kind: 'agent', prompt: 'x' }] },
+      { runId: 'forget-run', tag: 't', secrets: { customEngine: { env: { TOKEN: 'do-not-keep-this' } } } },
+    );
+    await kernel.wait(started.runId);
+
+    const holder = new RunKernel();
+    holder.setExecutor('agent', async () => ({ ok: true }));
+    let finish!: () => void;
+    const gate = new Promise<void>((resolve) => (finish = resolve));
+    holder.setExecutor('agent', async () => {
+      await gate;
+      return { ok: true };
+    });
+    await holder.resume('forget-run', { restart: true });
+
+    expect(kernel.delete('forget-run')).toBe(false);
+    const secrets = (kernel as unknown as { _secrets: Map<string, unknown> })._secrets;
+    expect(secrets.has('forget-run')).toBe(false);
+
+    finish();
+    await holder.wait('forget-run');
+    holder.delete('forget-run');
+  }, 30_000);
+
   it('delete cannot remove a run another kernel resumed', async () => {
     const { RunKernel } = await import('../kernel/engine.js');
     const first = new RunKernel();
@@ -1016,6 +1049,69 @@ describe('single owner, enforced', () => {
     await second.wait(started.runId);
     expect(second.delete(started.runId)).toBe(true);
   });
+
+  it('three real processes committing at once: every commit is in the log exactly once', async () => {
+    // The invariant that actually tests the lock, rather than describing it. A
+    // lock that lets two callers in at once does not announce itself — what it
+    // does is lose writes, because one caller's recursive cleanup of its own
+    // staging directory walks into the transaction directory the other just
+    // published. Committed events then vanish, or the run wedges with a
+    // transaction that can never be applied.
+    //
+    // Against the previous lock this test does not merely fail, it throws: the
+    // run ends up permanently unreadable.
+    const { readEvents } = await import('../kernel/store.js');
+    await seedRun('exclusion-run');
+    const startAt = Date.now() + 700;
+    const src = (label: string) => `
+      const { acquireLease, commit } = await import(${JSON.stringify(`${DIST2}/kernel/store.js`)});
+      await new Promise((r) => setTimeout(r, Math.max(0, ${startAt} - Date.now())));
+      const done = [];
+      let i = 0;
+      // One shared owner id: the lease is not what is under test here, the lock is.
+      while (Date.now() < ${startAt} + 1200) {
+        const message = ${JSON.stringify(label)} + '-' + i++;
+        try {
+          const g = acquireLease('exclusion-run', 'shared-owner');
+          if (commit(g, { events: [{ ts: 't', type: 'log', level: 'info', message }] }).outcome === 'committed') {
+            done.push(message);
+          }
+        } catch { /* contended */ }
+      }
+      await new Promise((r) => setTimeout(r, Math.max(0, ${startAt + 2200} - Date.now())));
+      console.log(JSON.stringify({ done }));
+    `;
+    const run = (label: string): Promise<{ done: string[] }> =>
+      new Promise((resolve, reject) => {
+        const proc = spawn(process.execPath, ['--input-type=module', '-e', src(label)], {
+          env: { ...process.env, CLAWO_WF_DIR: wfDir },
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        let out = '';
+        proc.stdout!.on('data', (d: Buffer) => (out += d.toString()));
+        proc.on('exit', () => {
+          try {
+            resolve(JSON.parse(out.trim().split('\n').pop() ?? '{"done":[]}'));
+          } catch (e) {
+            reject(e);
+          }
+        });
+        proc.on('error', reject);
+      });
+
+    const results = await Promise.all([run('a'), run('b'), run('c')]);
+    const committed = results.flatMap((r) => r.done);
+    expect(committed.length).toBeGreaterThan(20);
+
+    const logged = readEvents('exclusion-run').map((e) => (e as { message?: string }).message);
+    const counts = new Map<string | undefined, number>();
+    for (const m of logged) counts.set(m, (counts.get(m) ?? 0) + 1);
+    // Nothing a commit reported as committed may be missing, and nothing may
+    // appear twice — the two ways a broken lock shows up in the data.
+    expect(committed.filter((m) => !counts.has(m))).toEqual([]);
+    expect([...counts].filter(([, n]) => n > 1)).toEqual([]);
+    expect(fs.existsSync(path.join(wfDir, 'exclusion-run', '.tx'))).toBe(false);
+  }, 60_000);
 
   it('a moment of lock contention is not a lost run', async () => {
     // `withLock` threw immediately on a fresh lock and `commit` turned every

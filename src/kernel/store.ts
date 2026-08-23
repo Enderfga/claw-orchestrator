@@ -548,6 +548,17 @@ function applyTxLocked(runId: string, logger?: Logger): void {
     return;
   }
 
+  // Written after the last data step and before cleanup, so a failure while
+  // removing the directory leaves something that says "the data is in, only the
+  // tidying is left". Without it, a half-removed transaction directory looks
+  // exactly like a corrupt one, and re-applying would either throw forever or
+  // have to guess.
+  const appliedMarker = path.join(tx, 'applied');
+  if (fs.existsSync(appliedMarker)) {
+    fs.rmSync(tx, { recursive: true, force: true });
+    return;
+  }
+
   for (const rel of manifest.artifacts) {
     const from = path.join(tx, 'files', rel);
     const to = path.join(dir, rel);
@@ -578,6 +589,7 @@ function applyTxLocked(runId: string, logger?: Logger): void {
     }
   }
 
+  fs.writeFileSync(appliedMarker, '');
   fs.rmSync(tx, { recursive: true, force: true });
   logger?.debug?.(`[kernel-store] ${runId}: applied a pending transaction`);
 }
@@ -669,14 +681,24 @@ function runDirExists(runId: string): boolean {
 
 /** Apply anything a crashed owner committed but did not finish writing. */
 export function recoverPending(runId: string, logger?: Logger): boolean {
-  if (!isValidRunId(runId)) return false;
+  // Nothing to apply is not the same as something stuck: an id that cannot name
+  // a run has no pending transaction, and readers must not be told otherwise.
+  if (!isValidRunId(runId)) return true;
   try {
     if (!fs.existsSync(path.join(runDir(runId), TX_COMMITTED))) return true;
   } catch {
-    return false;
+    return true;
   }
-  const locked = withRunLock(runId, () => undefined, logger);
-  if (!locked.ok) return false;
+  // A transaction is applied by whoever holds the lock, so finding the lock busy
+  // means someone is very likely applying it right now. Retry before concluding
+  // anything: reporting "cannot be applied" for a moment of contention would
+  // turn a healthy commit into a read error, which is the same conflation this
+  // module exists to avoid.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const locked = withRunLock(runId, () => undefined, logger);
+    if (locked.ok) break;
+    if (!fs.existsSync(path.join(runDir(runId), TX_COMMITTED))) return true;
+  }
   // `recoverPendingLocked` deliberately leaves a committed transaction in
   // place when application fails. Its continued presence means returning the
   // old checkpoint or event log would be a lie.

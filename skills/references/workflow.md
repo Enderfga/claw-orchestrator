@@ -110,6 +110,31 @@ names four things, and all four are checked on every durable write:
   first caller. Asking `runExists()` and then creating is a check-then-write
   race, and it lost: two processes creating the same id 80 times both "succeeded"
   76 times, leaving one workflow executing under another's `spec.json`.
+- **The lock is exclusive, and release is not "unlink that path".** A vanished
+  lock is retried rather than treated as stale debris; a genuinely stale one is
+  broken by atomic rename; and a holder removes the lock file only if it is still
+  the one it created. Getting any of those wrong puts two callers in the section
+  at once, and the symptom is not an error — it is a committed transaction being
+  emptied by the other caller's cleanup, so writes vanish and the run wedges.
+- **A published transaction is authoritative before it is applied.** Readers
+  finish any pending transaction first, and refuse rather than hand back the
+  older checkpoint if it cannot be applied. Applying carries a marker written
+  after the last data step, so a failure during cleanup cannot make a healthy
+  transaction permanently unapplicable.
+- **The lock is exclusive, and release is not "unlink that path".** A vanished
+  lock is retried rather than treated as stale debris; a genuinely stale one is
+  broken by atomic rename; and a holder removes the lock file only if it is still
+  the one it created. Getting any of those wrong puts two callers in the section
+  at once, and the symptom is not an error — it is a committed transaction being
+  emptied by the other caller's cleanup, so writes vanish and the run wedges.
+- **A published transaction is authoritative before it is applied.** Readers
+  finish any pending transaction first, and refuse rather than hand back the
+  older checkpoint if it cannot be applied. Applying carries a marker written
+  after its last data step, so a failure during cleanup cannot make a healthy
+  transaction permanently unapplicable.
+- **`delete` claims before removing.** Releasing the lease first opened a window
+  in which another process could legally resume the run, only for this one to
+  remove the directory under its new owner.
 - **Contention is not a takeover.** `commit` reports `committed`, `superseded` or
   `blocked`, and only `superseded` is permanent. The lock waits briefly rather
   than failing on sight, and an owner that still cannot write stops _and hands

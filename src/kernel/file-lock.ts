@@ -65,26 +65,55 @@ export function withFileLock<T>(lockPath: string, fn: () => T, opts: FileLockOpt
   const deadline = Date.now() + waitMs;
 
   let fd: number | undefined;
+  /**
+   * Which file we created, so releasing can never remove someone else's.
+   *
+   * Unlinking by path is not release, it is "delete whatever is called that" —
+   * and the two stop being the same file the moment anything else can break a
+   * lock.
+   */
+  let ino: number | undefined;
   let lastError = 'lock is held by another process';
   for (;;) {
     try {
       if (opts.createParent) fs.mkdirSync(path.dirname(lockPath), { recursive: true });
       fd = fs.openSync(lockPath, 'wx');
+      ino = fs.fstatSync(fd).ino;
       break;
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
       if (code !== 'EEXIST') return { ok: false, reason: 'contended', error: (err as Error).message };
-      let age = Infinity;
+
+      let age: number;
       try {
         age = Date.now() - fs.statSync(lockPath).mtimeMs;
       } catch {
-        age = Infinity;
-      }
-      if (age >= staleMs) {
-        // Debris from a holder that died inside the section.
-        fs.rmSync(lockPath, { force: true });
+        // The lock vanished between our EEXIST and this stat: its holder
+        // released it. Retry the create — whoever gets there first wins.
+        //
+        // Treating this as "stale, therefore delete it" is what broke mutual
+        // exclusion. By the time we looked, another caller had already created
+        // *their* lock; deleting it and creating ours put two callers inside the
+        // section at once. That is not a theoretical hazard — under two
+        // processes committing in a loop it happened several times a second, and
+        // one of them recursively removing its staging directory would empty the
+        // transaction directory the other had just published, wedging the run.
         continue;
       }
+
+      if (age >= staleMs) {
+        // Debris from a holder that died inside the section. Broken by an atomic
+        // rename rather than an unlink, so two waiters deciding the same thing
+        // at the same moment cannot both delete-then-create: only one rename can
+        // succeed, and the O_EXCL create still decides the winner either way.
+        try {
+          fs.renameSync(lockPath, `${lockPath}.stale.${process.pid}.${Date.now().toString(36)}`);
+        } catch {
+          // Someone else got there first; just retry the create.
+        }
+        continue;
+      }
+
       if (Date.now() >= deadline) return { ok: false, reason: 'contended', error: lastError };
       lastError = `lock held by another process for ${Math.round(age)}ms`;
       sleepSync(5);
@@ -99,6 +128,13 @@ export function withFileLock<T>(lockPath: string, fn: () => T, opts: FileLockOpt
     } catch {
       // Already closed; the unlink below is what matters.
     }
-    fs.rmSync(lockPath, { force: true });
+    try {
+      // Only if it is still the file we created. If a stale-breaker moved ours
+      // aside and another caller has since made its own, removing "the lock" by
+      // name would remove theirs while they are still inside it.
+      if (fs.statSync(lockPath).ino === ino) fs.rmSync(lockPath, { force: true });
+    } catch {
+      // Already gone.
+    }
   }
 }
