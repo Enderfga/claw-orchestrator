@@ -129,8 +129,14 @@ describe('writeEvidence', () => {
   it('still returns a verdict when the bundle cannot be written', async () => {
     // The verdict is already decided by `results`; a failed write must not
     // change it, only lose the record.
+    // A path whose parent is a regular file, so every write under it fails with
+    // ENOTDIR on any platform. This used to point at `/proc/...`, which does not
+    // exist on macOS (instant ENOENT) but is a live pseudo-filesystem on Linux —
+    // a test whose failure mode differs by OS is not testing what it says.
+    const blocked = path.join(runRoot, 'not-a-directory');
+    fs.writeFileSync(blocked, 'regular file');
     const bundle = await writeEvidence({
-      runDir: '/proc/definitely-not-writable',
+      runDir: path.join(blocked, 'nested'),
       runId: 'r1',
       node: 'verify',
       evidenceId: 'verify-01',
