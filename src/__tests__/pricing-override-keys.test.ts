@@ -302,3 +302,26 @@ describe('an empty model string means "no model", not a model named ""', () => {
     expect(getModelPricing('')).toEqual({ input: 3, output: 15, cached: 0.3 });
   });
 });
+
+/**
+ * Every vendor prefix `pricingKey()` strips, one case each.
+ *
+ * This block exists because the loss is silent. `pricingKey()` folded a regex
+ * that upstream kept editing (5.1.0 added `grok|xai` for the Grok engine), so a
+ * rebase that resolves the conflict by taking our side drops those prefixes with
+ * no textual conflict to warn anyone — and, before this block, with the whole
+ * suite still green. A prefix that stops being stripped makes every override on
+ * that vendor's models silently unreachable, which is the exact bug this file
+ * was written to close. Pin the list, so the next rebase has to notice.
+ */
+describe('pricingKey — every vendor prefix stays strippable', () => {
+  const PREFIXES = ['anthropic', 'openai', 'openai-codex', 'google', 'gemini', 'agy', 'cursor', 'grok', 'xai'];
+
+  for (const prefix of PREFIXES) {
+    it(`"${prefix}/" is stripped, so an override on the bare id is reachable through it`, () => {
+      overrideModelPricing({ 'claude-opus-5': { input: 0, output: 0, cached: 0 } });
+      expect(getModelPricing(`${prefix}/claude-opus-5`)).toEqual({ input: 0, output: 0, cached: 0 });
+      expect(hasPricingOverride(`${prefix}/claude-opus-5`)).toBe(true);
+    });
+  }
+});
