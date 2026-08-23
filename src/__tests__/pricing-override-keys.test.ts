@@ -50,6 +50,7 @@ vi.mock('node:child_process', async (importOriginal) => {
 });
 
 const { SessionManager } = await import('../session-manager.js');
+const { PersistentCustomSession } = await import('../persistent-custom-session.js');
 const { getModelPricing, overrideModelPricing, _resetPricingOverrides, lookupModel, hasPricingOverride } =
   await import('../models.js');
 
@@ -185,25 +186,99 @@ describe('SessionManager — an override applies however the session named its m
   });
 });
 
-describe('an explicit override is not mistaken for a registry miss', () => {
+describe('PersistentCustomSession pricing — the guard as shipped, not a copy of it', () => {
   // A custom engine keeps its own pricing table and reaches for it when the
   // registry knows nothing. A subscription override is all-zero, which reads
-  // identically to a miss — so before hasPricingOverride() existed, zeroing a
-  // model handed back the engine's own (dearer) rate instead of the zero asked
-  // for: worse than not overriding at all.
-  const enginePricing = { input: 12, output: 60 };
-  const customRate = (model?: string) => {
-    const base = getModelPricing(model, 'claude-sonnet-4-6');
-    return base.input === 0 && base.output === 0 && !hasPricingOverride(model) ? enginePricing : base;
-  };
+  // identically to a registry miss, so before hasPricingOverride() existed,
+  // zeroing a model handed back the engine's own (dearer) rate: worse than not
+  // overriding at all.
+  //
+  // These drive PersistentCustomSession, so the real module-private
+  // getModelPricing(model, engineConfig) in persistent-custom-session.ts runs.
+  // Do NOT re-declare that predicate here: an earlier version of this block did,
+  // and deleting `&& !hasPricingOverride(model)` from the production file left
+  // the whole suite green. The rate cases need only the constructor, since
+  // getCost() reads pricing without a subprocess; the turn case below drives
+  // _updateCost() as well.
+  const ENGINE_RATE = { input: 12, output: 60 };
+  const rateOf = (model?: string) =>
+    new PersistentCustomSession({
+      name: `custom-${model ?? 'default'}`,
+      cwd: TMP_HOME,
+      engine: 'custom',
+      permissionMode: 'acceptEdits',
+      model,
+      customEngine: { name: 'my-cli', bin: 'my-cli', args: {}, pricing: ENGINE_RATE },
+    }).getCost().pricing;
 
-  it('falls back to the engine rate when nothing was overridden', () => {
-    expect(customRate('a-model-no-registry-knows')).toEqual({ input: 3, output: 15, cached: 0.3 });
+  it('a zeroing override on the session model beats the engine rate', () => {
+    overrideModelPricing({ 'claude-opus-5': { input: 0, output: 0, cached: 0 } });
+    expect(rateOf('claude-opus-5')).toEqual({ inputPer1M: 0, outputPer1M: 0 });
   });
 
-  it('honours a zeroing override on the engine default instead of the engine rate', () => {
+  it('a zeroing override on the engine default beats the engine rate when no model is named', () => {
     overrideModelPricing({ 'claude-sonnet-4-6': { input: 0, output: 0, cached: 0 } });
-    expect(customRate(undefined)).toEqual({ input: 0, output: 0, cached: 0 });
+    expect(rateOf(undefined)).toEqual({ inputPer1M: 0, outputPer1M: 0 });
+  });
+
+  it('a whole turn is billed at the zeroed override, not at the engine rate', async () => {
+    // The rate assertions above stop at getCost().pricing. This one runs a real
+    // persistent turn so _updateCost() — the second caller of the same guarded
+    // helper, and the one that decides what a turn actually cost — is on the
+    // path too. 1M in and 1M out against ENGINE_RATE would be $72.
+    overrideModelPricing({ 'claude-opus-5': { input: 0, output: 0, cached: 0 } });
+    mockProc = null;
+    const session = new PersistentCustomSession({
+      name: 'custom-turn',
+      cwd: TMP_HOME,
+      engine: 'custom',
+      permissionMode: 'acceptEdits',
+      model: 'claude-opus-5',
+      customEngine: { name: 'my-cli', bin: 'my-cli', args: { print: '-p' }, persistent: true, pricing: ENGINE_RATE },
+    });
+    const started = session.start();
+    for (let i = 0; i < 200 && !mockProc; i++) await new Promise((r) => setImmediate(r));
+    mockProc!.stdout.emit(
+      'data',
+      Buffer.from(JSON.stringify({ type: 'system', subtype: 'init', session_id: 'cs-1' }) + '\n'),
+    );
+    await started;
+    await session.send('hello');
+    mockProc!.stdout.emit(
+      'data',
+      Buffer.from(
+        JSON.stringify({ type: 'result', usage: { input_tokens: 1_000_000, output_tokens: 1_000_000 } }) + '\n',
+      ),
+    );
+    for (let i = 0; i < 200 && session.getCost().tokensIn === 0; i++) await new Promise((r) => setImmediate(r));
+    const cost = session.getCost();
+    expect(cost.tokensIn).toBe(1_000_000);
+    expect(cost.tokensOut).toBe(1_000_000);
+    expect(cost.totalUsd).toBe(0);
+    session.stop();
+  });
+
+  it('the engine rate still applies to a model nobody overrode', () => {
+    // This is the case that actually reaches `return engineConfig.pricing`, and
+    // it is the only way in: no registry entry is priced at zero, so the base
+    // rate is {0,0} only when the fallback default was itself zeroed — while
+    // hasPricingOverride('my-cli-native') stays false. Kept as a rename plus a
+    // real case rather than a rename alone, because the branch was otherwise
+    // untested. The old name, 'falls back to the engine rate when nothing was
+    // overridden', described this branch but the assertion was the sonnet
+    // fallback {3,15,0.3}: with nothing overridden the base is never {0,0}, so
+    // the engine rate was unreachable. That case still matters, so it is the
+    // next test, under a name that says what it checks.
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    overrideModelPricing({ 'claude-sonnet-4-6': { input: 0, output: 0, cached: 0 } });
+    expect(rateOf('my-cli-native')).toEqual({ inputPer1M: 12, outputPer1M: 60 });
+    warnSpy.mockRestore();
+  });
+
+  it('an unregistered model with no override prices at the default list rate, not the engine rate', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect(rateOf('my-cli-native')).toEqual({ inputPer1M: 3, outputPer1M: 15, cachedPer1M: 0.3 });
+    warnSpy.mockRestore();
   });
 
   it('reports an override under any spelling of the same model', () => {
