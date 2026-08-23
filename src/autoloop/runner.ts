@@ -237,6 +237,11 @@ export class AutoloopRunner extends EventEmitter {
         // Trigger policy-based push hooks.
         if (this.regressionStreak >= 2) await this.firePolicyPush('on_metric_regression_2', env.iter);
         if (this.rejectStreak >= 2) await this.firePolicyPush('on_reviewer_reject_2', env.iter);
+        // The one success signal in the policy set. It stayed silent for its
+        // whole existence because nothing could tell when the goal was met — a
+        // Reviewer verdict is a reading of the Coder's report, not a measurement.
+        // An acceptance contract is a measurement, so this fires on it.
+        if (v.accepted) await this.firePolicyPush('on_target_hit', env.iter);
         return;
       }
       case 'phase_error': {

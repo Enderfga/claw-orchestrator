@@ -1,106 +1,111 @@
 ---
 name: claw-orchestrator
-description: Manage persistent coding sessions across Claude Code, Codex, Antigravity (agy), Grok Build, and OpenCode engines. Use when orchestrating multi-engine coding agents, starting/sending/stopping sessions, running multi-agent council collaborations, cross-session messaging, ultraplan deep planning, ultrareview parallel code review, autoloop autonomous workspace iteration, ultraapp building deployable web apps from a structured Q&A interview, switching models/tools at runtime, exposing the orchestrator's 69 tools as an MCP server to Hermes Agent / Claude Desktop / Cursor / Cline / Continue / Zed / Windsurf / Goose, or running as an Agent Client Protocol (ACP) agent that Zed / JetBrains / Neovim / Emacs / VS Code / dsh can drive directly. Triggers on "start a session", "send to session", "run council", "ultraplan", "ultrareview", "autoloop", "ultraapp", "Forge tab", "build a web app", "one-click app", "AppSpec", "autonomous iteration", "iterate until goal", "deep paper review", "auto research", "switch model", "multi-agent", "coding session", "session inbox", "grok", "grok build", "opencode", "mcp server", "clawo-mcp", "hermes mcp", "model context protocol", "ultracode", "dynamic workflow", "fanout", "fan-out", "best-of-N", "steer turn", "interrupt turn", "fork thread", "rollback turns", "acp", "agent client protocol", "clawo acp", "zed agent", "jetbrains agent", "external agent", "dsh subagent", "deepseek harness", "clawo runs", "run ledger", "how much did it cost", "token usage", "spend cap", "budget limit", "maxBudgetUsd".
+description: Manage persistent coding sessions across Claude Code, Codex, Antigravity (agy), Grok Build, and OpenCode engines. Use when orchestrating multi-engine coding agents, starting/sending/stopping sessions, running multi-agent council collaborations, cross-session messaging, ultraplan deep planning, ultrareview parallel code review, autoloop autonomous workspace iteration, ultraapp building deployable web apps from a structured Q&A interview, switching models/tools at runtime, exposing the orchestrator's 77 tools as an MCP server to Hermes Agent / Claude Desktop / Cursor / Cline / Continue / Zed / Windsurf / Goose, or running as an Agent Client Protocol (ACP) agent that Zed / JetBrains / Neovim / Emacs / VS Code / dsh can drive directly. Triggers on "start a session", "send to session", "run council", "ultraplan", "ultrareview", "autoloop", "ultraapp", "Forge tab", "build a web app", "one-click app", "AppSpec", "autonomous iteration", "iterate until goal", "deep paper review", "auto research", "switch model", "multi-agent", "coding session", "session inbox", "grok", "grok build", "opencode", "mcp server", "clawo-mcp", "hermes mcp", "model context protocol", "ultracode", "dynamic workflow", "fanout", "fan-out", "best-of-N", "steer turn", "interrupt turn", "fork thread", "rollback turns", "acp", "agent client protocol", "clawo acp", "zed agent", "jetbrains agent", "external agent", "dsh subagent", "deepseek harness", "clawo runs", "run ledger", "how much did it cost", "token usage", "spend cap", "budget limit", "maxBudgetUsd", "workflow", "durable workflow", "resume a run", "verify", "verification", "acceptance contract", "evidence", "evidence bundle", "did the tests actually pass", "prove it works", "human gate", "repair loop", "clawo workflow", "clawo verify".
 metadata:
   {
-    "openclaw":
+    'openclaw':
       {
-        "emoji": "🤖",
-        "requires": { "anyBins": ["claude", "codex", "agy", "agent"] },
-        "install":
+        'emoji': '🤖',
+        'requires': { 'anyBins': ['claude', 'codex', 'agy', 'agent'] },
+        'install':
           [
             {
-              "id": "npm-plugin",
-              "kind": "node",
-              "package": "@enderfga/claw-orchestrator",
-              "label": "Install plugin (npm)"
+              'id': 'npm-plugin',
+              'kind': 'node',
+              'package': '@enderfga/claw-orchestrator',
+              'label': 'Install plugin (npm)',
             },
             {
-              "id": "node-claude",
-              "kind": "node",
-              "package": "@anthropic-ai/claude-code",
-              "bins": ["claude"],
-              "label": "Install Claude Code CLI"
+              'id': 'node-claude',
+              'kind': 'node',
+              'package': '@anthropic-ai/claude-code',
+              'bins': ['claude'],
+              'label': 'Install Claude Code CLI',
             },
             {
-              "id": "node-codex",
-              "kind": "node",
-              "package": "@openai/codex",
-              "bins": ["codex"],
-              "label": "Install Codex CLI"
-            }
-          ]
-      }
+              'id': 'node-codex',
+              'kind': 'node',
+              'package': '@openai/codex',
+              'bins': ['codex'],
+              'label': 'Install Codex CLI',
+            },
+          ],
+      },
   }
 ---
 
 # Claw Orchestrator Skill
 
-Claw Orchestrator — persistent multi-engine coding session manager for claw-style agent systems. Runs as a standalone CLI/server, with first-class OpenClaw plugin support. Wraps Claude Code, Codex, Antigravity, Grok Build, OpenCode, and custom CLIs into headless agentic engines with 69 tools.
+Claw Orchestrator — persistent multi-engine coding session manager for claw-style agent systems. Runs as a standalone CLI/server, with first-class OpenClaw plugin support. Wraps Claude Code, Codex, Antigravity, Grok Build, OpenCode, and custom CLIs into headless agentic engines with 77 tools.
 
 ## Engine Quick Reference
 
-| Engine | CLI | Session Type | Best For |
-|--------|-----|-------------|----------|
-| `claude` | `claude` | Persistent subprocess | Multi-turn, complex tasks |
-| `codex` | `codex exec` | Per-message spawn | One-shot execution |
-| `agy` | `agy -p` | Per-message spawn | Google Antigravity; plain-text, auto conversation resume |
-| `grok` | `grok -p` | Per-message spawn | xAI Grok Build; engine-reported cost, resumable session |
-| `opencode` | `opencode run` | Per-message spawn | Provider-agnostic (`provider/model`) |
+| Engine     | CLI            | Session Type          | Best For                                                 |
+| ---------- | -------------- | --------------------- | -------------------------------------------------------- |
+| `claude`   | `claude`       | Persistent subprocess | Multi-turn, complex tasks                                |
+| `codex`    | `codex exec`   | Per-message spawn     | One-shot execution                                       |
+| `agy`      | `agy -p`       | Per-message spawn     | Google Antigravity; plain-text, auto conversation resume |
+| `grok`     | `grok -p`      | Per-message spawn     | xAI Grok Build; engine-reported cost, resumable session  |
+| `opencode` | `opencode run` | Per-message spawn     | Provider-agnostic (`provider/model`)                     |
 
 ## Core Workflow
 
 ```javascript
 // 1. Start session (any engine)
-session_start({ name: "myproject", cwd: "/path/to/project", engine: "claude" })
-session_start({ name: "codex-task", cwd: "/path/to/project", engine: "codex" })
-session_start({ name: "agy-task", cwd: "/path/to/project", engine: "agy" })
-session_start({ name: "grok-task", cwd: "/path/to/project", engine: "grok" })
-session_start({ name: "opencode-task", cwd: "/path/to/project", engine: "opencode", model: "anthropic/claude-sonnet-4" })
+session_start({ name: 'myproject', cwd: '/path/to/project', engine: 'claude' });
+session_start({ name: 'codex-task', cwd: '/path/to/project', engine: 'codex' });
+session_start({ name: 'agy-task', cwd: '/path/to/project', engine: 'agy' });
+session_start({ name: 'grok-task', cwd: '/path/to/project', engine: 'grok' });
+session_start({
+  name: 'opencode-task',
+  cwd: '/path/to/project',
+  engine: 'opencode',
+  model: 'anthropic/claude-sonnet-4',
+});
 
 // 2. Send messages
-session_send({ name: "myproject", message: "Fix the auth bug" })
+session_send({ name: 'myproject', message: 'Fix the auth bug' });
 
 // 3. Check status / search history
-coding_session_status({ name: "myproject" })
-session_grep({ name: "myproject", pattern: "error" })
+coding_session_status({ name: 'myproject' });
+session_grep({ name: 'myproject', pattern: 'error' });
 
 // 4. Stop when done
-session_stop({ name: "myproject" })
+session_stop({ name: 'myproject' });
 ```
 
 ## Session Options
 
-| Parameter | Description |
-|-----------|-------------|
-| `engine` | `claude` (default), `codex`, `agy`, `cursor`, `opencode` |
-| `model` | Model name or alias (`fable`, `opus`, `sonnet`, `haiku`, `gpt-5.5`, `agy-pro`, `composer-2`) |
+| Parameter        | Description                                                                                                     |
+| ---------------- | --------------------------------------------------------------------------------------------------------------- |
+| `engine`         | `claude` (default), `codex`, `agy`, `cursor`, `opencode`                                                        |
+| `model`          | Model name or alias (`fable`, `opus`, `sonnet`, `haiku`, `gpt-5.5`, `agy-pro`, `composer-2`)                    |
 | `permissionMode` | `acceptEdits`, `auto`, `plan`, `bypassPermissions`, `manual`, `dontAsk` (`default` = legacy alias for `manual`) |
-| `effort` | `low`, `medium`, `high`, `xhigh`, `max`, `auto` (`xhigh` is Opus 4.7-only, between `high` and `max`) |
-| `maxBudgetUsd` | Cost limit in USD |
-| `allowedTools` | List of allowed tool names |
+| `effort`         | `low`, `medium`, `high`, `xhigh`, `max`, `auto` (`xhigh` is Opus 4.7-only, between `high` and `max`)            |
+| `maxBudgetUsd`   | Cost limit in USD                                                                                               |
+| `allowedTools`   | List of allowed tool names                                                                                      |
 
 ### CLI 2.1.111 options
 
-| Parameter | Description |
-|-----------|-------------|
-| `bare` | Minimal mode — no CLAUDE.md, hooks, LSP, auto-memory. Auto-enables prompt cache optimizations (see below). |
-| `includeHookEvents` | Stream hook lifecycle events (PreToolUse/PostToolUse). |
-| `forwardSubagentText` | Forward subagent text and thinking into the output stream, so sessions that fan out surface intermediate output instead of going quiet. |
-| `permissionPromptTool` | Delegate permission prompts to an MCP tool for non-interactive use. |
-| `excludeDynamicSystemPromptSections` | Move cwd/env/git from system prompt to user message for better prompt cache hits. Auto-enabled with `bare: true`. |
-| `enablePromptCaching1H` | Enable 1-hour prompt cache TTL (vs default 5-min). Auto-enabled with `bare: true`. |
-| `debug` / `debugFile` | Targeted debug output by category (e.g. `"api,mcp"`) and optional file path. |
-| `fromPr` | Resume a session linked to a GitHub PR number or URL. |
-| `channels` / `dangerouslyLoadDevelopmentChannels` | MCP channel subscriptions (research preview). |
+| Parameter                                         | Description                                                                                                                             |
+| ------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `bare`                                            | Minimal mode — no CLAUDE.md, hooks, LSP, auto-memory. Auto-enables prompt cache optimizations (see below).                              |
+| `includeHookEvents`                               | Stream hook lifecycle events (PreToolUse/PostToolUse).                                                                                  |
+| `forwardSubagentText`                             | Forward subagent text and thinking into the output stream, so sessions that fan out surface intermediate output instead of going quiet. |
+| `permissionPromptTool`                            | Delegate permission prompts to an MCP tool for non-interactive use.                                                                     |
+| `excludeDynamicSystemPromptSections`              | Move cwd/env/git from system prompt to user message for better prompt cache hits. Auto-enabled with `bare: true`.                       |
+| `enablePromptCaching1H`                           | Enable 1-hour prompt cache TTL (vs default 5-min). Auto-enabled with `bare: true`.                                                      |
+| `debug` / `debugFile`                             | Targeted debug output by category (e.g. `"api,mcp"`) and optional file path.                                                            |
+| `fromPr`                                          | Resume a session linked to a GitHub PR number or URL.                                                                                   |
+| `channels` / `dangerouslyLoadDevelopmentChannels` | MCP channel subscriptions (research preview).                                                                                           |
 
 ### CLI 2.1.121 options
 
-| Parameter | Description |
-|-----------|-------------|
-| `forkSubagent` | Fork subagent for non-interactive sessions (sets `CLAUDE_CODE_FORK_SUBAGENT=1`). |
-| `enableToolSearch` | Enable Vertex AI tool search (sets `ENABLE_TOOL_SEARCH=1`). |
-| `otelLogUserPrompts` | OpenTelemetry: include user prompts in logs (sets `OTEL_LOG_USER_PROMPTS=1`). |
+| Parameter             | Description                                                                                   |
+| --------------------- | --------------------------------------------------------------------------------------------- |
+| `forkSubagent`        | Fork subagent for non-interactive sessions (sets `CLAUDE_CODE_FORK_SUBAGENT=1`).              |
+| `enableToolSearch`    | Enable Vertex AI tool search (sets `ENABLE_TOOL_SEARCH=1`).                                   |
+| `otelLogUserPrompts`  | OpenTelemetry: include user prompts in logs (sets `OTEL_LOG_USER_PROMPTS=1`).                 |
 | `otelLogRawApiBodies` | OpenTelemetry: include raw API bodies in logs (sets `OTEL_LOG_RAW_API_BODIES=1`). Debug only. |
 
 `stats.pluginErrors` is now populated from the `system/init` event when CLI plugins fail to load due to unmet dependencies.
@@ -135,10 +140,10 @@ For details: see [references/council.md](references/council.md)
 Sessions can communicate. Idle sessions receive immediately; busy sessions queue.
 
 ```javascript
-session_send_to({ from: "sender", to: "receiver", message: "Auth module needs rate limiting" })
-session_send_to({ from: "monitor", to: "*", message: "Build failed!" })  // broadcast
-session_inbox({ name: "receiver" })
-session_deliver_inbox({ name: "receiver" })
+session_send_to({ from: 'sender', to: 'receiver', message: 'Auth module needs rate limiting' });
+session_send_to({ from: 'monitor', to: '*', message: 'Build failed!' }); // broadcast
+session_inbox({ name: 'receiver' });
+session_deliver_inbox({ name: 'receiver' });
 ```
 
 ## Team Tools (All Engines)
@@ -146,8 +151,8 @@ session_deliver_inbox({ name: "receiver" })
 All engines use the same virtual-team layer: cross-session inbox routing across active SessionManager sessions. (Claude Code's native experimental Agent Teams is in-process TUI only and not reachable from a subprocess wrapper.)
 
 ```javascript
-team_list({ name: "myproject" })
-team_send({ name: "myproject", teammate: "teammate", message: "Review this" })
+team_list({ name: 'myproject' });
+team_send({ name: 'myproject', teammate: 'teammate', message: 'Review this' });
 ```
 
 ## Ultraplan & Ultrareview
@@ -181,17 +186,17 @@ For the full control protocol, registry/resume behavior, and ledger layout, see 
 
 ## Tools Overview
 
-| Category | Tools |
-|----------|-------|
-| Session Lifecycle | `session_start`, `session_send`, `session_stop`, `session_list`, `sessions_overview` |
-| Session Ops | `coding_session_status`, `session_grep`, `session_compact`, `session_update_tools`, `session_switch_model` |
-| Inbox | `session_send_to`, `session_inbox`, `session_deliver_inbox` |
-| Teams | `coding_agents_list`, `team_list`, `team_send` |
-| Codex | `codex_resume`, `codex_review`, `codex_goal_*`, `codex_interrupt`, `codex_steer`, `codex_fork`, `codex_rollback`, `codex_models`, `codex_threads` |
-| Claude CLI | `claude_goal_*`, `claude_agents_list`, `plugin_details` |
-| Fan-out | `fanout_start`, `fanout_status`, `fanout_abort` |
-| Council | `council_start`, `council_status`, `council_abort`, `council_inject`, `council_review`, `council_accept`, `council_reject` |
-| Ultra | `ultraplan_start`, `ultraplan_status`, `ultrareview_start`, `ultrareview_status` |
+| Category          | Tools                                                                                                                                             |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Session Lifecycle | `session_start`, `session_send`, `session_stop`, `session_list`, `sessions_overview`                                                              |
+| Session Ops       | `coding_session_status`, `session_grep`, `session_compact`, `session_update_tools`, `session_switch_model`                                        |
+| Inbox             | `session_send_to`, `session_inbox`, `session_deliver_inbox`                                                                                       |
+| Teams             | `coding_agents_list`, `team_list`, `team_send`                                                                                                    |
+| Codex             | `codex_resume`, `codex_review`, `codex_goal_*`, `codex_interrupt`, `codex_steer`, `codex_fork`, `codex_rollback`, `codex_models`, `codex_threads` |
+| Claude CLI        | `claude_goal_*`, `claude_agents_list`, `plugin_details`                                                                                           |
+| Fan-out           | `fanout_start`, `fanout_status`, `fanout_abort`                                                                                                   |
+| Council           | `council_start`, `council_status`, `council_abort`, `council_inject`, `council_review`, `council_accept`, `council_reject`                        |
+| Ultra             | `ultraplan_start`, `ultraplan_status`, `ultrareview_start`, `ultrareview_status`                                                                  |
 
 `ultracode` (Claude dynamic workflows) is a `session_start` option, not a separate tool: set
 `ultracode: true` to have Claude orchestrate a JS workflow and fan out to subagents per task.
@@ -208,6 +213,37 @@ engine mid-session.
 
 For setup, the dsh YAML block, and the cancellation/permission limits: see [references/acp.md](references/acp.md)
 
+## Durable workflows
+
+`workflow_start` runs a declarative graph of `agent` / `fanout` / `council` / `verifier` /
+`human_gate` / `router` / `subflow` nodes. Every state transition is checkpointed to
+`~/.claw-orchestrator/wf/<runId>/`, so a run survives a process restart and `workflow_resume`
+picks it up at the node boundary — nodes already succeeded are not re-run, and the one that
+was in flight is retried because a half-finished node left no result to trust.
+
+Three built-in templates: `solve` (triage → implement → verify → repair-until-green →
+review), `council`, and `fanout`. Retry, per-node timeout, cancel, steer, human gates, and
+bounded loops come from the kernel rather than from each mode's own state machine.
+
+For node shapes, routing conditions, and the control surfaces:
+see [references/workflow.md](references/workflow.md)
+
+## Verification — does the work actually pass?
+
+Hand a run an **acceptance contract** and the runtime checks the result itself: shell commands
+gated on exit code, HTTP probes, headless-Chrome screenshots, diff policy, file assertions. A
+run carrying a contract cannot reach `completed` unless every required check passes; a run
+without one completes as `unverified`, which says nothing checked it rather than claiming
+success. Every attempt writes an evidence bundle — verdict, per-check output tails, the patch
+(created files included), screenshots — readable later with `clawo verify <runId>`.
+
+Contracts come from the caller or a mode default, never from agent output: an agent that
+writes its own acceptance criteria is grading itself. UltraApp ships one on by default;
+`verify_run` checks work that did not come through a workflow at all.
+
+For the check types, per-mode defaults, and what the screenshot gate does and does not claim:
+see [references/verification.md](references/verification.md)
+
 ## Cost & spend caps
 
 Every turn on every engine is appended to a durable ledger at
@@ -220,6 +256,11 @@ sessions are gone.
 `maxBudgetUsd` on a session (or per council / fanout agent) is enforced by the runtime, so it
 holds on Codex, Cursor, agy, OpenCode and custom engines too — not just Claude Code. Once
 cumulative spend reaches the cap, further sends are refused before the engine is spawned.
+
+Rows carry two different judgements and keep them apart: `ok` is the engine's terminal verdict
+on its own turn, `verified` is whether an acceptance contract passed. A row with no `verified`
+at all means no contract was declared — not that it failed. `clawo runs --verified` /
+`--refuted` filter on it.
 
 For the row schema, the query surfaces, and which engines report real token usage versus
 estimating it: see [references/observability.md](references/observability.md)

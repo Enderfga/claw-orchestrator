@@ -30,22 +30,22 @@ every engine passes through.
 
 ### Row schema
 
-| Field | Meaning |
-|---|---|
-| `ts` | ISO timestamp of turn completion |
-| `session` | SessionManager session name |
-| `engine` | `claude` / `codex` / `codex-app` / `grok` / `opencode` / `agy` / `custom` |
-| `model` | Configured model, or the engine's own reported model when none was set |
-| `cwd` | Working directory the turn ran in |
-| `turn` | 1-based turn index within the session |
-| `tokensIn` / `tokensOut` / `cachedTokens` | **Per-turn deltas**, not session totals |
-| `costUsd` | Per-turn delta in USD |
-| `tokensEstimated` | `true` when the counts came from `estimateTokens()` (see below) |
-| `durationMs` | Wall-clock for the turn |
-| `toolCalls` / `toolErrors` | Per-turn deltas |
-| `ok` | `false` for a turn that threw, or that the session's own `turnsSucceeded` counter did not count (see `sessions.md`). Falls back to "nothing was thrown" when the counter cannot be read |
-| `error` | Failure text, truncated to 500 chars. Absent when the turn resolved but the engine did not count it as succeeded (an interrupted or non-SUCCESS turn), so a failed row does not always carry one |
-| `parent` | council id / fanout id / autoloop run id, when the turn belongs to one |
+| Field                                     | Meaning                                                                                                                                                                                          |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `ts`                                      | ISO timestamp of turn completion                                                                                                                                                                 |
+| `session`                                 | SessionManager session name                                                                                                                                                                      |
+| `engine`                                  | `claude` / `codex` / `codex-app` / `grok` / `opencode` / `agy` / `custom`                                                                                                                        |
+| `model`                                   | Configured model, or the engine's own reported model when none was set                                                                                                                           |
+| `cwd`                                     | Working directory the turn ran in                                                                                                                                                                |
+| `turn`                                    | 1-based turn index within the session                                                                                                                                                            |
+| `tokensIn` / `tokensOut` / `cachedTokens` | **Per-turn deltas**, not session totals                                                                                                                                                          |
+| `costUsd`                                 | Per-turn delta in USD                                                                                                                                                                            |
+| `tokensEstimated`                         | `true` when the counts came from `estimateTokens()` (see below)                                                                                                                                  |
+| `durationMs`                              | Wall-clock for the turn                                                                                                                                                                          |
+| `toolCalls` / `toolErrors`                | Per-turn deltas                                                                                                                                                                                  |
+| `ok`                                      | `false` for a turn that threw, or that the session's own `turnsSucceeded` counter did not count (see `sessions.md`). Falls back to "nothing was thrown" when the counter cannot be read          |
+| `error`                                   | Failure text, truncated to 500 chars. Absent when the turn resolved but the engine did not count it as succeeded (an interrupted or non-SUCCESS turn), so a failed row does not always carry one |
+| `parent`                                  | council id / fanout id / autoloop run id, when the turn belongs to one                                                                                                                           |
 
 Deltas rather than totals means summing a query window gives that window's spend
 without double-counting.
@@ -98,11 +98,11 @@ Notes:
 - The check is "has the cap been reached", not "would this turn exceed it" — a
   turn's cost is unknown until it finishes, so the last allowed turn can overshoot.
   Size the cap accordingly.
-- A cap of `0` or a negative number means *unset*, not *refuse everything*.
+- A cap of `0` or a negative number means _unset_, not _refuse everything_.
 - Claude Code still receives `--max-budget-usd` as well: an in-CLI stop happens
   earlier and therefore costs less than an after-the-fact refusal.
 - `session_list` / `GET /session/list` expose `costUsd`, `budgetUsd` and
-  `budgetExhausted` so a stalled session shows *why* it stopped taking turns.
+  `budgetExhausted` so a stalled session shows _why_ it stopped taking turns.
 
 ## Accuracy: which engines report real usage
 
@@ -111,16 +111,16 @@ Where the engine reports usage, those counts are the engine's own. Where it does
 not, the wrapper falls back to `estimateTokens()` (characters ÷ 4) and the row is
 flagged `tokensEstimated: true`; the CLI marks those costs with a trailing `~`.
 
-| Engine | Token counts |
-|---|---|
-| `claude` | Engine-reported |
-| `codex` | Engine-reported |
-| `codex-app` | Engine-reported |
-| `grok` | Engine-reported — and so is the **cost**: this engine reports `total_cost_usd`, which the wrapper passes through instead of pricing tokens from the registry, so registry drift cannot affect a grok row |
-| `cursor` (legacy) | Engine-reported when the stream carries `usage`, else estimated |
-| `opencode` | Engine-reported when the run JSON carries `tokens`, else estimated |
-| `agy` | Engine-reported when the result event carries usage, else estimated |
-| `custom` | Depends on the CLI; estimated when it emits no usage |
+| Engine            | Token counts                                                                                                                                                                                             |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `claude`          | Engine-reported                                                                                                                                                                                          |
+| `codex`           | Engine-reported                                                                                                                                                                                          |
+| `codex-app`       | Engine-reported                                                                                                                                                                                          |
+| `grok`            | Engine-reported — and so is the **cost**: this engine reports `total_cost_usd`, which the wrapper passes through instead of pricing tokens from the registry, so registry drift cannot affect a grok row |
+| `cursor` (legacy) | Engine-reported when the stream carries `usage`, else estimated                                                                                                                                          |
+| `opencode`        | Engine-reported when the run JSON carries `tokens`, else estimated                                                                                                                                       |
+| `agy`             | Engine-reported when the result event carries usage, else estimated                                                                                                                                      |
+| `custom`          | Depends on the CLI; estimated when it emits no usage                                                                                                                                                     |
 
 So on an estimating engine the cap is best-effort. It will stop a runaway session;
 it is not an accounting guarantee, and it is not a substitute for the spend limits
@@ -130,3 +130,63 @@ Cost figures are also only as good as the pricing table: a model missing from
 `models.ts` prices at its family default, and subscription plans (Claude Max,
 ChatGPT Pro) bill nothing per token while the ledger still reports the API-rate
 equivalent. Read `costUsd` as "what this would cost at API rates".
+
+## `ok` vs `verified` (6.0.0)
+
+A row now carries two different judgements, and conflating them is the mistake
+this section exists to prevent.
+
+- **`ok`** — the engine's own terminal verdict for that turn. Codex fails a turn
+  that emits `turn.failed` while exiting 0; gemini succeeds on exit 53. It is a
+  careful signal, but it is the engine talking about itself.
+- **`verified`** — an acceptance contract ran against the work and every required
+  check passed. That is the runtime's own measurement.
+
+Three states, not two:
+
+| `verified` | Means                                               | CLI column |
+| ---------- | --------------------------------------------------- | ---------- |
+| `true`     | A contract ran and passed                           | `yes`      |
+| `false`    | A contract ran and a required check failed          | `NO`       |
+| absent     | **No contract was declared. Nothing checked this.** | `—`        |
+
+Absent is not false. An unchecked run is not a failed one, and reading it as
+either would make the ledger useless for the thing it is for.
+
+### Where the verdict comes from
+
+`verified` is **not written at turn time**, deliberately. The turns that produce
+the work all finish before the verifier that judges it, so stamping a verdict on
+them as they are written would be inventing one. It is joined in at read time
+from the run record via the row's `parent`, by `annotateVerdicts()`.
+
+Two consequences worth knowing:
+
+- A raw `runs/*.jsonl` line usually has no `verified` field. Read through
+  `clawo runs` / `GET /runs` / `getRunLedger()` to get the join.
+- Filtering on `--verified` happens _after_ the join. Pushing the filter into the
+  ledger read would match on a field no row carries yet and return nothing.
+
+### Other new row fields
+
+| Field                      | Source                                                                                                                                                          |
+| -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `evidenceId`, `contractId` | Joined from the run record                                                                                                                                      |
+| `nodeKind`                 | The kernel node the turn belonged to (`agent`, `council`, `verifier`, …)                                                                                        |
+| `repoLang`                 | Detected from a manifest (`package.json`, `pyproject.toml`, `go.mod`, …). Never guessed — a wrong label would corrupt the comparison the field exists to enable |
+| `taskKind`                 | Caller-declared only. Never inferred from the prompt                                                                                                            |
+
+All are optional and absent on rows written before 6.0.0. The reader already
+skips unknown and missing keys, so old shards stay readable; nothing backfills
+them, because we cannot know retroactively.
+
+```bash
+clawo runs --since 7d --verified     # only turns whose contract passed
+clawo runs --since 7d --refuted      # only turns whose contract failed
+clawo runs --parent wf-abc123        # every turn of one workflow run
+```
+
+## Related
+
+- [`verification.md`](./verification.md) — what a contract is and how a verdict is produced
+- [`workflow.md`](./workflow.md) — where run records live

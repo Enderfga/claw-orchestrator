@@ -20,26 +20,29 @@ The server exposes an OpenAI-compatible chat completions endpoint, enabling any 
 
 **Endpoints:**
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/v1/chat/completions` | POST | Chat completions (streaming + non-streaming) |
-| `/v1/models` | GET | List available models |
+| Endpoint               | Method | Description                                  |
+| ---------------------- | ------ | -------------------------------------------- |
+| `/v1/chat/completions` | POST   | Chat completions (streaming + non-streaming) |
+| `/v1/models`           | GET    | List available models                        |
 
 **Request format** (same as OpenAI):
+
 ```json
 {
   "model": "claude-sonnet-4-6",
-  "messages": [{"role": "user", "content": "Hello!"}],
+  "messages": [{ "role": "user", "content": "Hello!" }],
   "stream": true
 }
 ```
 
 **Session routing:** Each conversation maps to a persistent session for prompt cache reuse. Session key resolved from (in priority order):
+
 1. `X-Session-Id` header
 2. `user` field in the request body
 3. Default singleton session
 
 **Model routing:** The `model` field auto-routes to the correct engine:
+
 - `claude-*`, `opus`, `sonnet`, `haiku` → Claude engine
 - `gpt-*` → Codex engine
 - `grok-*` → Grok engine
@@ -59,38 +62,38 @@ The server exposes an OpenAI-compatible chat completions endpoint, enabling any 
 clawo session-start [name] [options]
 ```
 
-| Flag | Description |
-|------|-------------|
-| `-d, --cwd <dir>` | Working directory |
-| `-e, --engine <engine>` | Engine: `claude` (default), `codex`, `codex-app`, `agy`, `grok`, `opencode`, or `custom` |
-| `-m, --model <model>` | Model name or alias |
-| `--permission-mode <mode>` | `acceptEdits`, `plan`, `auto`, `bypassPermissions`, `manual`, `dontAsk` |
-| `--effort <level>` | `low`, `medium`, `high`, `max`, `auto` |
-| `--allowed-tools <tools>` | Comma-separated tool whitelist |
-| `--max-turns <n>` | Max agent loop turns |
-| `--max-budget <usd>` | API cost ceiling |
-| `--system-prompt <text>` | Replace system prompt |
-| `--append-system-prompt <text>` | Append to system prompt |
-| `--agents <json>` | Custom sub-agents JSON |
-| `--agent <name>` | Default agent |
-| `--bare` | No CLAUDE.md, no git context |
-| `-w, --worktree [name]` | Git worktree |
-| `--fallback-model <model>` | Fallback model |
-| `--json-schema <schema>` | JSON Schema for structured output |
-| `--mcp-config <paths>` | MCP config files (comma-separated) |
-| `--settings <path>` | Settings.json path |
-| `--skip-persistence` | Disable session persistence |
-| `--betas <headers>` | Beta headers (comma-separated) |
-| `--enable-agent-teams` | Enable agent teams |
-| `--include-hook-events` | Stream hook lifecycle events (PreToolUse/PostToolUse) |
-| `--permission-prompt-tool <tool>` | Delegate permission prompts to an MCP tool (non-interactive use) |
-| `--exclude-dynamic-system-prompt-sections` | Move cwd/env/git context to user message for better prompt cache hits (auto-enabled with `--bare`) |
-| `--debug <categories>` | Enable targeted debug output by category (e.g. `"api,mcp"`) |
-| `--debug-file <path>` | Write debug output to file |
-| `--from-pr <n>` | Resume a session linked to a GitHub PR number or URL |
-| `--channels <spec>` | MCP channel subscription (research preview) |
-| `--dangerously-load-development-channels <spec>` | Development MCP channel subscriptions (research preview) |
-| `ENABLE_PROMPT_CACHING_1H=1` (env var) | Enable 1-hour prompt cache TTL (auto-set with `--bare`) |
+| Flag                                             | Description                                                                                        |
+| ------------------------------------------------ | -------------------------------------------------------------------------------------------------- |
+| `-d, --cwd <dir>`                                | Working directory                                                                                  |
+| `-e, --engine <engine>`                          | Engine: `claude` (default), `codex`, `codex-app`, `agy`, `grok`, `opencode`, or `custom`           |
+| `-m, --model <model>`                            | Model name or alias                                                                                |
+| `--permission-mode <mode>`                       | `acceptEdits`, `plan`, `auto`, `bypassPermissions`, `manual`, `dontAsk`                            |
+| `--effort <level>`                               | `low`, `medium`, `high`, `max`, `auto`                                                             |
+| `--allowed-tools <tools>`                        | Comma-separated tool whitelist                                                                     |
+| `--max-turns <n>`                                | Max agent loop turns                                                                               |
+| `--max-budget <usd>`                             | API cost ceiling                                                                                   |
+| `--system-prompt <text>`                         | Replace system prompt                                                                              |
+| `--append-system-prompt <text>`                  | Append to system prompt                                                                            |
+| `--agents <json>`                                | Custom sub-agents JSON                                                                             |
+| `--agent <name>`                                 | Default agent                                                                                      |
+| `--bare`                                         | No CLAUDE.md, no git context                                                                       |
+| `-w, --worktree [name]`                          | Git worktree                                                                                       |
+| `--fallback-model <model>`                       | Fallback model                                                                                     |
+| `--json-schema <schema>`                         | JSON Schema for structured output                                                                  |
+| `--mcp-config <paths>`                           | MCP config files (comma-separated)                                                                 |
+| `--settings <path>`                              | Settings.json path                                                                                 |
+| `--skip-persistence`                             | Disable session persistence                                                                        |
+| `--betas <headers>`                              | Beta headers (comma-separated)                                                                     |
+| `--enable-agent-teams`                           | Enable agent teams                                                                                 |
+| `--include-hook-events`                          | Stream hook lifecycle events (PreToolUse/PostToolUse)                                              |
+| `--permission-prompt-tool <tool>`                | Delegate permission prompts to an MCP tool (non-interactive use)                                   |
+| `--exclude-dynamic-system-prompt-sections`       | Move cwd/env/git context to user message for better prompt cache hits (auto-enabled with `--bare`) |
+| `--debug <categories>`                           | Enable targeted debug output by category (e.g. `"api,mcp"`)                                        |
+| `--debug-file <path>`                            | Write debug output to file                                                                         |
+| `--from-pr <n>`                                  | Resume a session linked to a GitHub PR number or URL                                               |
+| `--channels <spec>`                              | MCP channel subscription (research preview)                                                        |
+| `--dangerously-load-development-channels <spec>` | Development MCP channel subscriptions (research preview)                                           |
+| `ENABLE_PROMPT_CACHING_1H=1` (env var)           | Enable 1-hour prompt cache TTL (auto-set with `--bare`)                                            |
 
 ### session-send
 
@@ -98,12 +101,12 @@ clawo session-start [name] [options]
 clawo session-send <name> <message> [options]
 ```
 
-| Flag | Description |
-|------|-------------|
-| `--effort <level>` | Override effort for this message |
-| `--plan` | Enable plan mode |
-| `-s, --stream` | Collect streaming chunks |
-| `-t, --timeout <ms>` | Timeout (default 300000) |
+| Flag                 | Description                      |
+| -------------------- | -------------------------------- |
+| `--effort <level>`   | Override effort for this message |
+| `--plan`             | Enable plan mode                 |
+| `-s, --stream`       | Collect streaming chunks         |
+| `-t, --timeout <ms>` | Timeout (default 300000)         |
 
 ### session-stop
 
@@ -180,21 +183,60 @@ clawo session-team-send <name> <teammate> <message>
 
 The following tools are available through the OpenClaw plugin SDK and TypeScript API but do not have CLI commands. Use the SDK directly or call them via OpenClaw's tool system.
 
-| Tool | Description |
-|------|-------------|
-| `sessions_overview` | Aggregate dashboard of all active sessions |
-| `session_update_tools` | Hot-swap allowed/disallowed tools via `--resume` |
-| `session_switch_model` | Switch model mid-session via `--resume` |
-| `council_start` | Start multi-agent council with worktree isolation |
-| `council_status` | Poll council progress and agent responses |
-| `council_abort` | Abort a running council |
-| `council_inject` | Inject a message into the next council round |
-| `session_send_to` | Cross-session messaging (immediate or queued) |
-| `session_inbox` | Read inbox messages for a session |
-| `session_deliver_inbox` | Deliver queued messages to an idle session |
-| `ultraplan_start` | Start background Opus planning session |
-| `ultraplan_status` | Poll ultraplan progress |
-| `ultrareview_start` | Start fleet of parallel reviewer agents |
-| `ultrareview_status` | Poll ultrareview findings |
+| Tool                    | Description                                       |
+| ----------------------- | ------------------------------------------------- |
+| `sessions_overview`     | Aggregate dashboard of all active sessions        |
+| `session_update_tools`  | Hot-swap allowed/disallowed tools via `--resume`  |
+| `session_switch_model`  | Switch model mid-session via `--resume`           |
+| `council_start`         | Start multi-agent council with worktree isolation |
+| `council_status`        | Poll council progress and agent responses         |
+| `council_abort`         | Abort a running council                           |
+| `council_inject`        | Inject a message into the next council round      |
+| `session_send_to`       | Cross-session messaging (immediate or queued)     |
+| `session_inbox`         | Read inbox messages for a session                 |
+| `session_deliver_inbox` | Deliver queued messages to an idle session        |
+| `ultraplan_start`       | Start background Opus planning session            |
+| `ultraplan_status`      | Poll ultraplan progress                           |
+| `ultrareview_start`     | Start fleet of parallel reviewer agents           |
+| `ultrareview_status`    | Poll ultrareview findings                         |
 
 See [Tools Reference](./tools.md) for full parameter documentation.
+
+## `clawo workflow` (6.0.0)
+
+```bash
+clawo workflow list [--state <s>] [--workflow <name>] [--limit N] [--json]
+clawo workflow show <runId> [--json]
+clawo workflow resume <runId>          # re-attach to a run whose process died
+clawo workflow cancel <runId>
+clawo workflow steer <runId> "<text>"  # queue a correction for the next agent node
+clawo workflow approve <runId> [reject]
+```
+
+`list` prints one row per run with its outcome as `verified` / `REFUTED` /
+`unchecked`. `unchecked` means no acceptance contract was declared — it is not a
+failure.
+
+Runs survive restarts, so `list` sees runs started by other processes and by
+earlier sessions.
+
+## `clawo verify`
+
+```bash
+clawo verify <runId> [--evidence <id>] [--json]
+```
+
+Prints the evidence bundle: per-check pass/fail with the failing command and its
+output tail, the base and head commits, and the files the run changed (created
+files included).
+
+## `clawo runs` additions
+
+```bash
+clawo runs --verified     # only turns whose acceptance contract passed
+clawo runs --refuted      # only turns whose acceptance contract failed
+```
+
+The table gains a `VERIFIED` column with three values: `yes`, `NO`, and `—` for
+"no contract was declared, so nothing checked it". See
+[`observability.md`](./observability.md).

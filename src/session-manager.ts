@@ -120,7 +120,16 @@ function makeDebounced(fn: () => void, ms: number): () => void {
 
 import { type Logger, createConsoleLogger } from './logger.js';
 import { CircuitBreaker } from './circuit-breaker.js';
+import { detectRepoLang } from './kernel/repo.js';
+import { RunKernel, runDir as kernelRunDir } from './kernel/engine.js';
+import { registerDefaultExecutors } from './kernel/nodes/index.js';
+import { loadRun, type RunSummary } from './kernel/store.js';
+import type { KernelEvent, RunRecord, RunState, WorkflowSpec } from './kernel/types.js';
+import { normalizeContract } from './verify/contract.js';
+import { runContract } from './verify/runner.js';
+import { evidenceDir, listEvidence, readEvidence, writeEvidence, type EvidenceBundle } from './verify/evidence.js';
 import {
+  annotateVerdicts,
   appendRunRow,
   readRunLedger,
   summarizeRuns,
@@ -143,6 +152,7 @@ import { PersistentCustomSession } from './persistent-custom-session.js';
 import {
   type SessionConfig,
   type SessionInfo,
+  type SendOptions,
   type SendResult,
   type PluginConfig,
   type EffortLevel,
@@ -216,20 +226,6 @@ interface ManagedSession {
    * session listings can show *why* a session stopped accepting turns.
    */
   budgetExhausted?: boolean;
-}
-
-interface SendOptions {
-  effort?: EffortLevel;
-  plan?: boolean;
-  autoResume?: boolean;
-  timeout?: number;
-  onEvent?: (event: StreamEvent) => void;
-  onChunk?: (chunk: string) => void;
-  /**
-   * council id / fanout id / autoloop run id. Recorded on the run-ledger row so
-   * a multi-agent run can be reconstructed from the ledger after the fact.
-   */
-  parentRunId?: string;
 }
 
 /**
@@ -492,6 +488,8 @@ export class SessionManager {
   private _activePids = new Map<string, number>();
   private _circuitBreaker = new CircuitBreaker();
   private _inbox = new InboxManager();
+  /** cwd → detected language, so the manifest probe runs once per directory. */
+  private _repoLangCache = new Map<string, string | undefined>();
   private logger: Logger;
   private _ultraappManager: UltraappManager | null = null;
   private _ultraappRouter: UltraappRouter | null = null;
@@ -822,7 +820,10 @@ export class SessionManager {
         turnError = (err as Error).message;
         throw err;
       } finally {
-        this._recordRunTurn(name, managed, ledgerBefore, startedAt, turnError, options.parentRunId);
+        this._recordRunTurn(name, managed, ledgerBefore, startedAt, turnError, options.parentRunId, {
+          nodeKind: options.nodeKind,
+          taskKind: options.taskKind,
+        });
       }
     } finally {
       releaseChain();
@@ -898,6 +899,7 @@ export class SessionManager {
     startedAt: number,
     error: string | undefined,
     parent: string | undefined,
+    dims: { nodeKind?: string; taskKind?: string } = {},
   ): void {
     const after = this._statsSnapshot(managed);
     const delta = (a: number, b: number): number => Math.max(0, a - b);
@@ -930,12 +932,32 @@ export class SessionManager {
     if (model) row.model = model;
     if (error) row.error = error.slice(0, 500);
     if (parent) row.parent = parent;
+    if (dims.nodeKind) row.nodeKind = dims.nodeKind;
+    if (dims.taskKind) row.taskKind = dims.taskKind;
+    // Detected from a manifest, never guessed. `verified` is deliberately absent
+    // here: the verdict does not exist yet at turn time, and is joined in at read
+    // time by annotateVerdicts().
+    const repoLang = this._repoLang(managed.cwd);
+    if (repoLang) row.repoLang = repoLang;
 
     appendRunRow(row, this.logger);
 
     if (isBudgetExceeded(after.costUsd, managed.config.maxBudgetUsd)) {
       managed.budgetExhausted = true;
     }
+  }
+
+  /**
+   * Repo language for the ledger row, memoised per cwd — the detector stats a
+   * handful of manifest paths and a turn-rate filesystem probe is wasteful when
+   * a session's cwd never changes.
+   */
+  private _repoLang(cwd: string): string | undefined {
+    if (!cwd) return undefined;
+    if (!this._repoLangCache.has(cwd)) {
+      this._repoLangCache.set(cwd, detectRepoLang(cwd));
+    }
+    return this._repoLangCache.get(cwd);
   }
 
   private _reportedModel(managed: ManagedSession): string | undefined {
@@ -959,8 +981,138 @@ export class SessionManager {
    * process restart and covers sessions this manager never owned.
    */
   getRunLedger(query: RunLedgerQuery = {}): { rows: RunLedgerRow[]; summary: RunLedgerSummary } {
-    const rows = readRunLedger(query, this.logger);
-    return { rows, summary: summarizeRuns(rows) };
+    // Join each row to the verdict of the run it belonged to. The turns that did
+    // the work all finish before the verifier that judged it, so the verdict
+    // cannot be written at turn time — see `annotateVerdicts`.
+    //
+    // `verified` is deliberately withheld from the read: applying it there would
+    // filter on a field no row carries yet and return nothing. It is applied
+    // after the join instead.
+    const { verified, ...readQuery } = query;
+    const rows = annotateVerdicts(readRunLedger(readQuery, this.logger), (parent) => {
+      const record = loadRun(parent);
+      if (!record || record.outcome === 'unverified') return undefined;
+      return {
+        verified: record.outcome === 'verified',
+        evidenceId: record.evidenceId,
+        contractId: record.spec?.contract?.id,
+      };
+    });
+    const filtered = verified === undefined ? rows : rows.filter((r) => r.verified === verified);
+    return { rows: filtered, summary: summarizeRuns(filtered) };
+  }
+
+  // ─── Workflow kernel ──────────────────────────────────────────────────────
+
+  /**
+   * Lazily built, like every other subsystem here — constructing it at plugin
+   * load would create run directories for a process that may never run anything.
+   */
+  private get kernel(): RunKernel {
+    if (!this._kernel) {
+      this._kernel = registerDefaultExecutors(new RunKernel({ manager: this, logger: this.logger }), (name) =>
+        this._resolveTemplate(name),
+      );
+    }
+    return this._kernel;
+  }
+
+  /** Named built-ins available to `subflow` nodes and to `workflow_start`. */
+  private _resolveTemplate(name: string): WorkflowSpec | undefined {
+    // Built-ins need caller arguments, so a bare name only resolves to a
+    // previously started run's spec — a subflow referencing a template by name
+    // without arguments has nothing to run.
+    const record = loadRun(name);
+    return record?.spec;
+  }
+
+  /**
+   * Subscribe to kernel events (for the SSE endpoint). Returns an unsubscribe
+   * function — SessionManager is not an EventEmitter, and making it one just for
+   * this would widen its surface for one consumer.
+   */
+  onWorkflowEvent(listener: (e: { runId: string; event: KernelEvent }) => void): () => void {
+    const k = this.kernel;
+    k.on('kernel-event', listener);
+    return () => {
+      k.off('kernel-event', listener);
+    };
+  }
+
+  async workflowStart(
+    spec: WorkflowSpec,
+    opts: { runId?: string; cwd?: string; contract?: unknown } = {},
+  ): Promise<RunRecord> {
+    return this.kernel.start(spec, opts);
+  }
+
+  workflowStatus(runId: string): RunRecord {
+    const record = this.kernel.get(runId);
+    if (!record) throw new Error(`Workflow run '${runId}' not found`);
+    return record;
+  }
+
+  workflowList(query: { workflow?: string; state?: RunState; limit?: number } = {}): RunSummary[] {
+    return this.kernel.list(query);
+  }
+
+  workflowCancel(runId: string): { cancelled: boolean } {
+    return { cancelled: this.kernel.cancel(runId) };
+  }
+
+  async workflowResume(runId: string): Promise<RunRecord> {
+    return this.kernel.resume(runId);
+  }
+
+  workflowSteer(runId: string, text: string): { steered: boolean } {
+    return { steered: this.kernel.steer(runId, text) };
+  }
+
+  workflowApprove(runId: string, approved: boolean): { answered: boolean } {
+    return { answered: this.kernel.approve(runId, approved) };
+  }
+
+  workflowDelete(runId: string): void {
+    this.kernel.delete(runId);
+  }
+
+  workflowEvidence(runId: string, evidenceId?: string): EvidenceBundle | undefined {
+    const dir = kernelRunDir(runId);
+    const id = evidenceId ?? this.kernel.get(runId)?.evidenceId ?? listEvidence(dir).at(-1);
+    return id ? readEvidence(dir, id) : undefined;
+  }
+
+  /**
+   * Run an acceptance contract against a directory, outside any workflow.
+   *
+   * This is the escape hatch for work that did not come through the kernel — a
+   * plain `session_send` that edited a repo, or a run from an older version. The
+   * contract comes from the caller and is normalized before anything executes.
+   */
+  async verifyRun(args: { cwd: string; contract: unknown; baseSha?: string; label?: string }): Promise<EvidenceBundle> {
+    const contract = normalizeContract(args.contract);
+    if (!contract) throw new Error('verifyRun requires a contract with at least one recognised check');
+    const runId = args.label || `verify-${Date.now().toString(36)}`;
+    const dir = kernelRunDir(runId);
+    const evidenceId = 'verify-01';
+    const { results, rounds } = await runContract(contract, {
+      cwd: args.cwd,
+      artifactDir: evidenceDir(dir, evidenceId),
+      baseSha: args.baseSha,
+      logger: this.logger,
+    });
+    return writeEvidence({
+      runDir: dir,
+      runId,
+      node: 'run',
+      evidenceId,
+      cwd: args.cwd,
+      baseSha: args.baseSha,
+      contractId: contract.id,
+      results,
+      rounds,
+      logger: this.logger,
+    });
   }
 
   async stopSession(name: string, opts: { keepPersisted?: boolean } = {}): Promise<void> {
@@ -2461,6 +2613,7 @@ export class SessionManager {
 
   // ─── Ultraplan ────────────────────────────────────────────────────────
 
+  private _kernel: RunKernel | null = null;
   private ultraplans = new Map<string, UltraplanResult>();
   ultraplanStart(task: string, opts?: { model?: string; cwd?: string; timeout?: number }): UltraplanResult {
     const id = `ultraplan-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
@@ -2738,7 +2891,13 @@ export class SessionManager {
       result.status = 'error';
       result.error = (err as Error).message;
       result.endTime = new Date().toISOString();
-      setTimeout(() => this.ultrareviews.delete(id), RESULT_TTL_MS);
+      {
+        // unref'd like every other TTL timer here: a 30-minute handle that keeps
+        // the event loop alive would hold a CLI process open for half an hour
+        // after a fan-out that failed to start.
+        const ttlDelete = setTimeout(() => this.ultrareviews.delete(id), RESULT_TTL_MS);
+        ttlDelete.unref();
+      }
       return result;
     }
 

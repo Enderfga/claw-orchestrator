@@ -455,6 +455,7 @@ export class EmbeddedServer {
           session: pick('session'),
           engine: pick('engine'),
           parent: pick('parent'),
+          verified: pick('verified') === undefined ? undefined : pick('verified') === 'true',
           limit: limitRaw ? Number(limitRaw) : undefined,
         });
         json(200, { ok: true, rows, summary });
@@ -732,6 +733,106 @@ export class EmbeddedServer {
           json(200, { ok: true, session });
         }
         return;
+      }
+
+      // ─── Workflow kernel — list / new / state / control / evidence / SSE ─
+      //
+      // Same conventions as /runs and /autoloop/*: any method reaches the route,
+      // POST bodies win over query params, and the whole block sits behind the
+      // shared auth + rate limit.
+
+      if (path === '/workflow/list') {
+        json(200, {
+          ok: true,
+          runs: this.manager.workflowList({
+            workflow: (body.workflow as string) ?? query.get('workflow') ?? undefined,
+            state: ((body.state as string) ?? query.get('state') ?? undefined) as never,
+            limit: Number((body.limit as string) ?? query.get('limit') ?? 25) || 25,
+          }),
+        });
+        return;
+      }
+
+      if (path === '/workflow/new') {
+        const spec = body.spec as never;
+        if (!spec) {
+          json(400, { ok: false, error: 'workflow/new requires `spec`' });
+          return;
+        }
+        const record = await this.manager.workflowStart(spec, {
+          cwd: body.cwd as string | undefined,
+          runId: body.runId as string | undefined,
+          contract: body.contract,
+        });
+        json(200, { ok: true, runId: record.runId, state: record.state });
+        return;
+      }
+
+      const wfMatch = path.match(/^\/workflow\/([^/]+)\/(state|cancel|resume|steer|approve|evidence|events)$/);
+      if (wfMatch) {
+        const [, runId, verb] = wfMatch;
+        if (verb === 'events') {
+          res.writeHead(200, {
+            'Content-Type': 'text/event-stream',
+            'Cache-Control': 'no-cache',
+            Connection: 'keep-alive',
+          });
+          const send = (event: string, data: unknown): void => {
+            res.write(`event: ${event}\n`);
+            res.write(`data: ${JSON.stringify(data)}\n\n`);
+          };
+          const snapshot = this.manager.workflowList({ limit: 1000 }).find((r) => r.runId === runId);
+          if (snapshot) send('snapshot', snapshot);
+          const unsubscribe = this.manager.onWorkflowEvent((e) => {
+            if (e.runId === runId) send('workflow-event', e.event);
+          });
+          res.on('close', () => {
+            unsubscribe();
+            try {
+              res.end();
+            } catch {
+              /* ignore */
+            }
+          });
+          return;
+        }
+
+        try {
+          switch (verb) {
+            case 'state':
+              json(200, { ok: true, run: this.manager.workflowStatus(runId) });
+              return;
+            case 'cancel':
+              json(200, { ok: true, ...this.manager.workflowCancel(runId) });
+              return;
+            case 'resume': {
+              const record = await this.manager.workflowResume(runId);
+              json(200, { ok: true, runId: record.runId, state: record.state });
+              return;
+            }
+            case 'steer':
+              json(200, { ok: true, ...this.manager.workflowSteer(runId, String(body.text ?? '')) });
+              return;
+            case 'approve':
+              json(200, { ok: true, ...this.manager.workflowApprove(runId, body.approved !== false) });
+              return;
+            case 'evidence': {
+              const bundle = this.manager.workflowEvidence(
+                runId,
+                (body.evidenceId as string) ?? query.get('evidenceId') ?? undefined,
+              );
+              if (!bundle) {
+                json(404, { ok: false, error: 'no evidence recorded for this run' });
+                return;
+              }
+              json(200, { ok: true, evidence: bundle });
+              return;
+            }
+          }
+        } catch (err) {
+          json(404, { ok: false, error: (err as Error).message });
+          return;
+        }
       }
 
       const councilEventsMatch = path.match(/^\/council\/([^/]+)\/events$/);

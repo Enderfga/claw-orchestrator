@@ -14,6 +14,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
+import { changedFilesSince } from './verify/baseline.js';
 import { EventEmitter } from 'node:events';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -29,6 +30,7 @@ import {
   type CouncilAcceptResult,
   type CouncilRejectResult,
   type CouncilChangedFile,
+  type CouncilFileChange,
   type EngineType,
   type SessionConfig,
   type SessionInfo,
@@ -52,7 +54,6 @@ import {
   GIT_CMD_TIMEOUT_MS,
   WORKTREE_CMD_TIMEOUT_MS,
   FOLLOWUP_TIMEOUT_MS,
-  GIT_LOG_DEPTH,
   DEFAULT_MAX_ROUNDS,
 } from './constants.js';
 import { type Logger, createConsoleLogger } from './logger.js';
@@ -835,43 +836,25 @@ export class Council extends EventEmitter {
     const reviewsDir = path.join(dir, 'reviews');
     const reviews = fs.existsSync(reviewsDir) ? fs.readdirSync(reviewsDir).filter((f) => f.endsWith('.md')) : [];
 
-    // Diff stat: find changed files compared to initial state
-    const changedFiles: CouncilChangedFile[] = [];
+    // What the council changed, measured against where its branches forked.
+    //
+    // This used to diff `HEAD~20..HEAD` with a `HEAD~10` fallback: a magic
+    // window with no relationship to when the council started, which returned
+    // nothing at all on a shallow or young history. The merge-base is the actual
+    // fork point, and `changedFilesSince` also sees files the agents created,
+    // which a plain tracked-file diff cannot.
+    let changedFiles: CouncilChangedFile[] = [];
     try {
-      // Ensure git history is available before diffing
-      await spawnAsync('git', ['-C', dir, 'log', '--oneline', '--all', `-${GIT_LOG_DEPTH}`], {
-        timeout: GIT_CMD_TIMEOUT_MS,
-      });
-      // Get diff stat from recent history (rough heuristic)
-      const diffResult = await spawnAsync('git', ['-C', dir, 'diff', '--stat', '--numstat', 'HEAD~20', 'HEAD', '--'], {
-        timeout: WORKTREE_CMD_TIMEOUT_MS,
-      }).catch(() => ({ stdout: '', stderr: '' }));
-
-      if (diffResult.stdout.trim()) {
-        for (const line of diffResult.stdout.trim().split('\n')) {
-          const parts = line.split('\t');
-          if (parts.length >= 3) {
-            const insertions = parseInt(parts[0], 10) || 0;
-            const deletions = parseInt(parts[1], 10) || 0;
-            const file = parts[2];
-            if (file && !file.startsWith('-')) {
-              changedFiles.push({ file, status: 'clean', insertions, deletions });
-            }
-          }
-        }
-      }
-
-      // If no numstat, try a simpler approach
-      if (changedFiles.length === 0) {
-        const nameOnly = await spawnAsync('git', ['-C', dir, 'diff', '--name-only', 'HEAD~10', 'HEAD', '--'], {
-          timeout: GIT_CMD_TIMEOUT_MS,
-        }).catch(() => ({ stdout: '', stderr: '' }));
-        for (const file of nameOnly.stdout.trim().split('\n').filter(Boolean)) {
-          changedFiles.push({ file, status: 'clean', insertions: 0, deletions: 0 });
-        }
-      }
+      const base = await this._reviewBaseline(dir, branches);
+      changedFiles = (await changedFilesSince(dir, base)).map((f) => ({
+        file: f.path,
+        // `status` is a reviewer's judgement and stays undefined until one is made.
+        change: f.status === 'untracked' ? 'added' : (f.status as CouncilFileChange),
+        insertions: f.insertions,
+        deletions: f.deletions,
+      }));
     } catch {
-      // Git diff failed — possibly shallow history; skip file listing
+      // Not a repo, or git refused — skip the file listing rather than guess.
     }
 
     // Agent summaries from final round
@@ -915,6 +898,23 @@ export class Council extends EventEmitter {
    * Internal cleanup helper — removes worktrees, branches, plan.md, and reviews/.
    * Each cleanup step is independently gated by the `options` flags.
    */
+  /**
+   * Where the council's work started: the merge-base between the current HEAD and
+   * the first council branch. Falls back to HEAD (working-tree changes only) when
+   * there are no council branches to fork from.
+   */
+  private async _reviewBaseline(dir: string, branches: string[]): Promise<string> {
+    const branch = branches.find((b) => b.startsWith('council/'));
+    if (branch) {
+      const mergeBase = await spawnAsync('git', ['-C', dir, 'merge-base', 'HEAD', branch], {
+        timeout: GIT_CMD_TIMEOUT_MS,
+      }).catch(() => ({ stdout: '', stderr: '' }));
+      const sha = mergeBase.stdout.trim();
+      if (sha) return sha;
+    }
+    return 'HEAD';
+  }
+
   private async _cleanup(
     projectDir: string,
     options: {

@@ -5,6 +5,117 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.0.0] - 2026-08-23
+
+Two things this runtime could not previously do: survive its own process dying,
+and check an agent's work. This release adds both, and they arrive together
+because a verifier is a node in the thing that survives.
+
+### Added
+
+- **Durable run kernel (`src/kernel/`).** A declarative `WorkflowSpec` over seven
+  node kinds — `agent`, `fanout`, `council`, `verifier`, `human_gate`, `router`,
+  `subflow` — with retry, per-node timeout, cancel, steer, human gates, and
+  bounded loops. Every state transition is checkpointed to
+  `~/.claw-orchestrator/wf/<runId>/` before the next step begins, so a run
+  survives a restart and `workflow_resume` re-attaches at the node boundary:
+  nodes already succeeded are not re-run, and the one that was in flight is
+  retried, because a half-finished node left no result to trust. The immutable
+  spec is stored apart from the mutable checkpoint, so a torn `run.json` is
+  recovered by replaying `events.jsonl` rather than lost.
+  Three built-in templates ship as ordinary specs: `solve`, `council`, `fanout`.
+- **Verification plane (`src/verify/`).** Acceptance contracts the runtime runs
+  itself: `command` (argv, gated on exit code), `http`, `screenshot`,
+  `diff_policy`, `file`. A run carrying a contract cannot reach `completed`
+  unless every required check passes. Each attempt writes an evidence bundle —
+  verdict, per-check output tails, the patch, screenshots — that outlives the
+  process. Contracts come from the caller or a mode default and are never read
+  from agent output; unrecognised fields are dropped before anything executes,
+  and there is no shell string anywhere to inject into.
+- **`RunOutcome`: `verified` | `refuted` | `unverified`.** Finishing and being
+  right are now different questions. A run with no contract completes as
+  `unverified` — it says it does not know, which is not the same as success, and
+  the read surfaces keep the three apart rather than collapsing them into
+  pass/fail.
+- **Eight tools**: `workflow_start`, `workflow_status`, `workflow_list`,
+  `workflow_resume`, `workflow_cancel`, `workflow_steer`, `workflow_approve`,
+  `verify_run` (77 total). Matching HTTP routes under `/workflow/*` including an
+  SSE event stream, and `clawo workflow` / `clawo verify` on the CLI.
+- **Baseline capture.** The change set a run produced, measured against the
+  commit recorded when it started, covering tracked changes ∪ untracked files.
+  Nothing in the project could previously answer that question correctly.
+- Ledger rows gain `verified`, `evidenceId`, `contractId`, `nodeKind`,
+  `repoLang`, `taskKind`, and `clawo runs` gains a `VERIFIED` column plus
+  `--verified` / `--refuted`. All optional; rows written before 6.0.0 stay
+  readable and nothing is backfilled.
+
+### Changed
+
+- **Council consensus is advisory.** A council used to end when a regex found
+  `[CONSENSUS: YES]` in every agent's prose. Votes are still collected and are
+  now recorded on the run with their parse source, but they no longer decide
+  whether the work is acceptable — a contract does. Without a contract, council
+  behaves exactly as before and the run completes `unverified`.
+- **UltraApp's build contract now runs `npm run smoke`.** §4 of the
+  architectural conventions has always told the council that the smoke test
+  gates build success. It was not in the step list, so the claim was false. A
+  generated codebase without a working `scripts.smoke` now fails its build,
+  which is what the brief said.
+- **UltraApp's §7g frontend gate is captured by the runtime.** Both viewports are
+  screenshotted against the deployed URL and stored as evidence, so whether a
+  capture happened is a file on disk rather than an agent's claim. It captures
+  and stores; it does not compare pixels. Advisory by default so a host without
+  Chrome does not lose a working app —
+  `CLAWO_ULTRAAPP_VISUAL_GATE=strict` makes a failed capture block the deploy.
+- **Autoloop accepts a contract**, which holds a Reviewer's `advance` unless the
+  checks pass. The Reviewer's prompt asks it to re-derive the metric
+  independently, but its sandbox contains the iteration's artifacts and no code,
+  so it never could; a contract can.
+- `fanout`'s per-agent `ok` reads the engine's terminal verdict
+  (`turnsSucceeded`) instead of "the call did not throw", so an engine that ran,
+  failed, and reported the failure cleanly is no longer recorded as a success.
+- `council_review` measures against the merge-base of `HEAD` and the first
+  `council/*` branch instead of a hardcoded `HEAD~20` window that returned
+  nothing on shallow history, and reports files the agents created.
+- `CouncilChangedFile.status` is optional and left undefined until a reviewer
+  assesses the file. It was hardcoded to `'clean'` for every entry, which read as
+  "reviewed and found fine" when nothing had looked at it. The new `change` field
+  carries git's own account.
+- `ultraapp/fix-on-failure.ts` is now an adapter over `src/verify/`; its public
+  signature is unchanged.
+- One child-process wrapper, one atomic-write helper, one append-JSONL helper,
+  and one start→send→stop agent lifecycle replace the four, four, three and five
+  near-duplicates that had accumulated.
+- The duplicate local `SendOptions` in `session-manager.ts` is gone in favour of
+  the canonical one in `types.ts`.
+
+### Fixed
+
+- Acceptance checks have a timeout. The predecessor pipeline had none, so a
+  wedged `npm test` hung a build indefinitely. A check that overruns is killed —
+  its whole process group, with SIGKILL — and recorded as failed.
+- `steps[].required` is honoured. The field was declared on the old step list and
+  never read, so every step was fatal.
+- Autoloop's per-iteration `diff.patch` includes files the Coder created. It was
+  captured with a bare `git diff`, which lists tracked modifications only, while
+  the `git add -A` two lines later committed the new files anyway — so the
+  Reviewer audited a picture that structurally could not show them. `files_changed`
+  is also taken from git unconditionally; it previously preferred the Coder's own
+  claim despite the comment above it saying otherwise.
+- `on_target_hit` fires. The push-policy key was declared, defaulted, and
+  whitelisted for runtime updates with zero firing sites anywhere — autoloop had
+  four ways to notice it was failing and none to notice it had succeeded. A
+  passing contract is the signal.
+- A `setTimeout` in the ultrareview error path was missing `.unref()`, holding
+  the event loop open for 30 minutes after a fan-out that failed to start.
+- A node that overran its timeout reported the whole run as `cancelled` rather
+  than `failed`, because the timeout and a user cancel shared one signal.
+
+### Removed
+
+- Nothing. All 69 previous tools and their behaviour are unchanged; a caller that
+  declares no contract sees the same completion semantics as 5.1.0.
+
 ## [5.1.0] - 2026-08-23
 
 ### Added
@@ -81,7 +192,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   engine, whatever their outcome". `turnsSucceeded` counts only the ones the
   engine reported as successful, and the predicate is the engine's own terminal
   verdict rather than the exit code: `codex` fails a turn that emits
-  `turn.failed` while exiting 0, `agy` requires `SUCCESS` *and* a zero exit,
+  `turn.failed` while exiting 0, `agy` requires `SUCCESS` _and_ a zero exit,
   `gemini` succeeds on exit 53 (its turn limit resolves), `codex-app` requires
   `status: 'completed'`, and `opencode` refuses a turn on purpose when read-only
   enforcement did not load. On the one-shot engines the counter and that turn's
@@ -93,13 +204,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   two counters is the failure count on the one-shot engines only.** On `claude`
   and a persistent `custom`, `turns` counts `user` events and the CLI emits one
   per tool-result batch as well as the prompt echo — a send that used eight tools
-  counts nine. `turnsSucceeded` *is* one-per-send everywhere, so compare it
+  counts nine. `turnsSucceeded` _is_ one-per-send everywhere, so compare it
   against sends there, not against `turns`. Measured against claude-code
   stream-json, not inferred.
 
   Exposed as `turns_succeeded` on `/v1/sessions` (openai-compat sessions) and in
   `health().details`.
-
 
 - Registry entries for `claude-mythos-5` (Fable 5 parity) and for the 4.5
   generation, `claude-sonnet-4-5` and `claude-opus-4-5` — still served, and
@@ -111,7 +221,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   counter, a turn the engine declined to count as succeeded — an interrupted
   `codex-app` turn, a non-SUCCESS `agy` turn — resolves without throwing, so
   `ok` is `false` while `error` is absent. Those rows now read `not counted as
-  succeeded`, and `observability.md` says that `error` is not guaranteed on a
+succeeded`, and `observability.md` says that `error` is not guaranteed on a
   failed row.
 
 ### Fixed
@@ -142,7 +252,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   status is now recorded sticky-on-failure and the exit code stays in the
   outcome expression, so a turn whose promise rejects is never counted as one
   that succeeded.
-
 
 - **Claude Sonnet 5 was priced 50% too high.** The registry carried $3/$15 per
   Mtok on purpose: $2/$10 had been announced as introductory pricing through
@@ -178,7 +287,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rather than silently substituted.
 
 - **An `agy` turn that agy itself rejected surfaced as `Antigravity exited with
-  code 1`.** agy reports a rejected invocation as a stream-json `result` event
+code 1`.** agy reports a rejected invocation as a stream-json `result` event
   carrying `error` and prints nothing on stderr, so the specific message — which
   names the values it will accept — was discarded. It is now surfaced as the
   turn's error, including when agy exits 0 while reporting one.
@@ -197,7 +306,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   logged and swallowed, never allowed to break the turn it describes.
 - **`clawo runs`** — query the ledger from the CLI:
   `clawo runs [--since 30m|24h|7d|<ISO>] [--session <name>] [--engine <engine>]
-  [--parent <run id>] [-n <limit>] [--json]`. Also exposed as `GET /runs`
+[--parent <run id>] [-n <limit>] [--json]`. Also exposed as `GET /runs`
   (query string or JSON body) and `manager.getRunLedger()`, both returning rows
   plus a summary with a per-engine cost breakdown.
 - **Dashboard 24-hour spend indicator**, fed by the same endpoint.
@@ -301,7 +410,7 @@ rather than lingering.
 
 ## [4.13.0] - 2026-08-17
 
-MCP gives tools *to* an agent; ACP makes you *be* the agent. Every agent in the
+MCP gives tools _to_ an agent; ACP makes you _be_ the agent. Every agent in the
 Agent Client Protocol ecosystem is a single agent — this one is a fleet.
 
 ### Added
@@ -389,7 +498,7 @@ conversation reached the engine without the caller's system prompt. Reported in
 - **`cursor` and `opencode` claimed a live conversation they might not have.**
   4.12.0 moved them to the native-conversation side of the bridge without giving
   them a case in `nativeThreadIsLive()`, so they fell through to its `default:
-  true` — the "session is in the manager's map" signal that predicate exists to
+true` — the "session is in the manager's map" signal that predicate exists to
   replace. A session whose first turn died before the engine announced an id was
   then indistinguishable from a healthy one, and lost the caller's system prompt
   and tool schemas on every subsequent turn rather than just once. Both engines
@@ -492,7 +601,7 @@ all could; the wrappers just never used it.
   the entire tool schema block, every tool result, and the system prompt every
   turn. Those three savings, added in 4.11.0 for codex/agy, now apply here too.
 - **Antigravity reports real token usage.** agy grew `--output-format
-  stream-json`, whose `result` event carries input/output/cache-read tokens; the
+stream-json`, whose `result` event carries input/output/cache-read tokens; the
   wrapper had been estimating ~4 chars per token from the message text, which
   under-counted a real turn by more than two orders of magnitude (a short prompt
   measured 27 estimated tokens against ~15k actual). Cost for this engine was a
@@ -684,6 +793,7 @@ attempting an actual adversarial write against the installed CLI, not by trustin
 flag or the model's self-report.
 
 ### Fixed
+
 - **Cursor read-only is now genuinely enforced.** `sandboxMode: 'read-only'` previously
   relied on `--mode plan`, which Cursor documents as steering "rather than enforcing
   permissions" — an adversarial prompt could still make edit-tool calls write files.
@@ -699,10 +809,11 @@ flag or the model's self-report.
   re-verified field-by-field).
 - **OpenCode read-only fails closed.** If the injected `clawo-readonly` enforcement agent
   fails to load, OpenCode 1.17.15 prints a warning and silently runs the default,
-  *writable* agent. A read-only session now detects that fallback and refuses the turn
+  _writable_ agent. A read-only session now detects that fallback and refuses the turn
   rather than returning output produced without its sandbox.
 
 ### Changed
+
 - Tested-engine pins updated to Cursor Agent **2026.07.09-a3815c0** and OpenCode
   **1.17.15**. OpenCode's `run --format json` event schema, token field path
   (`step_finish.part.tokens`), and agent-permission config were diffed at both tags and
@@ -712,11 +823,13 @@ flag or the model's self-report.
 ## [4.8.0] - 2026-07-12
 
 ### Added
+
 - **Per-role Autoloop engines** (closes #72). Planner, Coder, and Reviewer can independently use any built-in engine; a custom engine may additionally be supplied by a local caller. Existing runs keep the Claude defaults (`opus` for Planner, `sonnet` for Coder/Reviewer); non-Claude roles use their engine's default model when no model is supplied. Planner `spawn_subagents` can override Coder/Reviewer engine and model without accepting custom configuration data.
 - **Conversation replay for engines without native multi-turn.** Claude (persistent process), Codex (thread resume) and Antigravity (`--conversation`) carry context themselves; Gemini, Cursor, OpenCode and one-shot custom engines spawn a fresh process per send, so the dispatcher now replays the role's transcript in-band (`<conversation_history>`, oldest turns dropped past a character budget). Without this a non-Claude Planner forgot the plan it had just proposed on every turn.
 - **`sandboxMode: 'read-only'` is now enforced on every engine that accepts it**, not just Codex: Claude maps it to plan mode, Gemini to `--approval-mode plan` **plus an admin policy denying `exit_plan_mode`** (plan mode alone is model-cooperative and can be escaped), Antigravity/Cursor to their plan modes, and OpenCode to a generated `clawo-readonly` agent whose permissions deny `edit`/`bash`/`external_directory` (its built-in `plan` agent is a user-overridable preset that denies neither). A custom engine that cannot express read-only now refuses to start rather than silently running write-enabled.
 
 ### Changed
+
 - Built-in non-Claude Autoloop roles receive their role protocol in-band. Non-Claude Planners start in their engine's read-only/plan mode.
 - Autoloop registry entries retain each role's effective engine/model selection, including successful `spawn_subagents` overrides, and are now written as an upsert — a run keeps one row instead of accumulating one per start, spawn and resume.
 - `spawn_subagents` rejects engine/model changes after the corresponding session starts, rolls back a newly started Coder if Reviewer startup fails, and drops a prior model when switching to a different engine without an explicit replacement. If a rollback stop fails, the role stays marked as started so a later engine change is rejected rather than silently reusing the old engine's process.
@@ -725,11 +838,13 @@ flag or the model's self-report.
 - Tested-engine pins updated to Claude Code **2.1.207**, Codex **0.144.1**, Gemini **0.43.0**, Antigravity **1.1.1**, Cursor Agent **2026.04.08-a41fba1**, and OpenCode **1.1.40**.
 
 ### Notes
+
 - **Custom engines are local-only by design.** A custom engine names an executable to spawn (plus argv and env), so it may only be configured by a local caller — the MCP tool or the `SessionManager` API. The HTTP API (`POST /autoloop/new`, `POST /autoloop/<id>/resume`) accepts built-in engines only and rejects a `*_custom_engine` body field with a 400. The embedded server is often reverse-tunnelled and its token is a monitoring credential; it is not a channel for choosing what binary the host runs.
 
 ## [4.7.0] - 2026-07-10
 
 ### Added
+
 - **First-class Google Antigravity engine (`engine: 'agy'`).** Wraps the `agy` CLI —
   Google's successor to Gemini CLI (consumer Gemini CLI tiers stopped serving
   2026-06-18) — as a built-in one-shot engine, replacing the custom-engine recipe.
@@ -760,6 +875,7 @@ flag or the model's self-report.
   rejects it for that auth type), so 5.6 is opt-in via `model`.
 
 ### Changed
+
 - **stderr secret redaction unified across engines** (`src/sanitize.ts`). The claude,
   gemini, cursor, opencode, custom, and agy engines now share one sanitizer whose
   patterns are the union of the previous per-engine copies (Bearer tokens incl.
@@ -772,6 +888,7 @@ flag or the model's self-report.
   `max` applies to Bedrock GPT-5.6 models only), so the `max`→`xhigh` mapping stays.
 
 ### Removed
+
 - `delegate` removed from `PermissionMode` and the tool schemas: current Claude Code
   CLIs reject it at spawn (verified against 2.1.206), so it could only produce a
   session that fails to start.
@@ -779,6 +896,7 @@ flag or the model's self-report.
 ## [4.6.0] - 2026-07-03
 
 ### Added
+
 - **Claude Fable 5** registered in the model registry (`src/models.ts`): the first Claude 5-family
   model, in a tier above Opus. Standard $10/$50-per-Mtok pricing (cache read $1.00), full 1M-token
   context at standard rates (no long-context surcharge). New `fable` alias resolves to it. (Claude
@@ -786,6 +904,7 @@ flag or the model's self-report.
   `mythos`-named model strings are still routed to Anthropic.)
 
 ### Changed
+
 - Anthropic-model detection heuristics (`isClaudeModel`, `resolveProvider` fallback) now recognize
   `fable` and `mythos` model strings.
 - Tested Claude Code CLI pin updated to **2.1.199** (2.1.198–199 are subagent/background-agent
@@ -794,6 +913,7 @@ flag or the model's self-report.
 ## [4.5.1] - 2026-07-01
 
 ### Changed
+
 - CI now publishes to npm via **trusted publishing (OIDC)** instead of a long-lived `NPM_TOKEN`
   secret — no credential to rotate and nothing that expires. No change to the published package
   contents or runtime behavior.
@@ -801,12 +921,14 @@ flag or the model's self-report.
 ## [4.5.0] - 2026-07-01
 
 ### Added
+
 - **Claude Sonnet 5** registered in the model registry (`src/models.ts`): native 1M-token context
   window, standard $3/$15-per-Mtok pricing (cached $0.30). It is the new Claude Code default as of
   CLI 2.1.197. (Anthropic runs a launch promo of $2/$10 through 2026-08-31; we price the standard
   rate so cost estimates never under-report.)
 
 ### Changed
+
 - The `sonnet` alias now resolves to `claude-sonnet-5` (was `claude-sonnet-4-6`), matching the Claude
   CLI's own `sonnet` default so cost tracking and context-window estimates stay accurate. The older
   `claude-sonnet-4-6` remains selectable by its full id.
@@ -825,6 +947,7 @@ No behavior changes for normal use; the focus is failure-path correctness, resou
 and input validation. All 802 unit tests pass; build/lint/format clean.
 
 ### Fixed
+
 - **Subprocess I/O (all engines):** `persistent-session` / `persistent-custom-session` now attach a
   readline `error` handler (an stdout stream fault used to crash the monitor process), check
   `stdin.writable` and pass a write error callback (silent write failures left `waitForComplete`
@@ -865,22 +988,26 @@ and input validation. All 802 unit tests pass; build/lint/format clean.
 - **Dependencies:** refreshed the lockfile (advisory count 30 → 5, none high/critical).
 
 ### Added
+
 - `AutoloopConfig.maxDispatchDepth` — configurable per-drain message ceiling (default 64) for
   legitimately deep workflows.
 
 ### Docs
+
 - Corrected the registered-tool count (39 → 63) and the documented opencode/cursor invocation flags
   to match the actual wrappers.
 
 ### Tests
+
 - Added InboxManager coverage (idle/busy delivery, broadcast, queue flush, error fallback) and
   `getAnthropicBaseUrl` env-layer/memoization coverage; plus a regression test for the autoloop
   terminated final-state contract.
 
 ### Notes
+
 - The remaining audit-reported dependency advisories (esbuild, and protobufjs/tar nested under the
   `openclaw` peer dependency) are not present in this package's published tarball; the only `npm audit
-  fix --force` path downgrades the `openclaw` peer to a stub, so it is intentionally not applied.
+fix --force` path downgrades the `openclaw` peer to a stub, so it is intentionally not applied.
 
 ## [4.3.0] - 2026-06-16
 
@@ -1230,7 +1357,7 @@ The fix moves the role boundary from soft (prompt rule) to hard
 (tool gating):
 
 - **Planner session now passes `disallowedTools: ['Write', 'Edit',
-  'MultiEdit', 'NotebookEdit']` to Claude Code.** Read / Glob / Grep /
+'MultiEdit', 'NotebookEdit']` to Claude Code.** Read / Glob / Grep /
   Bash stay enabled so the Planner can still discover and audit the
   workspace.
 - **New autoloop tools `write_plan` and `write_goal`** replace
@@ -1247,7 +1374,7 @@ The fix moves the role boundary from soft (prompt rule) to hard
   boundaries remain prompt-only (their roles need Write/Edit to function;
   Reviewer's cwd-isolation continues to provide soft sandboxing).
 - `PlannerToolEffects.commitPlanFile` renamed to `writePlanFile(file,
-  content, commitMessage?)` — the new contract takes content.
+content, commitMessage?)` — the new contract takes content.
 
 This is a behavioural breaking change for anyone driving the Planner with
 custom prompts that reference the old tool names; the orchestrator surfaces
@@ -1265,7 +1392,7 @@ fetch resolved into the error branch.
 
 - HTTP `POST /autoloop/<id>/chat` is now fire-and-forget: validates the run
   is alive in memory, dispatches the message, returns **202** `{ ok, queued:
-  true }` immediately. The Planner's reply streams back via `/events` as a
+true }` immediately. The Planner's reply streams back via `/events` as a
   `planner_reply` event — the dashboard already subscribes to it.
 - New `planner_error` SSE event so runtime failures inside the Planner
   surface to the dashboard instead of hanging the "thinking…" indicator.
@@ -1346,7 +1473,7 @@ and switchable via Promote.
   consensus by 3-way YES vote (uses the existing `Council` class).
 - **Fix-on-failure helper** (`src/ultraapp/fix-on-failure.ts`): purpose-
   built ~50-line loop that drives `npm install / build / test / docker
-  build` and spawns a Claude Opus fixer session on red, up to N rounds.
+build` and spawns a Claude Opus fixer session on red, up to N rounds.
   Replaces the original autoloop adapter (different problem shape).
 - **Build queue** (`src/ultraapp/build.ts`): global serial FIFO with 11
   `BuildEvent` variants and live position reporting.
@@ -1386,9 +1513,9 @@ and switchable via Promote.
   `ultraapp_start_container`, `ultraapp_stop_container`, `ultraapp_delete`.
   All declared in `openclaw.plugin.json`.
 - **HTTP routes:** `/ultraapp/{list, new, <id>, <id>/answer,
-  <id>/spec-edit, <id>/files, <id>/events (SSE), <id>/build,
-  <id>/build/cancel, <id>/artifacts, <id>/start, <id>/stop, <id>/delete,
-  <id>/feedback, <id>/promote-version}`.
+<id>/spec-edit, <id>/files, <id>/events (SSE), <id>/build,
+<id>/build/cancel, <id>/artifacts, <id>/start, <id>/stop, <id>/delete,
+<id>/feedback, <id>/promote-version}`.
 - **Dashboard:** Forge tab with three-column layout (chat / spec / files).
   Mode pill (interview → queued → building → build-complete | deploying →
   done | failed). Chat input mode-aware: in interview mode submits to
@@ -1417,8 +1544,8 @@ engine or skill drift fails this test loudly. Manual smoke runner at
   (typical complete spec lands in 5–8 questions).
 - **`skills/references/ultraapp.md`** (new) — operator reference: lifecycle,
   conventions §1–§7 summary, runtime modes, file layout, all 14 MCP tools
-  + matching HTTP routes, done-mode classifier behaviour, reference-trace
-  replayer, known limitations.
+  - matching HTTP routes, done-mode classifier behaviour, reference-trace
+    replayer, known limitations.
 - **`skills/references/tools.md`** — adds Autoloop (6) and Ultraapp (14)
   sections with full param schemas; total declared tool count now matches
   the 55 registered in `src/index.ts`.
@@ -1696,11 +1823,11 @@ The embedded HTTP server now requires authentication on every endpoint
 except `/health`. Previously it ran unauthenticated unless `OPENCLAW_SERVER_TOKEN`
 was explicitly set (CWE-306).
 
-| Mode | Trigger |
-|---|---|
+| Mode                            | Trigger                                                                                                   |
+| ------------------------------- | --------------------------------------------------------------------------------------------------------- |
 | **Auto-generate** (new default) | unset env var → server writes a fresh 32-byte token to `~/.openclaw/server-token` (mode 0600) at startup. |
-| **Explicit token** (unchanged) | `OPENCLAW_SERVER_TOKEN=<value>` |
-| **Disabled** (opt-out, new) | `OPENCLAW_SERVER_TOKEN=disabled` — single-user host only; logs a loud warning |
+| **Explicit token** (unchanged)  | `OPENCLAW_SERVER_TOKEN=<value>`                                                                           |
+| **Disabled** (opt-out, new)     | `OPENCLAW_SERVER_TOKEN=disabled` — single-user host only; logs a loud warning                             |
 
 Three ways to authenticate (all equivalent):
 
@@ -1784,11 +1911,11 @@ Each agent session is monitored after every turn via `getStats().contextPercent`
 When it crosses the per-agent threshold the dispatcher dispatches `/compact`
 with an agent-specific summary hint:
 
-| Agent | Default threshold | What `/compact` is told to preserve |
-|---|---|---|
-| Planner | 80% | current plan / goal, decisions with the user, what's been tried + rejected, user prefs, iter verdicts |
-| Coder | 70% | codebase familiarity, attempted patches, current working state, plan + goal |
-| Reviewer | 70% | fakery patterns caught, recent metrics, structural rules from goal.json |
+| Agent    | Default threshold | What `/compact` is told to preserve                                                                   |
+| -------- | ----------------- | ----------------------------------------------------------------------------------------------------- |
+| Planner  | 80%               | current plan / goal, decisions with the user, what's been tried + rejected, user prefs, iter verdicts |
+| Coder    | 70%               | codebase familiarity, attempted patches, current working state, plan + goal                           |
+| Reviewer | 70%               | fakery patterns caught, recent metrics, structural rules from goal.json                               |
 
 Per-run override via `compactThresholds: { planner?, coder?, reviewer? }` on
 the dispatcher config. 30-second cooldown prevents back-to-back compactions.
@@ -1908,6 +2035,7 @@ explicit decision-needed. WeChat → WhatsApp → email fallback chain
 (mirrors push-api-skill SKILL.md §B). 5-minute dedup on (level, summary).
 
 **Backend SSE/HTTP** for the upcoming 3-pane UI:
+
 - `GET /autoloop/list`
 - `GET /autoloop/<id>/state`
 - `GET /autoloop/<id>/push_log`
@@ -2021,10 +2149,10 @@ Schema is undocumented upstream and the project releases nearly daily — pin a 
 
 OpenClaw 2026.5.x ships its own `session_status` and `agents_list` tools at the gateway level. The plugin's identically-named tools triggered `plugin tool name conflict` warnings on every gateway restart, and dispatch was ambiguous when an LLM called either name. Renamed the two colliding tools:
 
-| Before | After |
-|--------|-------|
+| Before           | After                   |
+| ---------------- | ----------------------- |
 | `session_status` | `coding_session_status` |
-| `agents_list` | `coding_agents_list` |
+| `agents_list`    | `coding_agents_list`    |
 
 No aliases — the conflicting names couldn't be invoked reliably anyway. All other tool names (and the rest of the API surface) are unchanged. If you have callers that hard-coded these two names, update them.
 
@@ -2066,24 +2194,24 @@ Project repositioned as **Claw Orchestrator** — a multi-engine coding-agent ru
 
 The 17 `claude_*`-prefixed tools were renamed to engine-neutral names. The old names remain registered as deprecated aliases for the v3.0.x line and will be removed in v3.1. The `codex_*`, `council_*`, `ultraplan_*`, `ultrareview_*` tool names are unchanged.
 
-| Old name (alias, deprecated) | New name (canonical) |
-|---|---|
-| `claude_session_start` | `session_start` |
-| `claude_session_send` | `session_send` |
-| `claude_session_stop` | `session_stop` |
-| `claude_session_list` | `session_list` |
-| `claude_sessions_overview` | `sessions_overview` |
-| `claude_session_status` | `session_status` |
-| `claude_session_grep` | `session_grep` |
-| `claude_session_compact` | `session_compact` |
-| `claude_agents_list` | `agents_list` |
-| `claude_team_list` | `team_list` |
-| `claude_team_send` | `team_send` |
-| `claude_session_update_tools` | `session_update_tools` |
-| `claude_session_switch_model` | `session_switch_model` |
-| `claude_project_purge` | `project_purge` |
-| `claude_session_send_to` | `session_send_to` |
-| `claude_session_inbox` | `session_inbox` |
+| Old name (alias, deprecated)   | New name (canonical)    |
+| ------------------------------ | ----------------------- |
+| `claude_session_start`         | `session_start`         |
+| `claude_session_send`          | `session_send`          |
+| `claude_session_stop`          | `session_stop`          |
+| `claude_session_list`          | `session_list`          |
+| `claude_sessions_overview`     | `sessions_overview`     |
+| `claude_session_status`        | `session_status`        |
+| `claude_session_grep`          | `session_grep`          |
+| `claude_session_compact`       | `session_compact`       |
+| `claude_agents_list`           | `agents_list`           |
+| `claude_team_list`             | `team_list`             |
+| `claude_team_send`             | `team_send`             |
+| `claude_session_update_tools`  | `session_update_tools`  |
+| `claude_session_switch_model`  | `session_switch_model`  |
+| `claude_project_purge`         | `project_purge`         |
+| `claude_session_send_to`       | `session_send_to`       |
+| `claude_session_inbox`         | `session_inbox`         |
 | `claude_session_deliver_inbox` | `session_deliver_inbox` |
 
 Calling a deprecated name still works; the tool description in OpenClaw's tool listing is prefixed with `[DEPRECATED — use <new-name>; this alias is removed in v3.1]` to nudge migration.
@@ -2165,6 +2293,7 @@ Skipped (passive / interactive-only): OTel numeric attribute fix and `invocation
 ## [2.14.1] - 2026-04-29
 
 ### Fixed
+
 - **`team_list` / `team_send` on Claude engine** — earlier code assumed Claude Code CLI exposed `/team` and `@teammate` as user-facing commands. They do not. `team_list` returned `Unknown command: /team` and `team_send` sent the message as plain prose with a stray `@name` prefix. Both tools now use the same engine-agnostic virtual-team layer (cross-session inbox routing) for every engine. Claude Code's native experimental Agent Teams (`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`, v2.1.32+) is an in-process TUI mechanism with no stdin-driven messaging surface, so a subprocess wrapper cannot drive it. Thanks @shendiid ([#48](https://github.com/Enderfga/openclaw-claude-code/issues/48))
 - Removed unused `TEAM_LIST_TIMEOUT_MS` and `TEAM_SEND_TIMEOUT_MS` constants
 - Updated README, SKILL.md, and `multi-engine.md` to describe the unified virtual-team behavior
@@ -2193,12 +2322,14 @@ Distributed tracing (`TRACEPARENT` / `TRACESTATE`) is automatically forwarded si
 ## [2.13.1] - 2026-04-28
 
 ### Fixed
+
 - **Windows path resolution in council** — replaced manual `import.meta.url.replace('file://', '')` with `fileURLToPath()` in `src/council.ts`. The hand-rolled stripping left a leading `/` on Windows file URLs (`file:///C:/...` → `/C:/...`), breaking config path resolution and the project-directory safety check. Thanks @shendiid ([#47](https://github.com/Enderfga/openclaw-claude-code/pull/47))
 - **Council safety check now uses `path.relative` instead of POSIX-only `'/'` separator** — the `moduleRoot + '/'` prefix check was Windows-incorrect (`\` vs `/`); now uses `path.relative()` so the safety guard works across platforms
 
 ## [2.13.0] - 2026-04-16
 
 ### Added
+
 - **Claude Code CLI 2.1.111 support** — updated tested version from 2.1.91 to 2.1.111
 - **Hook event streaming** — `includeHookEvents` option passes `--include-hook-events` for PreToolUse/PostToolUse lifecycle events
 - **Permission delegation** — `permissionPromptTool` option passes `--permission-prompt-tool` for non-interactive MCP-based permission handling
@@ -2213,17 +2344,20 @@ Distributed tracing (`TRACEPARENT` / `TRACESTATE`) is automatically forwarded si
 ## [2.12.2] - 2026-04-16
 
 ### Fixed
+
 - **OpenAI-compat: eliminated periodic 30–50s latency spikes** — tool definitions (`<available_tools>`) are now embedded in the session system prompt at create time instead of being prepended to every user message. For callers with many tools (e.g. 90+ MCP tools, ~50 KB payload), this enables reliable Anthropic prompt cache hits and eliminates a class of latency spikes that occurred every ~4 calls. Warm call latency drops from 3–45s (with spikes) to a stable 3–4s ([#43](https://github.com/Enderfga/openclaw-claude-code/pull/43))
 - **OpenAI-compat: session key now includes tool fingerprint** — prevents two callers with the same system prompt but different tool lists from sharing a stale session
 - **OpenAI-compat: extracted `buildSessionSystemPrompt()` helper** — deduplicated near-identical prompt strings, improved testability
 
 ### Added
+
 - **Opt-out env var `OPENAI_COMPAT_TOOLS_PER_MESSAGE=1`** — restores pre-fix per-turn tool injection for callers that mutate their tool list within a single session
 - 13 new unit tests covering tool fingerprinting, system prompt construction, and env var parsing (421 total)
 
 ## [2.12.1] - 2026-04-14
 
 ### Fixed
+
 - **Proxy: configurable Anthropic base URL** — three-layer fallback (`ANTHROPIC_BASE_URL` env var → `~/.openclaw/openclaw.json` providers → official API), enabling MiniMax and other Anthropic-compatible endpoints without patching code
 - **Proxy: removed hardcoded `minimax-portal` provider preference** — now uses first provider with a `baseUrl` from config, making the fallback generic
 - **Proxy: base URL resolution cached** — avoids synchronous filesystem reads on every request
@@ -2231,11 +2365,13 @@ Distributed tracing (`TRACEPARENT` / `TRACESTATE`) is automatically forwarded si
 - **Skill directory** — added `skills/claude-code-skill/` subdirectory symlink for OpenClaw skill loader compatibility
 
 ### Changed
+
 - `skills/claude-code-skill/SKILL.md` is a symlink to `skills/SKILL.md` (single source of truth)
 
 ## [2.12.0] - 2026-04-13
 
 ### Added
+
 - **Structured logging** — new `Logger` interface with `createConsoleLogger(prefix)` and `nullLogger`. Log level controlled via `OPENCLAW_LOG_LEVEL` env var (debug/info/warn/error). SessionManager and Council now accept optional `logger` parameter instead of using bare `console.*`
 - **`BaseOneShotSession` base class** — shared abstract class for one-shot (process-per-send) engines. Eliminates ~600 lines of duplication across Codex, Gemini, and Cursor session implementations
 - **`CircuitBreaker` class** — extracted from SessionManager into standalone module (`src/circuit-breaker.ts`) with `check()`, `recordFailure()`, `reset()`, `getStatus()` API
@@ -2243,11 +2379,13 @@ Distributed tracing (`TRACEPARENT` / `TRACESTATE`) is automatically forwarded si
 - New exports: `BaseOneShotSession`, `OneShotEngineConfig`, `Logger`, `createConsoleLogger`, `nullLogger`, `CircuitBreaker`, `InboxManager`, `SessionLookup`
 
 ### Fixed
+
 - **openai-compat: unsafe type assertion in `parseToolCallsFromText`** — tool call array elements are now validated at runtime before use, preventing crashes on malformed model output
 - **gemini-session / cursor-session: redundant dead branches** — merged identical error-handling branches in process close handlers
 - **Sensitive content removed** — cleaned internal service references and personal paths from code comments and documentation examples
 
 ### Changed
+
 - `PersistentCodexSession` now extends `BaseOneShotSession` (317 → 120 lines)
 - `PersistentGeminiSession` now extends `BaseOneShotSession` (419 → 238 lines)
 - `PersistentCursorSession` now extends `BaseOneShotSession` (441 → 264 lines)
@@ -2258,6 +2396,7 @@ Distributed tracing (`TRACEPARENT` / `TRACESTATE`) is automatically forwarded si
 ## [2.11.1] - 2026-04-11
 
 ### Fixed
+
 - **openai-compat: `--system-prompt` replaces CLI default tools during function calling** — when tools are provided via the OpenAI API, the bridge now uses `--system-prompt` (replace mode) instead of `--append-system-prompt` to suppress Claude Code's built-in tools, preventing the agent from executing host tools instead of returning `tool_calls`
 - **openai-compat: `tool_calls` arguments not always valid JSON** — `parseToolCallsFromText` now ensures the `arguments` field is always a JSON string, wrapping raw values in a JSON object when needed
 - **openai-compat: only first `<tool_calls>` block parsed** — all `<tool_calls>` blocks in a response are now parsed, with output limited to one block per response to match the OpenAI protocol
@@ -2269,6 +2408,7 @@ Distributed tracing (`TRACEPARENT` / `TRACESTATE`) is automatically forwarded si
 ## [2.11.0] - 2026-04-10
 
 ### Added
+
 - **OpenAI function calling support for openai-compat endpoint** — the `/v1/chat/completions` bridge now supports the full OpenAI tool use protocol:
   - Accepts `tools` array from requests (previously silently dropped)
   - Injects tool definitions into the prompt via `<available_tools>` block
@@ -2281,12 +2421,14 @@ Distributed tracing (`TRACEPARENT` / `TRACESTATE`) is automatically forwarded si
 - 19 new unit tests for function calling (tool prompt building, response parsing, tool result serialization, multi-turn flow)
 
 ### Fixed
+
 - **openai-compat session cwd** — uses empty temp directory instead of `process.cwd()` to prevent the CLI from loading CLAUDE.md and workspace context from the serve directory
 - **`tools: ''` falsy check** — empty string is now correctly passed through as `--tools ""` (previously skipped due to truthiness check)
 
 ## [2.10.0] - 2026-04-10
 
 ### Added
+
 - **Custom Engine (`engine: 'custom'`)** — integrate any coding agent CLI without writing engine-specific code. Users provide a `CustomEngineConfig` that maps CLI flags to OpenClaw session concepts. Supports two modes:
   - **Persistent** (`persistent: true`) — long-running subprocess with stream-json I/O over stdin/stdout (for Claude Code-compatible CLIs)
   - **One-shot** (`persistent: false`, default) — new process per `send()` (for simpler CLIs)
@@ -2299,16 +2441,19 @@ Distributed tracing (`TRACEPARENT` / `TRACESTATE`) is automatically forwarded si
 ## [2.9.4] - 2026-04-09
 
 ### Fixed
+
 - **openai-compat: system prompt not injected for non-Claude engines** — Cursor, Codex, and Gemini CLIs don't support `--append-system-prompt`, so the upstream caller's system prompt (OpenClaw agent identity, tool definitions, workspace context) was silently dropped. Now prepended as `<system>...</system>` to the user message on every turn for non-Claude engines.
 - **openai-compat: removed forceNonStream** — returning JSON when the gateway sent `stream: true` caused a protocol mismatch; the OpenAI SDK expected SSE, so webchat received no reply. Streaming with the fixed heartbeat comment format handles cold-start delay correctly.
 
 ### Added
+
 - **Cursor Auto model routing** — `model: "auto"` now resolves to the `cursor` engine, enabling Cursor's unlimited Auto mode as a primary backend via the OpenAI-compat bridge.
 - **openai-compat: optional status webhook (`OPENAI_COMPAT_STATUS_URL`)** — best-effort `POST` JSON `{ state, activity, tool }` at request start, on each CLI `tool_use` event (human-readable `activity`), when the turn completes (`state: idle`), and on handler failure (so UIs don't stick on `thinking`). Enables a webchat status bar or other dashboard to show live agent activity without parsing SSE.
 
 ## [2.9.3] - 2026-04-09
 
 ### Fixed
+
 - **openai-compat: persistent CLI destroyed every turn (#40)** — `extractUserMessage()`'s `nonSystemMessages.length <= 1` heuristic fired on every request for clients that forward only the latest user turn (OpenClaw main agent, cron jobs, subagents), causing `stopSession` + `startSession` on every turn, destroying the persistent CLI, and preventing Anthropic prompt caching from ever warming. The heuristic is now off by default; clients that want the old behavior set `OPENAI_COMPAT_NEW_CONVO_HEURISTIC=1`. All clients can still force a reset via `X-Session-Reset: 1` (now also accepted case-insensitively with whitespace).
 - **openai-compat: unkeyed callers collapsed onto one shared session (#40)** — `resolveSessionKey()` returned the literal string `'default'` when neither `X-Session-Id` nor `user` was set, so multi-caller setups all shared one `openai-default` plugin session and could see each other's `appendSystemPrompt` (a privacy leak across distinct callers). Now falls back to `'sys-<sha1(model + systemPrompt)>'` so distinct callers land on distinct sessions.
 - **openai-compat: session key ignored requested model (#40)** — two callers with the same system prompt but different requested models collided onto one session and silently got responses from whichever model the session was created with. Model is now mixed into the hash input.
@@ -2320,6 +2465,7 @@ Distributed tracing (`TRACEPARENT` / `TRACESTATE`) is automatically forwarded si
 - **openai-compat: `OpenAIChatMessage` type too narrow** — added `role: 'tool'`, `content: null | Array`, `tool_calls`, `tool_call_id` fields. `OpenAIChatCompletionRequest` now includes `tools`, `max_completion_tokens`. These fields are accepted but intentionally not forwarded to the Claude CLI — the bridge delegates all tool use to Claude Code's own tool system.
 
 ### Added
+
 - **`OPENAI_COMPAT_NEW_CONVO_HEURISTIC` env var** — opt-in legacy heuristic for webchat frontends that re-send the full transcript (ChatGPT-Next-Web, Open WebUI, etc).
 - **`GET /v1/sessions` inspection endpoint** — lists active OpenAI-compat sessions with `cached_tokens`, `tokens_in/out`, `turns`, `context_percent`, `cost_usd`. Production observability for verifying that prompt caching is actually warming. Bearer-token gated like the rest of `/v1/*`.
 - **Serve-mode tuning env vars** — `OPENCLAW_SERVE_MAX_SESSIONS` (default 32, was 5) and `OPENCLAW_SERVE_TTL_MINUTES` (default 60, was 120). Plugin-mode defaults are unchanged.
@@ -2327,14 +2473,17 @@ Distributed tracing (`TRACEPARENT` / `TRACESTATE`) is automatically forwarded si
 - **Tests** — 11 new unit tests covering: positive `X-Session-Reset` (1/true/case-insensitive/whitespace), negative reset values, distinct hash by system prompt, distinct hash by model, model-only hash, legacy-heuristic env-var restore, per-session send mutex serialization, mutex recovery from a failed send.
 
 ### Important
+
 - **Extra usage billing**: When OpenClaw's agent loop routes through this bridge, Anthropic recognizes the system prompt signature as programmatic/agent traffic and bills it against Claude Code's **extra usage** quota at standard API rates. This bridge does NOT bypass Anthropic's subscription enforcement or billing — it is not a workaround for API access restrictions.
 
 ### Credits
+
 - Bug diagnosis (#40) by @megayounus786.
 
 ## [2.9.2] - 2026-04-05
 
 ### Fixed
+
 - **Session creation race condition** — concurrent `startSession()` calls for the same name now check `_pendingSessions` before `sessions.has()`, preventing duplicate session creation
 - **Streaming proxy timeout** — `handleStreamingResponse` now uses `fetchWithRetry` (1 retry) instead of bare `fetch`, preventing indefinite hangs on upstream failures
 - **Swallowed errors in PersistentClaudeSession** — 7 empty `catch {}` blocks now log errors via `SESSION_EVENT.LOG` instead of silently ignoring them; process kill catches distinguish `ESRCH` (expected) from `EPERM` (logged)
@@ -2345,6 +2494,7 @@ Distributed tracing (`TRACEPARENT` / `TRACESTATE`) is automatically forwarded si
 ## [2.9.1] - 2026-04-05
 
 ### Fixed
+
 - **CLI argument parsing** — comma-separated `--allowed-tools`, `--disallowed-tools`, `--add-dir`, `--mcp-config`, and `--betas` flags now trim whitespace and filter empty entries
 - **API key sanitization** — stderr redaction now catches `sk-proj-*` and other `sk-*` key formats (previously only matched `sk-ant-*`)
 - **Council worktree cleanup** — if a worktree creation fails mid-batch, already-created worktrees are cleaned up instead of left dangling
@@ -2353,6 +2503,7 @@ Distributed tracing (`TRACEPARENT` / `TRACESTATE`) is automatically forwarded si
 - **Ultraplan TTL** — still-running ultraplans are marked as error at TTL expiry
 
 ### Added
+
 - **`estimateTokens()`** — shared token estimation utility (`~4 chars/token`), replaces 3 inline duplicates across Codex/Gemini/Cursor sessions
 - **`lookupModelStrict()`** — throws for unknown models instead of returning `undefined`
 - **Pricing fallback warning** — `getModelPricing()` now logs a `console.warn` when falling back to default pricing for unknown models
@@ -2361,11 +2512,13 @@ Distributed tracing (`TRACEPARENT` / `TRACESTATE`) is automatically forwarded si
 - **Tests: `embedded-server.test.ts`** — 22 tests for HTTP server (health, auth, rate limiting, body limits, routing, CORS, errors)
 
 ### Changed
+
 - **Model detection** — deduplicated inline `CLAUDE_PATTERNS` arrays in `persistent-session.ts` and `session-manager.ts`; both now use centralized `isClaudeModel()` from `models.ts`
 
 ## [2.9.0] - 2026-04-05
 
 ### Added
+
 - **Centralized model registry** (`src/models.ts`) — single source of truth for all 17 models across 4 providers. Model definitions, pricing, aliases, engine mappings, context windows, and `/v1/models` list are all auto-generated from one `MODELS[]` array. Adding a model is now a one-line change
 - **Per-model context window** — `contextPercent` in session stats now uses the actual model's context window (e.g. 1M for Gemini, 256k for GPT-5.4) instead of a fixed 200k assumption
 - **Session engine persistence** — `engine` field is now saved/restored across session restarts, so resumed sessions pick up the correct engine without re-specifying it
@@ -2376,18 +2529,21 @@ Distributed tracing (`TRACEPARENT` / `TRACESTATE`) is automatically forwarded si
 - **Configurable rate limit** — `OPENCLAW_RATE_LIMIT` env var overrides the default per-IP rate limit
 
 ### Changed
+
 - **`MAX_BODY_SIZE`** increased from 1 MB to 5 MB for larger request payloads
 - **`RATE_LIMIT_MAX_REQUESTS`** increased from 100 to 300 per window
 - **Error format consistency** — `/v1/*` routes now return OpenAI-standard `{ error: { message, type, code } }` format; internal routes keep `{ ok: false, error }` format
 - **Proxy provider detection** — `resolveProvider` now correctly returns `'google'` (not `'gemini'`) as the provider name, matching the `ProviderName` type
 
 ### Removed
+
 - **`CONTEXT_WINDOW_SIZE` constant** — replaced by per-model `getContextWindow()` from the model registry
 - **Duplicate model definitions** — `MODEL_ENGINE_MAP` (openai-compat.ts), `resolveProviderModel` (handler.ts), `isGeminiModel`/`isClaudeModel` (anthropic-adapter.ts), `DEFAULT_MODEL_PRICING`/`MODEL_PRICING` (types.ts) all consolidated into `src/models.ts`
 
 ## [2.8.1] - 2026-04-05
 
 ### Changed
+
 - **Model references updated to current flagships** — all code and docs now use current SOTA models: `gpt-5.4`/`gpt-5.4-mini` (OpenAI), `gemini-3.1-pro-preview`/`gemini-3-flash-preview` (Google), `composer-2`/`composer-2-fast` (Cursor). Deprecated model names (`gpt-4o`, `cursor-small`, etc.) removed from docs and `/v1/models` list
 - **Updated pricing table** — Opus 4.6 corrected to $5/$25, added GPT-5.4 series, Gemini 3.x, and Composer 2 pricing
 - **Council default roles** — renamed default agents from model-based names (GPT/Claude/Gemini) to delivery-stage roles (Planner/Generator/Evaluator) with specialized personas aligned to the Plan → Build → Verify workflow. Engine mappings preserved: Planner→claude, Generator→gpt, Evaluator→gemini
@@ -2395,6 +2551,7 @@ Distributed tracing (`TRACEPARENT` / `TRACESTATE`) is automatically forwarded si
 ## [2.8.0] - 2026-04-04
 
 ### Added
+
 - **OpenAI-compatible `/v1/chat/completions` endpoint** — drop-in backend for webchat apps (ChatGPT-Next-Web, Open WebUI, LobeChat, etc.). Stateful sessions maximize Anthropic prompt caching (90% discount on cached tokens). Supports streaming (SSE) and non-streaming responses
 - **`/v1/models` endpoint** — lists supported models for OpenAI client discovery
 - **Auto session management** — sessions created/reused per conversation via `X-Session-Id` header or `user` field. Auto-compact when context reaches 80%
@@ -2404,6 +2561,7 @@ Distributed tracing (`TRACEPARENT` / `TRACESTATE`) is automatically forwarded si
 ## [2.7.1] - 2026-04-04
 
 ### Added
+
 - **Embedded server authentication** — opt-in bearer token via `OPENCLAW_SERVER_TOKEN` env var; written to `~/.openclaw/server-token` for CLI. `/health` exempt. Default: no auth (localhost binding is the primary boundary)
 - **Orphaned process cleanup** — PID file tracking (`~/.openclaw/session-pids.json`) with startup cleanup. Verifies process command line matches known CLIs (claude/codex/gemini/agent) before killing to prevent PID reuse mishaps
 - **Circuit breaker** — engine-level failure tracking with exponential backoff prevents cascading failures from broken CLIs
@@ -2412,6 +2570,7 @@ Distributed tracing (`TRACEPARENT` / `TRACESTATE`) is automatically forwarded si
 - **Shared constants module** — `src/constants.ts` consolidates 30+ magic numbers (timeouts, limits, thresholds) from across the codebase
 
 ### Changed
+
 - **Council cleanup consolidation** — extracted `_cleanup()` method from `accept()` for reusable worktree/branch/file cleanup
 - **Strongly typed event names** — `SESSION_EVENT` constant object replaces magic strings in event emission
 - **Type cast fix** — eliminated `as unknown as` double cast in proxy handler registration
@@ -2419,6 +2578,7 @@ Distributed tracing (`TRACEPARENT` / `TRACESTATE`) is automatically forwarded si
 ## [2.7.0] - 2026-04-04
 
 ### Added
+
 - **Cursor Agent engine** — new `engine: 'cursor'` option wraps the Cursor Agent CLI (`agent`) with headless print mode, stream-json parsing, and full `ISession` interface support. Resolves #32
 - `PersistentCursorSession` class (`src/persistent-cursor-session.ts`) implementing the same pattern as Codex/Gemini engines
 - Unit tests for Cursor session (spawn flags, stream-json parsing, lifecycle, stderr sanitization)
@@ -2427,10 +2587,12 @@ Distributed tracing (`TRACEPARENT` / `TRACESTATE`) is automatically forwarded si
 ## [2.6.1] - 2026-04-03
 
 ### Added
+
 - **Zero-config proxy** — non-Claude models on the `claude` engine automatically start a local proxy server that converts Anthropic → OpenAI format and forwards to the OpenClaw gateway. Gateway port and auth are auto-detected from `~/.openclaw/openclaw.json`. No env vars, no baseUrl, no config changes needed
 - Proxy documentation in `skills/references/multi-engine.md`
 
 ### Fixed
+
 - **Proxy model URL extraction** — `extractRealModel` regex fixed to handle Claude Code CLI's `/real/<model>/v1/messages` URL pattern
 - **Gateway model name** — `forwardToGateway` now sends `model: "openclaw"` as required by gateway
 - **HEAD request handling** — proxy returns 200 for CLI probe requests instead of JSON parse errors
@@ -2438,17 +2600,20 @@ Distributed tracing (`TRACEPARENT` / `TRACESTATE`) is automatically forwarded si
 ## [2.6.0] - 2026-04-03
 
 ### Changed
+
 - **Skill restructure** — SKILL.md rewritten from scratch: removed hardcoded local paths, migrated metadata from `clawdis` to `openclaw` format, install via `kind: "node"` npm package instead of local path
 - **Docs moved into skill** — `docs/` directory moved to `skills/references/` for progressive disclosure. AI agents load reference files on demand instead of duplicating content. All README/CLAUDE.md links updated
 - **Skill description** — comprehensive trigger keywords covering all 27 tools, multi-engine, council, ultraplan, ultrareview
 
 ### Removed
+
 - `docs/` directory (content lives in `skills/references/` now)
 - Hardcoded `~/clawd/claude-code-skill` path from skill metadata
 
 ## [2.5.5] - 2026-04-03
 
 ### Fixed
+
 - **Codex engine fully reworked** — migrated from `codex --full-auto --quiet` to `codex exec --full-auto --skip-git-repo-check -C <dir>`. Fixes `--quiet` rejection, `--cwd` rejection, TTY requirement, and git-repo-check in non-git directories (codex-cli 0.112.0+)
 - **Gemini engine fake success** — non-zero exit codes (except 53/turn-limit) now correctly reject instead of resolving with empty output
 - **Gemini prompt echo** — user-role messages from `stream-json` output are now filtered; only assistant responses are collected
@@ -2457,6 +2622,7 @@ Distributed tracing (`TRACEPARENT` / `TRACESTATE`) is automatically forwarded si
 - **Ultraplan error masking** — error responses (auth failures, empty output) no longer marked as `status: 'completed'` with error text in the `plan` field; correctly set `status: 'error'` with `error` field
 
 ### Added
+
 - **Cross-engine team tools** — `team_list` and `team_send` now work on all engines. Claude uses native `/team` and `@teammate`; Codex/Gemini use SessionManager's cross-session messaging as a virtual team layer
 - Engine Compatibility Matrix in README with tested CLI versions (Claude 2.1.91, Codex 0.118.0, Gemini 0.36.0)
 - Known Limitations section in README
@@ -2464,17 +2630,20 @@ Distributed tracing (`TRACEPARENT` / `TRACESTATE`) is automatically forwarded si
 - Full functional audit test script (`test-full-audit.ts`) — 47 tests covering all 27 tools across all 3 engines
 
 ### Changed
+
 - Codex stdin set to `'ignore'` (was `'pipe'`) to prevent `codex exec` from waiting for piped input
 - Consensus tail-fallback tests updated to match stricter parsing behavior
 
 ## [2.5.0] - 2026-04-03
 
 ### Added
+
 - Council post-processing lifecycle: `council_review`, `council_accept`, `council_reject` tools — completes the council workflow with structured review, cleanup, and rejection-with-feedback
 - `CouncilReviewResult`, `CouncilAcceptResult`, `CouncilRejectResult` types for structured post-processing responses
 - Council `accepted` and `rejected` status states
 
 ### Changed
+
 - Translated `configs/council-system-prompt.md` from Chinese to English for project-wide consistency
 - Translated all Chinese strings in `council.ts` agent prompts and CLAUDE.md worktree templates to English
 - `openclaw.plugin.json` contracts.tools updated from 24 → 27
@@ -2482,12 +2651,14 @@ Distributed tracing (`TRACEPARENT` / `TRACESTATE`) is automatically forwarded si
 ## [2.4.0] - 2026-04-01
 
 ### Added
+
 - Gemini CLI engine (`engine: 'gemini'`) — third engine alongside Claude Code and Codex. Per-message spawning with `--output-format stream-json` for real token usage tracking. Permission mapping: `bypassPermissions` → `--yolo`, `default` → `--sandbox` (#29)
 - 88 new unit tests: SessionManager (74 tests, #28) and Gemini session (14 tests, #29). Total: 162 tests
 - CLAUDE.md project context file for contributors
 - README architecture diagram (mermaid), test badge, "Why not Claude API" callout
 
 ### Fixed
+
 - Test files no longer compiled to `dist/` or shipped in npm package (tsconfig exclude)
 - `openclaw.plugin.json` contracts.tools updated from 10 → 24 to match actual registered tools
 - `SessionManagerLike` interface in council.ts uses real types instead of `Record<string, unknown>`
@@ -2497,6 +2668,7 @@ Distributed tracing (`TRACEPARENT` / `TRACESTATE`) is automatically forwarded si
 ## [2.3.1] - 2026-04-01
 
 ### Fixed
+
 - Plugin installation blocked on OpenClaw 2026.3.31 — resolved security scanner false positive for "credential harvesting" in CLI by deferring env var access (#24)
 - Added `openclaw.hooks` declaration to prevent hook pack validation error
 - Added `capabilities.childProcess` and `capabilities.networkAccess` to plugin manifest for scanner whitelisting
@@ -2504,12 +2676,14 @@ Distributed tracing (`TRACEPARENT` / `TRACESTATE`) is automatically forwarded si
 ## [2.3.0] - 2026-03-31
 
 ### Added
+
 - Session Inbox — cross-session messaging with `claude_session_send_to`, `claude_session_inbox`, `claude_session_deliver_inbox`. Idle sessions receive immediately; busy sessions queue for later delivery. Broadcast via `"*"` (#22)
 - Ultraplan — dedicated Opus planning session (up to 30 min) with `ultraplan_start`, `ultraplan_status` (#22)
 - Ultrareview — fleet of 5-20 specialized reviewer agents in parallel via council system with `ultrareview_start`, `ultrareview_status`. 20 review angles: security, logic, performance, types, concurrency, etc. (#22)
 - Tool count: 17 → 24
 
 ### Fixed
+
 - Session creation race condition — concurrent `startSession()` calls no longer create duplicates (#23)
 - File persistence error handling — proper error callbacks, orphan `.tmp` cleanup on rename failure (#23)
 - HTTP stream reader leak — `try/finally { reader.cancel() }` on all streaming paths (#23)
@@ -2525,6 +2699,7 @@ Distributed tracing (`TRACEPARENT` / `TRACESTATE`) is automatically forwarded si
 ## [2.2.0] - 2026-03-31
 
 ### Added
+
 - Stream output support — `onChunk` callback and `stream` param for `claude_session_send` (#9)
 - Session persistence — registry saved to `~/.openclaw/claude-sessions.json` with 7-day disk TTL, atomic writes, debounced saves (#11)
 - Dynamic tool/model switching — `claude_session_update_tools` and `claude_session_switch_model` with rollback on failure (#12)
@@ -2532,21 +2707,25 @@ Distributed tracing (`TRACEPARENT` / `TRACESTATE`) is automatically forwarded si
 - Premature CLI exit detection — startup crash no longer leaves sessions stuck in busy state (#13)
 
 ### Fixed
+
 - Stale close listener on fallback ready path (follow-up to #13)
 - Truncated code comments in startup flow
 
 ### Improved
+
 - Project governance: CONTRIBUTING.md, CHANGELOG.md, issue/PR templates, CI workflows, npm publish automation
 
 ## [2.1.0] - 2026-03-31
 
 ### Added
+
 - Cross-platform PATH inheritance from `process.env.PATH`
 - `CLAUDE_BIN` env var override for custom binary locations
 - `resumeSessionId` exposed in tool schema
 - Lazy initialization — zero memory when unused
 
 ### Fixed
+
 - `contextPercent` calculation (was hardcoded 0)
 - Process blocking on detached child (`proc.unref()`)
 - Ready event now listens for CLI init signal instead of blind 2s timeout
@@ -2554,12 +2733,14 @@ Distributed tracing (`TRACEPARENT` / `TRACESTATE`) is automatically forwarded si
 ## [2.0.0] - 2026-03-31
 
 ### Added
+
 - Complete rewrite as native OpenClaw plugin
 - 10 native tools (`claude_session_start/send/stop/list/status/grep/compact`, `claude_agents_list`, `claude_team_list/send`)
 - Plugin hooks: `before_prompt_build`, `registerHttpRoute`
 - Embedded HTTP server for backward-compatible CLI access
 
 ### Breaking Changes
+
 - Requires OpenClaw >= 2026.3.0 with plugin SDK
 - Standalone Express backend deprecated
 - FastAPI proxy now optional
@@ -2567,6 +2748,7 @@ Distributed tracing (`TRACEPARENT` / `TRACESTATE`) is automatically forwarded si
 ## [1.2.0] - 2026-03-27
 
 ### Added
+
 - Cost tracking per session
 - Git branch awareness
 - Hook system for pre/post execution
@@ -2575,6 +2757,7 @@ Distributed tracing (`TRACEPARENT` / `TRACESTATE`) is automatically forwarded si
 ## [1.1.0] - 2026-03-25
 
 ### Added
+
 - Effort levels (low/medium/high/max)
 - Plan mode (`--plan` flag)
 - Compact command for context reclamation
@@ -2584,6 +2767,7 @@ Distributed tracing (`TRACEPARENT` / `TRACESTATE`) is automatically forwarded si
 ## [1.0.0] - 2026-03-23
 
 ### Added
+
 - Initial release
 - Persistent Claude Code sessions via MCP
 - Multi-model proxy support

@@ -16,7 +16,7 @@ start() → send() → send() → ... → stop()
 const info = await manager.startSession({
   name: 'my-task',
   cwd: '/path/to/project',
-  model: 'opus',                    // alias or full name
+  model: 'opus', // alias or full name
   permissionMode: 'acceptEdits',
   effort: 'high',
   allowedTools: ['Bash', 'Read', 'Edit', 'Write'],
@@ -27,24 +27,24 @@ const info = await manager.startSession({
 
 Key options:
 
-| Option | Description |
-|--------|-------------|
-| `engine` | `'claude'` (default), `'codex'`, `'codex-app'`, `'agy'`, `'grok'`, `'opencode'`, or `'custom'` — see [Multi-Engine](./multi-engine.md) |
-| `model` | Model alias (`fable`, `opus`, `sonnet`, `haiku`, `agy-pro`) or full name |
-| `permissionMode` | `acceptEdits`, `bypassPermissions`, `plan`, `auto`, `manual`, `dontAsk` (`default` = legacy alias for `manual`) |
-| `effort` | `low`, `medium`, `high`, `max`, `auto` |
-| `bare` | Skip hooks, LSP, auto-memory, CLAUDE.md |
-| `worktree` | Run in isolated git worktree |
-| `appendSystemPrompt` | Append custom instructions to the system prompt |
+| Option               | Description                                                                                                                            |
+| -------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `engine`             | `'claude'` (default), `'codex'`, `'codex-app'`, `'agy'`, `'grok'`, `'opencode'`, or `'custom'` — see [Multi-Engine](./multi-engine.md) |
+| `model`              | Model alias (`fable`, `opus`, `sonnet`, `haiku`, `agy-pro`) or full name                                                               |
+| `permissionMode`     | `acceptEdits`, `bypassPermissions`, `plan`, `auto`, `manual`, `dontAsk` (`default` = legacy alias for `manual`)                        |
+| `effort`             | `low`, `medium`, `high`, `max`, `auto`                                                                                                 |
+| `bare`               | Skip hooks, LSP, auto-memory, CLAUDE.md                                                                                                |
+| `worktree`           | Run in isolated git worktree                                                                                                           |
+| `appendSystemPrompt` | Append custom instructions to the system prompt                                                                                        |
 
 ### Sending Messages
 
 ```typescript
 const result = await manager.sendMessage('my-task', 'Fix the auth bug', {
-  effort: 'high',       // override effort for this message
-  plan: true,           // enter plan mode
-  timeout: 600_000,     // 10 min timeout
-  onChunk: (text) => process.stdout.write(text),  // streaming
+  effort: 'high', // override effort for this message
+  plan: true, // enter plan mode
+  timeout: 600_000, // 10 min timeout
+  onChunk: (text) => process.stdout.write(text), // streaming
 });
 
 console.log(result.output);
@@ -100,8 +100,8 @@ Mid-turn and thread control via Codex 0.137 v2 RPCs, surfaced as tools: `codex_i
 Switch models mid-conversation. The session restarts with `--resume` to preserve history:
 
 ```typescript
-await manager.switchModel('my-task', 'haiku');  // fast model for simple tasks
-await manager.switchModel('my-task', 'opus');   // back to powerful model
+await manager.switchModel('my-task', 'haiku'); // fast model for simple tasks
+await manager.switchModel('my-task', 'opus'); // back to powerful model
 ```
 
 ### Tool Management
@@ -111,11 +111,11 @@ Add/remove tool permissions at runtime:
 ```typescript
 await manager.updateTools('my-task', {
   allowedTools: ['Bash', 'Read'],
-  merge: true,                    // add to existing list
+  merge: true, // add to existing list
 });
 
 await manager.updateTools('my-task', {
-  removeTools: ['Bash'],          // revoke Bash access
+  removeTools: ['Bash'], // revoke Bash access
 });
 ```
 
@@ -152,7 +152,7 @@ against `turns`.
 
 Which outcome counts as a success is the engine's own verdict, not the exit
 code's: `codex` fails a turn that emits `turn.failed` while exiting 0, `agy`
-requires a `SUCCESS` status *and* a zero exit (it can report success and then die
+requires a `SUCCESS` status _and_ a zero exit (it can report success and then die
 in cleanup), `gemini` succeeds on exit 53 because its turn limit resolves,
 `codex-app` requires `status: 'completed'` so a turn cancelled through
 `interrupt()` does not count, and `opencode` refuses a turn on purpose when
@@ -207,15 +207,15 @@ Session stats are returned by `getStats()` and surfaced through `coding_session_
 
 Fields added in plugin v2.13.0 (Claude CLI 2.1.111):
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `retries` | number | Total API retries that occurred during the session |
-| `lastRetryError` | string \| undefined | Error message from the most recent retry (if any) |
+| Field            | Type                | Description                                        |
+| ---------------- | ------------------- | -------------------------------------------------- |
+| `retries`        | number              | Total API retries that occurred during the session |
+| `lastRetryError` | string \| undefined | Error message from the most recent retry (if any)  |
 
 Fields added in plugin v2.14.0 (Claude CLI 2.1.121):
 
-| Field | Type | Description |
-|-------|------|-------------|
+| Field          | Type                                   | Description                                                                                                                               |
+| -------------- | -------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
 | `pluginErrors` | `Array<{plugin, reason}>` \| undefined | Plugins that failed to load due to unmet dependencies, captured from the `system/init` event. `undefined` when no plugin errors occurred. |
 
 ### `system/api_retry` events
@@ -238,3 +238,21 @@ All session engine classes expose an optional `pid` readonly property, providing
 const session = manager.getSession('my-session');
 console.log(session.pid); // e.g., 12345 or undefined
 ```
+
+## Verifying what a session did (6.0.0)
+
+A plain session leaves no verdict — it ran, and nothing checked the result. To
+check it, hand `verify_run` a contract and the directory:
+
+```jsonc
+verify_run({
+  cwd: "/repo",
+  contract: { checks: [{ type: "command", cmd: "npm", args: ["test"] }] }
+})
+```
+
+For work that should be checked as part of running it, use a workflow instead —
+see [`workflow.md`](./workflow.md).
+
+`SendOptions` also gained `nodeKind` and `taskKind`, both stamped onto the run
+ledger row. `taskKind` is caller-declared and never inferred from the prompt.

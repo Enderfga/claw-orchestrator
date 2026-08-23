@@ -120,3 +120,55 @@ describe('Fanout', () => {
     expect(session.synthesisError).toContain('boom:synthesis');
   });
 });
+
+// ─── Success predicate (6.0.0) ──────────────────────────────────────────────
+
+describe('per-agent ok', () => {
+  /** A manager that reports the engine's own terminal verdict, like the real one. */
+  function makeCountingManager(succeeds: Record<string, boolean>) {
+    const stats: Record<string, { turns: number; turnsSucceeded: number }> = {};
+    return {
+      startSession: vi.fn(async (config: { name?: string }) => {
+        stats[config.name!] = { turns: 0, turnsSucceeded: 0 };
+        return { name: config.name } as never;
+      }),
+      sendMessage: vi.fn(async (name: string) => {
+        const agent = name.split('-').pop()!;
+        stats[name].turns++;
+        if (succeeds[agent]) stats[name].turnsSucceeded++;
+        return { output: `out:${agent}`, events: [] } as never;
+      }),
+      stopSession: vi.fn(async () => undefined),
+      getStatus: (name: string) => ({ stats: stats[name] }) as never,
+    };
+  }
+
+  it('records a turn the engine declined to count as succeeded as NOT ok', async () => {
+    const manager = makeCountingManager({ alpha: true, beta: false });
+    const fanout = new Fanout(baseConfig([{ name: 'alpha' }, { name: 'beta' }]), manager as never);
+    const session = await fanout.run();
+    expect(session.results.find((r) => r.agent === 'alpha')?.ok).toBe(true);
+    // Before 6.0.0 this was an unconditional `true` — the send returned, so it
+    // was called a success even though the engine reported the turn as failed.
+    expect(session.results.find((r) => r.agent === 'beta')?.ok).toBe(false);
+    expect(session.results.find((r) => r.agent === 'beta')?.error).toBeTruthy();
+  });
+
+  it('still succeeds when the manager cannot report stats', async () => {
+    const { manager } = makeManager();
+    const fanout = new Fanout(baseConfig([{ name: 'alpha' }]), manager as never);
+    const session = await fanout.run();
+    expect(session.results[0].ok).toBe(true);
+  });
+
+  it('stamps the ledger with the node kind', async () => {
+    const { manager } = makeManager();
+    const fanout = new Fanout(baseConfig([{ name: 'alpha' }]), manager as never);
+    await fanout.run();
+    expect(manager.sendMessage).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.any(String),
+      expect.objectContaining({ nodeKind: 'fanout' }),
+    );
+  });
+});

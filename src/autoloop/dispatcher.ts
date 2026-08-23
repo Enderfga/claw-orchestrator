@@ -27,6 +27,10 @@ import type { Logger } from '../logger.js';
 import { ENGINE_TYPES, engineHasNativeConversation, type CustomEngineConfig, type EngineType } from '../types.js';
 import { nullLogger } from '../logger.js';
 import { spawn } from 'node:child_process';
+import { capturePatch, changedFilesSince } from '../verify/baseline.js';
+import { runContract } from '../verify/runner.js';
+import { writeEvidence } from '../verify/evidence.js';
+import type { AcceptanceContract } from '../verify/contract.js';
 import { type AnyAutoloopMessage, Msg } from './messages.js';
 import {
   LEDGER_SCHEMA_VERSION,
@@ -89,6 +93,16 @@ export interface ClaudeAgentDispatcherConfig {
   reviewerCustomEngine?: CustomEngineConfig;
   /** Per-message wall-clock cap. Default 10 min. */
   sendTimeoutMs?: number;
+  /**
+   * Optional acceptance contract. When present the Reviewer's `advance` is no
+   * longer sufficient on its own: the contract runs against the workspace and a
+   * red result downgrades the verdict to `hold`.
+   *
+   * Supplied by the caller at autoloop start — never parsed out of Planner or
+   * Reviewer output, which would put the agents back in charge of their own
+   * grading.
+   */
+  contract?: AcceptanceContract;
   logger?: Logger;
   /**
    * Auto-compact thresholds (percent of context window). When the agent's
@@ -923,16 +937,21 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
     );
 
     // Compute diff + files_changed via git so we don't trust Coder's claim.
-    const diffOut = await this.runGit(['git', 'diff', '--unified=3']);
-    fs.writeFileSync(path.join(iterDir, 'diff.patch'), diffOut.out);
-    let filesChanged = ic.files_changed;
-    if (!filesChanged) {
-      const named = await this.runGit(['git', 'diff', '--name-only']);
-      filesChanged = named.out
-        .split('\n')
-        .map((s) => s.trim())
-        .filter(Boolean);
-    }
+    //
+    // Two things this used to get wrong, both of which made the Reviewer audit a
+    // picture that could not show what actually happened:
+    //
+    //  1. A bare `git diff` lists tracked modifications only. Files the Coder
+    //     *created* appeared in neither the patch nor the `--name-only`
+    //     fallback, while the `git add -A` a few lines below committed them
+    //     anyway. `capturePatch` covers tracked changes ∪ untracked files.
+    //  2. `ic.files_changed` — the Coder's own claim — won whenever it was
+    //     supplied, so the git fallback only ran when the Coder said nothing.
+    //     The comment above said we don't trust the claim; now we don't.
+    const diffText = await capturePatch(this.config.workspace, 'HEAD');
+    fs.writeFileSync(path.join(iterDir, 'diff.patch'), diffText);
+    const observed = await changedFilesSince(this.config.workspace, 'HEAD');
+    const filesChanged = observed.map((f) => f.path);
     // Commit the iteration so Reviewer's git view is clean for the next iter.
     await this.runGit(['git', 'add', '-A']);
     const commitMsg = `autoloop/iter-${env.iter}: ${ic.summary}`.slice(0, 200);
@@ -957,7 +976,7 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
     await this.maybeCompact('coder', this.coderName);
     return [
       Msg.iterArtifacts(env.iter, {
-        diff: diffOut.out,
+        diff: diffText,
         eval_output: ic.eval_output,
         files_changed: filesChanged,
       }),
@@ -1143,9 +1162,64 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
       return [verdict];
     }
 
-    this.persistVerdict(env.payload.iter, rc);
+    const gated = await this.gateVerdict(env.payload.iter, rc);
+    this.persistVerdict(env.payload.iter, gated);
     await this.maybeCompact('reviewer', this.reviewerName);
-    return [Msg.reviewVerdict(env.payload.iter, rc)];
+    return [Msg.reviewVerdict(env.payload.iter, gated)];
+  }
+
+  /**
+   * Run the acceptance contract before letting an `advance` stand.
+   *
+   * The Reviewer is asked to "re-derive the metric independently", but its
+   * sandbox holds only the iteration's artifacts — no code, no evaluator — so it
+   * cannot, and its verdict is ultimately a reading of the Coder's own report.
+   * When a contract is configured, this runs the checks against the real
+   * workspace and downgrades `advance` to `hold` on red. Without a contract the
+   * verdict passes through unchanged, exactly as before.
+   */
+  private async gateVerdict<T extends { decision: string; metric: number | null; audit_notes: string }>(
+    iter: number,
+    rc: T,
+  ): Promise<T & { accepted?: boolean; evidence_id?: string }> {
+    const contract = this.config.contract;
+    if (!contract || rc.decision !== 'advance') return rc;
+
+    const iterDir = path.join(this.ledgerDir, 'iter', String(iter));
+    const evidenceId = `iter-${iter}`;
+    const { results, passed, rounds } = await runContract(contract, {
+      cwd: this.config.workspace,
+      artifactDir: path.join(iterDir, 'evidence'),
+      baseSha: undefined,
+      logger: this.logger,
+    });
+    await writeEvidence({
+      runDir: this.ledgerDir,
+      runId: this.config.runId,
+      node: `reviewer-iter-${iter}`,
+      evidenceId,
+      cwd: this.config.workspace,
+      contractId: contract.id,
+      results,
+      rounds,
+      logger: this.logger,
+    });
+
+    if (passed) {
+      this.emit('target_hit', { iter, evidenceId });
+      return { ...rc, accepted: true, evidence_id: evidenceId };
+    }
+    const failed = results.filter((r) => r.required && !r.passed).map((r) => r.detail);
+    this.appendDecisionLog({
+      kind: 'phase_error',
+      actor: 'dispatcher',
+      payload: { agent: 'reviewer', phase: 'acceptance', error: failed.join('; '), iter },
+    });
+    return {
+      ...rc,
+      decision: 'hold',
+      audit_notes: `${rc.audit_notes}\n\n[acceptance] advance withheld — ${failed.join('; ')} (evidence: ${evidenceId})`,
+    };
   }
 
   private persistVerdict(

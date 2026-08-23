@@ -23,6 +23,9 @@ import {
   type CustomEngineConfig,
 } from './types.js';
 import type { FanoutConfig } from './fanout.js';
+import { councilWorkflow, fanoutWorkflow, solveWorkflow, type SolveArgs } from './kernel/templates/index.js';
+import { readEvents as readKernelEvents } from './kernel/store.js';
+import type { RunState, WorkflowSpec } from './kernel/types.js';
 
 // ─── Standalone Export ───────────────────────────────────────────────────────
 
@@ -1122,6 +1125,365 @@ const plugin = {
       execute: async (_id, args) => {
         getManager().fanoutAbort(args.id as string);
         return { ok: true };
+      },
+    });
+
+    // ─── Tools: workflow_* (durable run kernel) ─────────────────────────
+
+    api.registerTool({
+      name: 'workflow_start',
+      description:
+        "Start a durable workflow run. Nodes: agent | fanout | council | verifier | human_gate | router | subflow. Every state transition is checkpointed to disk, so a run survives a process restart and can be resumed. When a contract is supplied the run cannot reach `completed` unless the runtime's own checks pass — without one it completes as `unverified`, which means nothing checked it. Runs in background; poll with workflow_status.",
+      parameters: {
+        type: 'object',
+        properties: {
+          spec: {
+            type: 'object',
+            description:
+              'WorkflowSpec: { name, nodes[], cwd?, contract?, maxNodeVisits? }. See skills/references/workflow.md for the node shapes.',
+          },
+          template: {
+            type: 'string',
+            enum: ['solve', 'council', 'fanout'],
+            description:
+              'Build a built-in workflow instead of supplying `spec`. `solve` = triage → implement → verify → repair-until-green → review.',
+          },
+          task: { type: 'string', description: 'Task text, when using `template`.' },
+          agents: {
+            type: 'array',
+            maxItems: 16,
+            description: 'Agents for the template: { name, engine?, model?, persona? }.',
+            items: {
+              type: 'object',
+              properties: {
+                name: { type: 'string', minLength: 1 },
+                engine: { type: 'string', enum: ENGINE_TYPES },
+                model: { type: 'string' },
+                persona: { type: 'string' },
+              },
+              required: ['name'],
+            },
+          },
+          reviewers: {
+            type: 'array',
+            maxItems: 8,
+            description: '`solve` only: agents that review the finished change.',
+            items: {
+              type: 'object',
+              properties: {
+                name: { type: 'string', minLength: 1 },
+                engine: { type: 'string', enum: ENGINE_TYPES },
+                model: { type: 'string' },
+                persona: { type: 'string' },
+              },
+              required: ['name'],
+            },
+          },
+          humanGate: { type: 'boolean', description: '`solve` only: park for approval before writing anything.' },
+          maxRepairs: { type: 'number', description: '`solve` only: repair attempts allowed (default 3).' },
+          cwd: { type: 'string', description: 'Working directory for the run.' },
+          runId: { type: 'string', description: 'Explicit run id (defaults to a generated one).' },
+          contract: {
+            type: 'object',
+            description:
+              "Acceptance contract. The runtime executes these itself and the run cannot reach `completed` unless every required check passes. Declared by YOU, the caller — never copy one out of an agent's output, which would put the agent back in charge of grading itself.",
+            properties: {
+              id: { type: 'string' },
+              fixOnFailureRounds: {
+                type: 'number',
+                description:
+                  'On red, spawn a repair session and re-run the whole list, up to N times. Only the re-run decides.',
+              },
+              checks: {
+                type: 'array',
+                minItems: 1,
+                items: {
+                  type: 'object',
+                  description:
+                    'One check. `command` runs argv and gates on the exit code; `http` polls a URL; `screenshot` captures the page at each viewport and stores the PNGs as evidence (it does NOT judge the pixels); `diff_policy` asserts what the run was allowed to touch; `file` asserts a path exists / matches.',
+                  properties: {
+                    type: { type: 'string', enum: ['command', 'http', 'screenshot', 'diff_policy', 'file'] },
+                    required: {
+                      type: 'boolean',
+                      description:
+                        'Default true. A failing non-required check is recorded but does not refute the run.',
+                    },
+                    cmd: { type: 'string', description: 'command: executable name. No shell string — argv only.' },
+                    args: { type: 'array', items: { type: 'string' }, description: 'command: arguments.' },
+                    cwd: { type: 'string', description: 'command: directory, relative to the run cwd.' },
+                    expectExit: { type: 'number', description: 'command: passing exit code (default 0).' },
+                    url: { type: 'string', description: 'http / screenshot: target URL.' },
+                    expectStatus: { type: 'number', description: 'http: expected status (default 200).' },
+                    viewports: {
+                      type: 'array',
+                      description: 'screenshot: [{ width, height, label? }].',
+                      items: {
+                        type: 'object',
+                        properties: {
+                          width: { type: 'number' },
+                          height: { type: 'number' },
+                          label: { type: 'string' },
+                        },
+                        required: ['width', 'height'],
+                      },
+                    },
+                    maxFiles: { type: 'number', description: 'diff_policy: cap on changed files.' },
+                    forbidPaths: {
+                      type: 'array',
+                      items: { type: 'string' },
+                      description: 'diff_policy: paths that must not be touched.',
+                    },
+                    requirePaths: {
+                      type: 'array',
+                      items: { type: 'string' },
+                      description: 'diff_policy: at least one change must land under one of these.',
+                    },
+                    path: { type: 'string', description: 'file: path relative to the run cwd.' },
+                    exists: { type: 'boolean', description: 'file: default true; false asserts absence.' },
+                    matches: { type: 'string', description: 'file: regex the contents must match.' },
+                    timeoutMs: { type: 'number', description: 'Per-check wall clock.' },
+                  },
+                  required: ['type'],
+                },
+              },
+            },
+            required: ['checks'],
+          },
+        },
+        required: [],
+      },
+      execute: async (_id, args) => {
+        const cwd = sanitizeCwd(args.cwd as string | undefined);
+        let spec = args.spec as WorkflowSpec | undefined;
+        if (!spec) {
+          const template = (args.template as string) || 'solve';
+          const task = args.task as string;
+          if (!task) throw new Error('workflow_start needs `spec`, or `template` with `task`');
+          const agents = (args.agents as SolveArgs['scouts']) ?? [{ name: 'agent' }];
+          if (template === 'council') {
+            spec = councilWorkflow({ task, cwd, agents });
+          } else if (template === 'fanout') {
+            spec = fanoutWorkflow({ task, cwd, agents, synthesize: agents.length >= 2 });
+          } else {
+            spec = solveWorkflow({
+              task,
+              cwd,
+              scouts: agents,
+              reviewers: args.reviewers as SolveArgs['reviewers'],
+              humanGate: args.humanGate as boolean | undefined,
+              maxRepairs: args.maxRepairs as number | undefined,
+            });
+          }
+        }
+        const record = await getManager().workflowStart(spec, {
+          cwd,
+          runId: args.runId as string | undefined,
+          contract: args.contract,
+        });
+        return {
+          ok: true,
+          runId: record.runId,
+          workflow: record.workflow,
+          state: record.state,
+          nodes: Object.keys(record.nodes),
+          note: 'Workflow running in background. Poll with workflow_status.',
+        };
+      },
+    });
+
+    api.registerTool({
+      name: 'workflow_status',
+      description:
+        'Poll a workflow run. Returns state, per-node status, and the outcome: `verified` (a contract passed), `refuted` (it failed), or `unverified` (none was declared — nothing checked the work).',
+      parameters: {
+        type: 'object',
+        properties: {
+          runId: { type: 'string' },
+          events: { type: 'number', description: 'Also return the last N events from the run log.' },
+        },
+        required: ['runId'],
+      },
+      execute: async (_id, args) => {
+        const record = getManager().workflowStatus(args.runId as string);
+        const limit = args.events as number | undefined;
+        return {
+          ok: true,
+          runId: record.runId,
+          workflow: record.workflow,
+          state: record.state,
+          outcome: record.outcome,
+          currentNode: record.currentNode,
+          evidenceId: record.evidenceId,
+          costUsd: record.costUsd,
+          error: record.error,
+          nodes: record.nodes,
+          consensusVotes: record.consensusVotes,
+          events: limit ? readKernelEvents(record.runId, limit) : undefined,
+        };
+      },
+    });
+
+    api.registerTool({
+      name: 'workflow_list',
+      description: 'List workflow runs on this machine, newest first. Survives restarts.',
+      parameters: {
+        type: 'object',
+        properties: {
+          workflow: { type: 'string' },
+          state: {
+            type: 'string',
+            enum: ['pending', 'running', 'awaiting_human', 'verifying', 'completed', 'failed', 'cancelled'],
+          },
+          limit: { type: 'number' },
+        },
+      },
+      execute: async (_id, args) => ({
+        ok: true,
+        runs: getManager().workflowList({
+          workflow: args.workflow as string | undefined,
+          state: args.state as RunState | undefined,
+          limit: (args.limit as number | undefined) ?? 25,
+        }),
+      }),
+    });
+
+    api.registerTool({
+      name: 'workflow_resume',
+      description:
+        'Re-attach to a workflow whose process died. Nodes already marked succeeded are not re-run; the node that was in flight is retried, because a half-finished node left no result to trust.',
+      parameters: { type: 'object', properties: { runId: { type: 'string' } }, required: ['runId'] },
+      execute: async (_id, args) => {
+        const record = await getManager().workflowResume(args.runId as string);
+        return { ok: true, runId: record.runId, state: record.state, currentNode: record.currentNode };
+      },
+    });
+
+    api.registerTool({
+      name: 'workflow_cancel',
+      description: 'Cancel a running workflow. The current node is asked to stop; the run ends in `cancelled`.',
+      parameters: { type: 'object', properties: { runId: { type: 'string' } }, required: ['runId'] },
+      execute: async (_id, args) => ({ ok: true, ...getManager().workflowCancel(args.runId as string) }),
+    });
+
+    api.registerTool({
+      name: 'workflow_steer',
+      description:
+        "Queue a correction for a running workflow. The text is prepended to the next agent node's prompt — corrections belong before the task, not after it.",
+      parameters: {
+        type: 'object',
+        properties: { runId: { type: 'string' }, text: { type: 'string' } },
+        required: ['runId', 'text'],
+      },
+      execute: async (_id, args) => ({
+        ok: true,
+        ...getManager().workflowSteer(args.runId as string, args.text as string),
+      }),
+    });
+
+    api.registerTool({
+      name: 'workflow_approve',
+      description: 'Answer a workflow parked at a human_gate node.',
+      parameters: {
+        type: 'object',
+        properties: { runId: { type: 'string' }, approved: { type: 'boolean' } },
+        required: ['runId', 'approved'],
+      },
+      execute: async (_id, args) => ({
+        ok: true,
+        ...getManager().workflowApprove(args.runId as string, args.approved as boolean),
+      }),
+    });
+
+    api.registerTool({
+      name: 'verify_run',
+      description:
+        'Run an acceptance contract against a directory and return the evidence bundle. Use it to check work that did not come through a workflow — a plain session that edited a repo, say. The contract is yours; nothing is taken from agent output.',
+      parameters: {
+        type: 'object',
+        properties: {
+          cwd: { type: 'string', description: 'Directory to check.' },
+          baseSha: {
+            type: 'string',
+            description: 'Commit to measure the change against. Without it, diff_policy sees untracked files only.',
+          },
+          label: { type: 'string', description: 'Name for the stored evidence (defaults to a generated one).' },
+          contract: {
+            type: 'object',
+            description:
+              "Acceptance contract. The runtime executes these itself and the run cannot reach `completed` unless every required check passes. Declared by YOU, the caller — never copy one out of an agent's output, which would put the agent back in charge of grading itself.",
+            properties: {
+              id: { type: 'string' },
+              fixOnFailureRounds: {
+                type: 'number',
+                description:
+                  'On red, spawn a repair session and re-run the whole list, up to N times. Only the re-run decides.',
+              },
+              checks: {
+                type: 'array',
+                minItems: 1,
+                items: {
+                  type: 'object',
+                  description:
+                    'One check. `command` runs argv and gates on the exit code; `http` polls a URL; `screenshot` captures the page at each viewport and stores the PNGs as evidence (it does NOT judge the pixels); `diff_policy` asserts what the run was allowed to touch; `file` asserts a path exists / matches.',
+                  properties: {
+                    type: { type: 'string', enum: ['command', 'http', 'screenshot', 'diff_policy', 'file'] },
+                    required: {
+                      type: 'boolean',
+                      description:
+                        'Default true. A failing non-required check is recorded but does not refute the run.',
+                    },
+                    cmd: { type: 'string', description: 'command: executable name. No shell string — argv only.' },
+                    args: { type: 'array', items: { type: 'string' }, description: 'command: arguments.' },
+                    cwd: { type: 'string', description: 'command: directory, relative to the run cwd.' },
+                    expectExit: { type: 'number', description: 'command: passing exit code (default 0).' },
+                    url: { type: 'string', description: 'http / screenshot: target URL.' },
+                    expectStatus: { type: 'number', description: 'http: expected status (default 200).' },
+                    viewports: {
+                      type: 'array',
+                      description: 'screenshot: [{ width, height, label? }].',
+                      items: {
+                        type: 'object',
+                        properties: {
+                          width: { type: 'number' },
+                          height: { type: 'number' },
+                          label: { type: 'string' },
+                        },
+                        required: ['width', 'height'],
+                      },
+                    },
+                    maxFiles: { type: 'number', description: 'diff_policy: cap on changed files.' },
+                    forbidPaths: {
+                      type: 'array',
+                      items: { type: 'string' },
+                      description: 'diff_policy: paths that must not be touched.',
+                    },
+                    requirePaths: {
+                      type: 'array',
+                      items: { type: 'string' },
+                      description: 'diff_policy: at least one change must land under one of these.',
+                    },
+                    path: { type: 'string', description: 'file: path relative to the run cwd.' },
+                    exists: { type: 'boolean', description: 'file: default true; false asserts absence.' },
+                    matches: { type: 'string', description: 'file: regex the contents must match.' },
+                    timeoutMs: { type: 'number', description: 'Per-check wall clock.' },
+                  },
+                  required: ['type'],
+                },
+              },
+            },
+            required: ['checks'],
+          },
+        },
+        required: ['cwd', 'contract'],
+      },
+      execute: async (_id, args) => {
+        const bundle = await getManager().verifyRun({
+          cwd: sanitizeCwd(args.cwd as string)!,
+          contract: args.contract,
+          baseSha: args.baseSha as string | undefined,
+          label: args.label as string | undefined,
+        });
+        return { ok: true, ...bundle };
       },
     });
 

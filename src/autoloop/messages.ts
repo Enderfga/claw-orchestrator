@@ -56,6 +56,16 @@ export interface ReviewVerdictPayload {
   decision: 'advance' | 'hold' | 'rollback';
   metric: number | null;
   audit_notes: string;
+  /**
+   * Set only when an acceptance contract ran and passed. This is what makes
+   * `on_target_hit` fireable: before it existed the policy key was declared,
+   * defaulted and whitelisted for updates, but had no firing site anywhere —
+   * autoloop had no way to notice it had succeeded, only ways to notice it was
+   * failing. Absent means no contract was configured, not that it failed.
+   */
+  accepted?: boolean;
+  /** Evidence bundle id backing `accepted`. */
+  evidence_id?: string;
 }
 
 export interface IterDonePayload {

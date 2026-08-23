@@ -93,8 +93,9 @@ internally. ENTRYPOINT runs the production server. Build args:
 Smoke test: package.json must expose "scripts.smoke" that drives ONE complete
 job using AppSpec.inputs[].examples[0].ref files copied into the image at
 build time under $DATA_DIR/_smoke/. The smoke test asserts pipeline completes and
-output matches AppSpec.outputs[].type. fix-on-failure runs "npm run smoke" and
-gates build-success on its passing.
+output matches AppSpec.outputs[].type. The orchestrator runs "npm run smoke"
+itself as part of the build acceptance contract and gates build-success on its
+exit code — a codebase without a working "scripts.smoke" does not build.
 
 Smoke test must complete in < 90 seconds for the reference-trace inputs
 provided. If your pipeline genuinely takes longer, design the smoke test to
@@ -205,6 +206,12 @@ AppSpec.ui.accentColor (if present) is the source of truth.
 tags, class names, and \`@media\` queries don't tell you what the page
 actually looks like. You MUST capture screenshots and look at the pixels
 before voting.
+
+Note on who checks what: after deployment the orchestrator captures both
+viewports against the live URL itself and stores the PNGs as run evidence,
+so whether a capture happened is no longer taken on trust. It does not
+judge the rendering — that is still your job, and it is why the steps
+below are yours to perform in your own worktree before you vote.
 
 Before voting [CONSENSUS: YES], EVERY agent MUST:
 

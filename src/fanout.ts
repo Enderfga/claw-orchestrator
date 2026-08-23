@@ -20,6 +20,7 @@ import type {
   SendResult,
   PermissionMode,
   CustomEngineConfig,
+  SessionStats,
 } from './types.js';
 import { type Logger } from './logger.js';
 
@@ -28,6 +29,8 @@ interface SessionManagerLike {
   startSession(config: Partial<SessionConfig> & { name?: string }): Promise<SessionInfo>;
   sendMessage(name: string, message: string, options?: Partial<SendOptions>): Promise<SendResult>;
   stopSession(name: string): Promise<void>;
+  /** Optional so lightweight fakes stay valid; `ok` falls back to throw/no-throw without it. */
+  getStatus?(name: string): SessionInfo & { stats: SessionStats };
 }
 
 export interface FanoutAgentSpec {
@@ -148,16 +151,27 @@ export class Fanout {
         maxBudgetUsd: this.config.maxBudgetUsd,
         customEngine: spec.customEngine,
       });
+      const before = this._stats(sessionName);
       const result = await this.manager.sendMessage(sessionName, spec.prompt || this.config.task, {
         timeout: this.config.agentTimeoutMs ?? DEFAULT_AGENT_TIMEOUT_MS,
         parentRunId: this.session.id,
+        nodeKind: 'fanout',
       });
+      const after = this._stats(sessionName);
+      // `ok` used to be an unconditional true in this block, i.e. "the call did
+      // not throw" — so an engine that ran, failed, and reported the failure
+      // cleanly was recorded as a success. Read the engine's own terminal
+      // verdict instead, the same predicate the run ledger uses.
+      const ok =
+        !result.error &&
+        (before && after ? (after.turns > before.turns ? after.turnsSucceeded > before.turnsSucceeded : true) : true);
       return {
         agent: spec.name,
         engine,
         model: spec.model,
-        ok: true,
+        ok,
         output: result.output,
+        error: ok ? undefined : result.error || 'engine did not report the turn as succeeded',
         durationMs: Date.now() - start,
       };
     } catch (err) {
@@ -174,6 +188,24 @@ export class Fanout {
       await this.manager.stopSession(sessionName).catch(() => {
         // Best-effort cleanup; a dead session is fine to ignore.
       });
+    }
+  }
+
+  /**
+   * Engine-reported counters, when the manager can supply them.
+   *
+   * Copied rather than aliased on purpose: the real `getStats()` happens to build
+   * a fresh object each call, but nothing states that as a contract, and a
+   * before/after pair that turns out to be the same reference silently compares
+   * a value against itself and always reports success.
+   */
+  private _stats(name: string): { turns: number; turnsSucceeded: number } | undefined {
+    if (!this.manager.getStatus) return undefined;
+    try {
+      const s = this.manager.getStatus(name).stats;
+      return { turns: s.turns, turnsSucceeded: s.turnsSucceeded };
+    } catch {
+      return undefined;
     }
   }
 

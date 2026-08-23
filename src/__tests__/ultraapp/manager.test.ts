@@ -206,6 +206,9 @@ describe('UltraappManager', () => {
       sessionManager: sm as never,
       router: fakeRouter,
       deployFn,
+      // Deploy-stage acceptance runs a headless browser against the deployed
+      // URL; a stubbed deploy has none, so stub the checks the same way.
+      runDeployChecksFn: async () => [],
     });
     activeMgr = mgr;
     const id = await mgr.createRun();
@@ -261,6 +264,9 @@ describe('UltraappManager', () => {
       sessionManager: sm as never,
       router: fakeRouter,
       deployFn,
+      // Deploy-stage acceptance runs a headless browser against the deployed
+      // URL; a stubbed deploy has none, so stub the checks the same way.
+      runDeployChecksFn: async () => [],
     });
     activeMgr = mgr;
     const id = await mgr.createRun();

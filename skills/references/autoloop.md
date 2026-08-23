@@ -21,11 +21,11 @@ This page is the operator reference.
 
 ## Roles
 
-| Agent | Default | cwd | Owns |
-|---|---|---|---|
-| **Planner** | claude / opus | workspace | strategy, `plan.md`, `goal.json`, talking to you |
-| **Coder** | claude / sonnet | workspace | code changes, eval execution |
-| **Reviewer** | claude / sonnet | `<workspace>/tasks/<run_id>/reviewer_sandbox/` | distrust audit; advance / hold / rollback |
+| Agent        | Default         | cwd                                            | Owns                                             |
+| ------------ | --------------- | ---------------------------------------------- | ------------------------------------------------ |
+| **Planner**  | claude / opus   | workspace                                      | strategy, `plan.md`, `goal.json`, talking to you |
+| **Coder**    | claude / sonnet | workspace                                      | code changes, eval execution                     |
+| **Reviewer** | claude / sonnet | `<workspace>/tasks/<run_id>/reviewer_sandbox/` | distrust audit; advance / hold / rollback        |
 
 Each role can use any built-in engine, or a `custom` engine config supplied by a
 local caller (custom engines name an executable, so the HTTP API does not accept
@@ -105,14 +105,14 @@ curl -X POST http://127.0.0.1:18789/v1/openclaw/tools/autoloop_stop \
 
 ## Plugin tools
 
-| Tool | Args | What |
-|---|---|---|
-| `autoloop_start` | `run_id`, `workspace`, per-role `*_engine?`, `*_model?`, `*_custom_engine?`, `send_timeout_ms?` | Start a run; launches Planner and stores Coder/Reviewer defaults. Each `custom` role requires its matching config. |
-| `autoloop_chat` | `run_id`, `text` | Send a chat message to the Planner; returns the Planner's reply. |
-| `autoloop_status` | `run_id` | Current state (status, iter, push count, subagents_spawned). |
-| `autoloop_list` | — | All active runs in this manager process. |
-| `autoloop_stop` | `run_id`, `reason?` | Terminate; stops Planner / Coder / Reviewer. |
-| `autoloop_reset_agent` | `run_id`, `agent` ('planner' / 'coder' / 'reviewer'), `force?`, `eager_restart?` | Reset one subagent. Planner reset requires `force: true`. |
+| Tool                   | Args                                                                                            | What                                                                                                               |
+| ---------------------- | ----------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `autoloop_start`       | `run_id`, `workspace`, per-role `*_engine?`, `*_model?`, `*_custom_engine?`, `send_timeout_ms?` | Start a run; launches Planner and stores Coder/Reviewer defaults. Each `custom` role requires its matching config. |
+| `autoloop_chat`        | `run_id`, `text`                                                                                | Send a chat message to the Planner; returns the Planner's reply.                                                   |
+| `autoloop_status`      | `run_id`                                                                                        | Current state (status, iter, push count, subagents_spawned).                                                       |
+| `autoloop_list`        | —                                                                                               | All active runs in this manager process.                                                                           |
+| `autoloop_stop`        | `run_id`, `reason?`                                                                             | Terminate; stops Planner / Coder / Reviewer.                                                                       |
+| `autoloop_reset_agent` | `run_id`, `agent` ('planner' / 'coder' / 'reviewer'), `force?`, `eager_restart?`                | Reset one subagent. Planner reset requires `force: true`.                                                          |
 
 ## Planner-emitted control tools
 
@@ -120,17 +120,17 @@ The Planner controls the run by emitting fenced ` ```autoloop ` JSON blocks
 inside its replies. The dispatcher parses them out and applies them. You
 never see the JSON — only the Planner's narrative.
 
-| Tool | Args | What |
-|---|---|---|
-| `notify_user` | `level` ('info' / 'warn' / 'decision' / 'error'), `summary`, `detail?`, `channel?` ('auto' / 'wechat' / 'webchat' / 'both' / 'email') | Push you out-of-band. |
-| `spawn_subagents` | `coder_engine?`, `coder_model?`, `reviewer_engine?`, `reviewer_model?`, `initial_directive?` | Start Coder + Reviewer. Omitted values inherit run defaults. An engine change without a model uses the new engine's default. Once a role session has started, changing its engine/model is rejected. Custom configs cannot be emitted by Planner. Only after explicit user approval. |
-| `send_directive` | `goal`, `constraints?`, `success_criteria?`, `max_attempts?` | Next iter's instruction to Coder. |
-| `pause_loop` | `reason` | Halt subloop at next iter boundary; chat keeps working. |
-| `resume_loop` | — | Resume after pause. |
-| `terminate` | `reason` | End run. |
-| `update_push_policy` | partial PushPolicy | Mutate notification rules (e.g. when you say "tell me every iter"). |
-| `write_plan` | `content` (full plan.md body), `commit_message?` | Write `plan.md` to the workspace and git-commit. The **only** way the Planner can author plan.md — Write/Edit are stripped from the Planner session as a hard role boundary. Re-running replaces the whole file. |
-| `write_goal` | `content` (full goal.json body), `commit_message?` | Same, for `goal.json`. Content is JSON-validated before write; malformed content errors back to the Planner. |
+| Tool                 | Args                                                                                                                                  | What                                                                                                                                                                                                                                                                                 |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `notify_user`        | `level` ('info' / 'warn' / 'decision' / 'error'), `summary`, `detail?`, `channel?` ('auto' / 'wechat' / 'webchat' / 'both' / 'email') | Push you out-of-band.                                                                                                                                                                                                                                                                |
+| `spawn_subagents`    | `coder_engine?`, `coder_model?`, `reviewer_engine?`, `reviewer_model?`, `initial_directive?`                                          | Start Coder + Reviewer. Omitted values inherit run defaults. An engine change without a model uses the new engine's default. Once a role session has started, changing its engine/model is rejected. Custom configs cannot be emitted by Planner. Only after explicit user approval. |
+| `send_directive`     | `goal`, `constraints?`, `success_criteria?`, `max_attempts?`                                                                          | Next iter's instruction to Coder.                                                                                                                                                                                                                                                    |
+| `pause_loop`         | `reason`                                                                                                                              | Halt subloop at next iter boundary; chat keeps working.                                                                                                                                                                                                                              |
+| `resume_loop`        | —                                                                                                                                     | Resume after pause.                                                                                                                                                                                                                                                                  |
+| `terminate`          | `reason`                                                                                                                              | End run.                                                                                                                                                                                                                                                                             |
+| `update_push_policy` | partial PushPolicy                                                                                                                    | Mutate notification rules (e.g. when you say "tell me every iter").                                                                                                                                                                                                                  |
+| `write_plan`         | `content` (full plan.md body), `commit_message?`                                                                                      | Write `plan.md` to the workspace and git-commit. The **only** way the Planner can author plan.md — Write/Edit are stripped from the Planner session as a hard role boundary. Re-running replaces the whole file.                                                                     |
+| `write_goal`         | `content` (full goal.json body), `commit_message?`                                                                                    | Same, for `goal.json`. Content is JSON-validated before write; malformed content errors back to the Planner.                                                                                                                                                                         |
 
 ### Custom engines and resume
 
@@ -150,24 +150,25 @@ for the `CustomEngineConfig` shape.
 
 ## Default push policy
 
-| Event | Default |
-|---|---|
-| on_start | info / wechat ("loop started, will notify on issues") |
-| on_iter_done_ok | silent |
-| on_target_hit | info / both (webchat + wechat) |
-| on_metric_regression_2 | warn / both |
-| on_reviewer_reject_2 | warn / both |
-| on_phase_error | error / both |
-| on_stall_30min | warn / wechat |
-| on_decision_needed | decision / both |
+| Event                  | Default                                               |
+| ---------------------- | ----------------------------------------------------- |
+| on_start               | info / wechat ("loop started, will notify on issues") |
+| on_iter_done_ok        | silent                                                |
+| on_target_hit          | info / both (webchat + wechat)                        |
+| on_metric_regression_2 | warn / both                                           |
+| on_reviewer_reject_2   | warn / both                                           |
+| on_phase_error         | error / both                                          |
+| on_stall_30min         | warn / wechat                                         |
+| on_decision_needed     | decision / both                                       |
 
 5-minute dedup on (level, summary) prevents duplicate pushes from the same
 event. Channel chain: `auto` walks wechat → whatsapp → email; `wechat` /
 `webchat` / `email` route directly; `both` does webchat (if session known)
-+ wechat fallback chain. **`on_phase_error` and `on_decision_needed` cannot
-be set to `silent: true`** by Planner — `update_push_policy` strips the flag
-and records the attempt in `decisions.jsonl` (these channels are the
-operator's lifeline; they stay loud).
+
+- wechat fallback chain. **`on_phase_error` and `on_decision_needed` cannot
+  be set to `silent: true`** by Planner — `update_push_policy` strips the flag
+  and records the attempt in `decisions.jsonl` (these channels are the
+  operator's lifeline; they stay loud).
 
 ## Auto-compact
 
@@ -195,7 +196,7 @@ consecutive `phase_error`s and:
 1. Fires `on_phase_error` on each one (defaults to error / both channels).
 2. After `phaseErrorCircuit` consecutive errors (default **3**) emits a
    `decision`-level push and an automatic `terminate { reason:
-   'phase_error_circuit' }`.
+'phase_error_circuit' }`.
 
 A successful (non-error) `iter_done` resets the counter. Override the
 threshold via `AutoloopConfig.phaseErrorCircuit`.
@@ -214,15 +215,15 @@ with `agent: 'reviewer', eager_restart: true`).
 `<ledger>/decisions.jsonl` is the auditable trail of runner / dispatcher
 decisions:
 
-| Kind | When |
-|---|---|
-| `spawn_subagents` | Planner emits `spawn_subagents` |
-| `reset_agent` | Any agent reset (manual or auto-recovery) |
-| `compact` | Auto-compact fires |
-| `update_push_policy` | Planner mutates the policy |
-| `policy_silence_blocked` | Planner tried to silence a critical channel |
-| `phase_error` | Surfaced from dispatcher to runner |
-| `terminate` | Run ends (planner reason or `phase_error_circuit`) |
+| Kind                     | When                                               |
+| ------------------------ | -------------------------------------------------- |
+| `spawn_subagents`        | Planner emits `spawn_subagents`                    |
+| `reset_agent`            | Any agent reset (manual or auto-recovery)          |
+| `compact`                | Auto-compact fires                                 |
+| `update_push_policy`     | Planner mutates the policy                         |
+| `policy_silence_blocked` | Planner tried to silence a critical channel        |
+| `phase_error`            | Surfaced from dispatcher to runner                 |
+| `terminate`              | Run ends (planner reason or `phase_error_circuit`) |
 
 JSONL, one entry per line, ts-prefixed.
 
@@ -260,19 +261,20 @@ Every JSON artifact in the ledger carries a `schema_version` field (currently
 
 ## Backend HTTP / SSE
 
-| Endpoint | Returns |
-|---|---|
-| `GET /autoloop/list` | `{ ok, runs: AutoloopState[] }` |
-| `POST /autoloop/new` | `{ ok, run_id, planner_session }` — body `{ workspace, run_id?, planner_engine?, planner_model?, planner_custom_engine?, coder_engine?, coder_model?, coder_custom_engine?, reviewer_engine?, reviewer_model?, reviewer_custom_engine?, send_timeout_ms? }` |
-| `GET /autoloop/<id>/state` | `{ ok, state: AutoloopState }` — also returns a `terminated`-state stub reconstructed from the registry for runs that aren't in this process's memory, so the dashboard can open historical runs without 404'ing. |
-| `GET /autoloop/<id>/push_log` | `{ ok, entries: PushLogEntry[] }` — served from the ledger via `autoloopStatus`, so historical runs work the same as live ones. |
-| `GET /autoloop/<id>/chat_history` | `{ ok, entries: ChatEntry[] }` — replays `<ledger>/chat.jsonl`. The dashboard fetches this when opening a run so the Planner-pane conversation survives a page refresh / cross-process / re-opening a terminated run. Returns `[]` when the file doesn't exist (e.g. runs that predate the chat-history feature). |
-| `GET /autoloop/<id>/events` | SSE: `snapshot` / `message` / `state` / `push` / `iter_done` / `planner_reply` / `planner_error` / `coder_reply` / `reviewer_reply` / `terminated`. For runs that are NOT in this process's memory (terminated, or live in another process), the endpoint emits a single-shot `snapshot` + `terminated` then closes — the dashboard's existing handlers render history without hanging. |
-| `POST /autoloop/<id>/chat` | **202** `{ ok, queued: true }` — body `{ text }`. Fire-and-forget: the Planner's reply streams back via the `/events` SSE channel as a `planner_reply` event (or `planner_error` on failure); the HTTP response intentionally does NOT wait for it, because first-contact replies routinely exceed reverse-proxy idle limits (e.g. Cloudflare Tunnel cuts at ~100s → 524). 400 on empty text, 404 when the run is not in this process's memory. The MCP `autoloop_chat` tool path keeps the synchronous await-and-return-reply semantics (it runs in-process). |
-| `POST /autoloop/<id>/resume` | `{ ok, state }` — restore the role engine/model choices from the registry and re-create dispatcher + runner. Optional body fields `planner_custom_engine`, `coder_custom_engine`, `reviewer_custom_engine` must be supplied again for roles using `custom` because configs are intentionally not persisted. Existing engine-specific conversation resume behavior is reused where supported; `chat.jsonl` remains the visual history fallback. 404 when the registry has no record. |
-| `POST /autoloop/<id>/delete` | `{ ok }` — stops the runner if still alive, scrubs the row from `~/.claw-orchestrator/autoloop-registry.jsonl`, and purges `persistedSessions` so the run cannot be `/resume`'d back. The ledger directory under `<workspace>/tasks/<run_id>/` is kept on disk. 404 if the run was not present in either memory or the registry. |
+| Endpoint                          | Returns                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /autoloop/list`              | `{ ok, runs: AutoloopState[] }`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `POST /autoloop/new`              | `{ ok, run_id, planner_session }` — body `{ workspace, run_id?, planner_engine?, planner_model?, planner_custom_engine?, coder_engine?, coder_model?, coder_custom_engine?, reviewer_engine?, reviewer_model?, reviewer_custom_engine?, send_timeout_ms? }`                                                                                                                                                                                                                                                                                                    |
+| `GET /autoloop/<id>/state`        | `{ ok, state: AutoloopState }` — also returns a `terminated`-state stub reconstructed from the registry for runs that aren't in this process's memory, so the dashboard can open historical runs without 404'ing.                                                                                                                                                                                                                                                                                                                                              |
+| `GET /autoloop/<id>/push_log`     | `{ ok, entries: PushLogEntry[] }` — served from the ledger via `autoloopStatus`, so historical runs work the same as live ones.                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `GET /autoloop/<id>/chat_history` | `{ ok, entries: ChatEntry[] }` — replays `<ledger>/chat.jsonl`. The dashboard fetches this when opening a run so the Planner-pane conversation survives a page refresh / cross-process / re-opening a terminated run. Returns `[]` when the file doesn't exist (e.g. runs that predate the chat-history feature).                                                                                                                                                                                                                                              |
+| `GET /autoloop/<id>/events`       | SSE: `snapshot` / `message` / `state` / `push` / `iter_done` / `planner_reply` / `planner_error` / `coder_reply` / `reviewer_reply` / `terminated`. For runs that are NOT in this process's memory (terminated, or live in another process), the endpoint emits a single-shot `snapshot` + `terminated` then closes — the dashboard's existing handlers render history without hanging.                                                                                                                                                                        |
+| `POST /autoloop/<id>/chat`        | **202** `{ ok, queued: true }` — body `{ text }`. Fire-and-forget: the Planner's reply streams back via the `/events` SSE channel as a `planner_reply` event (or `planner_error` on failure); the HTTP response intentionally does NOT wait for it, because first-contact replies routinely exceed reverse-proxy idle limits (e.g. Cloudflare Tunnel cuts at ~100s → 524). 400 on empty text, 404 when the run is not in this process's memory. The MCP `autoloop_chat` tool path keeps the synchronous await-and-return-reply semantics (it runs in-process). |
+| `POST /autoloop/<id>/resume`      | `{ ok, state }` — restore the role engine/model choices from the registry and re-create dispatcher + runner. Optional body fields `planner_custom_engine`, `coder_custom_engine`, `reviewer_custom_engine` must be supplied again for roles using `custom` because configs are intentionally not persisted. Existing engine-specific conversation resume behavior is reused where supported; `chat.jsonl` remains the visual history fallback. 404 when the registry has no record.                                                                            |
+| `POST /autoloop/<id>/delete`      | `{ ok }` — stops the runner if still alive, scrubs the row from `~/.claw-orchestrator/autoloop-registry.jsonl`, and purges `persistedSessions` so the run cannot be `/resume`'d back. The ledger directory under `<workspace>/tasks/<run_id>/` is kept on disk. 404 if the run was not present in either memory or the registry.                                                                                                                                                                                                                               |
 
 The 3-pane UI consumes these endpoints:
+
 - **Left**: Planner chat (subscribes to `planner_reply`)
 - **Center**: Coder activity (`coder_reply` + `iter_done`)
 - **Right**: Reviewer verdicts (`reviewer_reply`)
@@ -293,15 +295,13 @@ wrote down. A typical shape:
     "name": "test_pass_rate",
     "direction": "max",
     "extract_cmd": "bash eval.sh | grep -oE 'metric=[0-9.]+' | cut -d= -f2",
-    "target": 1.0
+    "target": 1.0,
   },
-  "gates": [
-    { "name": "tests_pass", "cmd": "npm test", "must": "exit-0" }
-  ],
+  "gates": [{ "name": "tests_pass", "cmd": "npm test", "must": "exit-0" }],
   "termination": {
     "max_iters": 10,
-    "scalar_target_hit": true
-  }
+    "scalar_target_hit": true,
+  },
 }
 ```
 
@@ -347,3 +347,44 @@ iter 0 ledger artifacts (`directive` + `eval_output` + `diff.patch` +
   map; the on-disk ledger survives but cannot resume a running state.
 - **Multi-run / same workspace** races on `git index.lock`. Run separate
   workspaces (or git worktrees) for concurrent runs.
+
+## Acceptance contracts (6.0.0)
+
+The Reviewer's `advance` was the only thing standing between an iteration and
+"done", and it could not do the job it was given. Its prompt tells it to
+"re-derive the metric independently if the sandbox has the bits to do so", but
+`stageReviewSandbox` copies in the iteration's artifacts — `directive.json`,
+`diff.patch`, `eval_output.json`, `coder_summary.txt` — plus `plan.md`,
+`goal.json`, and the prior verdict. No code, no evaluator. The verdict was
+therefore a reading of the Coder's own report, and `eval_output` was literally
+whatever the Coder passed to a tool call.
+
+Pass a contract at autoloop start and an `advance` is held unless the checks
+pass. The verdict is rewritten to `hold`, the reason is appended to
+`audit_notes`, and the evidence bundle lands at
+`<ledger>/iter/<n>/evidence/`. Without a contract nothing changes.
+
+### `on_target_hit` now fires
+
+That push-policy key was declared in `types.ts`, given a default, and whitelisted
+for runtime updates — and had **zero firing sites** anywhere in the codebase.
+Autoloop had four ways to notice it was failing (stall, metric regression,
+reviewer rejections, phase-error circuit) and no way to notice it had succeeded,
+because a Reviewer verdict is not a measurement. An acceptance contract is, so
+`on_target_hit` fires when one passes.
+
+### `diff.patch` sees created files
+
+The per-iteration patch was captured with a bare `git diff`, which lists tracked
+modifications only. A file the Coder _created_ appeared in neither the patch nor
+the `--name-only` fallback, while the `git add -A` two lines later committed it —
+so the Reviewer audited a picture that structurally could not show new files.
+The capture now covers tracked changes ∪ untracked files.
+
+`files_changed` is also taken from git unconditionally. It previously preferred
+the Coder's own `files_changed` whenever the Coder supplied one, despite the
+comment above it saying the claim was not trusted.
+
+## Related
+
+- [`verification.md`](./verification.md) — contracts, checks, evidence

@@ -202,3 +202,90 @@ describe('formatRunTable', () => {
     expect(out).not.toMatch(/error:\s*$/m);
   });
 });
+
+// ─── Verification fields (6.0.0) ────────────────────────────────────────────
+
+describe('verification fields', () => {
+  const row = (over: Partial<RunLedgerRow>): RunLedgerRow => ({
+    ts: new Date().toISOString(),
+    session: 's',
+    engine: 'claude',
+    cwd: '/tmp',
+    turn: 1,
+    tokensIn: 1,
+    tokensOut: 1,
+    cachedTokens: 0,
+    costUsd: 0.01,
+    tokensEstimated: false,
+    durationMs: 10,
+    toolCalls: 0,
+    toolErrors: 0,
+    ok: true,
+    ...over,
+  });
+
+  it('round-trips the new fields', () => {
+    appendRunRow(
+      row({
+        verified: true,
+        evidenceId: 'v-01',
+        contractId: 'c1',
+        nodeKind: 'verifier',
+        repoLang: 'typescript',
+        taskKind: 'bugfix',
+      }),
+    );
+    const [r] = readRunLedger();
+    expect(r).toMatchObject({
+      verified: true,
+      evidenceId: 'v-01',
+      contractId: 'c1',
+      nodeKind: 'verifier',
+      repoLang: 'typescript',
+      taskKind: 'bugfix',
+    });
+  });
+
+  it('reads rows written before 6.0.0, which have none of them', () => {
+    appendRunRow(row({}));
+    const [r] = readRunLedger();
+    expect(r.verified).toBeUndefined();
+    expect(r.ok).toBe(true);
+  });
+
+  it('filters on verified without swallowing unchecked rows into either bucket', () => {
+    appendRunRow(row({ session: 'yes', verified: true }));
+    appendRunRow(row({ session: 'no', verified: false }));
+    appendRunRow(row({ session: 'unchecked' }));
+    expect(readRunLedger({ verified: true }).map((r) => r.session)).toEqual(['yes']);
+    expect(readRunLedger({ verified: false }).map((r) => r.session)).toEqual(['no']);
+    expect(
+      readRunLedger()
+        .map((r) => r.session)
+        .sort(),
+    ).toEqual(['no', 'unchecked', 'yes']);
+  });
+
+  it('summarises the three states separately', () => {
+    appendRunRow(row({ verified: true }));
+    appendRunRow(row({ verified: true }));
+    appendRunRow(row({ verified: false }));
+    appendRunRow(row({}));
+    const s = summarizeRuns(readRunLedger());
+    expect(s.verifiedRows).toBe(2);
+    expect(s.refutedRows).toBe(1);
+    expect(s.unverifiedRows).toBe(1);
+  });
+
+  it('renders unchecked as an em dash, not as a failure', () => {
+    const table = formatRunTable([row({}), row({ verified: false }), row({ verified: true })]);
+    expect(table).toContain('VERIFIED');
+    expect(table).toMatch(/—/);
+    expect(table).toMatch(/\bNO\b/);
+    expect(table).toMatch(/\byes\b/);
+  });
+
+  it('says plainly when nothing was checked', () => {
+    expect(formatRunTable([row({})])).toContain('unchecked, not passed');
+  });
+});

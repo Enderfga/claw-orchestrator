@@ -5,8 +5,13 @@
  * with the process, and per-session history is capped at MAX_HISTORY_ITEMS and
  * evicted. So until now nothing survived a restart except the resume-id registry
  * — there was no way to answer "what did we run today, on which engine, for how
- * much". The ledger is that record, and it is the data source a future routing
- * layer would need.
+ * much". The ledger is that record.
+ *
+ * As of 6.0.0 it is also usable as a routing signal, which it was not before: a
+ * row's `ok` is the engine's report on itself, and no amount of that teaches you
+ * which engine is actually better at a task. `verified` is the runtime's own
+ * measurement against an acceptance contract, and that is the column a router
+ * can learn from. Rows carry both, and the read surfaces keep them apart.
  *
  * Durability rules, copied from the pattern autoloop's dispatcher already proved
  * (`appendDecisionLog`): mkdir + append + swallow. A ledger failure must never
@@ -46,10 +51,41 @@ export interface RunLedgerRow {
   durationMs: number;
   toolCalls: number;
   toolErrors: number;
+  /**
+   * The engine's own terminal verdict for this turn — it ran and did not report
+   * failure. Distinct from `verified`: this is the engine talking about itself.
+   */
   ok: boolean;
   error?: string;
-  /** council id / fanout id / autoloop run id, when this turn belongs to one. */
+  /** council id / fanout id / autoloop run id / workflow run id, when this turn belongs to one. */
   parent?: string;
+
+  // ─── Verification (v6) ────────────────────────────────────────────────────
+  // Every field below is optional and absent on rows written before 6.0.0. The
+  // reader already tolerates unknown and missing keys, so old shards stay
+  // readable; nothing backfills them, because we cannot know retroactively.
+
+  /**
+   * True when an acceptance contract ran against the work this turn belonged to
+   * and every required check passed. Absent means no contract was declared —
+   * which is *not* the same as false, and the read surfaces must not collapse
+   * the two. `ok` is the engine's self-report; this is our own measurement.
+   *
+   * Not written at turn time, and deliberately so: a turn finishes before the
+   * verifier runs, so stamping a verdict there would be inventing one. It is
+   * filled in by `annotateVerdicts()` at read time from the run record, or
+   * written directly by a standalone `verify_run`.
+   */
+  verified?: boolean;
+  /** Evidence bundle id under the run directory, when a contract ran. */
+  evidenceId?: string;
+  contractId?: string;
+  /** Kernel node kind this turn belonged to (`agent`, `council`, `verifier`, …). */
+  nodeKind?: string;
+  /** Primary language detected from the repo's manifest. Detected, never guessed from prose. */
+  repoLang?: string;
+  /** Caller-declared task class. Never inferred — an inferred label is not a label. */
+  taskKind?: string;
 }
 
 export interface RunLedgerQuery {
@@ -58,6 +94,8 @@ export interface RunLedgerQuery {
   session?: string;
   engine?: string;
   parent?: string;
+  /** `true` keeps only verified rows, `false` keeps only refuted ones. Unset keeps all. */
+  verified?: boolean;
   /** Most recent N rows (applied after filtering). Default 200. */
   limit?: number;
 }
@@ -69,6 +107,12 @@ export interface RunLedgerSummary {
   tokensOut: number;
   /** Rows whose token counts were estimated rather than engine-reported. */
   estimatedRows: number;
+  /** Rows an acceptance contract passed. */
+  verifiedRows: number;
+  /** Rows an acceptance contract refuted. */
+  refutedRows: number;
+  /** Rows with no contract at all — we do not know either way. */
+  unverifiedRows: number;
   byEngine: Record<string, { rows: number; costUsd: number }>;
 }
 
@@ -188,11 +232,41 @@ export function readRunLedger(query: RunLedgerQuery = {}, logger?: Logger): RunL
       if (query.session && row.session !== query.session) continue;
       if (query.engine && row.engine !== query.engine) continue;
       if (query.parent && row.parent !== query.parent) continue;
+      if (query.verified !== undefined && row.verified !== query.verified) continue;
       out.push(row);
       if (out.length >= limit) return out.reverse();
     }
   }
   return out.reverse();
+}
+
+// ─── Verdict join ───────────────────────────────────────────────────────────
+
+/** What a row's parent run says about it. Supplied by the caller so the ledger stays leaf-level. */
+export interface RunVerdict {
+  verified?: boolean;
+  evidenceId?: string;
+  contractId?: string;
+}
+
+export type VerdictLookup = (parent: string) => RunVerdict | undefined;
+
+/**
+ * Fill in each row's verdict from the run it belonged to.
+ *
+ * The join lives here rather than at write time because of the ordering: the
+ * turns that produce the work all finish before the verifier that judges it, so
+ * there is nothing truthful to stamp on them as they are written. The lookup is
+ * injected rather than imported so this module keeps no dependency on the kernel.
+ */
+export function annotateVerdicts(rows: RunLedgerRow[], lookup: VerdictLookup): RunLedgerRow[] {
+  const cache = new Map<string, RunVerdict | undefined>();
+  return rows.map((row) => {
+    if (!row.parent || row.verified !== undefined) return row;
+    if (!cache.has(row.parent)) cache.set(row.parent, lookup(row.parent));
+    const verdict = cache.get(row.parent);
+    return verdict ? { ...row, ...verdict } : row;
+  });
 }
 
 // ─── Aggregate + format (pure) ──────────────────────────────────────────────
@@ -204,6 +278,9 @@ export function summarizeRuns(rows: RunLedgerRow[]): RunLedgerSummary {
     tokensIn: 0,
     tokensOut: 0,
     estimatedRows: 0,
+    verifiedRows: 0,
+    refutedRows: 0,
+    unverifiedRows: 0,
     byEngine: {},
   };
   for (const r of rows) {
@@ -211,6 +288,9 @@ export function summarizeRuns(rows: RunLedgerRow[]): RunLedgerSummary {
     summary.tokensIn += r.tokensIn || 0;
     summary.tokensOut += r.tokensOut || 0;
     if (r.tokensEstimated) summary.estimatedRows++;
+    if (r.verified === true) summary.verifiedRows++;
+    else if (r.verified === false) summary.refutedRows++;
+    else summary.unverifiedRows++;
     const bucket = (summary.byEngine[r.engine] ??= { rows: 0, costUsd: 0 });
     bucket.rows++;
     bucket.costUsd = round4(bucket.costUsd + (r.costUsd || 0));
@@ -239,6 +319,7 @@ export function formatRunTable(rows: RunLedgerRow[]): string {
     pad('OUT', 9),
     pad('COST', 9),
     pad('DUR', 8),
+    pad('VERIFIED', 9),
     'STATUS',
   ].join(' ');
   const lines = rows.map((r) => {
@@ -253,6 +334,10 @@ export function formatRunTable(rows: RunLedgerRow[]): string {
       pad(String(r.tokensOut ?? 0), 9),
       pad(cost, 9),
       pad(dur, 8),
+      // Three states, not two: `—` means no contract was declared, which is a
+      // different claim from `no`. Collapsing them would let an unchecked run
+      // read as a checked-and-failed one, or worse, the reverse.
+      pad(r.verified === undefined ? '—' : r.verified ? 'yes' : 'NO', 9),
       // `ok: false` does not imply error text: a turn the engine declined to count as
       // succeeded (codex-app `interrupted`, agy's non-SUCCESS status) resolves without
       // throwing, so there is nothing to quote. Say so rather than print a bare label.
@@ -266,6 +351,9 @@ export function formatRunTable(rows: RunLedgerRow[]): string {
   const footer =
     `\n${s.rows} turns  $${s.costUsd.toFixed(4)}  ` +
     `${s.tokensIn} in / ${s.tokensOut} out\n${engines}` +
+    (s.verifiedRows + s.refutedRows > 0
+      ? `\nverified ${s.verifiedRows} · refuted ${s.refutedRows} · unchecked ${s.unverifiedRows}`
+      : `\n${s.unverifiedRows} turn(s) ran with no acceptance contract — unchecked, not passed.`) +
     (s.estimatedRows > 0
       ? `\n~ ${s.estimatedRows} turn(s) used estimated token counts (engine reported no usage).`
       : '');

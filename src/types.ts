@@ -461,10 +461,18 @@ export interface SendOptions {
   onChunk?: (chunk: string) => void;
   onEvent?: (event: StreamEvent) => void;
   /**
-   * council id / fanout id / autoloop run id. Stamped onto the run-ledger row
-   * so a multi-agent run can be reassembled from the ledger afterwards.
+   * council id / fanout id / autoloop run id / workflow run id. Stamped onto the
+   * run-ledger row so a multi-agent run can be reassembled from the ledger.
    */
   parentRunId?: string;
+  /** Kernel node kind this turn belongs to (`agent`, `council`, `verifier`, …). */
+  nodeKind?: string;
+  /**
+   * Caller-declared task class, for later grouping in the ledger. Never inferred
+   * from the prompt — a guessed label would corrupt the comparison it exists to
+   * enable.
+   */
+  taskKind?: string;
 }
 
 // ─── Stream Events ───────────────────────────────────────────────────────────
@@ -748,11 +756,28 @@ export interface CouncilSession {
 
 // ─── Council Post-Processing Types ─────────────────────────────────────────
 
+/**
+ * A reviewer's assessment of a changed file. This is a judgement, not a git
+ * fact — nothing in the orchestrator can compute it, and it is populated only
+ * when a reviewer supplies one.
+ */
 export type CouncilFileStatus = 'clean' | 'needs_rework' | 'redundant' | 'missing';
+
+/** What git says happened to the file. Computed, unlike `status`. */
+export type CouncilFileChange = 'added' | 'modified' | 'deleted';
 
 export interface CouncilChangedFile {
   file: string;
-  status: CouncilFileStatus;
+  /**
+   * Absent until a reviewer assesses the file.
+   *
+   * Through 5.1.0 this was hardcoded to `'clean'` for every entry, which read as
+   * "the council reviewed this and found nothing wrong" when in fact nothing had
+   * looked at it at all. An unassessed file now says so by being undefined.
+   */
+  status?: CouncilFileStatus;
+  /** Git's own account of the change. */
+  change?: CouncilFileChange;
   insertions: number;
   deletions: number;
   note?: string;

@@ -17,6 +17,10 @@ import { UltraappBuildQueue } from './build.js';
 import type { BuildEvent } from './build-events.js';
 import { runCouncilSynth } from './council-adapter.js';
 import { runFixOnFailure } from './fix-on-failure.js';
+import { ultraappBuildContract, ultraappDeployContract, visualGateIsStrict } from './contract.js';
+import { runChecks } from '../verify/runner.js';
+import { contractPassed, type AcceptanceContract, type CheckResult } from '../verify/contract.js';
+import { writeEvidence } from '../verify/evidence.js';
 import { spawnFixerSessionWith } from './fix-on-failure-session.js';
 import { deployArtifact, type DeployArgs, type DeployResult } from './deploy.js';
 import { dockerBuild, dockerRun, dockerRmi } from './docker.js';
@@ -62,6 +66,12 @@ export interface UltraappManagerOptions {
   router?: UltraappRouter;
   /** Test seam: stub the deploy state machine. */
   deployFn?: (a: DeployArgs) => Promise<DeployResult>;
+  /**
+   * Test seam: stub the deploy-stage acceptance checks. The real one drives a
+   * headless browser against the deployed URL, which a stubbed deploy has not
+   * got, so tests inject their own the same way they inject `deployFn`.
+   */
+  runDeployChecksFn?: (contract: AcceptanceContract, cwd: string, artifactDir: string) => Promise<CheckResult[]>;
   /** Runtime mode for build + deploy. 'host' (default) runs the generated
       app as a regular Node process — works anywhere Node works, no extra
       deps. 'docker' uses `docker build` + `docker run` for isolation; only
@@ -253,15 +263,24 @@ export class UltraappManager {
       maxRounds: 5,
       // Reuse the same SessionManager so the fixer doesn't spawn a fresh one per fix.
       spawnFixer: (a) => spawnFixerSessionWith(this.opts.sessionManager, a),
-      // Host mode skips the docker-build step (no Docker required).
-      steps: useDocker
-        ? undefined // default: install + build + test + docker build
-        : [
-            { cmd: 'npm', args: ['install'] },
-            { cmd: 'npm', args: ['run', 'build'] },
-            { cmd: 'npm', args: ['test'] },
-          ],
+      // The build contract adds the `npm run smoke` step that §4 of the
+      // conventions has always told the council was binding, and that the code
+      // never actually ran. Host mode drops the docker-build check.
+      contract: ultraappBuildContract({ useDocker }),
+      artifactDir: path.join(this.opts.store.runDirAbsolute(runId), 'evidence', 'build-artifacts'),
     });
+    if (fix.results) {
+      await writeEvidence({
+        runDir: this.opts.store.runDirAbsolute(runId),
+        runId,
+        node: 'build',
+        evidenceId: 'build-01',
+        cwd: council.worktreePath!,
+        contractId: 'ultraapp-build',
+        results: fix.results,
+        rounds: fix.rounds,
+      });
+    }
     if (!fix.ok) {
       emit({
         type: 'build-failed',
@@ -354,6 +373,48 @@ export class UltraappManager {
       containerName: dep.containerName!,
       imageTag: dep.imageTag!,
     });
+
+    // §7g, enforced by the runtime instead of by persona text. We capture the
+    // two viewports ourselves against the deployed URL and store the PNGs as
+    // evidence, so "did anyone actually look" stops being an agent's claim.
+    // We do not judge the pixels — that is still a reader's call.
+    const deployContract = ultraappDeployContract(dep.url!);
+    const deployArtifactDir = path.join(this.opts.store.runDirAbsolute(args.runId), 'evidence', 'deploy-01');
+    const deployChecks = this.opts.runDeployChecksFn
+      ? await this.opts.runDeployChecksFn(deployContract, args.worktreePath, deployArtifactDir)
+      : await runChecks(deployContract, { cwd: args.worktreePath, artifactDir: deployArtifactDir });
+    await writeEvidence({
+      runDir: this.opts.store.runDirAbsolute(args.runId),
+      runId: args.runId,
+      node: 'deploy',
+      evidenceId: 'deploy-01',
+      cwd: args.worktreePath,
+      contractId: 'ultraapp-deploy',
+      results: deployChecks,
+      rounds: 0,
+    });
+    if (!contractPassed(deployChecks)) {
+      const failed = deployChecks.filter((c) => c.required && !c.passed);
+      args.emit({
+        type: 'build-failed',
+        runId: args.runId,
+        phase: 'orchestrator',
+        reason: `acceptance: ${failed.map((f) => f.detail).join('; ')}`,
+      });
+      await this.opts.store.setMode(args.runId, 'failed', failed[0]?.detail);
+      return;
+    }
+    if (!visualGateIsStrict()) {
+      const shot = deployChecks.find((c) => c.id === 'frontend-gate');
+      if (shot && !shot.passed) {
+        await this.opts.store.appendChat(args.runId, {
+          role: 'system',
+          kind: 'error',
+          text: `Frontend gate: ${shot.detail}. Screenshots are captured by the runtime; set CLAWO_ULTRAAPP_VISUAL_GATE=strict to make a failed capture block the deploy.`,
+        });
+      }
+    }
+
     await this.opts.store.setMode(args.runId, 'done');
     const run = this.runs.get(args.runId);
     if (run) {
