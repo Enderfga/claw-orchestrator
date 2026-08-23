@@ -9,6 +9,9 @@ on:
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
+    # A hang should cost fifteen minutes, not the six-hour default. The suite
+    # runs in about a minute; anything near this ceiling is a hang, not slowness.
+    timeout-minutes: 15
     strategy:
       matrix:
         node-version: [22, 24]

@@ -75,6 +75,15 @@ export function withFileLock<T>(lockPath: string, fn: () => T, opts: FileLockOpt
   let ino: number | undefined;
   let lastError = 'lock is held by another process';
   for (;;) {
+    // Checked once per iteration, before anything can `continue` past it. Two
+    // of the retry paths below used to skip it, which made this loop unbounded
+    // in exactly the case it exists for: another process churning the lock file
+    // meant the vanished-lock branch retried forever, with no deadline and no
+    // yield. On a two-core CI runner that pegged a core and starved the test
+    // runner for fourteen minutes — a busy-wait that a comment described as
+    // "waits before giving up".
+    if (Date.now() >= deadline) return { ok: false, reason: 'contended', error: lastError };
+
     try {
       if (opts.createParent) fs.mkdirSync(path.dirname(lockPath), { recursive: true });
       fd = fs.openSync(lockPath, 'wx');
@@ -98,6 +107,8 @@ export function withFileLock<T>(lockPath: string, fn: () => T, opts: FileLockOpt
         // processes committing in a loop it happened several times a second, and
         // one of them recursively removing its staging directory would empty the
         // transaction directory the other had just published, wedging the run.
+        lastError = 'lock was being released and retaken';
+        sleepSync(1);
         continue;
       }
 
@@ -111,10 +122,11 @@ export function withFileLock<T>(lockPath: string, fn: () => T, opts: FileLockOpt
         } catch {
           // Someone else got there first; just retry the create.
         }
+        lastError = `broke a lock abandoned for ${Math.round(age)}ms`;
+        sleepSync(1);
         continue;
       }
 
-      if (Date.now() >= deadline) return { ok: false, reason: 'contended', error: lastError };
       lastError = `lock held by another process for ${Math.round(age)}ms`;
       sleepSync(5);
     }

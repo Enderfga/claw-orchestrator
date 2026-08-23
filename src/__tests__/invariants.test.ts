@@ -1150,6 +1150,39 @@ describe('single owner, enforced', () => {
     expect(fs.existsSync(path.join(wfDir, 'exclusion-run', '.tx'))).toBe(false);
   }, 60_000);
 
+  it('gives up rather than spinning when it can neither take nor break a lock', async () => {
+    // Every path out of the acquisition loop has to respect the deadline. Two of
+    // them used to `continue` past it, so a lock this caller could neither open
+    // nor break turned into a hot loop with no exit — it does not fail, it does
+    // not return, it just burns a core. That is what fourteen minutes of silent
+    // CI looked like: the suite had finished a file and the worker never came
+    // back.
+    //
+    // Constructed rather than raced: an abandoned lock inside a directory this
+    // process cannot write to, so the stale-breaking rename can never succeed
+    // and the loop is guaranteed to reach its retry path every time. (Running
+    // as root would make the rename succeed and the test merely pass.)
+    const { withFileLock } = await import('../kernel/file-lock.js');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'clawo-livelock-'));
+    const lock = path.join(dir, 'x.lock');
+    fs.writeFileSync(lock, '');
+    const longAgo = new Date(Date.now() - 3_600_000);
+    fs.utimesSync(lock, longAgo, longAgo);
+    fs.chmodSync(dir, 0o555);
+    try {
+      const startedAt = Date.now();
+      const result = withFileLock(lock, () => 'entered', { waitMs: 200, staleMs: 1_000 });
+      const elapsed = Date.now() - startedAt;
+      expect(result.ok).toBe(false);
+      // Back at its deadline, not whenever the obstruction happens to clear.
+      expect(elapsed).toBeGreaterThanOrEqual(150);
+      expect(elapsed).toBeLessThan(2_000);
+    } finally {
+      fs.chmodSync(dir, 0o755);
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
+
   it('a moment of lock contention is not a lost run', async () => {
     // `withLock` threw immediately on a fresh lock and `commit` turned every
     // error into "you no longer own this", so a millisecond of contention ended
