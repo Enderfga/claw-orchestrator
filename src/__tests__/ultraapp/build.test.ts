@@ -112,37 +112,99 @@ describe('durable queue', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
-  it('survives the process that accepted the build', async () => {
+  it('survives a process that died, restoring the in-flight build first', async () => {
     // The old queue kept pending builds in an array and nothing else: a restart
     // dropped every queued build with no record it had been asked for.
-    const blocked = new Promise<void>(() => undefined);
-    const first = new UltraappBuildQueue({ statePath, worker: () => blocked });
-    await first.enqueue('run-a');
-    await first.enqueue('run-b');
-    await new Promise((r) => setTimeout(r, 10));
+    //
+    // The dead owner is simulated by writing a state file whose pid cannot
+    // exist. Constructing a live queue and then a second one in the SAME
+    // process would prove the opposite of what this test is for — that two
+    // owners can run the same builds concurrently.
+    fs.writeFileSync(
+      statePath,
+      JSON.stringify({
+        pending: ['run-b'],
+        current: 'run-a',
+        owner: { pid: 2 ** 30, renewedAt: new Date().toISOString() },
+      }),
+    );
 
     const seen: string[] = [];
     const restored: string[][] = [];
-    const second = new UltraappBuildQueue({
+    const q = new UltraappBuildQueue({
       statePath,
       worker: async (runId) => {
         seen.push(runId);
       },
       onRestore: (ids) => restored.push(ids),
     });
-    await second.idle();
+    await q.idle();
 
+    expect(q.ownsQueue()).toBe(true);
     // The in-flight build comes back first: it was asked for first, and the
     // user has been waiting on it longest.
     expect(restored[0]).toEqual(['run-a', 'run-b']);
     expect(seen).toEqual(['run-a', 'run-b']);
   });
 
+  it('refuses to take builds a live OTHER process already owns', async () => {
+    // Two owners restoring the same file would each run every build — every side
+    // effect twice.
+    //
+    // The owner has to be a different live process, so pid 1 stands in: it
+    // always exists, it is never us, and `kill(1, 0)` reports it as alive.
+    // Constructing two queues in this process would not test this at all —
+    // same-pid re-entrancy is allowed on purpose, so a manager can rebuild its
+    // own queue.
+    fs.writeFileSync(
+      statePath,
+      JSON.stringify({ pending: ['run-a'], current: null, owner: { pid: 1, renewedAt: new Date().toISOString() } }),
+    );
+
+    const seen: string[] = [];
+    let refusedTo: { pid: number } | undefined;
+    const second = new UltraappBuildQueue({
+      statePath,
+      worker: async (runId) => {
+        seen.push(runId);
+      },
+      onNotOwner: (o) => {
+        refusedTo = o;
+      },
+    });
+
+    await new Promise((r) => setTimeout(r, 20));
+    expect(second.ownsQueue()).toBe(false);
+    expect(refusedTo?.pid).toBe(1);
+    expect(seen).toEqual([]);
+  });
+
+  it('takes over from an owner whose heartbeat has gone stale', async () => {
+    fs.writeFileSync(
+      statePath,
+      JSON.stringify({
+        pending: ['run-a'],
+        current: null,
+        owner: { pid: 1, renewedAt: new Date(Date.now() - 10 * 60_000).toISOString() },
+      }),
+    );
+    const seen: string[] = [];
+    const q = new UltraappBuildQueue({
+      statePath,
+      worker: async (runId) => {
+        seen.push(runId);
+      },
+    });
+    await q.idle();
+    expect(q.ownsQueue()).toBe(true);
+    expect(seen).toEqual(['run-a']);
+  });
+
   it('clears the state once the queue drains', async () => {
     const q = new UltraappBuildQueue({ statePath, worker: async () => undefined });
     await q.enqueue('run-a');
     await q.idle();
-    expect(JSON.parse(fs.readFileSync(statePath, 'utf8'))).toEqual({ pending: [], current: null });
+    expect(JSON.parse(fs.readFileSync(statePath, 'utf8'))).toMatchObject({ pending: [], current: null });
   });
 
   it('forgets a cancelled build', async () => {

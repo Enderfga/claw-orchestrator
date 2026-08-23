@@ -14,13 +14,33 @@ export async function executeFanoutNode(node: NodeSpec, ctx: NodeContext): Promi
   const spec = node as FanoutNode;
   if (!ctx.manager) return { ok: false, error: 'fanout node requires a session manager' };
 
+  // Every field, forwarded. The first cut mapped four of them and dropped the
+  // rest, which is how an ultrareview's per-reviewer prompt and its
+  // `permissionMode: 'plan'` stopped reaching the session — a read-only review
+  // that ran under `bypassPermissions`.
+  const customEngines = (ctx.secrets.agentCustomEngines ?? {}) as Record<string, unknown>;
   const { Fanout } = await import('../../fanout.js');
   const fanout = new Fanout(
     {
       task: spec.prompt,
       projectDir: spec.cwd || ctx.cwd,
-      agents: spec.agents.map((a) => ({ name: a.name, engine: a.engine, model: a.model, prompt: a.persona })),
+      agents: spec.agents.map((a) => ({
+        name: a.name,
+        engine: a.engine,
+        model: a.model,
+        prompt: a.prompt ?? a.persona,
+        baseUrl: a.baseUrl,
+        permissionMode: a.permissionMode as never,
+        // Credentials never travel in the spec; they arrive through the
+        // in-memory side channel keyed by agent name.
+        customEngine: customEngines[a.name] as never,
+      })),
       synthesize: spec.synthesize,
+      synthesisEngine: spec.synthesisEngine,
+      synthesisModel: spec.synthesisModel,
+      synthesisPermissionMode: spec.synthesisPermissionMode as never,
+      maxTurnsPerAgent: spec.maxTurnsPerAgent,
+      maxBudgetUsd: spec.maxBudgetUsd,
       agentTimeoutMs: spec.timeoutMs,
     },
     ctx.manager,

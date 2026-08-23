@@ -69,11 +69,18 @@ succeeded are not re-run; the node that was in flight when the process died is
 retried from the start, because a half-finished node left no result to trust.
 
 **This makes node execution at-least-once, not exactly-once.** There is no
-idempotency key, no attempt lease, and no side-effect commit marker, so a node
-that wrote files and then died before its checkpoint runs again from the top,
-and two processes resuming the same run will both execute it. Workflows whose
-nodes are not safe to repeat need to make them safe. Resume is also explicit —
+idempotency key and no side-effect commit marker, so a node that wrote files and
+then died before its checkpoint runs again from the top. Workflows whose nodes
+are not safe to repeat need to make them safe. Resume is also explicit —
 `workflow_resume` — not automatic.
+
+**One owner at a time**, though. A run holds a lease (`lease.json`: pid, host,
+heartbeat) taken on start and resume, renewed on every checkpoint, released when
+the run ends. A second process trying to resume a run someone else is executing
+is refused by name — two owners would mean every side effect twice, two writers
+to one checkpoint, and one event log interleaving two timelines. A lease whose
+holder is gone (same host: the pid is checked directly) or whose heartbeat has
+stopped for a minute is up for grabs.
 
 One more caveat worth stating plainly: event appends are best-effort (a log
 failure is warned and swallowed so it cannot break the run it describes), yet
@@ -172,6 +179,13 @@ These are ordinary specs, not privileged paths.
 ## The verifier is a terminal barrier
 
 A passing verdict only stands while it still describes the tree.
+
+The digest is over **content**, not status: HEAD, the full `git diff HEAD`, and
+the bytes of every untracked file. An earlier version hashed
+`git status --porcelain`, which reports a file's state rather than its bytes — so
+a file already `M` before the checks and rewritten afterwards produced an
+identical digest, and the commonest case (an agent editing a file it had already
+edited) was the one it could not see.
 
 This cannot be enforced by inspecting the spec — a router can send control
 anywhere, so which node runs last is not a property of the graph. And "nothing

@@ -22,6 +22,9 @@ export function makeSubflowExecutor(kernel: RunKernel, resolve?: WorkflowResolve
     }
 
     const record = await kernel.start(child, { cwd: ctx.cwd });
+    // Recorded now, not with the result: a parent cancelled while the child is
+    // still running has to be able to find it.
+    ctx.setChild(record.runId);
     ctx.emit({
       ts: new Date().toISOString(),
       type: 'log',

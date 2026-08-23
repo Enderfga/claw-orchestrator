@@ -40,9 +40,11 @@ import { normalizeContract, type AcceptanceContract } from '../verify/contract.j
 import { captureBaseline, treeFingerprint } from '../verify/baseline.js';
 import type { SessionManagerLike } from './agent-step.js';
 import {
+  acquireLease,
   appendEvent,
   createRunDir,
   isValidRunId,
+  releaseLease,
   deleteRunDir,
   listRuns,
   loadRun,
@@ -117,6 +119,8 @@ export interface NodeContext {
   emit(event: KernelEvent): void;
   /** The workflow-level contract, for a `contract: 'run'` verifier node. */
   runContract?: AcceptanceContract;
+  /** In-memory values the spec deliberately does not carry. Never persisted. */
+  secrets: Record<string, unknown>;
   /**
    * Publish the live engine object for this node (a `Council`, a `Fanout`, an
    * autoloop dispatcher) so in-flight control — inject, abort, chat — can reach
@@ -127,6 +131,14 @@ export interface NodeContext {
   setHandle(handle: unknown): void;
   /** Checkpoint mode payload as the node runs, not only when it finishes. */
   publish(data: unknown): void;
+  /**
+   * Record a child run started by this node, immediately.
+   *
+   * It has to land before the child finishes, not with the node's result: the
+   * whole point is that cancelling the parent can find the child, and a parent
+   * cancelled mid-subflow is exactly when the id is not yet in the record.
+   */
+  setChild(childRunId: string): void;
 }
 
 export type NodeExecutor = (node: NodeSpec, ctx: NodeContext) => Promise<NodeResult>;
@@ -134,6 +146,8 @@ export type NodeExecutor = (node: NodeSpec, ctx: NodeContext) => Promise<NodeRes
 interface RunHandle {
   signal: { aborted: boolean };
   steer: string[];
+  /** Never written anywhere; dies with the process, as intended. */
+  secrets: Record<string, unknown>;
   /** Resolves when a parked human_gate is answered. */
   gate?: { resolve: (approved: boolean) => void };
   done: Promise<RunRecord>;
@@ -154,6 +168,15 @@ export interface StartOptions {
   cwd?: string;
   /** Overrides `spec.contract`. Callers only — never sourced from agent output. */
   contract?: unknown;
+  /**
+   * Values a node needs but the spec must not carry — custom-engine configs,
+   * whose `env` holds credentials.
+   *
+   * These live only in this process's memory. They are never written to
+   * `spec.json` or `run.json`, and a resume in another process has to supply
+   * them again rather than reading them back, which is the point.
+   */
+  secrets?: Record<string, unknown>;
 }
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -162,6 +185,57 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
  * Append the implicit terminal verifier when a run-level contract exists and the
  * author did not already place one. This is what makes `completed` mean "checked".
  */
+/**
+ * Reject a spec that cannot execute correctly, before anything runs.
+ *
+ * These are all mistakes that used to surface much later and much worse: a
+ * duplicate node id silently overwrote a record so one of the two nodes had no
+ * state; a `next` or router target naming a node that does not exist failed the
+ * run halfway through with `unknown node`; a negative retry or visit bound was
+ * accepted and then behaved arbitrarily.
+ */
+export function validateSpec(spec: WorkflowSpec): void {
+  if (!spec || typeof spec.name !== 'string' || !spec.name.trim()) {
+    throw new Error('WorkflowSpec needs a name');
+  }
+  if (!Array.isArray(spec.nodes) || spec.nodes.length === 0) {
+    throw new Error(`Workflow '${spec.name}' has no nodes`);
+  }
+
+  const ids = new Set<string>();
+  for (const node of spec.nodes) {
+    if (!node?.id || typeof node.id !== 'string') throw new Error(`Workflow '${spec.name}' has a node with no id`);
+    if (ids.has(node.id)) throw new Error(`Workflow '${spec.name}' has duplicate node id '${node.id}'`);
+    ids.add(node.id);
+    if (node.retry && (!Number.isInteger(node.retry.max) || node.retry.max < 0)) {
+      throw new Error(`Node '${node.id}': retry.max must be a non-negative integer`);
+    }
+    if (node.timeoutMs !== undefined && (!Number.isFinite(node.timeoutMs) || node.timeoutMs <= 0)) {
+      throw new Error(`Node '${node.id}': timeoutMs must be a positive number`);
+    }
+  }
+
+  if (spec.maxNodeVisits !== undefined && (!Number.isInteger(spec.maxNodeVisits) || spec.maxNodeVisits < 1)) {
+    throw new Error(`Workflow '${spec.name}': maxNodeVisits must be a positive integer`);
+  }
+
+  const check = (target: string | undefined, where: string): void => {
+    if (target !== undefined && !ids.has(target)) {
+      throw new Error(`${where} points at unknown node '${target}'`);
+    }
+  };
+  for (const node of spec.nodes) {
+    check(node.next, `Node '${node.id}' next`);
+    if (node.kind === 'router') {
+      check(node.default, `Router '${node.id}' default`);
+      for (const route of node.routes ?? []) {
+        check(route.to, `Router '${node.id}' route`);
+        if (!route.when?.type) throw new Error(`Router '${node.id}' has a route with no condition`);
+      }
+    }
+  }
+}
+
 export function prepareSpec(spec: WorkflowSpec): WorkflowSpec {
   if (!spec.contract) return spec;
   const hasRunVerifier = spec.nodes.some((n) => n.kind === 'verifier' && n.contract === 'run');
@@ -178,6 +252,12 @@ export class RunKernel extends EventEmitter {
   private readonly executors: Partial<Record<NodeKind, NodeExecutor>>;
   private readonly nodeTimeoutMs: number;
   private readonly live = new Map<string, RunHandle>();
+  /**
+   * Per-run secrets, in memory only. Keyed by run id so a resume in this
+   * process can re-use what the start supplied; a resume elsewhere must be
+   * given them again.
+   */
+  private readonly _secrets = new Map<string, Record<string, unknown>>();
 
   constructor(opts: KernelOptions = {}) {
     super();
@@ -195,8 +275,22 @@ export class RunKernel extends EventEmitter {
   // ─── Lifecycle ────────────────────────────────────────────────────────────
 
   async start(rawSpec: WorkflowSpec, opts: StartOptions = {}): Promise<RunRecord> {
-    const contract = opts.contract !== undefined ? normalizeContract(opts.contract) : rawSpec.contract;
+    let contract = rawSpec.contract;
+    if (opts.contract !== undefined) {
+      contract = normalizeContract(opts.contract);
+      // A contract that survives normalisation with nothing in it used to leave
+      // the run with no contract at all, which then completed `unverified` — a
+      // caller who asked to be checked was told nothing had checked, and the
+      // reason was a typo they never saw.
+      if (!contract) {
+        throw new Error(
+          'The supplied acceptance contract has no recognised checks. Every check needs a `type` of ' +
+            'command | http | screenshot | diff_policy | file, and a `command` check needs `cmd`.',
+        );
+      }
+    }
     const spec = prepareSpec({ ...rawSpec, contract });
+    validateSpec(spec);
     const runId = opts.runId || `wf-${Date.now().toString(36)}-${crypto.randomBytes(3).toString('hex')}`;
     // Validated here as well as in the store: failing before any directory is
     // created keeps a rejected id from leaving a half-made run behind.
@@ -224,7 +318,9 @@ export class RunKernel extends EventEmitter {
       costUsd: 0,
     };
 
+    if (opts.secrets) this._secrets.set(runId, opts.secrets);
     createRunDir(runId, spec);
+    acquireLease(runId);
     record.baseSha = await captureBaseline(cwd);
     saveRun(record);
     this._event(record, { ts: now, type: 'run_created', runId, workflow: spec.name });
@@ -238,7 +334,8 @@ export class RunKernel extends EventEmitter {
    * re-run; the node that was in flight when the process ended is retried from
    * the start, because a half-finished node left no result to trust.
    */
-  async resume(runId: string, opts: { restart?: boolean } = {}): Promise<RunRecord> {
+  async resume(runId: string, opts: { restart?: boolean; secrets?: Record<string, unknown> } = {}): Promise<RunRecord> {
+    if (opts.secrets) this._secrets.set(runId, opts.secrets);
     if (this.live.has(runId)) {
       const existing = loadRun(runId);
       if (!existing) throw new Error(`Run '${runId}' not found`);
@@ -246,6 +343,9 @@ export class RunKernel extends EventEmitter {
     }
     const record = loadRun(runId);
     if (!record) throw new Error(`Run '${runId}' not found`);
+    // Claim it before touching anything: two processes resuming the same run
+    // would each execute its nodes, with every side effect happening twice.
+    acquireLease(runId);
     // A finished run stays finished by default: silently re-running a completed
     // workflow because someone polled `resume` would be a nasty surprise.
     // `restart` is for callers whose "resume" genuinely means "bring it back up"
@@ -276,6 +376,17 @@ export class RunKernel extends EventEmitter {
     if (!handle) return false;
     handle.signal.aborted = true;
     handle.gate?.resolve(false);
+    // Reach the engines too. Setting a flag only works for runners that check
+    // it; `Council` and `Fanout` have their own `abort()`, and without calling
+    // it a shutdown waits out the node timeout instead of stopping.
+    for (const [, live] of handle.handles) {
+      const abortable = live as { abort?: () => void };
+      try {
+        abortable.abort?.();
+      } catch {
+        // Best-effort: an engine that fails to abort must not block the others.
+      }
+    }
     // Cancellation propagates to subflows. Without this a cancelled parent
     // leaves its children running and spending, with nothing pointing at them.
     const record = loadRun(runId);
@@ -329,6 +440,8 @@ export class RunKernel extends EventEmitter {
 
   delete(runId: string): void {
     this.cancel(runId);
+    releaseLease(runId);
+    this._secrets.delete(runId);
     deleteRunDir(runId, this.logger);
   }
 
@@ -343,7 +456,7 @@ export class RunKernel extends EventEmitter {
   }
 
   async shutdown(): Promise<void> {
-    for (const [, handle] of this.live) handle.signal.aborted = true;
+    for (const [runId] of this.live) this.cancel(runId);
     await Promise.allSettled([...this.live.values()].map((h) => h.done));
     this.live.clear();
   }
@@ -354,6 +467,7 @@ export class RunKernel extends EventEmitter {
     const handle: RunHandle = {
       signal: { aborted: false },
       steer: [],
+      secrets: this._secrets.get(record.runId) ?? {},
       handles: new Map(),
       done: Promise.resolve(record),
     };
@@ -380,6 +494,9 @@ export class RunKernel extends EventEmitter {
     if (error) record.error = error;
     if (isTerminalRunState(state)) stampTerminal(record, state);
     saveRun(record);
+    // Hand the run back once it is over, so another process can pick it up
+    // without waiting out the lease.
+    if (isTerminalRunState(state)) releaseLease(record.runId);
     this._event(record, {
       ts: record.updatedAt,
       type: 'run_state',
@@ -499,7 +616,12 @@ export class RunKernel extends EventEmitter {
 
       const result = await this._runWithRetry(record, spec, nodeRec, handle);
 
-      if (handle.signal.aborted && !result.ok) {
+      // Cancel wins regardless of what the node returned. A runner that never
+      // looked at the signal and reported success anyway used to carry the run
+      // all the way to `completed` — so "I cancelled it" and "it completed"
+      // could both be true, which makes cancellation meaningless.
+      if (handle.signal.aborted) {
+        this._absorb(record, nodeRec, result);
         this._setNodeState(record, nodeRec, 'cancelled');
         this._setRunState(record, 'cancelled');
         return record;
@@ -580,6 +702,12 @@ export class RunKernel extends EventEmitter {
         setHandle: (h) => handle.handles.set(spec.id, h),
         publish: (data) => {
           nodeRec.data = data;
+          record.updatedAt = new Date().toISOString();
+          saveRun(record);
+        },
+        secrets: handle.secrets,
+        setChild: (childRunId) => {
+          nodeRec.childRunId = childRunId;
           record.updatedAt = new Date().toISOString();
           saveRun(record);
         },

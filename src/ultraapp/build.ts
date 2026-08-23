@@ -15,6 +15,12 @@
  * restored on construction. A build that was in flight when the process died is
  * re-queued rather than resumed — each build starts from a fresh council
  * worktree, so re-running is safe and resuming a half-built tree is not.
+ *
+ * Durability without ownership would be worse than neither: two processes each
+ * restoring the same file would each run the same builds, doing every side
+ * effect twice. So restoring takes a lease on the state file, held by pid and
+ * heartbeated. A queue that cannot take the lease starts empty and leaves the
+ * work to whoever owns it.
  */
 
 import { EventEmitter } from 'node:events';
@@ -34,6 +40,11 @@ export interface UltraappBuildQueueOptions {
   statePath?: string;
   /** Notified when a restored in-flight build is re-queued. */
   onRestore?: (runIds: string[]) => void;
+  /**
+   * Notified when another live process owns the queue, so this one starts
+   * empty. Not an error — it is the correct outcome.
+   */
+  onNotOwner?: (owner: { pid: number; renewedAt: string }) => void;
 }
 
 interface PendingItem {
@@ -44,6 +55,24 @@ interface PersistedQueue {
   pending: string[];
   /** The build that was running when the state was last written. */
   current: string | null;
+  /** Who is executing this queue. */
+  owner?: { pid: number; renewedAt: string };
+}
+
+/** How long an owner may go without a heartbeat before the queue is up for grabs. */
+const OWNER_TTL_MS = 60_000;
+
+function ownerIsLive(owner: PersistedQueue['owner']): boolean {
+  if (!owner) return false;
+  if (owner.pid === process.pid) return true;
+  const age = Date.now() - Date.parse(owner.renewedAt);
+  if (Number.isNaN(age) || age > OWNER_TTL_MS) return false;
+  try {
+    process.kill(owner.pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'EPERM';
+  }
 }
 
 export class UltraappBuildQueue {
@@ -61,11 +90,20 @@ export class UltraappBuildQueue {
     this.concurrency = opts.concurrency ?? 1;
     this.statePath = opts.statePath;
     const restored = this.restore();
+    if (this.notOwner) opts.onNotOwner?.(this.notOwner);
     if (restored.length > 0) {
       opts.onRestore?.(restored);
       this.markBusy();
       void this.tryDispatch();
     }
+  }
+
+  /** Set when another live process holds the queue. */
+  private notOwner?: { pid: number; renewedAt: string };
+
+  /** True when this process is executing the queue. */
+  ownsQueue(): boolean {
+    return !this.notOwner;
   }
 
   /**
@@ -88,6 +126,12 @@ export class UltraappBuildQueue {
     } catch {
       return [];
     }
+    if (ownerIsLive(parsed.owner) && parsed.owner!.pid !== process.pid) {
+      // Someone else is running these. Taking them would execute every build
+      // twice; the honest move is to start empty and say so.
+      this.notOwner = parsed.owner!;
+      return [];
+    }
     const ids = [
       ...(parsed.current ? [parsed.current] : []),
       ...(Array.isArray(parsed.pending) ? parsed.pending.filter((x) => typeof x === 'string') : []),
@@ -101,7 +145,13 @@ export class UltraappBuildQueue {
     if (!this.statePath) return;
     try {
       fs.mkdirSync(path.dirname(this.statePath), { recursive: true });
-      const state: PersistedQueue = { pending: this.pending.map((p) => p.runId), current: this.currentRunId };
+      const state: PersistedQueue = {
+        pending: this.pending.map((p) => p.runId),
+        current: this.currentRunId,
+        // Every write is also the heartbeat, so a queue that stops making
+        // progress stops holding the claim.
+        owner: { pid: process.pid, renewedAt: new Date().toISOString() },
+      };
       const tmp = `${this.statePath}.tmp.${process.pid}`;
       fs.writeFileSync(tmp, JSON.stringify(state));
       fs.renameSync(tmp, this.statePath);

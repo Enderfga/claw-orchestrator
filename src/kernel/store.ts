@@ -135,17 +135,46 @@ export function runExists(runId: string): boolean {
  * kept accumulating, leaving one log describing two different runs and a replay
  * that reconstructs neither.
  */
+/**
+ * Keys whose values never reach disk.
+ *
+ * `customEngine` carries a `CustomEngineConfig`, whose `env` is explicitly for
+ * environment variables — API tokens included. An autoloop started with a custom
+ * engine wrote its whole options object into the node spec, and `spec.json`
+ * ended up holding the token in plain text.
+ *
+ * The real fix is to route them through `StartOptions.secrets`, which stays in
+ * memory. This is the second line: even a spec that should not contain one is
+ * scrubbed on the way out, so a future field cannot leak by omission.
+ */
+const NEVER_PERSIST = new Set(['customengine', 'plannercustomengine', 'codercustomengine', 'reviewercustomengine']);
+
+export function sanitizeForDisk<T>(value: T): T {
+  if (Array.isArray(value)) return value.map((v) => sanitizeForDisk(v)) as unknown as T;
+  if (!value || typeof value !== 'object') return value;
+  const out: Record<string, unknown> = {};
+  for (const [key, v] of Object.entries(value as Record<string, unknown>)) {
+    if (NEVER_PERSIST.has(key.toLowerCase())) continue;
+    out[key] = sanitizeForDisk(v);
+  }
+  return out as unknown as T;
+}
+
 export function createRunDir(runId: string, spec: WorkflowSpec): void {
   if (runExists(runId)) {
     throw new Error(`Run '${runId}' already exists — pick another id, or resume it instead of starting over`);
   }
   const dir = runDir(runId);
   fs.mkdirSync(dir, { recursive: true });
-  atomicWriteJson(path.join(dir, 'spec.json'), spec);
+  atomicWriteJson(path.join(dir, 'spec.json'), sanitizeForDisk(spec));
 }
 
 export function saveRun(record: RunRecord): void {
-  atomicWriteJson(path.join(runDir(record.runId), 'run.json'), record);
+  // The checkpoint embeds the spec, so it gets the same scrub.
+  atomicWriteJson(path.join(runDir(record.runId), 'run.json'), sanitizeForDisk(record));
+  // Checkpointing IS the heartbeat: a run that is making progress is proving
+  // its owner is alive, and one that is not will let its lease expire.
+  renewLease(record.runId);
 }
 
 export function loadSpec(runId: string): WorkflowSpec | undefined {
@@ -320,6 +349,103 @@ export function stampTerminal(record: RunRecord, state: RunState): void {
   record.state = state;
   record.endedAt = new Date().toISOString();
   record.updatedAt = record.endedAt;
+}
+
+// ─── Ownership lease ────────────────────────────────────────────────────────
+//
+// A run has one owner at a time. Without this, two processes could each call
+// `resume` on the same run and both start executing its nodes — every side
+// effect twice, two writers to one checkpoint, and an event log interleaving two
+// timelines. "At-least-once per node" is a tolerable contract; "twice,
+// concurrently, by design" is not.
+//
+// The lease is a file with the owner's pid and a heartbeat. It is taken on
+// start/resume, renewed on every checkpoint, and released when the run ends.
+// A lease is stale when its holder is gone (same host: `kill(pid, 0)`) or when
+// the heartbeat has not moved for LEASE_TTL_MS.
+
+export const LEASE_TTL_MS = 60_000;
+
+export interface RunLease {
+  pid: number;
+  host: string;
+  acquiredAt: string;
+  renewedAt: string;
+}
+
+function leaseFile(runId: string): string {
+  return path.join(runDir(runId), 'lease.json');
+}
+
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    // EPERM means it exists and belongs to someone else.
+    return (err as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+export function readLease(runId: string): RunLease | undefined {
+  return readJson<RunLease>(leaseFile(runId));
+}
+
+/** True when a lease no longer represents a live owner. */
+export function leaseIsStale(lease: RunLease | undefined, now = Date.now()): boolean {
+  if (!lease) return true;
+  const age = now - Date.parse(lease.renewedAt);
+  if (Number.isNaN(age)) return true;
+  // Same host: the pid is the authority, and a dead pid frees the run at once
+  // rather than after a minute of waiting.
+  if (lease.host === os.hostname() && !processAlive(lease.pid)) return true;
+  return age > LEASE_TTL_MS;
+}
+
+/**
+ * Claim a run. Throws when someone else holds it.
+ *
+ * Re-entrant for the current process: a manager that already owns a run may
+ * take it again (resume-after-terminate, for one) without tripping over itself.
+ */
+export function acquireLease(runId: string): RunLease {
+  const existing = readLease(runId);
+  if (existing && existing.pid !== process.pid && !leaseIsStale(existing)) {
+    throw new Error(
+      `Run '${runId}' is owned by pid ${existing.pid} on ${existing.host} (last seen ${existing.renewedAt}) — ` +
+        `only one process may run it at a time`,
+    );
+  }
+  const now = new Date().toISOString();
+  const lease: RunLease = {
+    pid: process.pid,
+    host: os.hostname(),
+    acquiredAt: existing?.pid === process.pid ? existing.acquiredAt : now,
+    renewedAt: now,
+  };
+  atomicWriteJson(leaseFile(runId), lease);
+  return lease;
+}
+
+/** Heartbeat. Best-effort: losing a renewal must not break the run. */
+export function renewLease(runId: string): void {
+  try {
+    const existing = readLease(runId);
+    if (!existing || existing.pid !== process.pid) return;
+    atomicWriteJson(leaseFile(runId), { ...existing, renewedAt: new Date().toISOString() });
+  } catch {
+    // The next renewal will try again.
+  }
+}
+
+export function releaseLease(runId: string): void {
+  try {
+    const existing = readLease(runId);
+    if (existing && existing.pid !== process.pid) return;
+    fs.rmSync(leaseFile(runId), { force: true });
+  } catch {
+    // A lease left behind expires on its own.
+  }
 }
 
 // ─── Cross-process listing ──────────────────────────────────────────────────

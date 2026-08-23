@@ -135,6 +135,20 @@ because a verifier is a node in the thing that survives.
 
 ### Fixed
 
+- A cancelled run is `cancelled`, whatever the node returned. A runner that never
+  looked at the signal and reported success carried the run to `completed`, so
+  "I cancelled it" and "it completed" could both be true. Cancelling also reaches
+  the live `Council` / `Fanout` and calls their `abort()`, instead of setting a
+  flag and waiting out the node timeout.
+- A subflow's child run id is recorded when the child starts, not when it
+  finishes — which is to say, it is now recorded in the only window where
+  cancelling the parent needs it.
+- A workflow spec is validated before it runs: duplicate node ids, `next` and
+  router targets naming nodes that do not exist, and negative retry or visit
+  bounds are refused up front instead of failing halfway through.
+- A contract with no recognised checks is refused. It used to normalise to
+  nothing, leaving the run with no contract at all — so a caller who asked to be
+  checked was told nothing had checked it, and never saw why.
 - Acceptance checks have a timeout. The predecessor pipeline had none, so a
   wedged `npm test` hung a build indefinitely. A check that overruns is killed —
   its whole process group, with SIGKILL — and recorded as failed.
@@ -157,6 +171,25 @@ because a verifier is a node in the thing that survives.
 
 ### Security
 
+- **Read-only reviews are read-only again.** The kernel's per-agent spec carried
+  only name/engine/model/persona, so the adapters dropped everything else — and
+  ultrareview builds a bespoke prompt and `permissionMode: 'plan'` for each
+  reviewer. Neither reached the session: every reviewer got the shared task
+  under `bypassPermissions`, free to edit the code it was reviewing. The spec now
+  mirrors the legacy shape field for field, and the synthesis pass is held to the
+  same rule — it shares the project directory, so a writable synthesiser was the
+  same hole one step later.
+- **Custom-engine credentials no longer reach disk.** `CustomEngineConfig.env`
+  is for environment variables, tokens included, and an autoloop started with a
+  custom engine wrote its whole options object into the node spec — so
+  `spec.json` held the token in plain text. Credentials travel through an
+  in-memory side channel now, and the spec is scrubbed on the way out as a second
+  line of defence.
+- **One owner per run.** A lease (pid + heartbeat) is taken on start and resume
+  and released when the run ends. Two processes could each `resume` the same run
+  and both execute its nodes: every side effect twice, two writers to one
+  checkpoint, one event log interleaving two timelines. The UltraApp build queue
+  takes the same kind of claim over its state file.
 - Run ids are validated as a single path segment before any path is derived from
   them. They can be supplied by the caller — including through a tool call — and
   every path in the run store came from `path.join(root, runId)`, with delete
@@ -166,9 +199,14 @@ because a verifier is a node in the thing that survives.
   definition while its event log kept growing, leaving a log describing two runs
   and a replay that reconstructed neither.
 - A passing verdict no longer survives later edits to the tree it describes.
-  Evidence records a digest of the working tree, and a workspace-touching node
-  running after the verdict causes the digest to be rechecked at the end of the
-  run; if it moved, the outcome drops to `unverified` with the reason recorded.
+  Evidence records a digest of the working tree's **content** — HEAD, the full
+  `git diff HEAD`, and the bytes of every untracked file — and a
+  workspace-touching node running after the verdict causes it to be recomputed at
+  the end of the run; if it moved, the outcome drops to `unverified` with the
+  reason recorded. (The first attempt hashed `git status --porcelain`, which
+  reports a file's _state_, not its bytes: a file already `M` before the checks
+  and rewritten afterwards produced an identical digest, so the commonest case —
+  an agent editing a file it had already edited — was exactly the one it missed.)
   The `solve` template's reviewer fan-out has moved ahead of the gate — it shared
   the project directory, so reviewers could edit a tree the verifier had already
   signed off while the run still reported `verified`.
@@ -184,6 +222,23 @@ because a verifier is a node in the thing that survives.
 - The `node:fs` mock in the SessionManager tests no-op'd **every** write in the
   process to keep two files out of the developer's home directory. It now names
   those two files and passes everything else through.
+
+### Testing
+
+- **`src/__tests__/invariants.test.ts`** drives the real public APIs through the
+  real kernel, the real node executors and the real `Council` / `Fanout`, with a
+  fake engine session as the only seam — and never calls `setExecutor`.
+
+  This exists because the alternative failed. Every other mode test replaces the
+  executor and asserts on the spec that reached it, which proves the spec's shape
+  and nothing about what ran: that is how a read-only review that could write,
+  and a credential written to disk, both shipped with the whole suite green. The
+  harness asserts what the runtime actually did — each legacy field arriving at
+  the session, a reviewer being unable to write (the fake writes a file whenever
+  its permission mode allows it), no secret in any run file, cancel never
+  yielding `completed`, a verdict expiring when an already-dirty file changes
+  again, and — with a real child process and a real `SIGKILL` — recovery that
+  re-runs only the node that was in flight, with a second owner refused.
 
 ### Removed
 

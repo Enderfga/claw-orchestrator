@@ -28,7 +28,8 @@ export interface AutoloopHandle {
 }
 
 export interface AutoloopNodeDeps {
-  boot(config: Record<string, unknown>): Promise<AutoloopHandle>;
+  /** `secrets` carries what the spec deliberately does not — custom-engine configs. */
+  boot(config: Record<string, unknown>, secrets: Record<string, unknown>): Promise<AutoloopHandle>;
   /** Resolve/reject the deferred `autoloopStart` is waiting on. */
   ready(runId: string, value: { plannerSession: string; state: AutoloopState } | Error): void;
   /** Wait until the loop reaches a terminal status. */
@@ -57,7 +58,7 @@ export function makeAutoloopExecutor(deps: AutoloopNodeDeps) {
     const spec = node as AutoloopNode;
     let handle: AutoloopHandle;
     try {
-      handle = await deps.boot(spec.config);
+      handle = await deps.boot(spec.config, ctx.secrets);
     } catch (err) {
       deps.ready(ctx.runId, err as Error);
       return { ok: false, error: (err as Error).message };

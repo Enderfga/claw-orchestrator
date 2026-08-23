@@ -135,7 +135,12 @@ import {
   toUltrareviewResult,
   type FanoutNodeData,
 } from './kernel/projections.js';
-import { legacyCouncilWorkflow, legacyFanoutWorkflow, legacyUltraplanWorkflow } from './kernel/templates/index.js';
+import {
+  legacyCouncilWorkflow,
+  legacyFanoutWorkflow,
+  legacyUltraplanWorkflow,
+  splitAgentSecrets,
+} from './kernel/templates/index.js';
 import type { KernelEvent, RunRecord, RunState, WorkflowSpec } from './kernel/types.js';
 import { normalizeContract } from './verify/contract.js';
 import { runContract } from './verify/runner.js';
@@ -886,12 +891,12 @@ export class SessionManager {
       kernel.setExecutor(
         'autoloop',
         makeAutoloopExecutor({
-          boot: (config) =>
+          boot: (config, secrets) =>
             this._bootAutoloop({
               ...(config as Parameters<SessionManager['_bootAutoloop']>[0]),
-              // Custom-engine configs can carry secrets and are never persisted,
-              // so a resume re-supplies them out of band.
-              ...(this._autoloopResumeConfig.get(String(config.runId)) ?? {}),
+              // Custom-engine configs never reach the spec, so they come from
+              // the run's in-memory secret bag instead.
+              ...(secrets as Partial<Parameters<SessionManager['_bootAutoloop']>[0]>),
             }),
           ready: (runId, value) => {
             const deferred = this._autoloopReady.get(runId);
@@ -2290,15 +2295,19 @@ export class SessionManager {
 
   async councilStart(task: string, config: CouncilConfig): Promise<CouncilSession> {
     const runId = `council-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`;
+    const { agents, secrets } = splitAgentSecrets(config.agents);
     const record = await this.kernel.start(
       legacyCouncilWorkflow({
         task,
         cwd: config.projectDir,
-        agents: config.agents,
+        agents,
         maxRounds: config.maxRounds,
         timeoutMs: config.agentTimeoutMs,
+        maxTurnsPerAgent: config.maxTurnsPerAgent,
+        maxBudgetUsd: config.maxBudgetUsd,
+        defaultPermissionMode: config.defaultPermissionMode,
       }),
-      { runId, cwd: config.projectDir },
+      { runId, cwd: config.projectDir, secrets: { agentCustomEngines: secrets } },
     );
     return toCouncilSession(record);
   }
@@ -2401,15 +2410,21 @@ export class SessionManager {
       throw new Error('fanoutStart: agent names must be unique (they form session names)');
     }
     const runId = `fanout-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`;
+    const { agents, secrets } = splitAgentSecrets(config.agents);
     const record = await this.kernel.start(
       legacyFanoutWorkflow({
         task: config.task,
         cwd: config.projectDir,
-        agents: config.agents,
+        agents,
         synthesize: config.synthesize,
+        synthesisEngine: config.synthesisEngine,
+        synthesisModel: config.synthesisModel,
+        synthesisPermissionMode: config.synthesisPermissionMode,
+        maxTurnsPerAgent: config.maxTurnsPerAgent,
+        maxBudgetUsd: config.maxBudgetUsd,
         timeoutMs: config.agentTimeoutMs,
       }),
-      { runId, cwd: config.projectDir },
+      { runId, cwd: config.projectDir, secrets: { agentCustomEngines: secrets } },
     );
     return toFanoutSession(record);
   }
@@ -2689,8 +2704,17 @@ export class SessionManager {
         name: 'ultrareview',
         task: reviewInstruction,
         cwd,
+        // Each reviewer's own prompt and `permissionMode: 'plan'` travel with it.
+        // They were being dropped, so every reviewer got the shared task under
+        // `bypassPermissions` — a read-only review that could edit the code.
         agents,
         synthesize: true,
+        // The synthesiser reads the reviewers' text, not the code, and it shares
+        // the project directory — so it is held to the same read-only rule. It
+        // was not, which meant an ultrareview could still write through its
+        // final pass.
+        synthesisPermissionMode: 'plan',
+        maxTurnsPerAgent: 20,
         timeoutMs: maxMinutes * 60 * 1000,
       }),
       { runId, cwd },
@@ -2924,15 +2948,28 @@ export class SessionManager {
     const ready = new Promise<{ plannerSession: string; state: AutoloopState }>((resolve, reject) => {
       this._autoloopReady.set(opts.runId, { resolve, reject });
     });
+    // Custom-engine configs hold credentials and the spec is written to disk, so
+    // they travel in memory. Without this split, `spec.json` contained the token
+    // from `CustomEngineConfig.env` in plain text.
+    const { plannerCustomEngine, coderCustomEngine, reviewerCustomEngine, ...persistable } = opts;
     await this.kernel.start(
       {
         name: 'autoloop',
         cwd: opts.workspace,
         nodes: [
-          { id: LEGACY_NODE, kind: 'autoloop', workspace: opts.workspace, config: opts as Record<string, unknown> },
+          {
+            id: LEGACY_NODE,
+            kind: 'autoloop',
+            workspace: opts.workspace,
+            config: persistable as Record<string, unknown>,
+          },
         ],
       },
-      { runId: opts.runId, cwd: opts.workspace },
+      {
+        runId: opts.runId,
+        cwd: opts.workspace,
+        secrets: { plannerCustomEngine, coderCustomEngine, reviewerCustomEngine },
+      },
     );
     try {
       const { plannerSession, state } = await ready;

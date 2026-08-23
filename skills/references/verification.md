@@ -161,3 +161,22 @@ unchecked run read as a checked one.
 - [`workflow.md`](./workflow.md) — the kernel that runs verifiers as nodes
 - [`observability.md`](./observability.md) — how verdicts reach the run ledger
 - [`ultraapp.md`](./ultraapp.md) — the default contract in context
+
+## What the guarantee is, precisely
+
+- The checks are run by the runtime, and their exit codes are read by the
+  runtime. No part of the verdict is an agent's report about itself.
+- A run carrying a contract cannot reach `completed` unless every required check
+  passed.
+- If anything that can touch the workspace runs after the checks and the tree's
+  **content** changes, the verdict expires: the outcome drops to `unverified`
+  with the reason recorded. Not `refuted` — no check failed.
+- Outside a git repository the digest is unavailable. Nothing running after the
+  checks means the verdict stands; something running after it means we decline
+  to vouch, and the run says so.
+
+What it is **not**: a guarantee that nothing can touch the tree after the
+evidence is written. A node that overran its timeout is abandoned rather than
+killed, so its writes can land after the run has finished, later than the last
+digest. Give such nodes a timeout they will not hit, or make their writes safe to
+arrive late.

@@ -53,6 +53,13 @@ export interface FanoutConfig {
   synthesize?: boolean;
   synthesisModel?: string;
   synthesisEngine?: EngineType;
+  /**
+   * Permission mode for the synthesis pass. Defaults to `bypassPermissions`
+   * like the agents do, but a read-only fan-out has to pass `plan` here too:
+   * synthesis shares the project directory, so a writable synthesiser can edit
+   * the code the read-only agents were only allowed to look at.
+   */
+  synthesisPermissionMode?: PermissionMode;
   agentTimeoutMs?: number;
   maxTurnsPerAgent?: number;
   maxBudgetUsd?: number;
@@ -224,7 +231,7 @@ export class Fanout {
         cwd: this.config.projectDir,
         engine: this.config.synthesisEngine || 'claude',
         model: this.config.synthesisModel,
-        permissionMode: 'bypassPermissions',
+        permissionMode: this.config.synthesisPermissionMode ?? 'bypassPermissions',
         maxTurns: this.config.maxTurnsPerAgent ?? DEFAULT_MAX_TURNS,
         maxBudgetUsd: this.config.maxBudgetUsd,
       });

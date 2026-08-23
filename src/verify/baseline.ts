@@ -19,6 +19,7 @@
  */
 
 import crypto from 'node:crypto';
+import fs from 'node:fs';
 import path from 'node:path';
 import { exec } from '../kernel/exec.js';
 
@@ -129,7 +130,7 @@ export async function capturePatch(cwd: string, baseSha: string | undefined): Pr
 }
 
 /**
- * A cheap digest of the working tree's current state.
+ * A digest of the working tree's current *content*.
  *
  * Evidence describes the tree as it was when the checks ran. If anything moves
  * afterwards the bundle still exists but no longer describes what is there, and
@@ -137,18 +138,46 @@ export async function capturePatch(cwd: string, baseSha: string | undefined): Pr
  * something nobody measured. Comparing this before and after is how the kernel
  * notices.
  *
- * `git status --porcelain` covers tracked modifications, staged changes, and
- * untracked files; HEAD covers commits. Returns undefined outside a repo — a
- * caller that cannot fingerprint must not assume the tree held still.
+ * The first version of this hashed `git rev-parse HEAD` plus
+ * `git status --porcelain`, which does not work: porcelain reports a file's
+ * *state*, not its bytes. A file that was already `M` before the verifier and
+ * is rewritten afterwards still prints ` M a.txt`, so the digest was unchanged
+ * and a stale verdict sailed through. The common case — an agent editing a file
+ * it had already edited — was exactly the case it missed.
+ *
+ * So this hashes content: HEAD, the full `git diff HEAD` patch (which covers
+ * staged and unstaged changes to tracked files), and the path plus bytes of
+ * every untracked file.
+ *
+ * Returns undefined outside a repo — a caller that cannot fingerprint must not
+ * assume the tree held still.
  */
 export async function treeFingerprint(cwd: string): Promise<string | undefined> {
-  const head = await exec('git', ['-C', cwd, 'rev-parse', 'HEAD'], { timeoutMs: GIT_TIMEOUT_MS });
   const status = await exec('git', ['-C', cwd, 'status', '--porcelain'], { timeoutMs: GIT_TIMEOUT_MS });
   if (status.code !== 0) return undefined;
-  return crypto
-    .createHash('sha256')
-    .update(`${head.code === 0 ? head.out.trim() : 'no-head'}\n${status.out}`)
-    .digest('hex');
+
+  const head = await exec('git', ['-C', cwd, 'rev-parse', 'HEAD'], { timeoutMs: GIT_TIMEOUT_MS });
+  const tracked = await exec('git', ['-C', cwd, 'diff', 'HEAD'], { timeoutMs: GIT_TIMEOUT_MS });
+
+  const hash = crypto.createHash('sha256');
+  hash.update(head.code === 0 ? head.out.trim() : 'no-head');
+  hash.update('\u0000');
+  hash.update(tracked.code === 0 ? tracked.out : status.out);
+
+  // Untracked files are invisible to `git diff`, so hash them by hand — path and
+  // bytes both, so a rename and an edit are each detected.
+  for (const file of (await untrackedFiles(cwd)).sort()) {
+    hash.update('\u0000');
+    hash.update(file);
+    try {
+      hash.update(fs.readFileSync(path.join(cwd, file)));
+    } catch {
+      // Unreadable (a dangling symlink, a race with a delete): record that we
+      // could not read it rather than silently treating it as empty.
+      hash.update('\u0000unreadable');
+    }
+  }
+  return hash.digest('hex');
 }
 
 /**

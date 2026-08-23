@@ -63,11 +63,32 @@ export interface AgentNode extends NodeBase {
   permissionMode?: string;
 }
 
+/**
+ * One agent in a fan-out or council.
+ *
+ * This mirrors the legacy per-agent shape field for field, deliberately. The
+ * first cut of the kernel carried only `name` / `engine` / `model` / `persona`,
+ * and the adapters silently dropped everything else — so an ultrareview that
+ * built a bespoke prompt and `permissionMode: 'plan'` per reviewer handed the
+ * session neither: every reviewer got the shared task, under
+ * `bypassPermissions`. A read-only review that can write is worse than no
+ * review, and nothing failed to say so.
+ *
+ * `customEngine` is the one field NOT here. It can carry credentials, and a
+ * spec is written to disk — see `StartOptions.secrets`.
+ */
 export interface FanoutAgentSpec {
   name: string;
   engine?: EngineType;
   model?: string;
+  /** Per-agent prompt. Overrides the node's shared prompt when present. */
+  prompt?: string;
+  /** Council-style persona text. */
   persona?: string;
+  permissionMode?: string;
+  baseUrl?: string;
+  effort?: string;
+  ultracode?: boolean;
 }
 
 export interface FanoutNode extends NodeBase {
@@ -75,6 +96,11 @@ export interface FanoutNode extends NodeBase {
   prompt: string;
   agents: FanoutAgentSpec[];
   synthesize?: boolean;
+  synthesisEngine?: EngineType;
+  synthesisModel?: string;
+  synthesisPermissionMode?: string;
+  maxTurnsPerAgent?: number;
+  maxBudgetUsd?: number;
   cwd?: string;
 }
 
@@ -84,6 +110,9 @@ export interface CouncilNode extends NodeBase {
   agents: FanoutAgentSpec[];
   projectDir?: string;
   maxRounds?: number;
+  maxTurnsPerAgent?: number;
+  maxBudgetUsd?: number;
+  defaultPermissionMode?: string;
 }
 
 export interface VerifierNode extends NodeBase {

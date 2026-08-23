@@ -195,6 +195,9 @@ export interface LegacyCouncilArgs {
   agents: CouncilNode['agents'];
   maxRounds: number;
   timeoutMs?: number;
+  maxTurnsPerAgent?: number;
+  maxBudgetUsd?: number;
+  defaultPermissionMode?: string;
 }
 
 export function legacyCouncilWorkflow(args: LegacyCouncilArgs): WorkflowSpec {
@@ -210,6 +213,9 @@ export function legacyCouncilWorkflow(args: LegacyCouncilArgs): WorkflowSpec {
         projectDir: args.cwd,
         maxRounds: args.maxRounds,
         timeoutMs: args.timeoutMs,
+        maxTurnsPerAgent: args.maxTurnsPerAgent,
+        maxBudgetUsd: args.maxBudgetUsd,
+        defaultPermissionMode: args.defaultPermissionMode,
       },
     ],
   };
@@ -220,6 +226,11 @@ export interface LegacyFanoutArgs {
   cwd: string;
   agents: FanoutNode['agents'];
   synthesize?: boolean;
+  synthesisEngine?: FanoutNode['synthesisEngine'];
+  synthesisModel?: string;
+  synthesisPermissionMode?: string;
+  maxTurnsPerAgent?: number;
+  maxBudgetUsd?: number;
   timeoutMs?: number;
   name?: string;
 }
@@ -235,11 +246,35 @@ export function legacyFanoutWorkflow(args: LegacyFanoutArgs): WorkflowSpec {
         prompt: args.task,
         agents: args.agents,
         synthesize: args.synthesize,
+        synthesisEngine: args.synthesisEngine,
+        synthesisModel: args.synthesisModel,
+        synthesisPermissionMode: args.synthesisPermissionMode,
+        maxTurnsPerAgent: args.maxTurnsPerAgent,
+        maxBudgetUsd: args.maxBudgetUsd,
         cwd: args.cwd,
         timeoutMs: args.timeoutMs,
       },
     ],
   };
+}
+
+/**
+ * Split per-agent custom-engine configs out of a legacy agent list.
+ *
+ * They hold credentials and the spec is written to disk, so they travel through
+ * `StartOptions.secrets` instead — keyed by agent name, which is unique within a
+ * run because both council and fan-out already require it.
+ */
+export function splitAgentSecrets<T extends { name: string; customEngine?: unknown }>(
+  agents: T[],
+): { agents: Omit<T, 'customEngine'>[]; secrets: Record<string, unknown> } {
+  const secrets: Record<string, unknown> = {};
+  const stripped = agents.map((a) => {
+    const { customEngine, ...rest } = a;
+    if (customEngine) secrets[a.name] = customEngine;
+    return rest;
+  });
+  return { agents: stripped, secrets };
 }
 
 export const ULTRAPLAN_SYSTEM_PROMPT =

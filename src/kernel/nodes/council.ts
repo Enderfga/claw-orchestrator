@@ -17,19 +17,31 @@ export async function executeCouncilNode(node: NodeSpec, ctx: NodeContext): Prom
   const spec = node as CouncilNode;
   if (!ctx.manager) return { ok: false, error: 'council node requires a session manager' };
 
+  // Same story as the fan-out node: forward every field. Dropping
+  // `customEngine` here did not merely lose configuration — a council agent on a
+  // custom engine could not start at all without it.
+  const customEngines = (ctx.secrets.agentCustomEngines ?? {}) as Record<string, unknown>;
   const { Council } = await import('../../council.js');
   const council = new Council(
     {
       agents: spec.agents.map((a) => ({
         name: a.name,
         emoji: '',
-        persona: a.persona ?? '',
+        persona: a.persona ?? a.prompt ?? '',
         engine: a.engine,
         model: a.model,
+        baseUrl: a.baseUrl,
+        permissionMode: a.permissionMode as never,
+        effort: a.effort as never,
+        ultracode: a.ultracode,
+        customEngine: customEngines[a.name] as never,
       })),
       maxRounds: spec.maxRounds ?? 8,
       projectDir: spec.projectDir || ctx.cwd,
       agentTimeoutMs: spec.timeoutMs,
+      maxTurnsPerAgent: spec.maxTurnsPerAgent,
+      maxBudgetUsd: spec.maxBudgetUsd,
+      defaultPermissionMode: spec.defaultPermissionMode as never,
     },
     ctx.manager,
     ctx.logger,
