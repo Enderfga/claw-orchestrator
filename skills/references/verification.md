@@ -175,8 +175,13 @@ unchecked run read as a checked one.
   checks means the verdict stands; something running after it means we decline
   to vouch, and the run says so.
 
-What it is **not**: a guarantee that nothing can touch the tree after the
-evidence is written. A node that overran its timeout is abandoned rather than
-killed, so its writes can land after the run has finished, later than the last
-digest. Give such nodes a timeout they will not hit, or make their writes safe to
-arrive late.
+- If an abandoned attempt (a node past its timeout, which cannot be killed) is
+  still running when the run ends, the outcome is `unverified` with the reason
+  recorded. The runtime will not vouch for a tree something may still be writing
+  to.
+
+What it is **not**: a promise that nothing can touch the tree after a run ends.
+A node past its timeout keeps running, and if it outlives the short settle
+window its writes land after the last digest — the run will have said
+`unverified`, but the file is still changed. Give such nodes a timeout they will
+not hit, or make their writes safe to arrive late.

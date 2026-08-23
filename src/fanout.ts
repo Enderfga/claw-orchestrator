@@ -63,6 +63,15 @@ export interface FanoutConfig {
   agentTimeoutMs?: number;
   maxTurnsPerAgent?: number;
   maxBudgetUsd?: number;
+  /**
+   * Identity for this run, supplied by the kernel.
+   *
+   * Without it the fan-out minted its own `fanout-<uuid>` and stamped THAT onto
+   * every ledger row's `parentRunId` — so the rows could not be grouped by the
+   * kernel run they belonged to, and the two ids had to be joined by hand.
+   * One execution, one identity.
+   */
+  runId?: string;
 }
 
 export interface FanoutAgentResult {
@@ -102,7 +111,7 @@ export class Fanout {
     private logger?: Logger,
   ) {
     this.session = {
-      id: `fanout-${randomUUID().slice(0, 8)}`,
+      id: config.runId ?? `fanout-${randomUUID().slice(0, 8)}`,
       status: 'running',
       task: config.task,
       agentCount: config.agents.length,

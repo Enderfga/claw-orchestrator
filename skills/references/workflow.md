@@ -74,13 +74,24 @@ then died before its checkpoint runs again from the top. Workflows whose nodes
 are not safe to repeat need to make them safe. Resume is also explicit —
 `workflow_resume` — not automatic.
 
-**One owner at a time**, though. A run holds a lease (`lease.json`: pid, host,
-heartbeat) taken on start and resume, renewed on every checkpoint, released when
-the run ends. A second process trying to resume a run someone else is executing
-is refused by name — two owners would mean every side effect twice, two writers
-to one checkpoint, and one event log interleaving two timelines. A lease whose
-holder is gone (same host: the pid is checked directly) or whose heartbeat has
-stopped for a minute is up for grabs.
+**One owner at a time**, though, and it is enforced rather than agreed:
+
+- **Atomic acquisition.** The check and the write happen inside an `O_EXCL` lock
+  file. Read-then-write let two processes both see "free" and both conclude they
+  had it, which is the failure a lease exists to prevent.
+- **A fencing token.** Each acquisition bumps a counter, and the holder verifies
+  it before every state write. A process wrongly declared dead — a long GC pause,
+  a suspended laptop — stops instead of writing alongside its replacement.
+- **An independent heartbeat.** Renewed on a timer, not only at checkpoints: a
+  run executing one long node makes no checkpoints, and must not look abandoned
+  for it. On the same host a live pid is the authority and is never judged stale
+  for going quiet; the heartbeat is the fallback for a holder on another machine.
+- **In-process too.** Starting a run whose id is already live retires the
+  previous run first. A lease cannot see inside one process, and two live runs
+  sharing an id would write over each other's checkpoints.
+
+A second process trying to resume a run someone else is executing is refused by
+name, with the owner's pid and host in the message.
 
 One more caveat worth stating plainly: event appends are best-effort (a log
 failure is warned and swallowed so it cannot break the run it describes), yet
@@ -245,6 +256,12 @@ belong before the task.
   (`<runId>-<nodeId>-a<n>`) — otherwise the dying attempt's teardown would stop
   the retry's session. A node that writes to a fixed path outside the run
   directory can still race its own retry; scope such writes per attempt.
+
+  Because such an attempt can still write, a run about to report `verified`
+  waits briefly for outstanding attempts to settle, and reports `unverified`
+  with the reason if any is still going. It will not hold the run open for one
+  that never stops — it declines to vouch instead.
+
 - Cancel and a node timeout are different things. A timeout is a node failure
   (it still gets its retries and still honours `onFailure`); cancelling ends the
   run.

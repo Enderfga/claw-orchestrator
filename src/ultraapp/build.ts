@@ -61,6 +61,8 @@ interface PersistedQueue {
 
 /** How long an owner may go without a heartbeat before the queue is up for grabs. */
 const OWNER_TTL_MS = 60_000;
+/** Refresh interval, comfortably inside the TTL. */
+const HEARTBEAT_MS = 15_000;
 
 function ownerIsLive(owner: PersistedQueue['owner']): boolean {
   if (!owner) return false;
@@ -82,6 +84,7 @@ export class UltraappBuildQueue {
   private readonly worker: Worker;
   private readonly concurrency: number;
   private readonly statePath?: string;
+  private heartbeat?: ReturnType<typeof setInterval>;
   private idlePromise: Promise<void> = Promise.resolve();
   private idleResolve: (() => void) | null = null;
 
@@ -90,6 +93,12 @@ export class UltraappBuildQueue {
     this.concurrency = opts.concurrency ?? 1;
     this.statePath = opts.statePath;
     const restored = this.restore();
+    if (this.statePath && !this.notOwner) {
+      // Independent of any build finishing: a worker that runs for ten minutes
+      // makes no state writes, and must not look abandoned for it.
+      this.heartbeat = setInterval(() => this.persist(), HEARTBEAT_MS);
+      if (typeof this.heartbeat.unref === 'function') this.heartbeat.unref();
+    }
     if (this.notOwner) opts.onNotOwner?.(this.notOwner);
     if (restored.length > 0) {
       opts.onRestore?.(restored);
@@ -104,6 +113,21 @@ export class UltraappBuildQueue {
   /** True when this process is executing the queue. */
   ownsQueue(): boolean {
     return !this.notOwner;
+  }
+
+  /** Refuse an operation that only the owner may perform. */
+  private assertOwner(action: string): void {
+    if (!this.notOwner) return;
+    throw new Error(
+      `Cannot ${action}: this build queue is owned by pid ${this.notOwner.pid} ` +
+        `(last seen ${this.notOwner.renewedAt}). Running its builds here would execute them twice.`,
+    );
+  }
+
+  /** Release the claim so another process can pick the queue up promptly. */
+  stop(): void {
+    if (this.heartbeat) clearInterval(this.heartbeat);
+    this.heartbeat = undefined;
   }
 
   /**
@@ -142,7 +166,7 @@ export class UltraappBuildQueue {
 
   /** Best-effort, like every other log write here: never break a build over it. */
   private persist(): void {
-    if (!this.statePath) return;
+    if (!this.statePath || this.notOwner) return;
     try {
       fs.mkdirSync(path.dirname(this.statePath), { recursive: true });
       const state: PersistedQueue = {
@@ -165,6 +189,10 @@ export class UltraappBuildQueue {
    * pending list. Use {@link idle} to wait for the queue to drain.
    */
   async enqueue(runId: string): Promise<void> {
+    // Refusing at construction is not enough: `ownsQueue()` returning false
+    // while `enqueue` cheerfully ran the build — and rewrote the owner to
+    // ourselves — is exactly the double execution the claim exists to stop.
+    this.assertOwner('enqueue');
     this.pending.push({ runId });
     this.persist();
     this.markBusy();
@@ -208,6 +236,7 @@ export class UltraappBuildQueue {
   }
 
   private async tryDispatch(): Promise<void> {
+    if (this.notOwner) return;
     if (this.currentRunId !== null) return;
     if (this.concurrency !== 1) throw new Error('concurrency > 1 not implemented in v0.2');
     const next = this.pending.shift();

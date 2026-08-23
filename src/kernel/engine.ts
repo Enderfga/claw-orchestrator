@@ -42,6 +42,9 @@ import type { SessionManagerLike } from './agent-step.js';
 import {
   acquireLease,
   appendEvent,
+  holdsLease,
+  LEASE_HEARTBEAT_MS,
+  renewLease,
   createRunDir,
   isValidRunId,
   releaseLease,
@@ -71,6 +74,14 @@ import {
 
 export const DEFAULT_NODE_TIMEOUT_MS = 30 * 60_000;
 export const DEFAULT_MAX_NODE_VISITS = 50;
+/**
+ * How long a run about to claim `verified` waits for abandoned attempts to stop.
+ *
+ * Short on purpose. The wait exists to catch an attempt that is about to finish,
+ * not to hold a run hostage to one that never will — a node stuck forever must
+ * not stop the run from ending, only from being called verified.
+ */
+export const QUIESCE_GRACE_MS = 2_000;
 /** Terminal verifier appended when the workflow declares a run-level contract. */
 export const IMPLICIT_VERIFIER_ID = '__verify';
 /** How much node text the checkpoint carries inline. The rest goes to disk. */
@@ -121,6 +132,8 @@ export interface NodeContext {
   runContract?: AcceptanceContract;
   /** In-memory values the spec deliberately does not carry. Never persisted. */
   secrets: Record<string, unknown>;
+  /** `StartOptions.tag` for the start that launched this node, when one was given. */
+  tag?: string;
   /**
    * Publish the live engine object for this node (a `Council`, a `Fanout`, an
    * autoloop dispatcher) so in-flight control — inject, abort, chat — can reach
@@ -146,6 +159,16 @@ export type NodeExecutor = (node: NodeSpec, ctx: NodeContext) => Promise<NodeRes
 interface RunHandle {
   signal: { aborted: boolean };
   steer: string[];
+  /** Fence from the lease this run holds. Every state write checks it. */
+  fence: number;
+  tag?: string;
+  /** Independent of any checkpoint, so a long node cannot look abandoned. */
+  heartbeat?: ReturnType<typeof setInterval>;
+  /**
+   * Executor promises that have been abandoned (timed out) but are still
+   * running. A run cannot claim `verified` while one of these could still write.
+   */
+  inflight: Set<Promise<unknown>>;
   /** Never written anywhere; dies with the process, as intended. */
   secrets: Record<string, unknown>;
   /** Resolves when a parked human_gate is answered. */
@@ -168,6 +191,14 @@ export interface StartOptions {
   cwd?: string;
   /** Overrides `spec.contract`. Callers only — never sourced from agent output. */
   contract?: unknown;
+  /**
+   * Opaque label for THIS start, handed to nodes as `ctx.tag`.
+   *
+   * A run id can be reused — a start that failed frees it for a retry — so
+   * anything the caller keys on the run id can be clobbered by the next start.
+   * The tag identifies one attempt at running it.
+   */
+  tag?: string;
   /**
    * Values a node needs but the spec must not carry — custom-engine configs,
    * whose `env` holds credentials.
@@ -258,6 +289,10 @@ export class RunKernel extends EventEmitter {
    * given them again.
    */
   private readonly _secrets = new Map<string, Record<string, unknown>>();
+  /** Fence handed back by the last successful lease acquisition, per run. */
+  private readonly _fences = new Map<string, number>();
+  /** Caller label for the most recent start of each run. */
+  private readonly _tags = new Map<string, string>();
 
   constructor(opts: KernelOptions = {}) {
     super();
@@ -265,6 +300,15 @@ export class RunKernel extends EventEmitter {
     this.logger = opts.logger ?? createConsoleLogger('kernel');
     this.executors = opts.executors ?? {};
     this.nodeTimeoutMs = opts.nodeTimeoutMs ?? DEFAULT_NODE_TIMEOUT_MS;
+  }
+
+  /** Stop and await any live run holding this id, so a reuse cannot overlap it. */
+  private async _retire(runId: string): Promise<void> {
+    const existing = this.live.get(runId);
+    if (!existing) return;
+    this.cancel(runId);
+    await existing.done.catch(() => undefined);
+    if (this.live.get(runId) === existing) this.live.delete(runId);
   }
 
   /** Register (or replace) the executor for one node kind. */
@@ -319,8 +363,15 @@ export class RunKernel extends EventEmitter {
     };
 
     if (opts.secrets) this._secrets.set(runId, opts.secrets);
+    if (opts.tag) this._tags.set(runId, opts.tag);
+    // A run id may be reused once its previous run is gone — a failed start
+    // frees it. But two live runs with the same id in one process would write
+    // over each other's checkpoints, so the old one is stopped and waited for
+    // first. This is the in-process half of what the lease does across
+    // processes.
+    await this._retire(runId);
     createRunDir(runId, spec);
-    acquireLease(runId);
+    this._fences.set(runId, acquireLease(runId).fence);
     record.baseSha = await captureBaseline(cwd);
     saveRun(record);
     this._event(record, { ts: now, type: 'run_created', runId, workflow: spec.name });
@@ -334,8 +385,12 @@ export class RunKernel extends EventEmitter {
    * re-run; the node that was in flight when the process ended is retried from
    * the start, because a half-finished node left no result to trust.
    */
-  async resume(runId: string, opts: { restart?: boolean; secrets?: Record<string, unknown> } = {}): Promise<RunRecord> {
+  async resume(
+    runId: string,
+    opts: { restart?: boolean; secrets?: Record<string, unknown>; tag?: string } = {},
+  ): Promise<RunRecord> {
     if (opts.secrets) this._secrets.set(runId, opts.secrets);
+    if (opts.tag) this._tags.set(runId, opts.tag);
     if (this.live.has(runId)) {
       const existing = loadRun(runId);
       if (!existing) throw new Error(`Run '${runId}' not found`);
@@ -343,14 +398,18 @@ export class RunKernel extends EventEmitter {
     }
     const record = loadRun(runId);
     if (!record) throw new Error(`Run '${runId}' not found`);
-    // Claim it before touching anything: two processes resuming the same run
-    // would each execute its nodes, with every side effect happening twice.
-    acquireLease(runId);
     // A finished run stays finished by default: silently re-running a completed
     // workflow because someone polled `resume` would be a nasty surprise.
     // `restart` is for callers whose "resume" genuinely means "bring it back up"
     // — autoloop, whose runs terminate and are expected to be restartable.
+    //
+    // Checked BEFORE the lease is taken. Taking it first meant that merely
+    // polling `resume` on a completed run minted a lease nobody would ever
+    // release, blocking the next process from restarting it.
     if (isTerminalRunState(record.state) && !opts.restart) return record;
+    // Claim it: two processes resuming the same run would each execute its
+    // nodes, with every side effect happening twice.
+    this._fences.set(runId, acquireLease(runId).fence);
 
     for (const n of Object.values(record.nodes)) {
       if (n.state === 'running' || (opts.restart && isTerminalRunState(record.state))) {
@@ -467,16 +526,25 @@ export class RunKernel extends EventEmitter {
     const handle: RunHandle = {
       signal: { aborted: false },
       steer: [],
+      fence: this._fences.get(record.runId) ?? 0,
+      tag: this._tags.get(record.runId),
+      inflight: new Set(),
       secrets: this._secrets.get(record.runId) ?? {},
       handles: new Map(),
       done: Promise.resolve(record),
     };
+    handle.heartbeat = setInterval(() => renewLease(record.runId), LEASE_HEARTBEAT_MS);
+    if (typeof handle.heartbeat.unref === 'function') handle.heartbeat.unref();
     // Registered before the run starts: a workflow with no nodes finishes
     // synchronously up to its first await, and the `finally` below would
     // otherwise delete an entry that had not been added yet.
     this.live.set(record.runId, handle);
     handle.done = this._run(record, handle).finally(() => {
-      this.live.delete(record.runId);
+      if (handle.heartbeat) clearInterval(handle.heartbeat);
+      // Identity-checked: a run id can be reused, and deleting by key alone
+      // meant a finishing run evicted the handle of the run that had just
+      // replaced it.
+      if (this.live.get(record.runId) === handle) this.live.delete(record.runId);
     });
     // The caller gets the record immediately; failures surface through the record.
     handle.done.catch(() => undefined);
@@ -486,6 +554,22 @@ export class RunKernel extends EventEmitter {
     appendEvent(record.runId, event, this.logger);
     this.emit('kernel-event', { runId: record.runId, event });
     this.emit(record.runId, event);
+  }
+
+  /**
+   * Stop the run if this process no longer owns it.
+   *
+   * A fencing token is only useful if the loser checks it. Without this, a
+   * process wrongly declared dead — a long GC pause, a suspended laptop — would
+   * carry on writing checkpoints alongside its replacement.
+   */
+  private _assertFence(record: RunRecord, handle: RunHandle): boolean {
+    if (handle.fence === 0 || holdsLease(record.runId, handle.fence)) return true;
+    handle.signal.aborted = true;
+    this.logger.warn?.(
+      `[kernel] ${record.runId}: lease was taken over (fence ${handle.fence} superseded) — stopping this owner`,
+    );
+    return false;
   }
 
   private _setRunState(record: RunRecord, state: RunRecord['state'], error?: string): void {
@@ -560,6 +644,7 @@ export class RunKernel extends EventEmitter {
     ctx: NodeContext,
     timeoutMs: number,
     attemptSignal: { aborted: boolean },
+    inflight: Set<Promise<unknown>>,
   ): Promise<NodeResult> {
     const executor = this.executors[node.kind];
     if (!executor) {
@@ -577,10 +662,43 @@ export class RunKernel extends EventEmitter {
       }, timeoutMs);
       if (typeof timer.unref === 'function') timer.unref();
     });
+    // The executor promise is tracked, not just raced. A timeout abandons the
+    // wait, not the work — the executor keeps running and can still write — so
+    // the run has to know it is out there before it calls anything verified.
+    const running = Promise.resolve()
+      .then(() => executor(node, ctx))
+      .catch((err) => ({ ok: false, error: (err as Error).message }) as NodeResult)
+      .finally(() => inflight.delete(running));
+    inflight.add(running);
+
     try {
-      return await Promise.race([executor(node, ctx), timeout]);
+      return await Promise.race([running, timeout]);
     } catch (err) {
       return { ok: false, error: (err as Error).message };
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  /**
+   * Wait for abandoned attempts to stop, so a terminal verdict describes a tree
+   * nobody is still writing to.
+   *
+   * A timed-out node is not killed — JS gives us no way to — so a run used to
+   * stamp `completed / verified`, then have the abandoned attempt write to the
+   * workspace afterwards. The evidence was accurate at the moment it was taken
+   * and wrong seconds later, with nothing recording that.
+   */
+  private async _awaitQuiescence(handle: RunHandle, graceMs: number): Promise<boolean> {
+    if (handle.inflight.size === 0) return true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const grace = new Promise<'timeout'>((resolve) => {
+      timer = setTimeout(() => resolve('timeout'), graceMs);
+      if (typeof timer.unref === 'function') timer.unref();
+    });
+    const settled = Promise.allSettled([...handle.inflight]).then(() => 'settled' as const);
+    try {
+      return (await Promise.race([settled, grace])) === 'settled';
     } finally {
       if (timer) clearTimeout(timer);
     }
@@ -644,7 +762,7 @@ export class RunKernel extends EventEmitter {
       if (!result.ok) {
         this._setNodeState(record, nodeRec, 'failed', { error: result.error });
         if ((spec.onFailure ?? 'fail') === 'fail') {
-          await this._finish(record, `node '${cursor}' failed: ${result.error ?? 'unknown'}`);
+          await this._finish(record, handle, `node '${cursor}' failed: ${result.error ?? 'unknown'}`);
           return record;
         }
         // `continue` — record it and move on.
@@ -659,7 +777,7 @@ export class RunKernel extends EventEmitter {
       cursor = spec.next ?? this._nextInOrder(record, cursor);
     }
 
-    await this._finish(record);
+    await this._finish(record, handle);
     return record;
   }
 
@@ -676,6 +794,7 @@ export class RunKernel extends EventEmitter {
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       if (handle.signal.aborted) return { ok: false, error: 'cancelled' };
       nodeRec.attempts = attempt;
+      if (!this._assertFence(record, handle)) return { ok: false, error: 'lease lost to another owner' };
       this._setNodeState(record, nodeRec, 'running', { attempt });
 
       // A node sees one signal that is the union of "this attempt gave up" and
@@ -706,6 +825,7 @@ export class RunKernel extends EventEmitter {
           saveRun(record);
         },
         secrets: handle.secrets,
+        tag: handle.tag,
         setChild: (childRunId) => {
           nodeRec.childRunId = childRunId;
           record.updatedAt = new Date().toISOString();
@@ -713,7 +833,7 @@ export class RunKernel extends EventEmitter {
         },
       };
 
-      last = await this._executeNode(spec, ctx, timeoutMs, attemptSignal);
+      last = await this._executeNode(spec, ctx, timeoutMs, attemptSignal, handle.inflight);
       if (last.ok || handle.signal.aborted) return last;
 
       if (attempt < maxAttempts) {
@@ -804,7 +924,28 @@ export class RunKernel extends EventEmitter {
    * a run with no contract completes as `unverified`, which says we did not check
    * rather than claiming success.
    */
-  private async _finish(record: RunRecord, error?: string): Promise<void> {
+  private async _finish(record: RunRecord, handle: RunHandle, error?: string): Promise<void> {
+    // Nothing may still be writing when a verdict is stamped. An abandoned
+    // attempt keeps running after its timeout, so wait briefly for it — and if
+    // it will not stop, say so instead of vouching for a tree it may yet change.
+    //
+    // Only when there is a verdict to protect: a run that was never verified has
+    // nothing to lose by ending promptly, and blocking it would make one hung
+    // node delay every run that contained it.
+    const quiet = record.outcome === 'verified' ? await this._awaitQuiescence(handle, QUIESCE_GRACE_MS) : true;
+    if (!quiet && record.outcome === 'verified') {
+      record.outcome = 'unverified';
+      record.outcomeReason =
+        `evidence ${record.verdict?.evidenceId ?? '(none)'} passed, but ${handle.inflight.size} abandoned ` +
+        `attempt(s) were still running when the run ended — they can still change the tree, so the verdict ` +
+        `cannot stand`;
+      this._event(record, {
+        ts: new Date().toISOString(),
+        type: 'log',
+        level: 'warn',
+        message: `[verify] ${record.outcomeReason}`,
+      });
+    }
     await this._expireStaleVerdict(record);
     const outcome: RunOutcome = record.outcome;
     if (error || outcome === 'refuted') {

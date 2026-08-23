@@ -578,7 +578,7 @@ export class Council extends EventEmitter {
     }
 
     const session: CouncilSession = {
-      id: randomUUID(),
+      id: this.config.runId ?? randomUUID(),
       task: task.trim(),
       config: this.config,
       responses: [],

@@ -135,6 +135,32 @@ because a verifier is a node in the thing that survives.
 
 ### Fixed
 
+- **A verdict cannot outlive the work.** A node that overruns its timeout is
+  abandoned, not killed — JS offers no way to kill it — so a run used to stamp
+  `completed / verified` and then have the abandoned attempt write to the
+  workspace afterwards: evidence that was accurate when taken and wrong seconds
+  later, with nothing recording it. Abandoned attempts are now tracked, and a run
+  about to claim `verified` waits briefly for them; if any is still running it
+  reports `unverified` with the reason instead of vouching for a tree that may
+  yet change. The wait is short and only happens when there is a verdict at
+  stake, so one stuck node cannot hold a run open.
+- **Resuming with a custom engine works in a fresh process.** `autoloopResume`
+  asked the caller to re-supply the credentials the spec deliberately does not
+  carry, then dropped them into a map the executor no longer read — so the
+  original process succeeded by accident, on secrets still in its memory, and a
+  genuine restart got none of them. They go through the run's secret bag now, and
+  `workflowResume` accepts them too, which is what makes a custom-engine council
+  or fan-out resumable at all.
+- Polling `resume` on a finished run no longer mints a lease nobody releases.
+  The claim was taken before the terminal check, so a status poll could block the
+  next process from restarting it.
+- Readiness deferreds and live-run handles are keyed by the identity of a
+  particular start, not by run id. A run id is reused when a failed start frees
+  it, and keying on the id let a dying start clear the retry's deferred — the
+  retry then waited forever for a signal with nowhere to land.
+- **One execution, one identity.** `Council` and `Fanout` minted their own ids
+  and stamped those on every ledger row's `parentRunId`, so the ledger could not
+  be grouped by the kernel run a turn belonged to. They take the run id now.
 - A cancelled run is `cancelled`, whatever the node returned. A runner that never
   looked at the signal and reported success carried the run to `completed`, so
   "I cancelled it" and "it completed" could both be true. Cancelling also reaches
@@ -185,11 +211,28 @@ because a verifier is a node in the thing that survives.
   `spec.json` held the token in plain text. Credentials travel through an
   in-memory side channel now, and the spec is scrubbed on the way out as a second
   line of defence.
-- **One owner per run.** A lease (pid + heartbeat) is taken on start and resume
-  and released when the run ends. Two processes could each `resume` the same run
-  and both execute its nodes: every side effect twice, two writers to one
-  checkpoint, one event log interleaving two timelines. The UltraApp build queue
-  takes the same kind of claim over its state file.
+- **One owner per run, enforced.** A lease is taken on start and resume and
+  released when the run ends, so two processes cannot both execute a run's nodes
+  — every side effect twice, two writers to one checkpoint, one event log
+  interleaving two timelines.
+
+  It is a real lease, not a convention: acquisition is atomic (an `O_EXCL` lock
+  file around the check-and-write, because read-then-write let two racers both
+  conclude they had it); it carries a monotonic **fencing token** that every
+  state write verifies, so a holder that was wrongly declared dead finds out
+  instead of writing alongside its replacement; and it is heartbeated on a timer
+  rather than only at checkpoints, because a run executing one long node makes no
+  checkpoints and must not look abandoned for it. On the same host a live pid is
+  the authority and is never judged stale for going quiet.
+
+  In-process, starting a run whose id is already live retires the previous run
+  first — the same rule, applied where a lease cannot see.
+
+  The UltraApp build queue takes an equivalent claim over its state file, and
+  refuses `enqueue` rather than merely declining to restore: knowing it was not
+  the owner while still running the builds, and rewriting the owner to itself,
+  was the whole failure.
+
 - Run ids are validated as a single path segment before any path is derived from
   them. They can be supplied by the caller — including through a tool call — and
   every path in the run store came from `path.join(root, runId)`, with delete

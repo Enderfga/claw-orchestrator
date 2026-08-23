@@ -172,8 +172,9 @@ export function createRunDir(runId: string, spec: WorkflowSpec): void {
 export function saveRun(record: RunRecord): void {
   // The checkpoint embeds the spec, so it gets the same scrub.
   atomicWriteJson(path.join(runDir(record.runId), 'run.json'), sanitizeForDisk(record));
-  // Checkpointing IS the heartbeat: a run that is making progress is proving
-  // its owner is alive, and one that is not will let its lease expire.
+  // Checkpointing also refreshes the claim, but it is no longer the only thing
+  // that does: the kernel heartbeats on a timer, because a run executing one
+  // long node makes no checkpoints and must not look abandoned for it.
   renewLease(record.runId);
 }
 
@@ -365,16 +366,31 @@ export function stampTerminal(record: RunRecord, state: RunState): void {
 // the heartbeat has not moved for LEASE_TTL_MS.
 
 export const LEASE_TTL_MS = 60_000;
+/** How often a live owner refreshes its claim, independently of any work it is doing. */
+export const LEASE_HEARTBEAT_MS = 15_000;
 
 export interface RunLease {
   pid: number;
   host: string;
   acquiredAt: string;
   renewedAt: string;
+  /**
+   * Monotonically increasing across acquisitions.
+   *
+   * A holder stamps this on every write. If it ever finds a higher fence on
+   * disk it has been superseded and must stop, which is what stops a process
+   * that was wrongly declared dead from carrying on writing next to its
+   * replacement.
+   */
+  fence: number;
 }
 
 function leaseFile(runId: string): string {
   return path.join(runDir(runId), 'lease.json');
+}
+
+function lockFile(runId: string): string {
+  return path.join(runDir(runId), 'lease.lock');
 }
 
 function processAlive(pid: number): boolean {
@@ -391,40 +407,82 @@ export function readLease(runId: string): RunLease | undefined {
   return readJson<RunLease>(leaseFile(runId));
 }
 
-/** True when a lease no longer represents a live owner. */
+/**
+ * True when a lease no longer represents a live owner.
+ *
+ * On the same host the pid is the authority and the heartbeat is not consulted:
+ * a process running one long node makes no checkpoints, and judging it dead for
+ * that reason is how two owners end up running the same work. The heartbeat is
+ * the fallback for a holder we cannot ask about — another machine, or a pid
+ * whose meaning we cannot trust across hosts.
+ */
 export function leaseIsStale(lease: RunLease | undefined, now = Date.now()): boolean {
   if (!lease) return true;
+  if (lease.host === os.hostname()) return !processAlive(lease.pid);
   const age = now - Date.parse(lease.renewedAt);
-  if (Number.isNaN(age)) return true;
-  // Same host: the pid is the authority, and a dead pid frees the run at once
-  // rather than after a minute of waiting.
-  if (lease.host === os.hostname() && !processAlive(lease.pid)) return true;
-  return age > LEASE_TTL_MS;
+  return Number.isNaN(age) || age > LEASE_TTL_MS;
 }
 
 /**
- * Claim a run. Throws when someone else holds it.
+ * Claim a run, atomically.
  *
- * Re-entrant for the current process: a manager that already owns a run may
- * take it again (resume-after-terminate, for one) without tripping over itself.
+ * The check and the write have to be one operation. Read-then-write let two
+ * processes both see "free" and both conclude they had it, which is the failure
+ * a lease exists to prevent. The critical section is an `O_EXCL` lock file:
+ * exactly one racer creates it, and the loser is refused rather than made a
+ * co-owner.
+ *
+ * Re-entrant for the current process, so a manager can reclaim a run it already
+ * owns (resume-after-terminate) without tripping over itself.
  */
 export function acquireLease(runId: string): RunLease {
-  const existing = readLease(runId);
-  if (existing && existing.pid !== process.pid && !leaseIsStale(existing)) {
-    throw new Error(
-      `Run '${runId}' is owned by pid ${existing.pid} on ${existing.host} (last seen ${existing.renewedAt}) — ` +
-        `only one process may run it at a time`,
-    );
+  const lock = lockFile(runId);
+  fs.mkdirSync(path.dirname(lock), { recursive: true });
+
+  let fd: number;
+  try {
+    fd = fs.openSync(lock, 'wx');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+    // A lock left by a crashed acquirer would block the run forever, so a lock
+    // older than the TTL is broken open. Acquisition is milliseconds; anything
+    // this old is debris.
+    let age = Infinity;
+    try {
+      age = Date.now() - fs.statSync(lock).mtimeMs;
+    } catch {
+      age = Infinity;
+    }
+    if (age < LEASE_TTL_MS) {
+      throw new Error(`Run '${runId}' is being claimed by another process right now`);
+    }
+    fs.rmSync(lock, { force: true });
+    fd = fs.openSync(lock, 'wx');
   }
-  const now = new Date().toISOString();
-  const lease: RunLease = {
-    pid: process.pid,
-    host: os.hostname(),
-    acquiredAt: existing?.pid === process.pid ? existing.acquiredAt : now,
-    renewedAt: now,
-  };
-  atomicWriteJson(leaseFile(runId), lease);
-  return lease;
+
+  try {
+    const existing = readLease(runId);
+    if (existing && existing.pid !== process.pid && !leaseIsStale(existing)) {
+      throw new Error(
+        `Run '${runId}' is owned by pid ${existing.pid} on ${existing.host} (last seen ${existing.renewedAt}) — ` +
+          `only one process may run it at a time`,
+      );
+    }
+    const now = new Date().toISOString();
+    const lease: RunLease = {
+      pid: process.pid,
+      host: os.hostname(),
+      acquiredAt: existing?.pid === process.pid ? existing.acquiredAt : now,
+      renewedAt: now,
+      // Every takeover bumps the fence, so the previous holder can tell it lost.
+      fence: (existing?.fence ?? 0) + (existing?.pid === process.pid ? 0 : 1),
+    };
+    atomicWriteJson(leaseFile(runId), lease);
+    return lease;
+  } finally {
+    fs.closeSync(fd);
+    fs.rmSync(lock, { force: true });
+  }
 }
 
 /** Heartbeat. Best-effort: losing a renewal must not break the run. */
@@ -436,6 +494,19 @@ export function renewLease(runId: string): void {
   } catch {
     // The next renewal will try again.
   }
+}
+
+/**
+ * Whether this process still holds the run at the fence it was given.
+ *
+ * Checked before every state write. A holder that has been superseded stops
+ * rather than writing next to its replacement — the point of a fencing token is
+ * that the loser finds out.
+ */
+export function holdsLease(runId: string, fence: number): boolean {
+  const current = readLease(runId);
+  if (!current) return false;
+  return current.pid === process.pid && current.fence === fence;
 }
 
 export function releaseLease(runId: string): void {

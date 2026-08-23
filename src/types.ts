@@ -724,6 +724,12 @@ export interface AgentPersona {
 
 export interface CouncilConfig {
   name?: string;
+  /**
+   * Identity for this run, supplied by the kernel. Omitted, the council mints
+   * its own UUID — which then appears as the ledger's `parentRunId` instead of
+   * the run id everything else uses.
+   */
+  runId?: string;
   agents: AgentPersona[];
   maxRounds: number;
   projectDir: string;

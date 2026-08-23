@@ -22,6 +22,9 @@ export async function executeFanoutNode(node: NodeSpec, ctx: NodeContext): Promi
   const { Fanout } = await import('../../fanout.js');
   const fanout = new Fanout(
     {
+      // One identity for the whole execution: the ledger's `parentRunId` is the
+      // kernel run id, so rows group by the run they belong to.
+      runId: ctx.runId,
       task: spec.prompt,
       projectDir: spec.cwd || ctx.cwd,
       agents: spec.agents.map((a) => ({

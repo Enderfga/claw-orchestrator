@@ -895,11 +895,12 @@ export class SessionManager {
             this._bootAutoloop({
               ...(config as Parameters<SessionManager['_bootAutoloop']>[0]),
               // Custom-engine configs never reach the spec, so they come from
-              // the run's in-memory secret bag instead.
+              // the run's in-memory secret bag — supplied at start, and
+              // re-supplied by the caller on a resume.
               ...(secrets as Partial<Parameters<SessionManager['_bootAutoloop']>[0]>),
             }),
-          ready: (runId, value) => {
-            const deferred = this._autoloopReady.get(runId);
+          ready: (key, value) => {
+            const deferred = this._autoloopReady.get(key);
             if (!deferred) return;
             if (value instanceof Error) deferred.reject(value);
             else deferred.resolve(value);
@@ -961,8 +962,16 @@ export class SessionManager {
     return { cancelled: this.kernel.cancel(runId) };
   }
 
-  async workflowResume(runId: string): Promise<RunRecord> {
-    return this.kernel.resume(runId);
+  /**
+   * Re-attach to a run.
+   *
+   * `secrets` re-supplies the material the spec deliberately does not carry —
+   * per-agent custom-engine configs, keyed as `{ agentCustomEngines: { <name>: cfg } }`.
+   * A run that used one cannot be resumed in a fresh process without them,
+   * because they were never written down.
+   */
+  async workflowResume(runId: string, opts: { secrets?: Record<string, unknown> } = {}): Promise<RunRecord> {
+    return this.kernel.resume(runId, { secrets: opts.secrets });
   }
 
   workflowSteer(runId: string, text: string): { steered: boolean } {
@@ -2484,14 +2493,27 @@ export class SessionManager {
    * `autoloopStart` can return the Planner session name the caller expects
    * without polling.
    */
+  /**
+   * Deferreds resolved by the `autoloop` node once its engine is up.
+   *
+   * Keyed by the start's tag rather than its run id. A run id gets reused — a
+   * start that failed frees it for a retry — so keying on the id let a dying
+   * start settle, or clear, the retry's deferred instead of its own, and the
+   * retry then waited forever for a signal with nowhere to land.
+   */
   private _autoloopReady = new Map<
     string,
     { resolve: (v: { plannerSession: string; state: AutoloopState }) => void; reject: (e: Error) => void }
   >();
+  /**
+   * Run ids with a start in flight — the window between "run created" and
+   * "engine up". Deleting inside it would drop the run while its Planner
+   * session is still being created, orphaning a session that finishes a moment
+   * later with nothing pointing at it.
+   */
+  private _autoloopStarting = new Set<string>();
   /** Latest role selection per run, published into the node payload. */
   private _autoloopSelection = new Map<string, unknown>();
-  /** Custom-engine configs for a resume; never persisted, so never on disk. */
-  private _autoloopResumeConfig = new Map<string, Parameters<SessionManager['_bootAutoloop']>[0]>();
   /** Per-run checkpoint refreshers, registered by the autoloop node executor. */
   private _autoloopPublishers = new Map<string, () => void>();
 
@@ -2945,9 +2967,11 @@ export class SessionManager {
       }
     }
 
+    const tag = `${opts.runId}:${randomUUID()}`;
     const ready = new Promise<{ plannerSession: string; state: AutoloopState }>((resolve, reject) => {
-      this._autoloopReady.set(opts.runId, { resolve, reject });
+      this._autoloopReady.set(tag, { resolve, reject });
     });
+    this._autoloopStarting.add(opts.runId);
     // Custom-engine configs hold credentials and the spec is written to disk, so
     // they travel in memory. Without this split, `spec.json` contained the token
     // from `CustomEngineConfig.env` in plain text.
@@ -2968,6 +2992,7 @@ export class SessionManager {
       {
         runId: opts.runId,
         cwd: opts.workspace,
+        tag,
         secrets: { plannerCustomEngine, coderCustomEngine, reviewerCustomEngine },
       },
     );
@@ -2981,7 +3006,8 @@ export class SessionManager {
       this.kernel.delete(opts.runId);
       throw err;
     } finally {
-      this._autoloopReady.delete(opts.runId);
+      this._autoloopReady.delete(tag);
+      this._autoloopStarting.delete(opts.runId);
     }
   }
 
@@ -3124,17 +3150,25 @@ export class SessionManager {
     runId: string,
     config: Parameters<SessionManager['_bootAutoloop']>[0],
   ): Promise<AutoloopState> {
+    const tag = `${runId}:${randomUUID()}`;
     const ready = new Promise<{ plannerSession: string; state: AutoloopState }>((resolve, reject) => {
-      this._autoloopReady.set(runId, { resolve, reject });
+      this._autoloopReady.set(tag, { resolve, reject });
     });
-    // Stash the custom-engine configs the spec could not carry, so the node's
-    // boot call sees them without them ever being written to disk.
-    this._autoloopResumeConfig.set(runId, config);
+    this._autoloopStarting.add(runId);
+    // The custom-engine configs the caller re-supplied go into the run's secret
+    // bag, which is where the node reads them from. They used to be stashed in a
+    // separate map the executor no longer consulted, so a resume in a fresh
+    // process — the case that matters — silently got none of them.
+    const secrets = {
+      plannerCustomEngine: config.plannerCustomEngine,
+      coderCustomEngine: config.coderCustomEngine,
+      reviewerCustomEngine: config.reviewerCustomEngine,
+    };
     try {
       // `restart: true` because an autoloop resume means "bring the loop back
       // up", not "carry on from where the kernel left off" — the run is
       // normally terminated when someone resumes it.
-      const record = await this.kernel.resume(runId, { restart: true });
+      const record = await this.kernel.resume(runId, { restart: true, secrets, tag });
       // Race readiness against the run ending: a node that fails before it
       // publishes would otherwise leave this awaiting a signal that is never
       // coming.
@@ -3144,8 +3178,8 @@ export class SessionManager {
       const { state } = await Promise.race([ready, finished]);
       return state;
     } finally {
-      this._autoloopReady.delete(runId);
-      this._autoloopResumeConfig.delete(runId);
+      this._autoloopReady.delete(tag);
+      this._autoloopStarting.delete(runId);
     }
   }
 
@@ -3163,7 +3197,7 @@ export class SessionManager {
     // that finishes starting a moment later. `_autoloopReady` holds an entry for
     // exactly the window between "run created" and "engine up", which is the
     // window that used to need a dedicated `_startingAutoloops` Set.
-    if (this._autoloopReady.has(runId)) {
+    if (this._autoloopStarting.has(runId)) {
       throw new Error(`Autoloop with id '${runId}' is still starting`);
     }
     const ctx = this.kernel.handle<AutoloopHandle & { runner: AutoloopRunner; dispatcher: ClaudeAgentDispatcher }>(

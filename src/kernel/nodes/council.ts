@@ -24,6 +24,7 @@ export async function executeCouncilNode(node: NodeSpec, ctx: NodeContext): Prom
   const { Council } = await import('../../council.js');
   const council = new Council(
     {
+      runId: ctx.runId,
       agents: spec.agents.map((a) => ({
         name: a.name,
         emoji: '',

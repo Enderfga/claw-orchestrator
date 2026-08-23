@@ -508,3 +508,130 @@ describe('crash recovery', () => {
     expect(() => acquireLease(rec.runId)).not.toThrow();
   });
 });
+
+// ─── 8. The boundary holds under the cases that broke it ────────────────────
+
+describe('single owner, enforced', () => {
+  it('two racers cannot both acquire — one is refused, not made a co-owner', async () => {
+    const { acquireLease, createRunDir } = await import('../kernel/store.js');
+    createRunDir('race-run', { name: 'x', nodes: [] } as never);
+    const first = acquireLease('race-run');
+    // A different live pid, so this is a genuine second claimant.
+    const { atomicWriteJson, runDir } = await import('../kernel/store.js');
+    atomicWriteJson(path.join(runDir('race-run'), 'lease.json'), { ...first, pid: 1 });
+    expect(() => acquireLease('race-run')).toThrow(/owned by pid 1/);
+  });
+
+  it('does not declare a live local owner stale for going quiet', async () => {
+    // A run executing one long node makes no checkpoints. Judging it dead for
+    // that reason is precisely how two owners end up running the same work.
+    const { leaseIsStale } = await import('../kernel/store.js');
+    expect(
+      leaseIsStale({
+        pid: process.pid,
+        host: os.hostname(),
+        acquiredAt: new Date(Date.now() - 3_600_000).toISOString(),
+        renewedAt: new Date(Date.now() - 3_600_000).toISOString(),
+        fence: 1,
+      }),
+    ).toBe(false);
+  });
+
+  it('bumps the fence on takeover so the previous holder can tell it lost', async () => {
+    const { acquireLease, createRunDir, holdsLease, atomicWriteJson, runDir } = await import('../kernel/store.js');
+    createRunDir('fence-run', { name: 'x', nodes: [] } as never);
+    const mine = acquireLease('fence-run');
+    expect(holdsLease('fence-run', mine.fence)).toBe(true);
+
+    // Someone else takes over.
+    atomicWriteJson(path.join(runDir('fence-run'), 'lease.json'), {
+      ...mine,
+      pid: 1,
+      fence: mine.fence + 1,
+    });
+    expect(holdsLease('fence-run', mine.fence)).toBe(false);
+  });
+
+  it('polling resume on a finished run does not mint a lease nobody releases', async () => {
+    const { readLease } = await import('../kernel/store.js');
+    const { RunKernel } = await import('../kernel/engine.js');
+    const kernel = new RunKernel();
+    kernel.setExecutor('agent', async () => ({ ok: true }));
+    const rec = await kernel.start({
+      name: 'poll',
+      cwd: os.tmpdir(),
+      nodes: [{ id: 'a', kind: 'agent', prompt: 'x' }],
+    });
+    await kernel.wait(rec.runId);
+    expect(readLease(rec.runId)).toBeUndefined();
+    await kernel.resume(rec.runId);
+    expect(readLease(rec.runId)).toBeUndefined();
+  });
+});
+
+describe('a verdict never outlives the work', () => {
+  it('will not report verified while an abandoned attempt could still write', async () => {
+    const cwd = gitRepo();
+    const record = await mgr.workflowStart(
+      {
+        name: 'late-writer',
+        cwd,
+        nodes: [
+          { id: 'verify', kind: 'verifier', contract: 'run' },
+          // Abandoned after 10ms; it keeps running and writes much later.
+          { id: 'slow', kind: 'agent', prompt: 'x', cwd, timeoutMs: 10, onFailure: 'continue' },
+        ],
+      },
+      { cwd, contract: { checks: [{ type: 'command', cmd: 'true' }] } },
+    );
+    const done = (await (
+      mgr as unknown as { kernel: { wait(id: string): Promise<{ state: string; outcome: string }> } }
+    ).kernel.wait(record.runId))!;
+
+    // A timed-out node cannot be killed, so the honest answer is not to vouch.
+    expect(done.outcome).not.toBe('verified');
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }, 30_000);
+});
+
+describe('one execution, one identity', () => {
+  it('stamps the kernel run id on the ledger, not an engine-private one', async () => {
+    const cwd = gitRepo();
+    const fan = await mgr.fanoutStart({ task: 't', projectDir: cwd, agents: [{ name: 'a' }] });
+    await (mgr as unknown as { kernel: { wait(id: string): Promise<unknown> } }).kernel.wait(fan.id);
+
+    // Grouping the ledger by run only works if they are the same id.
+    const { rows } = mgr.getRunLedger({ since: '1h', parent: fan.id });
+    expect(rows.length).toBeGreaterThan(0);
+    expect(rows.every((r) => r.parent === fan.id)).toBe(true);
+    fs.rmSync(cwd, { recursive: true, force: true });
+  });
+});
+
+describe('the ultraapp build queue refuses work it does not own', () => {
+  it("throws on enqueue rather than running another owner's builds", async () => {
+    const { UltraappBuildQueue } = await import('../ultraapp/build.js');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'clawo-inv-q-'));
+    try {
+      const statePath = path.join(dir, 'q.json');
+      fs.writeFileSync(
+        statePath,
+        JSON.stringify({ pending: [], current: null, owner: { pid: 1, renewedAt: new Date().toISOString() } }),
+      );
+      const seen: string[] = [];
+      const q = new UltraappBuildQueue({
+        statePath,
+        worker: async (id: string) => {
+          seen.push(id);
+        },
+      });
+      expect(q.ownsQueue()).toBe(false);
+      // Refusing at construction is not enough if every other entry point runs anyway.
+      await expect(q.enqueue('intruder')).rejects.toThrow(/owned by pid 1/);
+      expect(seen).toEqual([]);
+      expect(JSON.parse(fs.readFileSync(statePath, 'utf8')).owner.pid).toBe(1);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

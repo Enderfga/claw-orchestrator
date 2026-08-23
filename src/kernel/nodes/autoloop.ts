@@ -30,8 +30,14 @@ export interface AutoloopHandle {
 export interface AutoloopNodeDeps {
   /** `secrets` carries what the spec deliberately does not — custom-engine configs. */
   boot(config: Record<string, unknown>, secrets: Record<string, unknown>): Promise<AutoloopHandle>;
-  /** Resolve/reject the deferred `autoloopStart` is waiting on. */
-  ready(runId: string, value: { plannerSession: string; state: AutoloopState } | Error): void;
+  /**
+   * Resolve/reject the deferred the caller is waiting on.
+   *
+   * Keyed by the start's tag, not the run id: a failed start frees its run id
+   * for a retry, and keying on the id let a dying start settle — or clear — the
+   * retry's deferred instead of its own.
+   */
+  ready(key: string, value: { plannerSession: string; state: AutoloopState } | Error): void;
   /** Wait until the loop reaches a terminal status. */
   waitForExit(handle: AutoloopHandle, signal: { aborted: boolean }): Promise<void>;
   /**
@@ -60,7 +66,7 @@ export function makeAutoloopExecutor(deps: AutoloopNodeDeps) {
     try {
       handle = await deps.boot(spec.config, ctx.secrets);
     } catch (err) {
-      deps.ready(ctx.runId, err as Error);
+      deps.ready(ctx.tag ?? ctx.runId, err as Error);
       return { ok: false, error: (err as Error).message };
     }
 
@@ -73,7 +79,7 @@ export function makeAutoloopExecutor(deps: AutoloopNodeDeps) {
       });
     deps.registerPublisher(ctx.runId, publish);
     publish();
-    deps.ready(ctx.runId, {
+    deps.ready(ctx.tag ?? ctx.runId, {
       plannerSession: handle.dispatcher.sessionNames.planner,
       state: handle.runner.state,
     });
