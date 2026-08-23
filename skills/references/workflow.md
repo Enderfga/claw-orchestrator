@@ -79,9 +79,16 @@ are not safe to repeat need to make them safe. Resume is also explicit —
 - **Atomic acquisition.** The check and the write happen inside an `O_EXCL` lock
   file. Read-then-write let two processes both see "free" and both conclude they
   had it, which is the failure a lease exists to prevent.
-- **A fencing token.** Each acquisition bumps a counter, and the holder verifies
-  it before every state write. A process wrongly declared dead — a long GC pause,
-  a suspended laptop — stops instead of writing alongside its replacement.
+- **A fenced commit is the only way to change persisted state.** Ownership is
+  confirmed and the write happens inside one critical section — every
+  checkpoint, node transition, event, publish and terminal verdict. A fencing
+  token checked once per node would leave everything after that check
+  unguarded, and a superseded owner could still declare the run complete.
+- **The fence never repeats.** It is kept apart from the lease, because
+  releasing the lease deletes it, and a counter read from the lease restarted at
+  1 — so a stale token could match a fresh one.
+- **Owner identity is not the pid.** Two kernels in one process share a pid;
+  each has its own owner id, or both would read the other's claim as their own.
 - **An independent heartbeat.** Renewed on a timer, not only at checkpoints: a
   run executing one long node makes no checkpoints, and must not look abandoned
   for it. On the same host a live pid is the authority and is never judged stale

@@ -14,6 +14,7 @@ import * as os from 'node:os';
 import * as crypto from 'node:crypto';
 import { SessionManager } from './session-manager.js';
 import { sanitizeCwd, validateRegex } from './validation.js';
+import { resolveSecretRefs } from './kernel/secrets.js';
 import type { EffortLevel, EngineType } from './types.js';
 import { handleChatCompletion } from './openai-compat.js';
 import { getModelList } from './models.js';
@@ -1180,10 +1181,17 @@ export class EmbeddedServer {
           return;
         }
         try {
-          // No custom-engine configs here by design (see rejectCustomEngineOverHttp).
-          // A run whose roles used custom engines therefore cannot be resumed over
-          // HTTP; autoloopResume reports that as a caller error, not a 500.
-          const state = await this.manager.autoloopResume(id, {});
+          // Custom-engine configs still never cross the wire. What crosses is a
+          // *name* the server resolves from its own environment
+          // (CLAWO_CUSTOM_ENGINE_<REF>), so a run whose roles used a custom
+          // engine can be resumed remotely after a crash — which it could not be
+          // before, because the material it needed had nowhere to come from.
+          const refs = resolveSecretRefs({
+            plannerCustomEngine: body.plannerCustomEngineRef as string | undefined,
+            coderCustomEngine: body.coderCustomEngineRef as string | undefined,
+            reviewerCustomEngine: body.reviewerCustomEngineRef as string | undefined,
+          });
+          const state = await this.manager.autoloopResume(id, refs as never);
           json(200, { ok: true, state });
         } catch (err) {
           json(autoloopErrorStatus(err), { ok: false, error: (err as Error).message });

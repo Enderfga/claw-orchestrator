@@ -25,6 +25,7 @@ import {
 import type { FanoutConfig } from './fanout.js';
 import { councilWorkflow, fanoutWorkflow, solveWorkflow, type SolveArgs } from './kernel/templates/index.js';
 import { readEvents as readKernelEvents } from './kernel/store.js';
+import { resolveSecretRefs } from './kernel/secrets.js';
 import type { RunState, WorkflowSpec } from './kernel/types.js';
 
 // ─── Standalone Export ───────────────────────────────────────────────────────
@@ -1351,9 +1352,24 @@ const plugin = {
       name: 'workflow_resume',
       description:
         'Re-attach to a workflow whose process died. Nodes already marked succeeded are not re-run; the node that was in flight is retried, because a half-finished node left no result to trust.',
-      parameters: { type: 'object', properties: { runId: { type: 'string' } }, required: ['runId'] },
+      parameters: {
+        type: 'object',
+        properties: {
+          runId: { type: 'string' },
+          agentCustomEngineRefs: {
+            type: 'object',
+            description:
+              'Per-agent custom-engine credentials, by name: { "<agent>": "<REF>" }. The orchestrator resolves each REF from CLAWO_CUSTOM_ENGINE_<REF> on its own host — the credentials themselves are never persisted with the run and never travel here. Required to resume a run whose agents used a custom engine.',
+            additionalProperties: { type: 'string' },
+          },
+        },
+        required: ['runId'],
+      },
       execute: async (_id, args) => {
-        const record = await getManager().workflowResume(args.runId as string);
+        const refs = args.agentCustomEngineRefs as Record<string, string> | undefined;
+        const record = await getManager().workflowResume(args.runId as string, {
+          secrets: refs ? { agentCustomEngines: resolveSecretRefs(refs) } : undefined,
+        });
         return { ok: true, runId: record.runId, state: record.state, currentNode: record.currentNode };
       },
     });

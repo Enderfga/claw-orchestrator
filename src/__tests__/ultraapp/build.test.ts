@@ -125,7 +125,7 @@ describe('durable queue', () => {
       JSON.stringify({
         pending: ['run-b'],
         current: 'run-a',
-        owner: { pid: 2 ** 30, renewedAt: new Date().toISOString() },
+        owner: { ownerId: 'gone', pid: 2 ** 30, renewedAt: new Date().toISOString() },
       }),
     );
 
@@ -158,7 +158,11 @@ describe('durable queue', () => {
     // own queue.
     fs.writeFileSync(
       statePath,
-      JSON.stringify({ pending: ['run-a'], current: null, owner: { pid: 1, renewedAt: new Date().toISOString() } }),
+      JSON.stringify({
+        pending: ['run-a'],
+        current: null,
+        owner: { ownerId: 'other', pid: 1, renewedAt: new Date().toISOString() },
+      }),
     );
 
     const seen: string[] = [];
@@ -175,7 +179,7 @@ describe('durable queue', () => {
 
     await new Promise((r) => setTimeout(r, 20));
     expect(second.ownsQueue()).toBe(false);
-    expect(refusedTo?.pid).toBe(1);
+    expect(refusedTo?.ownerId).toBe('other');
     expect(seen).toEqual([]);
   });
 
@@ -185,7 +189,7 @@ describe('durable queue', () => {
       JSON.stringify({
         pending: ['run-a'],
         current: null,
-        owner: { pid: 1, renewedAt: new Date(Date.now() - 10 * 60_000).toISOString() },
+        owner: { ownerId: 'other', pid: 1, renewedAt: new Date(Date.now() - 10 * 60_000).toISOString() },
       }),
     );
     const seen: string[] = [];

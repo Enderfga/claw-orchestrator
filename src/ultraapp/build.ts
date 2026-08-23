@@ -23,6 +23,7 @@
  * work to whoever owns it.
  */
 
+import crypto from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -44,7 +45,7 @@ export interface UltraappBuildQueueOptions {
    * Notified when another live process owns the queue, so this one starts
    * empty. Not an error — it is the correct outcome.
    */
-  onNotOwner?: (owner: { pid: number; renewedAt: string }) => void;
+  onNotOwner?: (owner: QueueOwner) => void;
 }
 
 interface PendingItem {
@@ -56,7 +57,19 @@ interface PersistedQueue {
   /** The build that was running when the state was last written. */
   current: string | null;
   /** Who is executing this queue. */
-  owner?: { pid: number; renewedAt: string };
+  owner?: QueueOwner;
+}
+
+export interface QueueOwner {
+  /**
+   * Identity of the owning queue instance, not of the process.
+   *
+   * Two queues in one process would otherwise share a pid and each read the
+   * other's claim as its own — the same mistake a pid-keyed run lease made.
+   */
+  ownerId: string;
+  pid: number;
+  renewedAt: string;
 }
 
 /** How long an owner may go without a heartbeat before the queue is up for grabs. */
@@ -64,9 +77,9 @@ const OWNER_TTL_MS = 60_000;
 /** Refresh interval, comfortably inside the TTL. */
 const HEARTBEAT_MS = 15_000;
 
-function ownerIsLive(owner: PersistedQueue['owner']): boolean {
+function ownerIsLive(owner: QueueOwner | undefined, selfId: string): boolean {
   if (!owner) return false;
-  if (owner.pid === process.pid) return true;
+  if (owner.ownerId === selfId) return true;
   const age = Date.now() - Date.parse(owner.renewedAt);
   if (Number.isNaN(age) || age > OWNER_TTL_MS) return false;
   try {
@@ -85,6 +98,8 @@ export class UltraappBuildQueue {
   private readonly concurrency: number;
   private readonly statePath?: string;
   private heartbeat?: ReturnType<typeof setInterval>;
+  /** This queue instance's identity as an owner. Per instance, not per process. */
+  readonly ownerId = `queue-${crypto.randomUUID()}`;
   private idlePromise: Promise<void> = Promise.resolve();
   private idleResolve: (() => void) | null = null;
 
@@ -107,8 +122,8 @@ export class UltraappBuildQueue {
     }
   }
 
-  /** Set when another live process holds the queue. */
-  private notOwner?: { pid: number; renewedAt: string };
+  /** Set when another live queue holds the claim. */
+  private notOwner?: QueueOwner;
 
   /** True when this process is executing the queue. */
   ownsQueue(): boolean {
@@ -119,7 +134,7 @@ export class UltraappBuildQueue {
   private assertOwner(action: string): void {
     if (!this.notOwner) return;
     throw new Error(
-      `Cannot ${action}: this build queue is owned by pid ${this.notOwner.pid} ` +
+      `Cannot ${action}: this build queue is owned by ${this.notOwner.ownerId} (pid ${this.notOwner.pid}) ` +
         `(last seen ${this.notOwner.renewedAt}). Running its builds here would execute them twice.`,
     );
   }
@@ -136,21 +151,60 @@ export class UltraappBuildQueue {
    * A build that was in flight goes to the FRONT of the restored queue: it was
    * asked for first, and the user has been waiting on it longest.
    */
+  /**
+   * Claim the queue and read back whatever the last owner left.
+   *
+   * Read-then-decide is not a claim. Two processes starting with no state file
+   * both saw "free", both concluded they owned it, and nothing wrote an owner
+   * until the first enqueue — by which time both were running the same builds.
+   * The read and the claim happen inside one `O_EXCL` critical section now.
+   */
   private restore(): string[] {
     if (!this.statePath) return [];
-    let raw: string;
+    const lock = `${this.statePath}.lock`;
+    fs.mkdirSync(path.dirname(this.statePath), { recursive: true });
+
+    let fd: number;
     try {
-      raw = fs.readFileSync(this.statePath, 'utf8');
-    } catch {
-      return [];
+      fd = fs.openSync(lock, 'wx');
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') return [];
+      let age = Infinity;
+      try {
+        age = Date.now() - fs.statSync(lock).mtimeMs;
+      } catch {
+        age = Infinity;
+      }
+      // A lock from a crashed claimant must not wedge the queue forever.
+      if (age < OWNER_TTL_MS) {
+        this.notOwner = { ownerId: 'unknown', pid: -1, renewedAt: new Date().toISOString() };
+        return [];
+      }
+      fs.rmSync(lock, { force: true });
+      try {
+        fd = fs.openSync(lock, 'wx');
+      } catch {
+        return [];
+      }
     }
+
+    try {
+      return this.claimLocked();
+    } finally {
+      fs.closeSync(fd);
+      fs.rmSync(lock, { force: true });
+    }
+  }
+
+  /** The critical section of `restore`: inspect the owner and take it, or step aside. */
+  private claimLocked(): string[] {
     let parsed: PersistedQueue;
     try {
-      parsed = JSON.parse(raw) as PersistedQueue;
+      parsed = JSON.parse(fs.readFileSync(this.statePath!, 'utf8')) as PersistedQueue;
     } catch {
-      return [];
+      parsed = { pending: [], current: null };
     }
-    if (ownerIsLive(parsed.owner) && parsed.owner!.pid !== process.pid) {
+    if (ownerIsLive(parsed.owner, this.ownerId)) {
       // Someone else is running these. Taking them would execute every build
       // twice; the honest move is to start empty and say so.
       this.notOwner = parsed.owner!;
@@ -161,12 +215,20 @@ export class UltraappBuildQueue {
       ...(Array.isArray(parsed.pending) ? parsed.pending.filter((x) => typeof x === 'string') : []),
     ];
     for (const runId of ids) this.pending.push({ runId });
+    // Stake the claim before releasing the lock, so a racer that gets in next
+    // sees an owner rather than an empty file.
+    this.writeState();
     return ids;
   }
 
   /** Best-effort, like every other log write here: never break a build over it. */
   private persist(): void {
     if (!this.statePath || this.notOwner) return;
+    this.writeState();
+  }
+
+  private writeState(): void {
+    if (!this.statePath) return;
     try {
       fs.mkdirSync(path.dirname(this.statePath), { recursive: true });
       const state: PersistedQueue = {
@@ -174,9 +236,9 @@ export class UltraappBuildQueue {
         current: this.currentRunId,
         // Every write is also the heartbeat, so a queue that stops making
         // progress stops holding the claim.
-        owner: { pid: process.pid, renewedAt: new Date().toISOString() },
+        owner: { ownerId: this.ownerId, pid: process.pid, renewedAt: new Date().toISOString() },
       };
-      const tmp = `${this.statePath}.tmp.${process.pid}`;
+      const tmp = `${this.statePath}.tmp.${process.pid}.${crypto.randomBytes(4).toString('hex')}`;
       fs.writeFileSync(tmp, JSON.stringify(state));
       fs.renameSync(tmp, this.statePath);
     } catch {

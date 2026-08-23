@@ -169,13 +169,16 @@ export function createRunDir(runId: string, spec: WorkflowSpec): void {
   atomicWriteJson(path.join(dir, 'spec.json'), sanitizeForDisk(spec));
 }
 
+/**
+ * Write a checkpoint.
+ *
+ * Unguarded on purpose — it is the raw write, and the kernel only ever reaches
+ * it through `commit()`, which confirms ownership in the same critical section.
+ * Nothing outside the store should call this directly.
+ */
 export function saveRun(record: RunRecord): void {
   // The checkpoint embeds the spec, so it gets the same scrub.
   atomicWriteJson(path.join(runDir(record.runId), 'run.json'), sanitizeForDisk(record));
-  // Checkpointing also refreshes the claim, but it is no longer the only thing
-  // that does: the kernel heartbeats on a timer, because a run executing one
-  // long node makes no checkpoints and must not look abandoned for it.
-  renewLease(record.runId);
 }
 
 export function loadSpec(runId: string): WorkflowSpec | undefined {
@@ -369,19 +372,25 @@ export const LEASE_TTL_MS = 60_000;
 /** How often a live owner refreshes its claim, independently of any work it is doing. */
 export const LEASE_HEARTBEAT_MS = 15_000;
 
-export interface RunLease {
+/**
+ * Who holds a run.
+ *
+ * `ownerId` is the identity, not `pid`. Two `RunKernel` instances in one process
+ * — two SessionManagers is not a strange thing to have — share a pid, so
+ * treating the pid as the owner let both of them execute the same run and call
+ * it re-entrancy. The pid is kept because it is what tells us whether the holder
+ * is still alive; it is not what tells us whether the holder is us.
+ */
+export interface Owner {
+  ownerId: string;
   pid: number;
   host: string;
+}
+
+export interface RunLease extends Owner {
   acquiredAt: string;
   renewedAt: string;
-  /**
-   * Monotonically increasing across acquisitions.
-   *
-   * A holder stamps this on every write. If it ever finds a higher fence on
-   * disk it has been superseded and must stop, which is what stops a process
-   * that was wrongly declared dead from carrying on writing next to its
-   * replacement.
-   */
+  /** Strictly increasing across acquisitions, and never reset. */
   fence: number;
 }
 
@@ -391,6 +400,25 @@ function leaseFile(runId: string): string {
 
 function lockFile(runId: string): string {
   return path.join(runDir(runId), 'lease.lock');
+}
+
+/**
+ * The fence counter, kept apart from the lease.
+ *
+ * It has to outlive the lease. Reading the next fence off `lease.json` looked
+ * fine until the file was deleted on release, at which point the counter
+ * restarted at 1 — so a "monotonic" token repeated itself, and a stale holder
+ * with fence 1 could match a fresh owner with fence 1.
+ */
+function fenceFile(runId: string): string {
+  return path.join(runDir(runId), 'fence.json');
+}
+
+function nextFence(runId: string): number {
+  const current = readJson<{ next: number }>(fenceFile(runId))?.next ?? 0;
+  const next = current + 1;
+  atomicWriteJson(fenceFile(runId), { next });
+  return next;
 }
 
 function processAlive(pid: number): boolean {
@@ -424,18 +452,12 @@ export function leaseIsStale(lease: RunLease | undefined, now = Date.now()): boo
 }
 
 /**
- * Claim a run, atomically.
+ * Run `fn` inside the run's lock.
  *
- * The check and the write have to be one operation. Read-then-write let two
- * processes both see "free" and both conclude they had it, which is the failure
- * a lease exists to prevent. The critical section is an `O_EXCL` lock file:
- * exactly one racer creates it, and the loser is refused rather than made a
- * co-owner.
- *
- * Re-entrant for the current process, so a manager can reclaim a run it already
- * owns (resume-after-terminate) without tripping over itself.
+ * Everything that inspects or changes ownership goes through here, so a check
+ * and the write that depends on it cannot be separated by another process.
  */
-export function acquireLease(runId: string): RunLease {
+function withLock<T>(runId: string, fn: () => T): T {
   const lock = lockFile(runId);
   fs.mkdirSync(path.dirname(lock), { recursive: true });
 
@@ -444,76 +466,115 @@ export function acquireLease(runId: string): RunLease {
     fd = fs.openSync(lock, 'wx');
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
-    // A lock left by a crashed acquirer would block the run forever, so a lock
-    // older than the TTL is broken open. Acquisition is milliseconds; anything
-    // this old is debris.
+    // A lock left by a crashed holder would block the run forever. Acquisition
+    // is milliseconds; anything older than the TTL is debris.
     let age = Infinity;
     try {
       age = Date.now() - fs.statSync(lock).mtimeMs;
     } catch {
       age = Infinity;
     }
-    if (age < LEASE_TTL_MS) {
-      throw new Error(`Run '${runId}' is being claimed by another process right now`);
-    }
+    if (age < LEASE_TTL_MS) throw new Error(`Run '${runId}' is locked by another process right now`);
     fs.rmSync(lock, { force: true });
     fd = fs.openSync(lock, 'wx');
   }
 
   try {
-    const existing = readLease(runId);
-    if (existing && existing.pid !== process.pid && !leaseIsStale(existing)) {
-      throw new Error(
-        `Run '${runId}' is owned by pid ${existing.pid} on ${existing.host} (last seen ${existing.renewedAt}) — ` +
-          `only one process may run it at a time`,
-      );
-    }
-    const now = new Date().toISOString();
-    const lease: RunLease = {
-      pid: process.pid,
-      host: os.hostname(),
-      acquiredAt: existing?.pid === process.pid ? existing.acquiredAt : now,
-      renewedAt: now,
-      // Every takeover bumps the fence, so the previous holder can tell it lost.
-      fence: (existing?.fence ?? 0) + (existing?.pid === process.pid ? 0 : 1),
-    };
-    atomicWriteJson(leaseFile(runId), lease);
-    return lease;
+    return fn();
   } finally {
     fs.closeSync(fd);
     fs.rmSync(lock, { force: true });
   }
 }
 
-/** Heartbeat. Best-effort: losing a renewal must not break the run. */
-export function renewLease(runId: string): void {
-  try {
+/**
+ * Claim a run, atomically.
+ *
+ * Re-entrant for the same `ownerId` — one kernel reclaiming a run it already has
+ * — and refused for anyone else whose predecessor is still alive.
+ */
+export function acquireLease(runId: string, ownerId: string): RunLease {
+  return withLock(runId, () => {
     const existing = readLease(runId);
-    if (!existing || existing.pid !== process.pid) return;
-    atomicWriteJson(leaseFile(runId), { ...existing, renewedAt: new Date().toISOString() });
+    if (existing && existing.ownerId !== ownerId && !leaseIsStale(existing)) {
+      throw new Error(
+        `Run '${runId}' is owned by ${existing.ownerId} (pid ${existing.pid} on ${existing.host}, ` +
+          `last seen ${existing.renewedAt}) — only one owner may run it at a time`,
+      );
+    }
+    const now = new Date().toISOString();
+    const lease: RunLease = {
+      ownerId,
+      pid: process.pid,
+      host: os.hostname(),
+      acquiredAt: existing?.ownerId === ownerId ? existing.acquiredAt : now,
+      renewedAt: now,
+      fence: existing?.ownerId === ownerId ? existing.fence : nextFence(runId),
+    };
+    atomicWriteJson(leaseFile(runId), lease);
+    return lease;
+  });
+}
+
+/** Heartbeat. Best-effort: losing a renewal must not break the run. */
+export function renewLease(runId: string, ownerId: string): void {
+  try {
+    withLock(runId, () => {
+      const existing = readLease(runId);
+      if (!existing || existing.ownerId !== ownerId) return;
+      atomicWriteJson(leaseFile(runId), { ...existing, renewedAt: new Date().toISOString() });
+    });
   } catch {
     // The next renewal will try again.
   }
 }
 
-/**
- * Whether this process still holds the run at the fence it was given.
- *
- * Checked before every state write. A holder that has been superseded stops
- * rather than writing next to its replacement — the point of a fencing token is
- * that the loser finds out.
- */
-export function holdsLease(runId: string, fence: number): boolean {
+/** Whether this owner still holds the run at the fence it was given. */
+export function holdsLease(runId: string, ownerId: string, fence: number): boolean {
   const current = readLease(runId);
-  if (!current) return false;
-  return current.pid === process.pid && current.fence === fence;
+  return Boolean(current && current.ownerId === ownerId && current.fence === fence);
 }
 
-export function releaseLease(runId: string): void {
+/**
+ * The one way to change a run's persisted state.
+ *
+ * Ownership is confirmed and the write happens inside the same critical section,
+ * so a holder that has been superseded cannot land a write between the check and
+ * the change. Returns false when the caller no longer owns the run — the caller
+ * must then stop, not retry.
+ *
+ * A fencing token is only a fencing token if the loser is prevented, not merely
+ * informed at the next convenient moment. Checking it once per node, as an
+ * earlier version did, left every checkpoint, event and terminal verdict after
+ * that check unguarded: a superseded owner could still declare the run complete.
+ */
+export function commit(runId: string, ownerId: string, fence: number, mutation: () => void): boolean {
   try {
-    const existing = readLease(runId);
-    if (existing && existing.pid !== process.pid) return;
-    fs.rmSync(leaseFile(runId), { force: true });
+    return withLock(runId, () => {
+      const current = readLease(runId);
+      if (!current || current.ownerId !== ownerId || current.fence !== fence) return false;
+      mutation();
+      atomicWriteJson(leaseFile(runId), { ...current, renewedAt: new Date().toISOString() });
+      return true;
+    });
+  } catch {
+    // A lock we could not take means someone else is mid-write; treat it the
+    // same as having lost the run rather than writing without the lock.
+    return false;
+  }
+}
+
+/**
+ * Release the claim. The fence counter is deliberately NOT removed — it must
+ * keep increasing across every acquisition for the life of the run directory.
+ */
+export function releaseLease(runId: string, ownerId: string): void {
+  try {
+    withLock(runId, () => {
+      const existing = readLease(runId);
+      if (existing && existing.ownerId !== ownerId) return;
+      fs.rmSync(leaseFile(runId), { force: true });
+    });
   } catch {
     // A lease left behind expires on its own.
   }

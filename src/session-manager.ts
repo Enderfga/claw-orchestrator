@@ -2511,7 +2511,7 @@ export class SessionManager {
    * session is still being created, orphaning a session that finishes a moment
    * later with nothing pointing at it.
    */
-  private _autoloopStarting = new Set<string>();
+  private _autoloopStarting = new Map<string, string>();
   /** Latest role selection per run, published into the node payload. */
   private _autoloopSelection = new Map<string, unknown>();
   /** Per-run checkpoint refreshers, registered by the autoloop node executor. */
@@ -2971,7 +2971,7 @@ export class SessionManager {
     const ready = new Promise<{ plannerSession: string; state: AutoloopState }>((resolve, reject) => {
       this._autoloopReady.set(tag, { resolve, reject });
     });
-    this._autoloopStarting.add(opts.runId);
+    this._autoloopStarting.set(tag, opts.runId);
     // Custom-engine configs hold credentials and the spec is written to disk, so
     // they travel in memory. Without this split, `spec.json` contained the token
     // from `CustomEngineConfig.env` in plain text.
@@ -3003,11 +3003,14 @@ export class SessionManager {
       // A start that never came up must not leave the id claimed. The store
       // refuses to reuse a run id, so without this a failed Planner startup
       // would make that id permanently unusable.
-      this.kernel.delete(opts.runId);
+      //
+      // Tag-guarded: by the time this runs, a retry may already hold the id, and
+      // deleting it would take out the run that replaced us.
+      this.kernel.delete(opts.runId, { expectTag: tag });
       throw err;
     } finally {
       this._autoloopReady.delete(tag);
-      this._autoloopStarting.delete(opts.runId);
+      this._autoloopStarting.delete(tag);
     }
   }
 
@@ -3154,7 +3157,7 @@ export class SessionManager {
     const ready = new Promise<{ plannerSession: string; state: AutoloopState }>((resolve, reject) => {
       this._autoloopReady.set(tag, { resolve, reject });
     });
-    this._autoloopStarting.add(runId);
+    this._autoloopStarting.set(tag, runId);
     // The custom-engine configs the caller re-supplied go into the run's secret
     // bag, which is where the node reads them from. They used to be stashed in a
     // separate map the executor no longer consulted, so a resume in a fresh
@@ -3179,7 +3182,7 @@ export class SessionManager {
       return state;
     } finally {
       this._autoloopReady.delete(tag);
-      this._autoloopStarting.delete(runId);
+      this._autoloopStarting.delete(tag);
     }
   }
 
@@ -3197,7 +3200,7 @@ export class SessionManager {
     // that finishes starting a moment later. `_autoloopReady` holds an entry for
     // exactly the window between "run created" and "engine up", which is the
     // window that used to need a dedicated `_startingAutoloops` Set.
-    if (this._autoloopStarting.has(runId)) {
+    if ([...this._autoloopStarting.values()].includes(runId)) {
       throw new Error(`Autoloop with id '${runId}' is still starting`);
     }
     const ctx = this.kernel.handle<AutoloopHandle & { runner: AutoloopRunner; dispatcher: ClaudeAgentDispatcher }>(

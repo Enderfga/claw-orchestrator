@@ -154,8 +154,16 @@ because a verifier is a node in the thing that survives.
 - Polling `resume` on a finished run no longer mints a lease nobody releases.
   The claim was taken before the terminal check, so a status poll could block the
   next process from restarting it.
-- Readiness deferreds and live-run handles are keyed by the identity of a
-  particular start, not by run id. A run id is reused when a failed start frees
+- **Resuming a custom-engine run works from the product entry points.** The
+  credentials are never persisted, so a crashed run could only be resumed by a
+  caller that still had them in memory — which excluded the dashboard and every
+  remote caller. `workflow_resume` and the HTTP autoloop resume now take a secret
+  _reference_: a name the orchestrator resolves from its own environment
+  (`CLAWO_CUSTOM_ENGINE_<REF>`). The name is not sensitive, the value never
+  crosses the wire, and an unknown name is an error rather than a silent start
+  without credentials.
+- Readiness deferreds, live-run handles, the starting marker, and `delete` are
+  keyed by the identity of a particular start, not by run id. A run id is reused when a failed start frees
   it, and keying on the id let a dying start clear the retry's deferred — the
   retry then waited forever for a signal with nowhere to land.
 - **One execution, one identity.** `Council` and `Fanout` minted their own ids
@@ -216,22 +224,39 @@ because a verifier is a node in the thing that survives.
   — every side effect twice, two writers to one checkpoint, one event log
   interleaving two timelines.
 
-  It is a real lease, not a convention: acquisition is atomic (an `O_EXCL` lock
-  file around the check-and-write, because read-then-write let two racers both
-  conclude they had it); it carries a monotonic **fencing token** that every
-  state write verifies, so a holder that was wrongly declared dead finds out
-  instead of writing alongside its replacement; and it is heartbeated on a timer
-  rather than only at checkpoints, because a run executing one long node makes no
-  checkpoints and must not look abandoned for it. On the same host a live pid is
-  the authority and is never judged stale for going quiet.
+  It is a real lease, not a convention:
+  - **Atomic acquisition.** An `O_EXCL` critical section holds the check and the
+    write together, because read-then-write let two racers both conclude they
+    had it.
+  - **A fenced commit is the only way to change persisted state.** `commit()`
+    confirms ownership and performs the write inside one critical section, and
+    every checkpoint, node transition, event, publish and terminal verdict goes
+    through it. Checking the fence once per node — as an earlier attempt did —
+    left everything after that check unguarded, so a superseded owner could
+    still declare the run complete. The mutation now happens inside the commit,
+    so a refused write leaves even the in-memory record untouched rather than
+    handing the caller a `completed` the disk rejected.
+  - **The fence never repeats.** It lives in its own file, apart from the lease,
+    because releasing the lease deletes the lease — and reading the counter off
+    it meant the "monotonic" token restarted at 1, so a stale holder's token
+    could match a fresh owner's.
+  - **Owner identity is not the pid.** Two `RunKernel`s in one process — two
+    SessionManagers is not exotic — share a pid, and treating that as
+    re-entrancy let both execute the same run. Each kernel has its own owner id.
+  - **An independent heartbeat**, not only at checkpoints: a run executing one
+    long node makes none, and must not look abandoned for it. On the same host a
+    live pid is the authority and is never judged stale for going quiet.
 
   In-process, starting a run whose id is already live retires the previous run
   first — the same rule, applied where a lease cannot see.
 
-  The UltraApp build queue takes an equivalent claim over its state file, and
-  refuses `enqueue` rather than merely declining to restore: knowing it was not
-  the owner while still running the builds, and rewriting the owner to itself,
-  was the whole failure.
+  The UltraApp build queue takes an equivalent claim: an `O_EXCL` critical
+  section around read-and-claim (two processes starting with no state file both
+  saw "free", and nothing wrote an owner until the first enqueue), an owner id of
+  its own rather than a pid, a heartbeat while a worker runs, and a refusal at
+  `enqueue` rather than merely at construction — knowing it was not the owner
+  while still running the builds, and rewriting the owner to itself, was the
+  whole failure.
 
 - Run ids are validated as a single path segment before any path is derived from
   them. They can be supplied by the caller — including through a tool call — and

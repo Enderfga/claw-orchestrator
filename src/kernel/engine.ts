@@ -42,7 +42,7 @@ import type { SessionManagerLike } from './agent-step.js';
 import {
   acquireLease,
   appendEvent,
-  holdsLease,
+  commit,
   LEASE_HEARTBEAT_MS,
   renewLease,
   createRunDir,
@@ -159,8 +159,10 @@ export type NodeExecutor = (node: NodeSpec, ctx: NodeContext) => Promise<NodeRes
 interface RunHandle {
   signal: { aborted: boolean };
   steer: string[];
-  /** Fence from the lease this run holds. Every state write checks it. */
+  /** Fence from the lease this run holds. Every state write confirms it. */
   fence: number;
+  /** Set once a write was refused because the run was taken over. */
+  lostLease?: boolean;
   tag?: string;
   /** Independent of any checkpoint, so a long node cannot look abandoned. */
   heartbeat?: ReturnType<typeof setInterval>;
@@ -284,6 +286,14 @@ export class RunKernel extends EventEmitter {
   private readonly nodeTimeoutMs: number;
   private readonly live = new Map<string, RunHandle>();
   /**
+   * This kernel's identity as a run owner.
+   *
+   * Per instance, not per process: two `RunKernel`s in one process — two
+   * SessionManagers is not exotic — would otherwise share a pid and each treat
+   * the other's lease as its own, so both would execute the same run.
+   */
+  readonly ownerId = `owner-${crypto.randomUUID()}`;
+  /**
    * Per-run secrets, in memory only. Keyed by run id so a resume in this
    * process can re-use what the start supplied; a resume elsewhere must be
    * given them again.
@@ -371,7 +381,7 @@ export class RunKernel extends EventEmitter {
     // processes.
     await this._retire(runId);
     createRunDir(runId, spec);
-    this._fences.set(runId, acquireLease(runId).fence);
+    this._fences.set(runId, acquireLease(runId, this.ownerId).fence);
     record.baseSha = await captureBaseline(cwd);
     saveRun(record);
     this._event(record, { ts: now, type: 'run_created', runId, workflow: spec.name });
@@ -409,7 +419,7 @@ export class RunKernel extends EventEmitter {
     if (isTerminalRunState(record.state) && !opts.restart) return record;
     // Claim it: two processes resuming the same run would each execute its
     // nodes, with every side effect happening twice.
-    this._fences.set(runId, acquireLease(runId).fence);
+    this._fences.set(runId, acquireLease(runId, this.ownerId).fence);
 
     for (const n of Object.values(record.nodes)) {
       if (n.state === 'running' || (opts.restart && isTerminalRunState(record.state))) {
@@ -462,12 +472,11 @@ export class RunKernel extends EventEmitter {
     handle.steer.push(text);
     const record = loadRun(runId);
     if (record) {
-      this._event(record, {
-        ts: new Date().toISOString(),
-        type: 'steer',
-        node: record.currentNode ?? '',
-        text,
-      });
+      this._event(
+        record,
+        { ts: new Date().toISOString(), type: 'steer', node: record.currentNode ?? '', text },
+        handle,
+      );
     }
     return true;
   }
@@ -497,11 +506,22 @@ export class RunKernel extends EventEmitter {
     return listRuns(query);
   }
 
-  delete(runId: string): void {
+  /**
+   * Remove a run.
+   *
+   * `expectTag` guards against deleting the wrong incarnation: a run id is
+   * reused when a failed start frees it, so a dying start's cleanup could
+   * otherwise delete the retry that had already taken the id. When the tag does
+   * not match, nothing is touched.
+   */
+  delete(runId: string, opts: { expectTag?: string } = {}): boolean {
+    if (opts.expectTag !== undefined && this._tags.get(runId) !== opts.expectTag) return false;
     this.cancel(runId);
-    releaseLease(runId);
+    releaseLease(runId, this.ownerId);
     this._secrets.delete(runId);
+    this._tags.delete(runId);
     deleteRunDir(runId, this.logger);
+    return true;
   }
 
   /**
@@ -533,7 +553,7 @@ export class RunKernel extends EventEmitter {
       handles: new Map(),
       done: Promise.resolve(record),
     };
-    handle.heartbeat = setInterval(() => renewLease(record.runId), LEASE_HEARTBEAT_MS);
+    handle.heartbeat = setInterval(() => renewLease(record.runId, this.ownerId), LEASE_HEARTBEAT_MS);
     if (typeof handle.heartbeat.unref === 'function') handle.heartbeat.unref();
     // Registered before the run starts: a workflow with no nodes finishes
     // synchronously up to its first await, and the `finally` below would
@@ -550,44 +570,66 @@ export class RunKernel extends EventEmitter {
     handle.done.catch(() => undefined);
   }
 
-  private _event(record: RunRecord, event: KernelEvent): void {
-    appendEvent(record.runId, event, this.logger);
+  /**
+   * Append an event.
+   *
+   * `handle` is optional only for the run-created event, which is written before
+   * a handle exists. Every other emission is fenced: a superseded owner must not
+   * be appending to the log its replacement is reading.
+   */
+  private _event(record: RunRecord, event: KernelEvent, handle?: RunHandle): void {
+    if (handle) {
+      if (!this._commit(record, handle, () => appendEvent(record.runId, event, this.logger))) return;
+    } else {
+      appendEvent(record.runId, event, this.logger);
+    }
     this.emit('kernel-event', { runId: record.runId, event });
     this.emit(record.runId, event);
   }
 
   /**
-   * Stop the run if this process no longer owns it.
+   * The only way this kernel changes a run's persisted state.
    *
-   * A fencing token is only useful if the loser checks it. Without this, a
-   * process wrongly declared dead — a long GC pause, a suspended laptop — would
-   * carry on writing checkpoints alongside its replacement.
+   * Ownership is confirmed and the write happens inside one critical section, so
+   * a superseded owner cannot slip a write in between. Losing the run aborts it
+   * here rather than at the next node boundary: an earlier version checked the
+   * fence once per attempt, which left every checkpoint, event and terminal
+   * verdict after that check unguarded — a stale owner could still declare the
+   * run complete.
    */
-  private _assertFence(record: RunRecord, handle: RunHandle): boolean {
-    if (handle.fence === 0 || holdsLease(record.runId, handle.fence)) return true;
-    handle.signal.aborted = true;
-    this.logger.warn?.(
-      `[kernel] ${record.runId}: lease was taken over (fence ${handle.fence} superseded) — stopping this owner`,
-    );
+  private _commit(record: RunRecord, handle: RunHandle, mutation: () => void): boolean {
+    if (commit(record.runId, this.ownerId, handle.fence, mutation)) return true;
+    if (!handle.signal.aborted) {
+      handle.signal.aborted = true;
+      handle.lostLease = true;
+      this.logger.warn?.(
+        `[kernel] ${record.runId}: lease lost (fence ${handle.fence} superseded) — this owner stops writing`,
+      );
+    }
     return false;
   }
 
-  private _setRunState(record: RunRecord, state: RunRecord['state'], error?: string): void {
-    record.state = state;
-    record.updatedAt = new Date().toISOString();
-    if (error) record.error = error;
-    if (isTerminalRunState(state)) stampTerminal(record, state);
-    saveRun(record);
-    // Hand the run back once it is over, so another process can pick it up
-    // without waiting out the lease.
-    if (isTerminalRunState(state)) releaseLease(record.runId);
-    this._event(record, {
-      ts: record.updatedAt,
-      type: 'run_state',
-      state,
-      outcome: record.outcome,
-      error,
-    });
+  private _setRunState(record: RunRecord, state: RunRecord['state'], handle: RunHandle, error?: string): void {
+    // The mutation happens INSIDE the commit, so a refused write leaves the
+    // in-memory record untouched too. Mutating first and committing second let a
+    // superseded owner hand its caller a record that said `completed` while the
+    // disk had correctly refused it — the same lie, one layer up.
+    const ts = new Date().toISOString();
+    if (
+      !this._commit(record, handle, () => {
+        record.state = state;
+        record.updatedAt = ts;
+        if (error) record.error = error;
+        if (isTerminalRunState(state)) stampTerminal(record, state);
+        saveRun(record);
+      })
+    ) {
+      return;
+    }
+    this._event(record, { ts: record.updatedAt, type: 'run_state', state, outcome: record.outcome, error }, handle);
+    // Hand the run back once it is over, so another owner can pick it up
+    // without waiting out the lease. After the writes, never before.
+    if (isTerminalRunState(state)) releaseLease(record.runId, this.ownerId);
   }
 
   private _setNodeState(
@@ -595,16 +637,26 @@ export class RunKernel extends EventEmitter {
     node: NodeRecord,
     state: NodeRecord['state'],
     extra: { attempt?: number; error?: string } = {},
+    handle?: RunHandle,
   ): void {
-    node.state = state;
-    if (extra.error) node.error = extra.error;
     const ts = new Date().toISOString();
-    if (state === 'running') node.startedAt = ts;
-    if (state === 'succeeded' || state === 'failed' || state === 'skipped' || state === 'cancelled') node.endedAt = ts;
-    record.currentNode = node.id;
-    record.updatedAt = ts;
-    saveRun(record);
-    this._event(record, { ts, type: 'node_state', node: node.id, state, ...extra });
+    const apply = (): void => {
+      node.state = state;
+      if (extra.error) node.error = extra.error;
+      if (state === 'running') node.startedAt = ts;
+      if (state === 'succeeded' || state === 'failed' || state === 'skipped' || state === 'cancelled') {
+        node.endedAt = ts;
+      }
+      record.currentNode = node.id;
+      record.updatedAt = ts;
+      saveRun(record);
+    };
+    if (handle) {
+      if (!this._commit(record, handle, apply)) return;
+    } else {
+      apply();
+    }
+    this._event(record, { ts, type: 'node_state', node: node.id, state, ...extra }, handle);
   }
 
   private _nodeSpec(record: RunRecord, id: string): NodeSpec | undefined {
@@ -706,31 +758,31 @@ export class RunKernel extends EventEmitter {
 
   private async _run(record: RunRecord, handle: RunHandle): Promise<RunRecord> {
     const maxVisits = record.spec.maxNodeVisits ?? DEFAULT_MAX_NODE_VISITS;
-    this._setRunState(record, 'running');
+    this._setRunState(record, 'running', handle);
 
     let cursor = this._firstPending(record);
 
     while (cursor) {
       if (handle.signal.aborted) {
-        this._setRunState(record, 'cancelled');
+        this._setRunState(record, 'cancelled', handle);
         return record;
       }
 
       const spec = this._nodeSpec(record, cursor);
       const nodeRec = record.nodes[cursor];
       if (!spec || !nodeRec) {
-        this._setRunState(record, 'failed', `unknown node '${cursor}'`);
+        this._setRunState(record, 'failed', handle, `unknown node '${cursor}'`);
         return record;
       }
 
       nodeRec.visits++;
       if (nodeRec.visits > maxVisits) {
         this._setNodeState(record, nodeRec, 'failed', { error: `visit limit ${maxVisits} exceeded` });
-        this._setRunState(record, 'failed', `node '${cursor}' exceeded the ${maxVisits}-visit loop bound`);
+        this._setRunState(record, 'failed', handle, `node '${cursor}' exceeded the ${maxVisits}-visit loop bound`);
         return record;
       }
 
-      if (spec.kind === 'verifier') this._setRunState(record, 'verifying');
+      if (spec.kind === 'verifier') this._setRunState(record, 'verifying', handle);
 
       const result = await this._runWithRetry(record, spec, nodeRec, handle);
 
@@ -739,35 +791,35 @@ export class RunKernel extends EventEmitter {
       // all the way to `completed` — so "I cancelled it" and "it completed"
       // could both be true, which makes cancellation meaningless.
       if (handle.signal.aborted) {
-        this._absorb(record, nodeRec, result);
-        this._setNodeState(record, nodeRec, 'cancelled');
-        this._setRunState(record, 'cancelled');
+        this._absorb(record, nodeRec, result, handle);
+        this._setNodeState(record, nodeRec, 'cancelled', {}, handle);
+        this._setRunState(record, 'cancelled', handle);
         return record;
       }
 
       if (result.awaitHuman) {
         const approved = await this._park(record, nodeRec, handle);
         if (!approved) {
-          this._setNodeState(record, nodeRec, 'failed', { error: 'rejected at human gate' });
-          this._setRunState(record, handle.signal.aborted ? 'cancelled' : 'failed', 'rejected at human gate');
+          this._setNodeState(record, nodeRec, 'failed', { error: 'rejected at human gate' }, handle);
+          this._setRunState(record, handle.signal.aborted ? 'cancelled' : 'failed', handle, 'rejected at human gate');
           return record;
         }
-        this._setNodeState(record, nodeRec, 'succeeded');
+        this._setNodeState(record, nodeRec, 'succeeded', {}, handle);
         cursor = spec.next ?? this._nextInOrder(record, cursor);
         continue;
       }
 
-      this._absorb(record, nodeRec, result);
+      this._absorb(record, nodeRec, result, handle);
 
       if (!result.ok) {
-        this._setNodeState(record, nodeRec, 'failed', { error: result.error });
+        this._setNodeState(record, nodeRec, 'failed', { error: result.error }, handle);
         if ((spec.onFailure ?? 'fail') === 'fail') {
           await this._finish(record, handle, `node '${cursor}' failed: ${result.error ?? 'unknown'}`);
           return record;
         }
         // `continue` — record it and move on.
       } else {
-        this._setNodeState(record, nodeRec, 'succeeded');
+        this._setNodeState(record, nodeRec, 'succeeded', {}, handle);
       }
 
       if (spec.kind === 'router') {
@@ -794,8 +846,8 @@ export class RunKernel extends EventEmitter {
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       if (handle.signal.aborted) return { ok: false, error: 'cancelled' };
       nodeRec.attempts = attempt;
-      if (!this._assertFence(record, handle)) return { ok: false, error: 'lease lost to another owner' };
-      this._setNodeState(record, nodeRec, 'running', { attempt });
+      this._setNodeState(record, nodeRec, 'running', { attempt }, handle);
+      if (handle.lostLease) return { ok: false, error: 'lease lost to another owner' };
 
       // A node sees one signal that is the union of "this attempt gave up" and
       // "the whole run was cancelled"; the kernel keeps them apart.
@@ -822,14 +874,14 @@ export class RunKernel extends EventEmitter {
         publish: (data) => {
           nodeRec.data = data;
           record.updatedAt = new Date().toISOString();
-          saveRun(record);
+          this._commit(record, handle, () => saveRun(record));
         },
         secrets: handle.secrets,
         tag: handle.tag,
         setChild: (childRunId) => {
           nodeRec.childRunId = childRunId;
           record.updatedAt = new Date().toISOString();
-          saveRun(record);
+          this._commit(record, handle, () => saveRun(record));
         },
       };
 
@@ -848,20 +900,20 @@ export class RunKernel extends EventEmitter {
   }
 
   private async _park(record: RunRecord, nodeRec: NodeRecord, handle: RunHandle): Promise<boolean> {
-    this._setNodeState(record, nodeRec, 'awaiting_human');
-    this._setRunState(record, 'awaiting_human');
+    this._setNodeState(record, nodeRec, 'awaiting_human', {}, handle);
+    this._setRunState(record, 'awaiting_human', handle);
     const approved = await new Promise<boolean>((resolve) => {
       handle.gate = { resolve };
     });
     handle.gate = undefined;
-    if (!handle.signal.aborted) this._setRunState(record, 'running');
+    if (!handle.signal.aborted) this._setRunState(record, 'running', handle);
     return approved;
   }
 
   /** Node kinds that can change the workspace. Routers and gates cannot. */
   private static readonly SIDE_EFFECT_KINDS: readonly NodeKind[] = ['agent', 'fanout', 'council', 'subflow'];
 
-  private _absorb(record: RunRecord, nodeRec: NodeRecord, result: NodeResult): void {
+  private _absorb(record: RunRecord, nodeRec: NodeRecord, result: NodeResult, handle: RunHandle): void {
     if (RunKernel.SIDE_EFFECT_KINDS.includes(nodeRec.kind)) {
       record.sideEffectSeq = (record.sideEffectSeq ?? 0) + 1;
     }
@@ -884,12 +936,11 @@ export class RunKernel extends EventEmitter {
             nodeRec.id +
             '/output.txt]'
           : result.output;
-      this._event(record, {
-        ts: new Date().toISOString(),
-        type: 'node_output',
-        node: nodeRec.id,
-        text: nodeRec.output,
-      });
+      this._event(
+        record,
+        { ts: new Date().toISOString(), type: 'node_output', node: nodeRec.id, text: nodeRec.output },
+        handle,
+      );
     }
     if (result.artifacts?.length) nodeRec.artifacts = result.artifacts;
     if (result.data !== undefined) nodeRec.data = result.data;
@@ -909,13 +960,17 @@ export class RunKernel extends EventEmitter {
         treeFingerprint: result.treeFingerprint,
         sideEffectSeq: record.sideEffectSeq ?? 0,
       };
-      this._event(record, {
-        ts: new Date().toISOString(),
-        type: 'evidence',
-        node: nodeRec.id,
-        evidenceId: result.evidenceId,
-        passed: Boolean(result.passed),
-      });
+      this._event(
+        record,
+        {
+          ts: new Date().toISOString(),
+          type: 'evidence',
+          node: nodeRec.id,
+          evidenceId: result.evidenceId,
+          passed: Boolean(result.passed),
+        },
+        handle,
+      );
     }
   }
 
@@ -939,20 +994,19 @@ export class RunKernel extends EventEmitter {
         `evidence ${record.verdict?.evidenceId ?? '(none)'} passed, but ${handle.inflight.size} abandoned ` +
         `attempt(s) were still running when the run ended — they can still change the tree, so the verdict ` +
         `cannot stand`;
-      this._event(record, {
-        ts: new Date().toISOString(),
-        type: 'log',
-        level: 'warn',
-        message: `[verify] ${record.outcomeReason}`,
-      });
+      this._event(
+        record,
+        { ts: new Date().toISOString(), type: 'log', level: 'warn', message: `[verify] ${record.outcomeReason}` },
+        handle,
+      );
     }
-    await this._expireStaleVerdict(record);
+    await this._expireStaleVerdict(record, handle);
     const outcome: RunOutcome = record.outcome;
     if (error || outcome === 'refuted') {
-      this._setRunState(record, 'failed', error ?? 'acceptance contract was not satisfied');
+      this._setRunState(record, 'failed', handle, error ?? 'acceptance contract was not satisfied');
       return;
     }
-    this._setRunState(record, 'completed');
+    this._setRunState(record, 'completed', handle);
   }
 
   /**
@@ -967,7 +1021,7 @@ export class RunKernel extends EventEmitter {
    * recorded. Not `refuted`: no check failed. We simply no longer know, and
    * saying so is the whole point of having three outcomes.
    */
-  private async _expireStaleVerdict(record: RunRecord): Promise<void> {
+  private async _expireStaleVerdict(record: RunRecord, handle: RunHandle): Promise<void> {
     if (record.outcome !== 'verified' || !record.verdict) return;
 
     // Nothing that could touch the workspace ran after the checks, so the
@@ -984,12 +1038,11 @@ export class RunKernel extends EventEmitter {
       before === undefined || after === undefined
         ? `evidence ${record.verdict.evidenceId} passed, but nodes ran afterwards and ${record.cwd} is not a git repository, so we cannot tell whether it still describes the tree`
         : `evidence ${record.verdict.evidenceId} passed, but the working tree changed afterwards — the verdict describes an earlier state`;
-    this._event(record, {
-      ts: new Date().toISOString(),
-      type: 'log',
-      level: 'warn',
-      message: `[verify] ${record.outcomeReason}`,
-    });
+    this._event(
+      record,
+      { ts: new Date().toISOString(), type: 'log', level: 'warn', message: `[verify] ${record.outcomeReason}` },
+      handle,
+    );
   }
 }
 
