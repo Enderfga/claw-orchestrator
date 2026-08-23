@@ -86,6 +86,14 @@ because a verifier is a node in the thing that survives.
   engine behind them needs a store, a router and a deploy strategy, and none of
   that belongs in the kernel. The stage between them needed no new kind at all.
 
+  Two consequences the wiring has to honour, or the move buys nothing. A build
+  the durable queue re-enqueues after a restart **resumes** its checkpoint
+  instead of starting over, so the crash-recovery this was for actually reaches
+  the product path — only an explicit rebuild takes a new incarnation. And
+  cancelling a build cancels the workflow, not just the queue entry: a dispatched
+  build used to carry on through verification and deploy while the user had been
+  told it had stopped.
+
   The interview and the done-mode conversation deliberately stay where they are.
   They are user-driven and open-ended; expressing them as a workflow would mean a
   router self-loop fighting the visit bound, or one fake node with a state
