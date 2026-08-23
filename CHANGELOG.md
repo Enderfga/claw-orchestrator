@@ -18,7 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `options.model` in `start()`, `src/persistent-session.ts:178-181`), but an override
     written as `opus` was dead for every `claude` session.
   - For the seven engines that never canonicalise, the reverse held — and because
-    `_persistSession()` stores the canonical id (`src/session-manager.ts:1959`), the same
+    `_persistSession()` stores the canonical id (`src/session-manager.ts:2011`), the same
     session priced by its raw spelling on a first run and by the canonical id after a
     resume, so an override could start or stop applying with no config change.
   - A prefixed key (`openai/gpt-5.4`) could never be reached from either spelling.
@@ -30,7 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A session with no explicit model gets its configured price.** `getModelPricing()`
   returned the registry rate before consulting the override map whenever `model` was
   absent, which is the normal case for codex and agy — and for non-Claude autoloop roles
-  it is deliberate (`src/session-manager.ts:619-621`). The engine default and the
+  it is deliberate (`src/session-manager.ts:494-496`). The engine default and the
   unknown-model fallback now go through the map like an explicit model does, so the
   flat-rate case the field exists for is actually covered.
 
@@ -38,14 +38,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   merge onto, so the unspecified fields become 0 — free tokens. That is a legitimate idiom
   and a very common typo, and they are indistinguishable at that point, so
   `overrideModelPricing()` now warns instead of resolving it silently. Previously the
-  override also suppressed the unknown-model warning at `src/models.ts:470`, so a
+  override also suppressed the unknown-model warning at `src/models.ts:512`, so a
   misspelled id went from noisy to silent.
 
 ### Added
 
 - **`pricingOverrides` is declared in the plugin config schema.** The capability was
   already wired — `api.pluginConfig` reaches the `SessionManager` constructor
-  (`src/index.ts:133`, `:154`) and `overrideModelPricing()` has been there all along — but
+  (`src/index.ts:138`, `:159`) and `overrideModelPricing()` has been there all along — but
   the field was absent from `openclaw.plugin.json`, so on the surface most users actually
   configure it was invisible and unvalidated.
 
