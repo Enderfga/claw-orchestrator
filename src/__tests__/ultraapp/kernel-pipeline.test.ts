@@ -112,12 +112,46 @@ describe('the ultraapp build pipeline is a kernel run', () => {
     expect(commit(guard, { record: crashed }).outcome).toBe('committed');
     releaseLease(guard);
 
-    await kernel.resume(runId);
-    const done = await kernel.wait(runId);
+    // Exercise the product recovery path used by the durable build queue, not a
+    // direct kernel resume that bypasses UltraappManager.runBuild.
+    await (mgr as unknown as { runBuild(id: string, emit: (event: unknown) => void): Promise<void> }).runBuild(
+      id,
+      () => undefined,
+    );
+    const done = loadRun(runId);
 
     expect(done!.state).toBe('completed');
     expect(done!.nodes.synth.state).toBe('succeeded');
     // The council ran once, for the whole life of this run.
     expect(synthCalls()).toBe(1);
+  }, 30_000);
+
+  it('cancelBuild cancels the dispatched kernel workflow', async () => {
+    const councilMod = await import('../../ultraapp/council-adapter.js');
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    vi.spyOn(councilMod, 'runCouncilSynth').mockImplementation(async ({ runDir }) => {
+      await gate;
+      const codebase = path.join(runDir, 'versions', 'v1', 'codebase');
+      fs.mkdirSync(codebase, { recursive: true });
+      return { ok: true, worktreePath: codebase, rounds: 1 };
+    });
+
+    mgr = new UltraappManager({
+      store,
+      sessionManager: fakeSessionManager() as never,
+      kernel,
+      buildContract: PASSING_BUILD,
+    });
+    const id = await mgr.createRun();
+    await mgr.startBuild(id);
+    for (let i = 0; i < 50 && !kernel.get(ultraappKernelRunId(id)); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+
+    mgr.cancelBuild(id);
+    release();
+    await kernel.wait(ultraappKernelRunId(id));
+    expect(loadRun(ultraappKernelRunId(id))?.state).toBe('cancelled');
   }, 30_000);
 });

@@ -304,6 +304,10 @@ export class UltraappManager {
 
   cancelBuild(runId: string): void {
     this.buildQueue.cancel(runId);
+    // A queued item lives in the queue; a dispatched item lives in the kernel.
+    // Cancelling only the former emitted a reassuring event while the workflow
+    // continued through verification and deploy.
+    this.kernel.cancel(ultraappKernelRunId(runId));
   }
 
   buildPosition(runId: string): number {
@@ -355,19 +359,24 @@ export class UltraappManager {
     });
 
     const kernelRunId = ultraappKernelRunId(runId);
-    // A rebuild reuses the id, so the previous run is removed first. Deleting
-    // takes its incarnation with it, so nothing left over from the old build can
-    // write to the new one.
-    if (this.kernel.get(kernelRunId) && !this.kernel.delete(kernelRunId)) {
-      const reason = `a previous build of ${runId} is still owned by another process`;
-      emit({ type: 'build-failed', runId, phase: 'orchestrator', reason });
-      await this.opts.store.setMode(runId, 'failed', reason);
-      return;
-    }
+    const previous = this.kernel.get(kernelRunId);
+    const resumable = previous && !['completed', 'failed', 'cancelled'].includes(previous.state);
 
     const off = this.subscribeKernel(kernelRunId, runId, emit, { version, codebasePath });
     try {
-      await this.kernel.start(workflow, { runId: kernelRunId, cwd: runDir });
+      if (resumable) {
+        // The durable queue re-enqueues an in-flight build after a process dies.
+        // Resume its checkpoint instead of deleting it: otherwise the queue's
+        // recovery path threw away the very per-stage durability the kernel move
+        // was meant to provide and paid for the council twice.
+        await this.kernel.resume(kernelRunId);
+      } else {
+        // An explicit rebuild reuses the stable id but is a new incarnation.
+        if (previous && !this.kernel.delete(kernelRunId)) {
+          throw new Error(`a previous build of ${runId} is still owned by another process`);
+        }
+        await this.kernel.start(workflow, { runId: kernelRunId, cwd: runDir });
+      }
       const record = await this.kernel.wait(kernelRunId);
       // Unsubscribed BEFORE settling. A handler is async and re-reads the record
       // itself, so one that started just before the terminal transition can
