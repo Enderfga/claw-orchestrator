@@ -5,6 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **OpenAI-compat: tool results were discarded on any thread the engine had not
+  opened.** `extractUserMessage()` decided whether to send the caller's tool
+  results by reading the SHAPE of the messages array — "is the last non-system
+  message a `tool` role?" — to answer a question about the ENGINE's state: "does
+  its transcript already hold them?". The two come apart whenever there is no
+  transcript. A `[..., tool, user]` or `[..., tool, assistant]` array sent to a
+  session whose native conversation did not exist yet had every result dropped,
+  and the turn was answered without them while the request still returned
+  200. The decision is now `serializeToolResults()`'s alone, keyed on
+  `threadHasHistory` — the parameter that already described the engine. Requests
+  carrying no tool results are untouched.
+
+  The `latestRoundOnly` scoping is unchanged, and so is the condition it rests
+  on, now asserted rather than assumed: it slices from the array's last
+  `assistant` message, so it bounds a tool loop to one round per hop only for a
+  client that echoes the `tool_calls` turn it is answering. An array with no
+  `assistant` message anywhere gives `lastIndexOf()` `-1` and `slice(0)` — the
+  whole array — so on that array `latestRoundOnly` is a no-op: the serialized
+  block is byte-identical with the flag set and unset, and the client re-sends the
+  entire loop on every hop, before this change as after it. Same for a turn with
+  no live conversation, where nothing is scoped by design. So "the duplication is
+  bounded to one round" holds only where the scoping actually runs.
+  `skills/references/openai-compat.md` documents each case.
+
+- **Docs: `X-Session-Reset` is not honored on a request that ends in a `tool`
+  result.** No behaviour change here — the header is parsed after the branch that
+  handles a trailing `tool` role returns, so on that one shape the reset stops no
+  session and creates no conversation, and the turn is treated as a resumed one.
+  `skills/references/openai-compat.md` said a reset turn always stops the session
+  and starts a new one; it now carries the exception.
+
 ## [6.0.1] - 2026-08-24
 
 ### Fixed

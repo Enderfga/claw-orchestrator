@@ -108,11 +108,84 @@ and opencode's session id), not merely that the session is in the manager's map:
 first turn that died before announcing one leaves a session behind that resumes
 nothing, and those turns keep receiving the full prompt.
 
+One exception to the sentence above, and it is a defect rather than a design: on a
+request whose last non-system message is a `tool` result, `X-Session-Reset` is not
+seen at all. The header is parsed after the branch that handles a trailing `tool`
+role returns, so on that shape the reset stops nothing, creates nothing, and the
+turn is treated as a resumed one — the prompt is skipped if the thread is live.
+Every other shape, `[..., tool, user]` included, honors it. A client that needs a
+reset mid-tool-loop has to send it on a turn that does not end in a `tool`
+message.
+
 `OPENAI_COMPAT_TOOLS_PER_MESSAGE=1` opts out: it re-sends the full block on every
 turn for `claude` too, which is what makes a changing tool set work inside one
 session (in that mode the tool list is deliberately left out of the session hash).
 It costs the per-turn growth described above — only use it if the tool set really
 does change mid-conversation.
+
+## Tool results on the way back
+
+A `tool` role message in the caller's array is the result of a call the model asked for on an
+earlier turn. The `tool` messages that are in scope are serialized into one `<tool_results>` block
+and prepended to the caller's latest `user` text in the message the CLI receives.
+
+What is in scope depends on what the engine is holding, not on where the `tool` messages sit in the
+array:
+
+| On this turn the engine                                                                                                                   | What is sent                                                                                                            |
+| ----------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| is **not** resuming a conversation — no session yet, a session that never announced a conversation id, or one being stopped and recreated | every `tool` message in the array                                                                                       |
+| **is** resuming a live conversation                                                                                                       | only the `tool` messages after the array's last `assistant` message — everything before it is already in the transcript |
+
+Whether the engine is resuming is resolved with the same `nativeThreadIsLive()` check as the
+middle row of [Tool definitions](#tool-definitions-and-where-they-live). Engines with no resume
+surface (`gemini`, one-shot `custom`) are never in the second row, because
+`engineHasNativeConversation()` gates the check.
+
+Two engines reach the second row from map presence alone rather than from a captured id, because
+`nativeThreadIsLive()` has no case for them and its `default` arm returns `true`: `claude`, which
+holds its context in a live process and has no separate id to check, and `grok` — which does resume
+by id (`--resume <sessionUUID>`), but whose id is absent from `SessionStats`, so there is nothing to
+check even though there is something to check for. A `grok` session whose first turn died before
+emitting its id therefore reports a live thread and gets its earlier rounds scoped away. That is
+pre-existing and not addressed here; fixing it means adding the field.
+
+The trailing role of the array does not enter into it — `[..., tool]`, `[..., tool, user]` and
+`[..., tool, assistant]` are read the same way, and the caller's latest `user` text, when there is
+one, is appended after the block either way. A turn whose latest `user` message carries no text at
+all — a multimodal content array holding only an image — gets the block as the whole message. An
+array carrying no `tool` message at all is untouched: no block, no wrapper, the message goes as it
+came.
+
+The third case in the first row — a session being stopped and recreated — is `X-Session-Reset`, and
+it puts the turn in that row on every shape where the header is read at all. That excludes an array
+ending in a `tool` result, where the header is not seen; see the note under [Tool definitions](#tool-definitions-and-where-they-live).
+
+### What the scoping is for, and what it does not cover
+
+On a resumed conversation the scoping is what keeps a tool loop linear instead of quadratic. With a
+30k-character batch per round, the tenth hop carries ~30k characters of results instead of the
+~300k the engine has already seen. Two properties are worth checking against your own client before
+relying on it:
+
+- **The boundary is the last `assistant` message, and what matters is whether one sits AFTER the
+  earliest unsent `tool` message** — not whether the array contains one at all. The OpenAI wire
+  format has the caller echo the `assistant` turn that carried the `tool_calls` ahead of the
+  matching `tool` messages, and a client that echoes it pays for one round per hop. When no
+  `assistant` message follows the earliest unsent result, `lastIndexOf('assistant')` is behind them
+  all and the slice keeps everything, so the scoping is a no-op. Two shapes land there: an array
+  with no `assistant` message at all, and one `assistant` announcing N parallel calls followed by
+  its N results — the second is a no-op that costs nothing, since those N results _are_ one round.
+- **A round can go out twice.** Engine replies are not read back out of the array, so a round the
+  caller did not record an `assistant` turn for looks the same as a round the engine never saw, and
+  it goes out again. The duplication is bounded to one round wherever the scoping runs — i.e. on a
+  resumed conversation whose array does carry an `assistant` message. It is unbounded in the two
+  cases where nothing is scoped: the row above, and any turn in the first row of the table (no
+  resumed conversation), where the whole array goes out by design because the engine holds none of
+  it.
+
+Neither applies to a caller that keeps its own transcript and forwards only the latest turn — it
+sends one round at a time.
 
 ## Environment variables
 

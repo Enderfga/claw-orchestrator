@@ -411,7 +411,11 @@ export function extractUserMessage(
    * Whether the engine's conversation already holds everything up to the caller's latest tool
    * round. Only meaningful for engines that resume a native conversation and only once the
    * conversation id has been captured — see nativeThreadIsLive(). Defaults to false so any caller
-   * that cannot establish that keeps the previous behaviour of sending every result.
+   * that cannot establish that keeps the safe behaviour of sending every result.
+   *
+   * This — not the shape of the caller's array — is what says whether a tool result is already in
+   * the engine's transcript. They are different questions: an array can end in a `user` turn on a
+   * thread that holds nothing at all.
    */
   threadHasHistory = false,
 ): ExtractedMessage {
@@ -437,10 +441,7 @@ export function extractUserMessage(
   const systemMessages = messages.filter((m) => m.role === 'system');
   const systemPrompt = systemMessages.length > 0 ? systemMessages.map(textOf).join('\n') : undefined;
 
-  // Handle tool result messages — only when the LAST non-system message is
-  // a tool role (meaning we're in an active tool-use cycle). If the last
-  // message is a user role, it's a follow-up in an existing conversation
-  // and the old tool results are already in the CLI's history.
+  // Tool results that end the array: an active tool-use cycle, with no new caller text to carry.
   const lastNonSystem = [...messages].reverse().find((m) => m.role !== 'system');
   if (lastNonSystem?.role === 'tool') {
     const toolResultBlock = serializeToolResults(messages, threadHasHistory);
@@ -455,13 +456,33 @@ export function extractUserMessage(
   if (userMessages.length === 0) {
     throw new Error('No user message found in messages array');
   }
-  const userMessage = textOf(userMessages[userMessages.length - 1]);
+  const lastUserText = textOf(userMessages[userMessages.length - 1]);
 
   // 1. Explicit reset header — honored in both modes. Normalize trim+lowercase
   //    so callers using `TRUE`, ` 1 `, etc. don't silently fail.
   const rawReset = headers?.['x-session-reset'];
   const resetHeader = typeof rawReset === 'string' ? rawReset.trim().toLowerCase() : '';
-  if (resetHeader === 'true' || resetHeader === '1') {
+  const isReset = resetHeader === 'true' || resetHeader === '1';
+
+  // Tool results that did NOT end the array — the caller appended a `user` or `assistant` turn
+  // after them. Whether they are already in the CLI's history is a question about the ENGINE, so
+  // `threadHasHistory` decides it, not the trailing role: an array ending in `user` says nothing
+  // about whether a transcript exists to have held the earlier rounds.
+  //
+  // A reset zeroes it: the session is about to be stopped and recreated, so on that turn the
+  // engine holds nothing regardless of what it held a moment ago. serializeToolResults() returns
+  // '' when there is nothing to send, so a request with no tool results is untouched, and on a
+  // live thread the existing scoping still trims everything before the engine's last assistant
+  // turn. What that bounds the hop to is precisely "the results that follow the engine's last
+  // `assistant` turn" — one round for a client that echoes each `assistant` turn it answers, and
+  // one round of N results for a single `assistant` announcing N parallel calls. It bounds nothing
+  // when no `assistant` message sits after the earliest unsent `tool` message, because then
+  // lastIndexOf('assistant') is behind them all and the slice keeps everything.
+  const toolResultBlock = serializeToolResults(messages, threadHasHistory && !isReset);
+  const userMessage =
+    toolResultBlock && lastUserText ? `${toolResultBlock}\n\n${lastUserText}` : toolResultBlock || lastUserText;
+
+  if (isReset) {
     return { systemPrompt, userMessage, isNewConversation: true };
   }
 
