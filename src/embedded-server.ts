@@ -1172,6 +1172,24 @@ export class EmbeddedServer {
       // runs that ended via terminate, NOT for autoloopDelete), Claude will
       // resume the original conversation. Otherwise a fresh Planner is
       // spawned and the dashboard replays chat.jsonl visually.
+      // ─── Autoloop — what a resume needs before it can run ─────
+      //
+      // GET /autoloop/<run_id>/resume-requirements
+      //
+      // Names the roles whose engine was `custom`, so a caller (the dashboard's
+      // Resume button, in practice) knows to supply a secret reference for each
+      // instead of sending an empty body and failing. Role names only — the
+      // engine kind is already in the run's spec, and no credential is involved.
+      const v2ResumeReqMatch = path.match(/^\/autoloop\/([^/]+)\/resume-requirements$/);
+      if (v2ResumeReqMatch) {
+        try {
+          json(200, { ok: true, ...this.manager.autoloopResumeRequirements(v2ResumeReqMatch[1]) });
+        } catch (err) {
+          json(autoloopErrorStatus(err), { ok: false, error: (err as Error).message });
+        }
+        return;
+      }
+
       const v2ResumeMatch = path.match(/^\/autoloop\/([^/]+)\/resume$/);
       if (v2ResumeMatch) {
         const id = v2ResumeMatch[1];

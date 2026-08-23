@@ -14,7 +14,12 @@
  * is not real is the engine subprocess, and the fake records exactly what it was
  * asked to do so the assertions can be about behaviour rather than intent.
  *
- * Rule for this file: never call `setExecutor`.
+ * Rule for this file: no assertion about what a *mode* does may replace a node
+ * executor. The ownership and crash-recovery sections do register one, because
+ * what they need from a node is that it hang, signal, or outlive its run — the
+ * node's content is not what is under test there, and the alternative is a real
+ * engine subprocess. Everywhere else, the path is production code all the way
+ * down to the fake session.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
@@ -514,23 +519,64 @@ describe('crash recovery', () => {
 describe('single owner, enforced', () => {
   const DIST2 = path.resolve('dist/src');
 
-  it('two real processes racing to claim: exactly one wins', async () => {
-    // Sequentially writing a fake pid proves nothing about a race. Two processes
-    // both hammer `acquireLease` on the same run; the invariant is that they do
-    // not both come away believing they own it.
-    const { createRunDir } = await import('../kernel/store.js');
+  /**
+   * Put a run's lease into the state a legitimate cross-host takeover starts
+   * from: the holder is on another machine and has stopped heartbeating.
+   *
+   * The pre-state is written by hand because we cannot run another host. The
+   * takeover itself is not — the tests below call the real `acquireLease`, so
+   * what is under test is the production path, not a hand-made outcome.
+   */
+  async function goQuietOnAnotherHost(runId: string): Promise<void> {
+    const { atomicWriteJson, readLease, runDir } = await import('../kernel/store.js');
+    atomicWriteJson(path.join(runDir(runId), 'lease.json'), {
+      ...readLease(runId)!,
+      host: 'a-machine-that-is-not-this-one',
+      renewedAt: new Date(Date.now() - 5 * 60_000).toISOString(),
+    });
+  }
+
+  function record(runId: string, over: Record<string, unknown> = {}): never {
+    return {
+      runId,
+      workflow: 'x',
+      spec: { name: 'x', nodes: [] },
+      state: 'running',
+      outcome: 'unverified',
+      cwd: os.tmpdir(),
+      createdAt: '2026-08-23T00:00:00.000Z',
+      updatedAt: '2026-08-23T00:00:00.000Z',
+      nodes: {},
+      ...over,
+    } as never;
+  }
+
+  it('two real processes racing to claim: only one of them ever holds it', async () => {
+    // The previous version asserted only that *someone* won, which two
+    // sequential winners also satisfy. Both children wait for the same instant
+    // and then hammer the claim for a fixed window, so neither can win by
+    // outliving the other — and each reports whether it ever got a guard AND
+    // whether that guard was good enough to write with.
+    const { createRunDir, readEvents } = await import('../kernel/store.js');
     createRunDir('race-run', { name: 'x', nodes: [] } as never);
+    const startAt = Date.now() + 700;
 
     const src = (label: string) => `
-      const { acquireLease } = await import(${JSON.stringify(`${DIST2}/kernel/store.js`)});
-      const results = [];
-      for (let i = 0; i < 40; i++) {
-        try { results.push(acquireLease('race-run', ${JSON.stringify(label)}).fence); }
-        catch { results.push(null); }
+      const { acquireLease, commit } = await import(${JSON.stringify(`${DIST2}/kernel/store.js`)});
+      await new Promise((r) => setTimeout(r, Math.max(0, ${startAt} - Date.now())));
+      let held = false, commits = 0;
+      const until = Date.now() + 1200;
+      while (Date.now() < until) {
+        try {
+          const g = acquireLease('race-run', ${JSON.stringify(label)});
+          held = true;
+          if (commit(g, { events: [{ ts: new Date().toISOString(), type: 'log', level: 'info',
+                                    message: ${JSON.stringify(label)} }] })) commits++;
+        } catch { /* refused, which is the correct outcome for the loser */ }
       }
-      console.log(JSON.stringify({ label: ${JSON.stringify(label)}, won: results.some((r) => r !== null) }));
+      console.log(JSON.stringify({ label: ${JSON.stringify(label)}, held, commits }));
     `;
-    const run = (label: string): Promise<{ label: string; won: boolean }> =>
+    const run = (label: string): Promise<{ label: string; held: boolean; commits: number }> =>
       new Promise((resolve, reject) => {
         const proc = spawn(process.execPath, ['--input-type=module', '-e', src(label)], {
           env: { ...process.env, CLAWO_WF_DIR: wfDir },
@@ -548,13 +594,14 @@ describe('single owner, enforced', () => {
         proc.on('error', reject);
       });
 
-    const [a, b] = await Promise.all([run('owner-a'), run('owner-b')]);
-    // One of them may lose every attempt; what must never happen is both
-    // believing they hold it at the end.
-    const { readLease } = await import('../kernel/store.js');
-    const finalOwner = readLease('race-run')!.ownerId;
-    expect([a.won, b.won].filter(Boolean).length).toBeGreaterThan(0);
-    expect(['owner-a', 'owner-b']).toContain(finalOwner);
+    const results = await Promise.all([run('owner-a'), run('owner-b')]);
+    const winners = results.filter((r) => r.held);
+    expect(winners).toHaveLength(1);
+    expect(results.filter((r) => r.commits > 0)).toHaveLength(1);
+    // And only the winner's writes are in the log the next owner would read.
+    const messages = new Set(readEvents('race-run').map((e) => (e as { message?: string }).message));
+    expect(messages.has(winners[0].label)).toBe(true);
+    expect(messages.has(results.find((r) => !r.held)!.label)).toBe(false);
   }, 60_000);
 
   it('two kernels in ONE process are two owners, not one', async () => {
@@ -586,52 +633,52 @@ describe('single owner, enforced', () => {
     expect(seen).toEqual(['k1']);
   }, 30_000);
 
-  it('the fence never repeats, even across release', async () => {
+  it('the fence never repeats within one incarnation, even across release', async () => {
     // It used to be read off the lease, which release deletes — so the counter
     // restarted at 1 and a stale holder's token could match a fresh owner's.
     const { acquireLease, createRunDir, releaseLease } = await import('../kernel/store.js');
     createRunDir('fence-run', { name: 'x', nodes: [] } as never);
-    const first = acquireLease('fence-run', 'owner-1').fence;
-    releaseLease('fence-run', 'owner-1');
-    const second = acquireLease('fence-run', 'owner-2').fence;
-    releaseLease('fence-run', 'owner-2');
-    const third = acquireLease('fence-run', 'owner-3').fence;
-    expect(second).toBeGreaterThan(first);
-    expect(third).toBeGreaterThan(second);
+    const first = acquireLease('fence-run', 'owner-1');
+    releaseLease(first);
+    const second = acquireLease('fence-run', 'owner-2');
+    releaseLease(second);
+    const third = acquireLease('fence-run', 'owner-3');
+    expect(second.fence).toBeGreaterThan(first.fence);
+    expect(third.fence).toBeGreaterThan(second.fence);
+  });
+
+  it('re-acquiring supersedes the previous guard, even for the same owner', async () => {
+    // Re-entrancy that hands back the same capability is not re-entrancy, it is
+    // two capabilities for one run. A second claim is a new claim.
+    const { acquireLease, commit, createRunDir, loadRun } = await import('../kernel/store.js');
+    createRunDir('reclaim-run', { name: 'x', nodes: [] } as never);
+    const first = acquireLease('reclaim-run', 'same-owner');
+    const second = acquireLease('reclaim-run', 'same-owner');
+    expect(second.acquisitionId).not.toBe(first.acquisitionId);
+    expect(commit(second, { record: record('reclaim-run', { workflow: 'second' }) })).toBe(true);
+    expect(commit(first, { record: record('reclaim-run', { workflow: 'first' }) })).toBe(false);
+    expect(loadRun('reclaim-run')!.workflow).toBe('second');
   });
 
   it('a superseded owner cannot commit — the write is refused, not merely noticed', async () => {
     // The previous version checked the fence once per node, so every checkpoint,
     // event and terminal verdict after that check was unguarded: a stale owner
     // could still declare the run complete.
-    const { acquireLease, commit, createRunDir, loadRun, saveRun } = await import('../kernel/store.js');
+    const { acquireLease, commit, createRunDir, loadRun } = await import('../kernel/store.js');
     createRunDir('commit-run', { name: 'x', nodes: [] } as never);
     const mine = acquireLease('commit-run', 'owner-old');
-    expect(
-      commit('commit-run', 'owner-old', mine.fence, () =>
-        saveRun({ runId: 'commit-run', workflow: 'x', state: 'running' } as never),
-      ),
-    ).toBe(true);
+    expect(commit(mine, { record: record('commit-run') })).toBe(true);
 
-    // A live local owner cannot be stolen — that is the point of the check — so
-    // the post-takeover state is written directly, which is exactly what a
-    // legitimate takeover (dead holder, or one on another host past its TTL)
-    // leaves behind.
-    const { atomicWriteJson, runDir, readLease } = await import('../kernel/store.js');
-    atomicWriteJson(path.join(runDir('commit-run'), 'lease.json'), {
-      ...readLease('commit-run')!,
-      ownerId: 'owner-new',
-      fence: mine.fence + 1,
-    });
+    // A real takeover, performed by the real acquisition path.
+    await goQuietOnAnotherHost('commit-run');
+    acquireLease('commit-run', 'owner-new');
 
-    const refused = commit('commit-run', 'owner-old', mine.fence, () =>
-      saveRun({ runId: 'commit-run', workflow: 'x', state: 'completed' } as never),
-    );
-    expect(refused).toBe(false);
+    expect(commit(mine, { record: record('commit-run', { state: 'completed' }) })).toBe(false);
     expect(loadRun('commit-run')?.state).not.toBe('completed');
   });
 
   it('a kernel whose lease is taken mid-node stops writing and does not complete', async () => {
+    const { acquireLease } = await import('../kernel/store.js');
     const { RunKernel } = await import('../kernel/engine.js');
     const kernel = new RunKernel({ nodeTimeoutMs: 10_000 });
     let released!: () => void;
@@ -646,13 +693,8 @@ describe('single owner, enforced', () => {
       { runId: 'stolen-run' },
     );
     await new Promise((r) => setTimeout(r, 50));
-    const { atomicWriteJson, runDir, readLease } = await import('../kernel/store.js');
-    const held = readLease('stolen-run')!;
-    atomicWriteJson(path.join(runDir('stolen-run'), 'lease.json'), {
-      ...held,
-      ownerId: 'someone-else',
-      fence: held.fence + 1,
-    });
+    await goQuietOnAnotherHost('stolen-run');
+    acquireLease('stolen-run', 'someone-else');
     released();
 
     const done = await kernel.wait(rec.runId);
@@ -661,16 +703,130 @@ describe('single owner, enforced', () => {
     expect(loadRun('stolen-run')?.state).not.toBe('completed');
   }, 30_000);
 
+  it('a superseded owner keeps neither the state nor the output the disk refused', async () => {
+    // The half the previous round missed. Refusing the checkpoint is not enough
+    // if the record handed back to the caller still carries the output, the
+    // cost, the node payload and a passing verdict — that is the same claim,
+    // one layer up, and it is what callers actually read.
+    const { acquireLease, loadRun, readEvents } = await import('../kernel/store.js');
+    const { RunKernel } = await import('../kernel/engine.js');
+    const kernel = new RunKernel({ nodeTimeoutMs: 10_000 });
+    let released!: () => void;
+    const gate = new Promise<void>((r) => (released = r));
+    kernel.setExecutor('agent', async (_node, ctx) => {
+      await gate;
+      // Everything a node is able to do to a run, done after losing it.
+      ctx.emit({ ts: new Date().toISOString(), type: 'log', level: 'info', message: 'STALE-OWNER-EVENT' });
+      ctx.publish({ stale: true });
+      return { ok: true, output: 'STALE-OWNER-OUTPUT', costUsd: 9.99, evidenceId: 'stale-ev', passed: true };
+    });
+
+    const rec = await kernel.start(
+      { name: 'stale-mem', cwd: os.tmpdir(), nodes: [{ id: 'a', kind: 'agent', prompt: 'x' }] },
+      { runId: 'stale-mem' },
+    );
+    await new Promise((r) => setTimeout(r, 50));
+    await goQuietOnAnotherHost('stale-mem');
+    acquireLease('stale-mem', 'the-new-owner');
+    released();
+
+    const done = (await kernel.wait(rec.runId))!;
+    for (const view of [done, loadRun('stale-mem')!]) {
+      expect(view.state).not.toBe('completed');
+      expect(view.outcome).not.toBe('verified');
+      expect(view.verdict).toBeUndefined();
+      expect(view.evidenceId).toBeUndefined();
+      expect(view.costUsd ?? 0).toBe(0);
+      expect(view.nodes.a.output).toBeUndefined();
+      expect(view.nodes.a.data).toBeUndefined();
+    }
+    // And nothing reached the log its replacement reads.
+    expect(JSON.stringify(readEvents('stale-mem'))).not.toContain('STALE-OWNER-EVENT');
+  }, 30_000);
+
+  it('a guard from a deleted run cannot write to the run that reuses its id', async () => {
+    // ABA. The fence is monotonic only while the directory it lives in exists,
+    // and deleting a run takes the counter with it — so the next run under the
+    // same id starts at fence 1 again, and an attempt still holding fence 1 from
+    // the deleted run becomes valid a second time. The incarnation id is what
+    // makes that impossible; this test asserts the fence really does repeat, so
+    // it is testing the thing that actually saves us.
+    const { acquireLease, commit, createRunDir, deleteRunDir, loadRun } = await import('../kernel/store.js');
+    const spec = { name: 'x', nodes: [] } as never;
+    createRunDir('aba-run', spec);
+    const old = acquireLease('aba-run', 'same-owner');
+    expect(commit(old, { record: record('aba-run', { workflow: 'old' }) })).toBe(true);
+
+    deleteRunDir('aba-run');
+    createRunDir('aba-run', spec);
+    const fresh = acquireLease('aba-run', 'same-owner');
+    expect(fresh.fence).toBe(old.fence);
+    expect(fresh.incarnationId).not.toBe(old.incarnationId);
+    expect(commit(fresh, { record: record('aba-run', { workflow: 'new' }) })).toBe(true);
+
+    // The old attempt, still alive, tries to finish the run it thinks it owns.
+    expect(commit(old, { record: record('aba-run', { workflow: 'old', state: 'completed' }) })).toBe(false);
+    expect(loadRun('aba-run')!.workflow).toBe('new');
+    expect(loadRun('aba-run')!.state).not.toBe('completed');
+  });
+
+  it('an abandoned attempt cannot write to the next run that takes its id', async () => {
+    // The same ABA, through the kernel: a node whose timeout was abandoned is
+    // still running by construction, and it outlives both its run and the
+    // delete that frees the id.
+    const { loadRun, readEvents } = await import('../kernel/store.js');
+    const { RunKernel } = await import('../kernel/engine.js');
+    const kernel = new RunKernel({ nodeTimeoutMs: 200 });
+    let released!: () => void;
+    const gate = new Promise<void>((r) => (released = r));
+    let first = true;
+    kernel.setExecutor('agent', async (_node, ctx) => {
+      if (first) {
+        first = false;
+        await gate;
+        ctx.emit({ ts: new Date().toISOString(), type: 'log', level: 'info', message: 'GHOST-EVENT' });
+        ctx.publish({ ghost: true });
+        return { ok: true, output: 'GHOST-OUTPUT' };
+      }
+      return { ok: true, output: 'second run output' };
+    });
+
+    const one = await kernel.start(
+      { name: 'ghost-one', cwd: os.tmpdir(), nodes: [{ id: 'a', kind: 'agent', prompt: 'x' }] },
+      { runId: 'reused-id', tag: 't1' },
+    );
+    await kernel.wait(one.runId);
+    expect(kernel.delete('reused-id', { expectTag: 't1' })).toBe(true);
+
+    const two = await kernel.start(
+      { name: 'ghost-two', cwd: os.tmpdir(), nodes: [{ id: 'a', kind: 'agent', prompt: 'x' }] },
+      { runId: 'reused-id', tag: 't2' },
+    );
+    await kernel.wait(two.runId);
+
+    released();
+    await new Promise((r) => setTimeout(r, 250));
+
+    const disk = loadRun('reused-id')!;
+    expect(disk.workflow).toBe('ghost-two');
+    expect(disk.nodes.a.output).toBe('second run output');
+    expect(disk.nodes.a.data).toBeUndefined();
+    expect(JSON.stringify(readEvents('reused-id'))).not.toContain('GHOST');
+  }, 30_000);
+
   it('does not declare a live local owner stale for going quiet', async () => {
     const { leaseIsStale } = await import('../kernel/store.js');
     expect(
       leaseIsStale({
+        runId: 'r',
+        incarnationId: 'i',
         ownerId: 'o',
+        acquisitionId: 'a',
+        fence: 1,
         pid: process.pid,
         host: os.hostname(),
         acquiredAt: new Date(Date.now() - 3_600_000).toISOString(),
         renewedAt: new Date(Date.now() - 3_600_000).toISOString(),
-        fence: 1,
       }),
     ).toBe(false);
   });
@@ -768,9 +924,9 @@ describe('the ultraapp build queue refuses work it does not own', () => {
 describe('races that need real processes', () => {
   const DIST3 = path.resolve('dist/src');
 
-  function child(src: string): ReturnType<typeof spawn> {
+  function child(src: string, env: NodeJS.ProcessEnv = {}): ReturnType<typeof spawn> {
     return spawn(process.execPath, ['--input-type=module', '-e', src], {
-      env: { ...process.env, CLAWO_WF_DIR: wfDir },
+      env: { ...process.env, CLAWO_WF_DIR: wfDir, ...env },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
   }
@@ -784,58 +940,153 @@ describe('races that need real processes', () => {
     });
   }
 
-  it('two processes claiming an EMPTY ultraapp queue: only one runs the build', async () => {
-    // The previous test pre-seeded an owner, so it never exercised the case that
-    // actually broke: two constructors, no state file, both concluding they owned
-    // it because nothing was written until the first enqueue.
+  function lastJson<T>(out: string): T | undefined {
+    try {
+      return JSON.parse(out.trim().split('\n').pop() ?? '') as T;
+    } catch {
+      return undefined;
+    }
+  }
+
+  it('two processes claiming an EMPTY ultraapp queue: exactly one runs the build', async () => {
+    // Two things were wrong with the earlier version. It pre-seeded an owner, so
+    // it never exercised the case that actually broke — two constructors, no
+    // state file, both concluding they owned it. And it asserted `<= 1`, which
+    // zero executions also satisfies, so a queue that ran nothing would have
+    // passed. Both processes now construct at the same instant and stay alive
+    // past each other, and the assertion is exactly one.
     const statePath = path.join(wfDir, 'contested-queue.json');
+    const startAt = Date.now() + 700;
     const src = (label: string) => `
       const { UltraappBuildQueue } = await import(${JSON.stringify(`${DIST3}/ultraapp/build.js`)});
       const seen = [];
+      await new Promise((r) => setTimeout(r, Math.max(0, ${startAt} - Date.now())));
       const q = new UltraappBuildQueue({
         statePath: ${JSON.stringify(statePath)},
         worker: async (id) => { seen.push(${JSON.stringify(label)} + ':' + id); },
       });
-      // Both processes finish constructing, then both try to take the work.
-      await new Promise((r) => setTimeout(r, 250));
-      try { await q.enqueue('same-build'); } catch { /* refused, as it should be */ }
+      const owns = q.ownsQueue();
+      let refused = false;
+      try { await q.enqueue('same-build'); } catch { refused = true; }
       await q.idle();
-      console.log(JSON.stringify({ seen }));
+      // Outlive the other process, so neither can win by being the last one standing.
+      await new Promise((r) => setTimeout(r, Math.max(0, ${startAt + 2500} - Date.now())));
+      console.log(JSON.stringify({ label: ${JSON.stringify(label)}, owns, refused, seen }));
     `;
     const outs = await Promise.all([collect(child(src('p1'))), collect(child(src('p2')))]);
-    const seen = outs.flatMap((o) => {
-      try {
-        return (JSON.parse(o.trim().split('\n').pop() ?? '{}').seen ?? []) as string[];
-      } catch {
-        return [];
-      }
-    });
-    // Exactly one of them may run it. Both running is the double-execution the
-    // claim exists to prevent.
-    expect(seen.length).toBeLessThanOrEqual(1);
+    const results = outs.map((o) => lastJson<{ owns: boolean; refused: boolean; seen: string[] }>(o));
+    expect(results.every(Boolean)).toBe(true);
+    expect(results.filter((r) => r!.owns)).toHaveLength(1);
+    expect(results.filter((r) => r!.refused)).toHaveLength(1);
+    expect(results.flatMap((r) => r!.seen)).toHaveLength(1);
   }, 60_000);
 
-  it('resumes a custom-engine run in a fresh process, through a secret reference', async () => {
-    // Credentials are never persisted, so a crashed run could not be resumed by
-    // anyone who did not still have them in memory. A reference is resolved from
-    // the host's own environment, so the value never travels.
-    const { secretEnvVar, resolveSecretRef } = await import('../kernel/secrets.js');
-    const ref = 'TEST_ENGINE';
-    const saved = process.env[secretEnvVar(ref)];
-    process.env[secretEnvVar(ref)] = JSON.stringify({ name: 'c', bin: 'c', args: {}, env: { TOKEN: 'x' } });
+  it("a superseded queue owner's next write does not steal the queue back", async () => {
+    // Claiming at construction and then writing unconditionally forever is not
+    // ownership: the heartbeat is the same write, so a queue that had been taken
+    // over would stamp itself back in as owner on its next persist and run the
+    // new owner's builds a second time.
+    const { UltraappBuildQueue } = await import('../ultraapp/build.js');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'clawo-inv-q2-'));
     try {
-      expect(resolveSecretRef(ref)).toMatchObject({ env: { TOKEN: 'x' } });
-      // An unknown name is an error, not a silent start without credentials.
-      expect(() => resolveSecretRef('NOT_SET')).toThrow(/Unknown secret reference/);
+      const statePath = path.join(dir, 'q.json');
+      const q = new UltraappBuildQueue({ statePath, worker: async () => {} });
+      expect(q.ownsQueue()).toBe(true);
+
+      // A live takeover by someone else, exactly as a second process leaves it.
+      fs.writeFileSync(
+        statePath,
+        JSON.stringify({
+          pending: ['theirs'],
+          current: null,
+          owner: { ownerId: 'the-new-owner', pid: process.pid, renewedAt: new Date().toISOString() },
+        }),
+      );
+
+      await expect(q.enqueue('mine')).rejects.toThrow(/owned by the-new-owner/);
+      const after = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+      expect(after.owner.ownerId).toBe('the-new-owner');
+      expect(after.pending).toEqual(['theirs']);
+      expect(q.ownsQueue()).toBe(false);
     } finally {
-      if (saved === undefined) delete process.env[secretEnvVar(ref)];
-      else process.env[secretEnvVar(ref)] = saved;
+      fs.rmSync(dir, { recursive: true, force: true });
     }
   });
 
+  it('a fresh process resumes a custom-engine run only when given the reference', async () => {
+    // Credentials are never persisted, so a crashed custom-engine run could not
+    // be resumed by anyone who did not still have them in memory. The earlier
+    // test for this called `resolveSecretRef` and nothing else — it proved a
+    // lookup, not a resume. This one runs the product entry point
+    // (`SessionManager.autoloopResume`) in a process that never held the config,
+    // twice: without the reference it is refused for the documented reason, with
+    // it the run gets past that gate.
+    const { acquireLease, commit, createRunDir, releaseLease } = await import('../kernel/store.js');
+    const runId = 'custom-engine-resume';
+    const spec = {
+      name: 'autoloop',
+      cwd: os.tmpdir(),
+      nodes: [
+        {
+          id: 'main',
+          kind: 'autoloop',
+          config: { runId, goal: 'g', workspace: os.tmpdir(), plannerEngine: 'custom' },
+        },
+      ],
+    };
+    createRunDir(runId, spec as never);
+    const fixture = acquireLease(runId, 'fixture');
+    commit(fixture, {
+      record: {
+        runId,
+        workflow: 'autoloop',
+        spec,
+        state: 'failed',
+        outcome: 'unverified',
+        cwd: os.tmpdir(),
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        nodes: { main: { id: 'main', kind: 'autoloop', state: 'failed', attempts: 1, visits: 1 } },
+      } as never,
+    });
+    releaseLease(fixture);
+
+    const src = (withRef: boolean) => `
+      const { SessionManager } = await import(${JSON.stringify(`${DIST3}/session-manager.js`)});
+      const { resolveSecretRefs } = await import(${JSON.stringify(`${DIST3}/kernel/secrets.js`)});
+      const mgr = new SessionManager({ logger: { info(){}, warn(){}, error(){}, debug(){} } });
+      const refs = ${withRef ? "resolveSecretRefs({ plannerCustomEngine: 'TEST_ENGINE' })" : '{}'};
+      let err = '';
+      try { await mgr.autoloopResume(${JSON.stringify(runId)}, refs); } catch (e) { err = String(e && e.message); }
+      console.log(JSON.stringify({ err }));
+      process.exit(0);
+    `;
+    const env = {
+      HOME,
+      USERPROFILE: HOME,
+      CLAWO_CUSTOM_ENGINE_TEST_ENGINE: JSON.stringify({
+        name: 'test-engine',
+        bin: '/nonexistent/definitely-not-a-real-binary',
+        args: { prompt: ['-p'] },
+        env: { TOKEN: 'never-leaves-the-host' },
+      }),
+    };
+    const [without, withRef] = await Promise.all([collect(child(src(false), env)), collect(child(src(true), env))]);
+    const a = lastJson<{ err: string }>(without);
+    const b = lastJson<{ err: string }>(withRef);
+    expect(a?.err).toMatch(/[Pp]lanner custom engine config is required/);
+    // The reference got the config all the way into the resume path: the same
+    // call, in the same fresh process, no longer fails for want of it.
+    expect(b?.err ?? '').not.toMatch(/[Pp]lanner custom engine config is required/);
+    expect(b?.err ?? '').not.toMatch(/Unknown secret reference/);
+    // And the credential itself never went to disk.
+    expect(runFiles(runId).join('\n')).not.toContain('never-leaves-the-host');
+  }, 60_000);
+
   it('a failed start does not delete the retry that took its run id', async () => {
-    // Overlapping, not the serial retry the existing test does: the loser's
-    // cleanup runs while the winner already holds the id.
+    // Overlapping, not the serial retry the earlier version did: the loser's
+    // late cleanup is fired while the winner's start is still in flight, which
+    // is the only ordering in which the bug could bite.
     const { RunKernel } = await import('../kernel/engine.js');
     const kernel = new RunKernel({ nodeTimeoutMs: 5_000 });
     kernel.setExecutor('agent', async () => ({ ok: true }));
@@ -847,14 +1098,17 @@ describe('races that need real processes', () => {
     await kernel.wait(first.runId);
     kernel.delete('contested-id', { expectTag: 'start-1' });
 
-    const second = await kernel.start(
+    // Not awaited: the delete below runs while this start is between its own
+    // awaits, holding the id but not yet finished with it.
+    const pending = kernel.start(
       { name: 'r', cwd: os.tmpdir(), nodes: [{ id: 'a', kind: 'agent', prompt: 'x' }] },
       { runId: 'contested-id', tag: 'start-2' },
     );
+    const late = kernel.delete('contested-id', { expectTag: 'start-1' });
+    const second = await pending;
     await kernel.wait(second.runId);
 
-    // The loser's late cleanup must be a no-op, not a deletion of the winner.
-    expect(kernel.delete('contested-id', { expectTag: 'start-1' })).toBe(false);
+    expect(late).toBe(false);
     expect(kernel.get('contested-id')).toBeDefined();
     // The rightful owner can still remove it.
     expect(kernel.delete('contested-id', { expectTag: 'start-2' })).toBe(true);

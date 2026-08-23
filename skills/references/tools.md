@@ -564,6 +564,16 @@ Start a chat-mode autoloop. Planner starts immediately; Coder + Reviewer start o
 > body field with a 400 — the embedded server is often reverse-tunnelled and its
 > token is a monitoring credential, not permission to choose what binary runs.
 > Built-in engines are fully selectable over HTTP.
+>
+> **Resuming one is done by reference.** Refusing the config over HTTP left a real
+> gap: a custom-engine run that crashed could not be brought back by any remote
+> caller, because the material it needed had nowhere to come from. So a remote
+> resume names the secret instead of carrying it — `plannerCustomEngineRef` and
+> friends on `POST /autoloop/<id>/resume`, `agentCustomEngineRefs` on
+> `workflow_resume` — and the orchestrator resolves the name against its own
+> `CLAWO_CUSTOM_ENGINE_<NAME>` environment. `GET /autoloop/<id>/resume-requirements`
+> says which roles need one. The name is not sensitive, the value never leaves the
+> host, and an unknown name fails loudly rather than starting without credentials.
 
 Custom configs are not persisted or accepted from Planner output. See [`multi-engine.md`](./multi-engine.md) for their shape.
 

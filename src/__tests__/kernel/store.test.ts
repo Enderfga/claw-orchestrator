@@ -9,21 +9,44 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  appendEvent,
+  acquireLease,
   atomicWriteJson,
+  commit,
   createRunDir,
   deleteRunDir,
   listRunIds,
   listRuns,
   loadRun,
   loadSpec,
+  nodeArtifactPath,
   readEvents,
   replayRun,
   runDir,
-  saveRun,
-  writeNodeArtifact,
 } from '../../kernel/store.js';
-import type { RunRecord, WorkflowSpec } from '../../kernel/types.js';
+import type { KernelEvent, RunRecord, WorkflowSpec } from '../../kernel/types.js';
+
+/**
+ * There is no unguarded way to write to a run, by design — the raw checkpoint
+ * and append helpers are module-private. Tests take a real claim like the kernel
+ * does, which also means every assertion below runs against the same code path
+ * production uses.
+ */
+function owner(runId: string, ownerId = 'test-owner'): ReturnType<typeof acquireLease> {
+  return acquireLease(runId, ownerId);
+}
+
+function saveRun(record: RunRecord, ownerId = 'test-owner'): boolean {
+  return commit(owner(record.runId, ownerId), { record });
+}
+
+function appendEvent(runId: string, event: KernelEvent, ownerId = 'test-owner'): boolean {
+  return commit(owner(runId, ownerId), { events: [event] });
+}
+
+function writeNodeArtifact(runId: string, nodeId: string, name: string, body: string): string {
+  commit(owner(runId), { artifacts: [{ nodeId, name, body }] });
+  return nodeArtifactPath(runId, nodeId, name);
+}
 
 let tmp: string;
 const saved = process.env.CLAWO_WF_DIR;

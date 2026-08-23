@@ -166,17 +166,23 @@ export function createRunDir(runId: string, spec: WorkflowSpec): void {
   }
   const dir = runDir(runId);
   fs.mkdirSync(dir, { recursive: true });
+  // Minted before the spec, so a run directory never exists without an
+  // incarnation to identify it. See `Incarnation` for why this is not optional.
+  atomicWriteJson(incarnationFile(runId), { incarnationId: crypto.randomUUID(), nextFence: 0 } as Incarnation);
   atomicWriteJson(path.join(dir, 'spec.json'), sanitizeForDisk(spec));
 }
 
 /**
  * Write a checkpoint.
  *
- * Unguarded on purpose — it is the raw write, and the kernel only ever reaches
- * it through `commit()`, which confirms ownership in the same critical section.
- * Nothing outside the store should call this directly.
+ * Deliberately NOT exported. "Unguarded on purpose, and nothing outside the
+ * store should call it" was the previous comment, and it was not true: the
+ * engine imported it and wrote checkpoints directly from `start`, `resume`,
+ * `publish` and `setChild`. A rule enforced by a comment is not a rule. The only
+ * way to a checkpoint is now {@link commit}, which cannot be reached without a
+ * {@link RunGuard}.
  */
-export function saveRun(record: RunRecord): void {
+function writeRunRecord(record: RunRecord): void {
   // The checkpoint embeds the spec, so it gets the same scrub.
   atomicWriteJson(path.join(runDir(record.runId), 'run.json'), sanitizeForDisk(record));
 }
@@ -188,7 +194,8 @@ export function loadSpec(runId: string): WorkflowSpec | undefined {
   return readJson<WorkflowSpec>(path.join(runDir(runId), 'spec.json'));
 }
 
-export function appendEvent(runId: string, event: KernelEvent, logger?: Logger): void {
+/** Internal for the same reason as {@link writeRunRecord}: appends go through {@link commit}. */
+function appendEventRaw(runId: string, event: KernelEvent, logger?: Logger): void {
   if (!isValidRunId(runId)) return;
   appendJsonl(path.join(runDir(runId), 'events.jsonl'), event, logger);
 }
@@ -340,40 +347,82 @@ export function readNodeOutput(runId: string, nodeId: string): string | undefine
   }
 }
 
-export function writeNodeArtifact(runId: string, nodeId: string, name: string, body: string): string {
-  const dir = nodeDir(runId, nodeId);
-  fs.mkdirSync(dir, { recursive: true });
-  const file = path.join(dir, name.replace(/[^\w.-]/g, '_'));
-  fs.writeFileSync(file, body);
+/**
+ * Where a node artifact will live, without writing it.
+ *
+ * Pure, because the checkpoint that references an artifact and the artifact
+ * itself are written in the same {@link commit}: the caller needs the path
+ * before the write, to put it in the record it is committing.
+ */
+export function nodeArtifactPath(runId: string, nodeId: string, name: string): string {
+  const file = path.join(nodeDir(runId, nodeId), name.replace(/[^\w.-]/g, '_'));
   return path.relative(runDir(runId), file);
 }
 
-/** Terminal run states carry `endedAt`; this is the single place that stamps it. */
-export function stampTerminal(record: RunRecord, state: RunState): void {
-  record.state = state;
-  record.endedAt = new Date().toISOString();
-  record.updatedAt = record.endedAt;
+function writeNodeArtifactRaw(runId: string, nodeId: string, name: string, body: string): void {
+  const dir = nodeDir(runId, nodeId);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, name.replace(/[^\w.-]/g, '_')), body);
 }
 
-// ─── Ownership lease ────────────────────────────────────────────────────────
+// ─── Ownership: incarnation, lease, guard, commit ───────────────────────────
 //
-// A run has one owner at a time. Without this, two processes could each call
-// `resume` on the same run and both start executing its nodes — every side
-// effect twice, two writers to one checkpoint, and an event log interleaving two
-// timelines. "At-least-once per node" is a tolerable contract; "twice,
-// concurrently, by design" is not.
+// A run has one owner at a time, and every durable change it makes is checked
+// against a capability that only that owner holds. Without the first, two
+// processes each `resume` the same run and every side effect happens twice.
+// Without the second, the first is decoration: the previous version had a lease
+// file and a fence, and the engine still wrote checkpoints, events and terminal
+// verdicts straight past both.
 //
-// The lease is a file with the owner's pid and a heartbeat. It is taken on
-// start/resume, renewed on every checkpoint, and released when the run ends.
-// A lease is stale when its holder is gone (same host: `kill(pid, 0)`) or when
-// the heartbeat has not moved for LEASE_TTL_MS.
+// The capability is a `RunGuard`. It names four things, and all four are
+// checked on every write:
+//
+//   incarnationId  which *creation* of this run id this is
+//   ownerId        which RunKernel instance (never the pid — see `Owner`)
+//   acquisitionId  which claim by that owner
+//   fence          monotonic within the incarnation, for ordering and logs
+//
+// `incarnationId` exists because a run id is reusable. Delete a run and start
+// another with the same id and the directory — fence counter included — is
+// gone, so the new run's first fence is 1 again and a stale attempt still
+// holding `{ownerId, fence: 1}` from the old run became valid a second time.
+// That is a textbook ABA, and it is not hypothetical: an abandoned timed-out
+// attempt outlives its run by construction. A fresh random id per creation
+// makes an old guard unusable no matter what the counter says.
 
 export const LEASE_TTL_MS = 60_000;
 /** How often a live owner refreshes its claim, independently of any work it is doing. */
 export const LEASE_HEARTBEAT_MS = 15_000;
 
 /**
- * Who holds a run.
+ * Identity of one creation of a run id, plus its fence counter.
+ *
+ * Kept in its own file so it survives `releaseLease` (the counter must never
+ * restart while the run exists) and dies with the run directory (a new creation
+ * must never inherit the old identity).
+ */
+interface Incarnation {
+  incarnationId: string;
+  nextFence: number;
+}
+
+/**
+ * The capability to change a run.
+ *
+ * Held by the executing kernel, passed to every write, and impossible to forge
+ * from a run id alone — which is what makes `commit` a boundary rather than a
+ * convention.
+ */
+export interface RunGuard {
+  runId: string;
+  incarnationId: string;
+  ownerId: string;
+  acquisitionId: string;
+  fence: number;
+}
+
+/**
+ * Who holds a run, as recorded on disk.
  *
  * `ownerId` is the identity, not `pid`. Two `RunKernel` instances in one process
  * — two SessionManagers is not a strange thing to have — share a pid, so
@@ -381,17 +430,21 @@ export const LEASE_HEARTBEAT_MS = 15_000;
  * it re-entrancy. The pid is kept because it is what tells us whether the holder
  * is still alive; it is not what tells us whether the holder is us.
  */
-export interface Owner {
-  ownerId: string;
+export interface RunLease extends RunGuard {
   pid: number;
   host: string;
-}
-
-export interface RunLease extends Owner {
   acquiredAt: string;
   renewedAt: string;
-  /** Strictly increasing across acquisitions, and never reset. */
-  fence: number;
+}
+
+/** What one `commit` may change. Everything durable about a run is in here. */
+export interface CommitBatch {
+  /** The new checkpoint. */
+  record?: RunRecord;
+  /** Appended to `events.jsonl`, in order, after the checkpoint. */
+  events?: KernelEvent[];
+  /** Node artifact files, written before the checkpoint that references them. */
+  artifacts?: Array<{ nodeId: string; name: string; body: string }>;
 }
 
 function leaseFile(runId: string): string {
@@ -402,23 +455,28 @@ function lockFile(runId: string): string {
   return path.join(runDir(runId), 'lease.lock');
 }
 
-/**
- * The fence counter, kept apart from the lease.
- *
- * It has to outlive the lease. Reading the next fence off `lease.json` looked
- * fine until the file was deleted on release, at which point the counter
- * restarted at 1 — so a "monotonic" token repeated itself, and a stale holder
- * with fence 1 could match a fresh owner with fence 1.
- */
-function fenceFile(runId: string): string {
-  return path.join(runDir(runId), 'fence.json');
+function incarnationFile(runId: string): string {
+  return path.join(runDir(runId), 'incarnation.json');
 }
 
-function nextFence(runId: string): number {
-  const current = readJson<{ next: number }>(fenceFile(runId))?.next ?? 0;
-  const next = current + 1;
-  atomicWriteJson(fenceFile(runId), { next });
-  return next;
+function readIncarnation(runId: string): Incarnation | undefined {
+  const raw = readJson<Incarnation>(incarnationFile(runId));
+  return raw && typeof raw.incarnationId === 'string' && raw.incarnationId ? raw : undefined;
+}
+
+/**
+ * The run's incarnation, minting one if the directory predates this field.
+ *
+ * Only ever called inside the lock. A directory with no incarnation is a run
+ * from an older layout; giving it one now is correct, because whatever guards
+ * existed before this file did are already unusable.
+ */
+function ensureIncarnationLocked(runId: string): Incarnation {
+  const existing = readIncarnation(runId);
+  if (existing) return existing;
+  const fresh: Incarnation = { incarnationId: crypto.randomUUID(), nextFence: 0 };
+  atomicWriteJson(incarnationFile(runId), fresh);
+  return fresh;
 }
 
 function processAlive(pid: number): boolean {
@@ -432,6 +490,7 @@ function processAlive(pid: number): boolean {
 }
 
 export function readLease(runId: string): RunLease | undefined {
+  if (!isValidRunId(runId)) return undefined;
   return readJson<RunLease>(leaseFile(runId));
 }
 
@@ -488,13 +547,16 @@ function withLock<T>(runId: string, fn: () => T): T {
 }
 
 /**
- * Claim a run, atomically.
+ * Claim a run and receive the capability to write to it.
  *
- * Re-entrant for the same `ownerId` — one kernel reclaiming a run it already has
- * — and refused for anyone else whose predecessor is still alive.
+ * Refused when someone else's claim is still live. Allowed for the same owner —
+ * but the guard it returns is a NEW one, and the previous guard is dead from
+ * that moment: re-acquiring is a fresh claim, not a renewal of the old one, so
+ * anything still holding the old guard stops being able to write.
  */
-export function acquireLease(runId: string, ownerId: string): RunLease {
+export function acquireLease(runId: string, ownerId: string): RunGuard {
   return withLock(runId, () => {
+    const incarnation = ensureIncarnationLocked(runId);
     const existing = readLease(runId);
     if (existing && existing.ownerId !== ownerId && !leaseIsStale(existing)) {
       throw new Error(
@@ -502,59 +564,82 @@ export function acquireLease(runId: string, ownerId: string): RunLease {
           `last seen ${existing.renewedAt}) — only one owner may run it at a time`,
       );
     }
+    const fence = incarnation.nextFence + 1;
+    atomicWriteJson(incarnationFile(runId), { ...incarnation, nextFence: fence });
     const now = new Date().toISOString();
     const lease: RunLease = {
+      runId,
+      incarnationId: incarnation.incarnationId,
       ownerId,
+      acquisitionId: crypto.randomUUID(),
+      fence,
       pid: process.pid,
       host: os.hostname(),
       acquiredAt: existing?.ownerId === ownerId ? existing.acquiredAt : now,
       renewedAt: now,
-      fence: existing?.ownerId === ownerId ? existing.fence : nextFence(runId),
     };
     atomicWriteJson(leaseFile(runId), lease);
-    return lease;
+    return {
+      runId,
+      incarnationId: lease.incarnationId,
+      ownerId,
+      acquisitionId: lease.acquisitionId,
+      fence,
+    };
   });
 }
 
+/** Whether the on-disk lease still answers to this guard. Caller must hold the lock. */
+function guardIsCurrentLocked(guard: RunGuard): boolean {
+  const incarnation = readIncarnation(guard.runId);
+  if (!incarnation || incarnation.incarnationId !== guard.incarnationId) return false;
+  const lease = readLease(guard.runId);
+  return Boolean(
+    lease &&
+    lease.incarnationId === guard.incarnationId &&
+    lease.ownerId === guard.ownerId &&
+    lease.acquisitionId === guard.acquisitionId &&
+    lease.fence === guard.fence,
+  );
+}
+
 /** Heartbeat. Best-effort: losing a renewal must not break the run. */
-export function renewLease(runId: string, ownerId: string): void {
+export function renewLease(guard: RunGuard): void {
   try {
-    withLock(runId, () => {
-      const existing = readLease(runId);
-      if (!existing || existing.ownerId !== ownerId) return;
-      atomicWriteJson(leaseFile(runId), { ...existing, renewedAt: new Date().toISOString() });
+    withLock(guard.runId, () => {
+      if (!guardIsCurrentLocked(guard)) return;
+      const existing = readLease(guard.runId)!;
+      atomicWriteJson(leaseFile(guard.runId), { ...existing, renewedAt: new Date().toISOString() });
     });
   } catch {
     // The next renewal will try again.
   }
 }
 
-/** Whether this owner still holds the run at the fence it was given. */
-export function holdsLease(runId: string, ownerId: string, fence: number): boolean {
-  const current = readLease(runId);
-  return Boolean(current && current.ownerId === ownerId && current.fence === fence);
-}
-
 /**
- * The one way to change a run's persisted state.
+ * The one way to change anything durable about a run.
  *
- * Ownership is confirmed and the write happens inside the same critical section,
- * so a holder that has been superseded cannot land a write between the check and
- * the change. Returns false when the caller no longer owns the run — the caller
- * must then stop, not retry.
+ * The guard is verified and every write happens inside a single critical
+ * section, so a holder that has been superseded cannot land a write between the
+ * check and the change. Returns false when the guard is no longer current — the
+ * caller must then stop, not retry.
  *
- * A fencing token is only a fencing token if the loser is prevented, not merely
- * informed at the next convenient moment. Checking it once per node, as an
- * earlier version did, left every checkpoint, event and terminal verdict after
- * that check unguarded: a superseded owner could still declare the run complete.
+ * Callers pass a record they have already produced by copying and mutating,
+ * never the record they are still using: `commit` persists what it is given, and
+ * the caller adopts it only if this returns true. That is what keeps a refused
+ * write from leaving a run *in memory* claiming a state the disk rejected.
  */
-export function commit(runId: string, ownerId: string, fence: number, mutation: () => void): boolean {
+export function commit(guard: RunGuard, batch: CommitBatch, logger?: Logger): boolean {
   try {
-    return withLock(runId, () => {
-      const current = readLease(runId);
-      if (!current || current.ownerId !== ownerId || current.fence !== fence) return false;
-      mutation();
-      atomicWriteJson(leaseFile(runId), { ...current, renewedAt: new Date().toISOString() });
+    return withLock(guard.runId, () => {
+      if (!guardIsCurrentLocked(guard)) return false;
+      for (const artifact of batch.artifacts ?? []) {
+        writeNodeArtifactRaw(guard.runId, artifact.nodeId, artifact.name, artifact.body);
+      }
+      if (batch.record) writeRunRecord(batch.record);
+      for (const event of batch.events ?? []) appendEventRaw(guard.runId, event, logger);
+      const lease = readLease(guard.runId)!;
+      atomicWriteJson(leaseFile(guard.runId), { ...lease, renewedAt: new Date().toISOString() });
       return true;
     });
   } catch {
@@ -565,15 +650,14 @@ export function commit(runId: string, ownerId: string, fence: number, mutation: 
 }
 
 /**
- * Release the claim. The fence counter is deliberately NOT removed — it must
- * keep increasing across every acquisition for the life of the run directory.
+ * Release the claim. The incarnation file is deliberately NOT removed — the
+ * fence must keep increasing for as long as this creation of the run exists.
  */
-export function releaseLease(runId: string, ownerId: string): void {
+export function releaseLease(guard: RunGuard): void {
   try {
-    withLock(runId, () => {
-      const existing = readLease(runId);
-      if (existing && existing.ownerId !== ownerId) return;
-      fs.rmSync(leaseFile(runId), { force: true });
+    withLock(guard.runId, () => {
+      if (!guardIsCurrentLocked(guard)) return;
+      fs.rmSync(leaseFile(guard.runId), { force: true });
     });
   } catch {
     // A lease left behind expires on its own.

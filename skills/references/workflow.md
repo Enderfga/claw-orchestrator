@@ -52,11 +52,13 @@ Every state transition is checkpointed **before the next step begins**:
 
 ```
 ~/.claw-orchestrator/wf/<runId>/        (override with CLAWO_WF_DIR)
-  spec.json      the WorkflowSpec, written once, never mutated
-  run.json       the mutable checkpoint, rewritten atomically (tmp + rename)
-  events.jsonl   append-only audit + SSE source
-  nodes/<id>/    per-node artifacts
-  evidence/<id>/ evidence bundles
+  spec.json         the WorkflowSpec, written once, never mutated
+  run.json          the mutable checkpoint, rewritten atomically (tmp + rename)
+  events.jsonl      append-only audit + SSE source
+  incarnation.json  which creation of this run id this is, and its fence counter
+  lease.json        who is executing it right now
+  nodes/<id>/       per-node artifacts
+  evidence/<id>/    evidence bundles
 ```
 
 Splitting the immutable spec from the mutable checkpoint is what makes recovery
@@ -74,21 +76,44 @@ then died before its checkpoint runs again from the top. Workflows whose nodes
 are not safe to repeat need to make them safe. Resume is also explicit —
 `workflow_resume` — not automatic.
 
-**One owner at a time**, though, and it is enforced rather than agreed:
+### One owner, and one way to write
 
-- **Atomic acquisition.** The check and the write happen inside an `O_EXCL` lock
-  file. Read-then-write let two processes both see "free" and both conclude they
-  had it, which is the failure a lease exists to prevent.
-- **A fenced commit is the only way to change persisted state.** Ownership is
-  confirmed and the write happens inside one critical section — every
-  checkpoint, node transition, event, publish and terminal verdict. A fencing
-  token checked once per node would leave everything after that check
-  unguarded, and a superseded owner could still declare the run complete.
-- **The fence never repeats.** It is kept apart from the lease, because
-  releasing the lease deletes it, and a counter read from the lease restarted at
-  1 — so a stale token could match a fresh one.
+Executing a run means holding a **`RunGuard`** — a capability, not a flag. It
+names four things, and all four are checked on every durable write:
+
+| Field           | What it pins down                                       |
+| --------------- | ------------------------------------------------------- |
+| `incarnationId` | which _creation_ of this run id this is                 |
+| `ownerId`       | which `RunKernel` instance (never the pid)              |
+| `acquisitionId` | which claim by that owner                               |
+| `fence`         | monotonic within the incarnation, for ordering and logs |
+
+- **`commit(guard, batch)` is the only way to change anything durable.**
+  Checkpoints, events and node artifacts all go through it, inside one `O_EXCL`
+  critical section that verifies the guard first. The raw writers are not
+  exported, so there is no path around it — the previous version stated this rule
+  in a comment while the engine wrote checkpoints directly from `start`,
+  `resume`, `publish` and `setChild`, and a rule enforced by a comment is not a
+  rule.
+- **Copy-on-write.** A change is applied to a clone, committed, and adopted only
+  if the disk accepted it. So a superseded owner does not merely fail to
+  persist — the record it hands back to its own caller stops advancing too.
+  Refusing the write while returning a record that says `completed` is the same
+  claim one layer up, and callers read the record.
+- **A deleted run id is a new run.** The fence lives in `incarnation.json`, which
+  survives `releaseLease` (so the counter never restarts while the run exists)
+  and dies with the run directory (so the next run under the same id gets a new
+  random `incarnationId`). Without that, deleting a run and reusing its id reset
+  the fence to 1, and an abandoned attempt still holding fence 1 became valid a
+  second time — a textbook ABA, and not hypothetical, because a timed-out attempt
+  outlives its run by construction.
+- **Re-acquiring supersedes.** A second claim, even by the same owner, mints a
+  new `acquisitionId` and kills the previous guard.
 - **Owner identity is not the pid.** Two kernels in one process share a pid;
   each has its own owner id, or both would read the other's claim as their own.
+- **Atomic acquisition.** The check and the write happen inside the lock.
+  Read-then-write let two processes both see "free" and both conclude they had
+  it, which is the failure a lease exists to prevent.
 - **An independent heartbeat.** Renewed on a timer, not only at checkpoints: a
   run executing one long node makes no checkpoints, and must not look abandoned
   for it. On the same host a live pid is the authority and is never judged stale
@@ -99,6 +124,14 @@ are not safe to repeat need to make them safe. Resume is also explicit —
 
 A second process trying to resume a run someone else is executing is refused by
 name, with the owner's pid and host in the message.
+
+One thing deliberately sits outside the guard: **evidence bundles**. They are
+written by the verifier as its checks run, under `evidence/<node>-<attempt>/`,
+and they are append-only artifacts, never read as state. What makes a bundle
+authoritative is the run record's `evidenceId` pointing at it, and that reference
+_is_ committed under the guard. So a bundle left behind by an owner that has been
+superseded is inert: nothing refers to it, and the run it belonged to did not get
+to claim it.
 
 One more caveat worth stating plainly: event appends are best-effort (a log
 failure is warned and swallowed so it cannot break the run it describes), yet

@@ -161,6 +161,30 @@ export class UltraappBuildQueue {
    */
   private restore(): string[] {
     if (!this.statePath) return [];
+    let entered = false;
+    const ids = this.withLock(() => {
+      entered = true;
+      return this.claimLocked();
+    }, []);
+    if (!entered && !this.notOwner) {
+      // We never got inside the critical section — someone else is claiming
+      // right now, or the lock file is unusable. Either way we have not taken
+      // the queue, and acting as though we had is how both processes end up
+      // running the same builds.
+      this.notOwner = { ownerId: 'unknown', pid: -1, renewedAt: new Date().toISOString() };
+    }
+    return ids ?? [];
+  }
+
+  /**
+   * Run `fn` inside the queue's lock.
+   *
+   * Extracted because claiming was not the only thing that needed it. Every
+   * write to the state file has to check the owner in the same critical section
+   * it writes in — see {@link persist}.
+   */
+  private withLock<T>(fn: () => T, onContended: T): T | undefined {
+    if (!this.statePath) return undefined;
     const lock = `${this.statePath}.lock`;
     fs.mkdirSync(path.dirname(this.statePath), { recursive: true });
 
@@ -168,7 +192,7 @@ export class UltraappBuildQueue {
     try {
       fd = fs.openSync(lock, 'wx');
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') return [];
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') return undefined;
       let age = Infinity;
       try {
         age = Date.now() - fs.statSync(lock).mtimeMs;
@@ -176,20 +200,17 @@ export class UltraappBuildQueue {
         age = Infinity;
       }
       // A lock from a crashed claimant must not wedge the queue forever.
-      if (age < OWNER_TTL_MS) {
-        this.notOwner = { ownerId: 'unknown', pid: -1, renewedAt: new Date().toISOString() };
-        return [];
-      }
+      if (age < OWNER_TTL_MS) return onContended;
       fs.rmSync(lock, { force: true });
       try {
         fd = fs.openSync(lock, 'wx');
       } catch {
-        return [];
+        return undefined;
       }
     }
 
     try {
-      return this.claimLocked();
+      return fn();
     } finally {
       fs.closeSync(fd);
       fs.rmSync(lock, { force: true });
@@ -198,6 +219,7 @@ export class UltraappBuildQueue {
 
   /** The critical section of `restore`: inspect the owner and take it, or step aside. */
   private claimLocked(): string[] {
+    if (!this.statePath) return [];
     let parsed: PersistedQueue;
     try {
       parsed = JSON.parse(fs.readFileSync(this.statePath!, 'utf8')) as PersistedQueue;
@@ -217,17 +239,58 @@ export class UltraappBuildQueue {
     for (const runId of ids) this.pending.push({ runId });
     // Stake the claim before releasing the lock, so a racer that gets in next
     // sees an owner rather than an empty file.
-    this.writeState();
+    this.writeStateUnchecked();
     return ids;
   }
 
-  /** Best-effort, like every other log write here: never break a build over it. */
-  private persist(): void {
-    if (!this.statePath || this.notOwner) return;
-    this.writeState();
+  /**
+   * Persist the queue, if we still own it.
+   *
+   * Best-effort about I/O, not about ownership: the check happens inside the
+   * lock, in the same critical section as the write. Taking the claim at
+   * construction and then writing unconditionally forever was not ownership — a
+   * queue whose heartbeat had lapsed and been taken over would quietly stamp
+   * itself back in as owner on its next persist, clobbering the new owner's
+   * pending list and running its builds a second time.
+   */
+  private persist(): boolean {
+    if (!this.statePath || this.notOwner) return false;
+    return this.withLock(() => this.writeStateLocked(), false) ?? false;
   }
 
-  private writeState(): void {
+  /** Caller must hold the lock. Steps aside — permanently — if the claim moved on. */
+  private writeStateLocked(): boolean {
+    if (!this.statePath) return false;
+    let parsed: PersistedQueue | undefined;
+    try {
+      parsed = JSON.parse(fs.readFileSync(this.statePath, 'utf8')) as PersistedQueue;
+    } catch {
+      parsed = undefined;
+    }
+    if (parsed?.owner && parsed.owner.ownerId !== this.ownerId && ownerIsLive(parsed.owner, this.ownerId)) {
+      this.standDown(parsed.owner);
+      return false;
+    }
+    this.writeStateUnchecked();
+    return true;
+  }
+
+  /**
+   * Hand the queue over: stop heartbeating and drop the pending list.
+   *
+   * Keeping the list would be worse than losing it — every entry now belongs to
+   * the new owner, who has its own copy, and dispatching from ours is the double
+   * execution the claim exists to prevent. A build already in flight cannot be
+   * recalled; it finishes, and nothing further starts.
+   */
+  private standDown(owner: QueueOwner): void {
+    this.notOwner = owner;
+    this.stop();
+    this.pending.length = 0;
+    if (this.currentRunId === null) this.markIdle();
+  }
+
+  private writeStateUnchecked(): void {
     if (!this.statePath) return;
     try {
       fs.mkdirSync(path.dirname(this.statePath), { recursive: true });
@@ -256,7 +319,14 @@ export class UltraappBuildQueue {
     // ourselves — is exactly the double execution the claim exists to stop.
     this.assertOwner('enqueue');
     this.pending.push({ runId });
-    this.persist();
+    // The claim is re-checked inside the same critical section the write happens
+    // in. Owning the queue at construction says nothing about owning it now: the
+    // heartbeat can have lapsed and someone else can have taken over, and an
+    // `enqueue` that only consulted the construction-time answer would run their
+    // builds a second time. (An ephemeral queue has no state file and no owner,
+    // so `persist` reports false there too — `assertOwner` is what distinguishes
+    // the two, and it stays silent when there is nothing to own.)
+    if (!this.persist()) this.assertOwner('enqueue');
     this.markBusy();
     const pos = this.position(runId);
     if (pos > 0) {
@@ -307,7 +377,13 @@ export class UltraappBuildQueue {
       return;
     }
     this.currentRunId = next.runId;
-    this.persist();
+    // Same check before starting work as before recording it: if the claim moved
+    // on while this queue was idle, the build belongs to whoever holds it now.
+    if (!this.persist() && this.notOwner) {
+      this.currentRunId = null;
+      this.markIdle();
+      return;
+    }
     try {
       await this.worker(next.runId, (e) => this.emit(e));
     } catch (e) {

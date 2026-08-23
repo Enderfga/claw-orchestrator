@@ -28,10 +28,9 @@ because a verifier is a node in the thing that survives.
   Two limits stated plainly rather than glossed. Node execution is
   **at-least-once**: there is no idempotency key, attempt lease, or side-effect
   commit marker, so a node that wrote files and died before its checkpoint runs
-  again from the top. And this is a runtime the modes _can_ be moved onto, not
-  one they go through today — `council_start`, `fanout_start`, `autoloop_start`
-  and ultraapp keep their own lifecycles, and a run started through them is not
-  a kernel run.
+  again from the top. And UltraApp is not yet expressed as a workflow: it has the
+  kernel's ownership primitives but keeps its own store, mode state machine and
+  council adapter, so it remains a second runtime standing beside this one.
 
 - **Verification plane (`src/verify/`).** Acceptance contracts the runtime runs
   itself: `command` (argv, gated on exit code), `http`, `screenshot`,
@@ -162,6 +161,11 @@ because a verifier is a node in the thing that survives.
   (`CLAWO_CUSTOM_ENGINE_<REF>`). The name is not sensitive, the value never
   crosses the wire, and an unknown name is an error rather than a silent start
   without credentials.
+- **The dashboard's Resume button can resume a custom-engine run.** It sent an
+  empty body unconditionally, so the one caller with a button for this was the
+  one caller that could not do it. It now asks
+  `GET /autoloop/<id>/resume-requirements` which roles used a custom engine and
+  prompts for one reference name each.
 - Readiness deferreds, live-run handles, the starting marker, and `delete` are
   keyed by the identity of a particular start, not by run id. A run id is reused when a failed start frees
   it, and keying on the id let a dying start clear the retry's deferred — the
@@ -219,30 +223,40 @@ because a verifier is a node in the thing that survives.
   `spec.json` held the token in plain text. Credentials travel through an
   in-memory side channel now, and the spec is scrubbed on the way out as a second
   line of defence.
-- **One owner per run, enforced.** A lease is taken on start and resume and
-  released when the run ends, so two processes cannot both execute a run's nodes
-  — every side effect twice, two writers to one checkpoint, one event log
-  interleaving two timelines.
+- **One owner per run, and one way to write.** Executing a run means holding a
+  `RunGuard`, which names the run's `incarnationId`, the owning kernel's
+  `ownerId`, that owner's `acquisitionId`, and a `fence`. Without it, two
+  processes each execute a run's nodes — every side effect twice, two writers to
+  one checkpoint, one event log interleaving two timelines.
 
-  It is a real lease, not a convention:
-  - **Atomic acquisition.** An `O_EXCL` critical section holds the check and the
-    write together, because read-then-write let two racers both conclude they
-    had it.
-  - **A fenced commit is the only way to change persisted state.** `commit()`
-    confirms ownership and performs the write inside one critical section, and
-    every checkpoint, node transition, event, publish and terminal verdict goes
-    through it. Checking the fence once per node — as an earlier attempt did —
-    left everything after that check unguarded, so a superseded owner could
-    still declare the run complete. The mutation now happens inside the commit,
-    so a refused write leaves even the in-memory record untouched rather than
-    handing the caller a `completed` the disk rejected.
-  - **The fence never repeats.** It lives in its own file, apart from the lease,
-    because releasing the lease deletes the lease — and reading the counter off
-    it meant the "monotonic" token restarted at 1, so a stale holder's token
-    could match a fresh owner's.
+  It is a capability, not a convention:
+  - **`commit(guard, batch)` is the only way to change anything durable.**
+    Checkpoints, events and node artifacts all go through it, inside one `O_EXCL`
+    critical section that verifies the guard first, and the raw writers are no
+    longer exported — so there is no path around it. The rule previously lived in
+    a comment while the engine wrote checkpoints directly from `start`, `resume`,
+    `publish`, `setChild` and the whole result-absorbing path, and a rule
+    enforced by a comment is not a rule.
+  - **Copy-on-write.** A change is applied to a clone, committed, and adopted
+    only if the disk accepted it. A superseded owner therefore does not merely
+    fail to persist: the record it hands back to its own caller stops advancing
+    too. Refusing the write while returning a record that says `completed`, with
+    the output, the cost and a passing verdict on it, is the same claim one layer
+    up — and the record is what callers read.
+  - **A deleted run id is a new run.** The fence lives in `incarnation.json`,
+    which survives releasing the lease (so the counter never restarts while the
+    run exists) and dies with the run directory (so the next run under the same
+    id gets a fresh random incarnation). Without that, deleting a run and reusing
+    its id reset the fence to 1 and an abandoned attempt still holding fence 1
+    became valid a second time — an ABA, and not a hypothetical one, because a
+    timed-out attempt outlives its run by construction.
+  - **Re-acquiring supersedes.** A second claim, even by the same owner, mints a
+    new acquisition id and kills the previous guard.
   - **Owner identity is not the pid.** Two `RunKernel`s in one process — two
     SessionManagers is not exotic — share a pid, and treating that as
     re-entrancy let both execute the same run. Each kernel has its own owner id.
+  - **Atomic acquisition.** The check and the write happen inside the lock,
+    because read-then-write let two racers both conclude they had it.
   - **An independent heartbeat**, not only at checkpoints: a run executing one
     long node makes none, and must not look abandoned for it. On the same host a
     live pid is the authority and is never judged stale for going quiet.
@@ -250,13 +264,17 @@ because a verifier is a node in the thing that survives.
   In-process, starting a run whose id is already live retires the previous run
   first — the same rule, applied where a lease cannot see.
 
-  The UltraApp build queue takes an equivalent claim: an `O_EXCL` critical
-  section around read-and-claim (two processes starting with no state file both
-  saw "free", and nothing wrote an owner until the first enqueue), an owner id of
-  its own rather than a pid, a heartbeat while a worker runs, and a refusal at
-  `enqueue` rather than merely at construction — knowing it was not the owner
-  while still running the builds, and rewriting the owner to itself, was the
-  whole failure.
+  The UltraApp build queue takes an equivalent claim, with the same correction
+  applied to the same place: read-and-claim happens in one `O_EXCL` critical
+  section (two processes starting with no state file both saw "free", and nothing
+  wrote an owner until the first enqueue), the owner is an id of its own rather
+  than a pid, and **every** state write re-checks the claim inside the lock it
+  writes in. Checking only at construction was not ownership — the heartbeat is
+  the same write, so a queue that had lapsed and been taken over would stamp
+  itself back in as owner on its next persist, clobber the new owner's pending
+  list and run its builds a second time. A queue that finds it has been
+  superseded stands down: it stops heartbeating, drops its pending list, and
+  refuses `enqueue` and dispatch.
 
 - Run ids are validated as a single path segment before any path is derived from
   them. They can be supplied by the caller — including through a tool call — and
@@ -295,7 +313,8 @@ because a verifier is a node in the thing that survives.
 
 - **`src/__tests__/invariants.test.ts`** drives the real public APIs through the
   real kernel, the real node executors and the real `Council` / `Fanout`, with a
-  fake engine session as the only seam — and never calls `setExecutor`.
+  fake engine session as the only seam. No mode assertion in it replaces a node
+  executor.
 
   This exists because the alternative failed. Every other mode test replaces the
   executor and asserts on the spec that reached it, which proves the spec's shape
@@ -307,6 +326,21 @@ because a verifier is a node in the thing that survives.
   yielding `completed`, a verdict expiring when an already-dirty file changes
   again, and — with a real child process and a real `SIGKILL` — recovery that
   re-runs only the node that was in flight, with a second owner refused.
+
+  Its ownership section is written as races rather than as descriptions of
+  races, because the earlier version's names were stronger than its coverage.
+  Two real processes wait for the same instant and then contend for a claim for a
+  fixed window, so neither can win by outliving the other, and the assertion is
+  that exactly one ever holds it and exactly one ever commits. Two processes
+  contend for an **empty** ultraapp queue — the state that actually broke, which
+  a pre-seeded owner never reached — and the assertion is that exactly one build
+  runs, not "at most one", which zero also satisfies. A superseded owner really
+  attempts a commit, and a takeover is performed by the real acquisition path
+  rather than by hand-writing its result. The fresh-process custom-engine resume
+  runs `SessionManager.autoloopResume` in a process that never held the config,
+  once without the reference and once with it, and asserts the reference is what
+  changed the outcome. And the reused-run-id case fires the loser's late cleanup
+  while the winner's start is still in flight, rather than after it.
 
 ### Removed
 

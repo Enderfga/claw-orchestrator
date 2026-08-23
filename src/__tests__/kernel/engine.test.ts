@@ -416,8 +416,13 @@ describe('resume', () => {
     record.endedAt = undefined;
     record.nodes.b.state = 'running';
     record.nodes.c.state = 'pending';
-    const { saveRun } = await import('../../kernel/store.js');
-    saveRun(record);
+    // No unguarded write exists any more, so the "crashed process" is simulated
+    // the way a real one behaves: claim the run, write the checkpoint it died
+    // holding, and let the claim go (a lease whose holder is gone is free).
+    const { acquireLease, commit, releaseLease } = await import('../../kernel/store.js');
+    const crashed = acquireLease(record.runId, 'crashed-process');
+    commit(crashed, { record });
+    releaseLease(crashed);
 
     const ran2: string[] = [];
     const { kernel: kernel2 } = makeKernel({}, ran2);
@@ -437,8 +442,13 @@ describe('resume', () => {
     record.state = 'running';
     record.nodes.b.state = 'running';
     record.nodes.b.attempts = 2;
-    const { saveRun } = await import('../../kernel/store.js');
-    saveRun(record);
+    // No unguarded write exists any more, so the "crashed process" is simulated
+    // the way a real one behaves: claim the run, write the checkpoint it died
+    // holding, and let the claim go (a lease whose holder is gone is free).
+    const { acquireLease, commit, releaseLease } = await import('../../kernel/store.js');
+    const crashed = acquireLease(record.runId, 'crashed-process');
+    commit(crashed, { record });
+    releaseLease(crashed);
 
     const ran2: string[] = [];
     const { kernel: kernel2 } = makeKernel({}, ran2);

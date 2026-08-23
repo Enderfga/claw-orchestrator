@@ -121,6 +121,14 @@ the orchestrator re-attaches the Planner (reusing the persisted Claude
 session ID when available, so Claude's context picks up where it left
 off) and the dashboard reconnects to `/events` for live updates.
 
+If the run used a **custom engine** for any role, the button first asks
+`/autoloop/<id>/resume-requirements` and prompts for one reference name per
+role — the name of a `CLAWO_CUSTOM_ENGINE_<NAME>` variable on the orchestrator
+host. The config itself is never stored and never sent; only the name is. Until
+this existed the button sent an empty body unconditionally, so a custom-engine
+run was resumable from the library and the HTTP API but not from the UI that
+offers the button.
+
 Runs that pre-date this feature have no `chat.jsonl` and no persisted
 session — they still resume cleanly, but with a blank Planner pane and a
 fresh Claude context. New runs going forward retain both.

@@ -1819,10 +1819,33 @@
                 btn.disabled = true;
                 btn.textContent = 'Resuming…';
                 try {
+                  // A run whose roles used a custom engine cannot be resumed
+                  // from an empty body: the config carries credentials, so it is
+                  // never persisted and has to be supplied again. What is sent
+                  // is a *name* the server resolves from its own environment
+                  // (CLAWO_CUSTOM_ENGINE_<REF>) — no credential goes over the
+                  // wire, and this button stops being the one caller that
+                  // cannot resume such a run.
+                  const body = {};
+                  const reqRes = await fetch(`/autoloop/${encodeURIComponent(id)}/resume-requirements`);
+                  const reqJson = reqRes.ok ? await reqRes.json().catch(() => null) : null;
+                  for (const role of (reqJson && reqJson.rolesNeedingCustomEngine) || []) {
+                    const ref = prompt(
+                      `The ${role} used a custom engine, whose config is never stored.\n\n` +
+                        `Enter the reference name set on the orchestrator host as ` +
+                        `CLAWO_CUSTOM_ENGINE_<NAME>:`,
+                    );
+                    if (!ref) {
+                      btn.disabled = false;
+                      btn.textContent = 'Resume run';
+                      return;
+                    }
+                    body[`${role}CustomEngineRef`] = ref;
+                  }
                   const r2 = await fetch(`/autoloop/${encodeURIComponent(id)}/resume`, {
                     method: 'POST',
                     headers: { 'content-type': 'application/json' },
-                    body: '{}',
+                    body: JSON.stringify(body),
                   });
                   if (!r2.ok) {
                     const j2 = await r2.json().catch(() => ({}));

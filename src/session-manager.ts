@@ -3112,6 +3112,31 @@ export class SessionManager {
    * is still served via /autoloop/<id>/chat_history so the dashboard can
    * replay the conversation visually.
    */
+  /**
+   * Which roles of a stored autoloop run need a custom-engine config before it
+   * can be resumed.
+   *
+   * Custom-engine configs are never persisted, so a resume has to be given them
+   * again — and a caller that cannot find out which roles need one can only
+   * guess. The dashboard's Resume button used to send an empty body
+   * unconditionally, which meant a custom-engine run could be resumed from the
+   * library and from the HTTP API but not from the UI that offers the button.
+   *
+   * Returns role names only. Nothing here is sensitive: the engine kind is
+   * already in `spec.json`, and the answer is a list of roles, not credentials.
+   */
+  autoloopResumeRequirements(runId: string): { runId: string; rolesNeedingCustomEngine: AutoloopRoleName[] } {
+    const record = loadRun(runId);
+    if (!record || record.workflow !== 'autoloop') throw new Error(`Autoloop run '${runId}' not found`);
+    const config = (record.spec.nodes.find((n) => n.id === LEGACY_NODE) as { config?: Record<string, unknown> })
+      ?.config;
+    const roles: AutoloopRoleName[] = [];
+    for (const role of ['planner', 'coder', 'reviewer'] as AutoloopRoleName[]) {
+      if (config?.[`${role}Engine`] === 'custom') roles.push(role);
+    }
+    return { runId, rolesNeedingCustomEngine: roles };
+  }
+
   async autoloopResume(
     runId: string,
     opts: {
