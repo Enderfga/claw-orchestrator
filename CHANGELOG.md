@@ -252,22 +252,26 @@ because a verifier is a node in the thing that survives.
 - A node that overran its timeout reported the whole run as `cancelled` rather
   than `failed`, because the timeout and a user cancel shared one signal.
 
-### Security
+### Execution guarantees
 
-- **Read-only reviews are read-only again.** The kernel's per-agent spec carried
-  only name/engine/model/persona, so the adapters dropped everything else — and
-  ultrareview builds a bespoke prompt and `permissionMode: 'plan'` for each
-  reviewer. Neither reached the session: every reviewer got the shared task
-  under `bypassPermissions`, free to edit the code it was reviewing. The spec now
-  mirrors the legacy shape field for field, and the synthesis pass is held to the
-  same rule — it shares the project directory, so a writable synthesiser was the
-  same hole one step later.
-- **Custom-engine credentials no longer reach disk.** `CustomEngineConfig.env`
-  is for environment variables, tokens included, and an autoloop started with a
-  custom engine wrote its whole options object into the node spec — so
-  `spec.json` held the token in plain text. Credentials travel through an
-  in-memory side channel now, and the spec is scrubbed on the way out as a second
-  line of defence.
+These describe how the new subsystem behaves. Nothing here is an advisory about
+an earlier release: the run kernel, its spec files and its per-agent adapters are
+all new in this version, so none of these paths exist in 5.x or before.
+
+- **A read-only mode is read-only all the way down.** `ultrareview` builds a
+  bespoke prompt and `permissionMode: 'plan'` for each reviewer, and the fan-out
+  spec now mirrors the legacy shape field for field so every one of them reaches
+  the session. The synthesis pass is held to the same rule: it shares the project
+  directory, so a writable synthesiser would undo the read-only agents one step
+  later. Asserted by driving a fake session that writes a file whenever its
+  permission mode allows it — "was the flag forwarded" is not the question, "did
+  the agent get to write" is.
+- **Custom-engine credentials never reach disk.** `CustomEngineConfig.env` is for
+  environment variables, tokens included. They travel through an in-memory side
+  channel that is not part of the checkpoint, and the spec is scrubbed on the way
+  out as a second line, so a future field cannot leak by omission. A resume in
+  another process is given them again by name — see the secret references above —
+  rather than reading them back.
 - **One owner per run, and one way to write.** Executing a run means holding a
   `RunGuard`, which names the run's `incarnationId`, the owning kernel's
   `ownerId`, that owner's `acquisitionId`, and a `fence`. Without it, two
