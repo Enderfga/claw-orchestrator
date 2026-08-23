@@ -158,6 +158,12 @@ export function loadSpec(runId: string): WorkflowSpec | undefined {
 
 export function readEvents(runId: string, limit?: number): KernelEvent[] {
   if (!isValidRunId(runId)) return [];
+  // A published transaction is authoritative even before its files have been
+  // applied. Returning the old log while `.tx` is still present would expose a
+  // state from before a commit that already succeeded.
+  if (!recoverPending(runId)) {
+    throw new Error(`Run '${runId}' has a committed transaction that could not be applied`);
+  }
   let raw: string;
   try {
     raw = fs.readFileSync(path.join(runDir(runId), 'events.jsonl'), 'utf8');
@@ -254,7 +260,9 @@ export function loadRun(runId: string): RunRecord | undefined {
   if (!spec) return undefined;
   // A transaction the last owner committed but died before applying is finished
   // here, so a reader never sees the state from before a committed change.
-  recoverPending(runId);
+  if (!recoverPending(runId)) {
+    throw new Error(`Run '${runId}' has a committed transaction that could not be applied`);
+  }
   const checkpoint = readJson<RunRecord>(path.join(runDir(runId), 'run.json'));
   if (checkpoint && checkpoint.runId === runId && checkpoint.nodes) {
     checkpoint.spec = checkpoint.spec ?? spec;
@@ -660,14 +668,19 @@ function runDirExists(runId: string): boolean {
 }
 
 /** Apply anything a crashed owner committed but did not finish writing. */
-export function recoverPending(runId: string, logger?: Logger): void {
-  if (!isValidRunId(runId)) return;
+export function recoverPending(runId: string, logger?: Logger): boolean {
+  if (!isValidRunId(runId)) return false;
   try {
-    if (!fs.existsSync(path.join(runDir(runId), TX_COMMITTED))) return;
+    if (!fs.existsSync(path.join(runDir(runId), TX_COMMITTED))) return true;
   } catch {
-    return;
+    return false;
   }
-  withRunLock(runId, () => undefined, logger);
+  const locked = withRunLock(runId, () => undefined, logger);
+  if (!locked.ok) return false;
+  // `recoverPendingLocked` deliberately leaves a committed transaction in
+  // place when application fails. Its continued presence means returning the
+  // old checkpoint or event log would be a lie.
+  return !fs.existsSync(path.join(runDir(runId), TX_COMMITTED));
 }
 
 // ─── Claiming ───────────────────────────────────────────────────────────────
@@ -912,7 +925,14 @@ export function summarize(record: RunRecord): RunSummary {
 export function listRuns(query: ListRunsQuery = {}): RunSummary[] {
   const out: RunSummary[] = [];
   for (const runId of listRunIds()) {
-    const record = loadRun(runId);
+    let record: RunRecord | undefined;
+    try {
+      record = loadRun(runId);
+    } catch {
+      // One run whose committed transaction cannot currently be applied must
+      // not make every other run disappear from the listing.
+      continue;
+    }
     if (!record) continue;
     if (query.workflow && record.workflow !== query.workflow) continue;
     if (query.state && record.state !== query.state) continue;

@@ -970,6 +970,53 @@ describe('single owner, enforced', () => {
     expect(readEvents('recover-run').map((e) => (e as { message?: string }).message)).toEqual(['FIRST', 'SECOND']);
   });
 
+  it('never returns the old checkpoint while a committed transaction cannot be applied', async () => {
+    const { acquireLease, commit, loadRun, runDir } = await import('../kernel/store.js');
+    await seedRun('unapplied-run');
+    const guard = acquireLease('unapplied-run', 'o');
+    expect(commit(guard, { record: record('unapplied-run', { workflow: 'old' }) }).outcome).toBe('committed');
+
+    const dir = runDir('unapplied-run');
+    fs.mkdirSync(path.join(dir, 'nodes'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'nodes', 'a'), 'blocks the artifact directory');
+    expect(
+      commit(guard, {
+        record: record('unapplied-run', { workflow: 'new' }),
+        artifacts: [{ nodeId: 'a', name: 'out.txt', body: 'new' }],
+      }).outcome,
+    ).toBe('committed');
+
+    expect(() => loadRun('unapplied-run')).toThrow(/committed transaction.*could not be applied/);
+    fs.rmSync(path.join(dir, 'nodes', 'a'));
+    expect(loadRun('unapplied-run')?.workflow).toBe('new');
+  });
+
+  it('delete cannot remove a run another kernel resumed', async () => {
+    const { RunKernel } = await import('../kernel/engine.js');
+    const first = new RunKernel();
+    first.setExecutor('agent', async () => ({ ok: true }));
+    const started = await first.start(
+      { name: 'delete-race', cwd: os.tmpdir(), nodes: [{ id: 'a', kind: 'agent', prompt: 'x' }] },
+      { runId: 'delete-race' },
+    );
+    await first.wait(started.runId);
+
+    let finish!: () => void;
+    const gate = new Promise<void>((resolve) => (finish = resolve));
+    const second = new RunKernel();
+    second.setExecutor('agent', async () => {
+      await gate;
+      return { ok: true };
+    });
+    await second.resume(started.runId, { restart: true });
+    expect(first.delete(started.runId)).toBe(false);
+    expect(first.get(started.runId)).toBeDefined();
+
+    finish();
+    await second.wait(started.runId);
+    expect(second.delete(started.runId)).toBe(true);
+  });
+
   it('a moment of lock contention is not a lost run', async () => {
     // `withLock` threw immediately on a fresh lock and `commit` turned every
     // error into "you no longer own this", so a millisecond of contention ended

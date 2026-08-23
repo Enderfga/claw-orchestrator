@@ -694,9 +694,15 @@ export class RunKernel extends EventEmitter {
    */
   delete(runId: string, opts: { expectTag?: string } = {}): boolean {
     if (opts.expectTag !== undefined && this._tags.get(runId) !== opts.expectTag) return false;
-    const handle = this.live.get(runId);
+    // Claim before deleting and never release first. Releasing here used to open
+    // a window in which another process could legally resume the run, only for
+    // this process to delete the directory out from under its new owner.
+    try {
+      acquireLease(runId, this.ownerId);
+    } catch {
+      return false;
+    }
     this.cancel(runId);
-    if (handle) releaseLease(handle.txn.guard);
     this._secrets.delete(runId);
     this._tags.delete(runId);
     deleteRunDir(runId, this.logger);
