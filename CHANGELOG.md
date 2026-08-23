@@ -13,9 +13,12 @@ because a verifier is a node in the thing that survives.
 
 ### Added
 
-- **Durable run kernel (`src/kernel/`).** A declarative `WorkflowSpec` over seven
+- **Durable run kernel (`src/kernel/`).** A declarative `WorkflowSpec` over ten
   node kinds — `agent`, `fanout`, `council`, `verifier`, `human_gate`, `router`,
-  `subflow` — with retry, per-node timeout, cancel, steer, human gates, and
+  `subflow`, and the three whose executors are injected because their engines
+  need more than the kernel has any business knowing (`autoloop`,
+  `ultraapp_synth`, `ultraapp_deploy`) — with retry, per-node timeout, cancel,
+  steer, human gates, and
   bounded loops. Every state transition is checkpointed to
   `~/.claw-orchestrator/wf/<runId>/` before the next step begins, so a run
   survives a restart and `workflow_resume` re-attaches at the node boundary:
@@ -23,7 +26,8 @@ because a verifier is a node in the thing that survives.
   retried, because a half-finished node left no result to trust. The immutable
   spec is stored apart from the mutable checkpoint, so a torn `run.json` is
   recovered by replaying `events.jsonl` rather than lost.
-  Three built-in templates ship as ordinary specs: `solve`, `council`, `fanout`.
+  Four built-in templates ship as ordinary specs: `solve`, `council`, `fanout`,
+  `ultraapp`.
 
   Two limits stated plainly rather than glossed. Node execution is
   **at-least-once**: there is no idempotency key, attempt lease, or side-effect
