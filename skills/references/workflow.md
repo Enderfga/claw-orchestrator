@@ -57,6 +57,7 @@ Every state transition is checkpointed **before the next step begins**:
   events.jsonl      append-only audit + SSE source
   incarnation.json  which creation of this run id this is, and its fence counter
   lease.json        who is executing it right now
+  .tx/              a committed batch awaiting application (see below)
   nodes/<id>/       per-node artifacts
   evidence/<id>/    evidence bundles
 ```
@@ -95,6 +96,27 @@ names four things, and all four are checked on every durable write:
   in a comment while the engine wrote checkpoints directly from `start`,
   `resume`, `publish` and `setChild`, and a rule enforced by a comment is not a
   rule.
+- **A batch lands whole.** It is staged in a scratch directory and published by a
+  single atomic directory rename; the rename is the commit point, and what
+  follows is replayable application of an already-committed transaction. A reader
+  finishes any transaction a crashed owner left, and applying is idempotent — the
+  manifest records the event log's length from before, so recovery truncates and
+  re-appends rather than duplicating. Without this, `committed` meant "most of it
+  was attempted": the event append swallowed its own errors, so a checkpoint
+  could land with its events silently dropped, and a batch that failed partway
+  left the artifacts it had already written behind.
+- **Creating a run and claiming it are one step.** The run directory is made with
+  a non-recursive `mkdir`, which _is_ the claim — it fails for everyone but the
+  first caller. Asking `runExists()` and then creating is a check-then-write
+  race, and it lost: two processes creating the same id 80 times both "succeeded"
+  76 times, leaving one workflow executing under another's `spec.json`.
+- **Contention is not a takeover.** `commit` reports `committed`, `superseded` or
+  `blocked`, and only `superseded` is permanent. The lock waits briefly rather
+  than failing on sight, and an owner that still cannot write stops _and hands
+  its claim back_ — because a live local pid is never judged stale, so a lease
+  left behind by a stopped run can never be taken over and the run is lost for
+  good. Collapsing the two into one boolean is what made a millisecond of
+  contention wedge a run permanently.
 - **Copy-on-write.** A change is applied to a clone, committed, and adopted only
   if the disk accepted it. So a superseded owner does not merely fail to
   persist — the record it hands back to its own caller stops advancing too.

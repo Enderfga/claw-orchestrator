@@ -151,6 +151,18 @@ function runFiles(runId: string): string[] {
   return out;
 }
 
+/** Hold a lock file from a real other process for `ms`, then release it. */
+function holdLock(lockPath: string, ms: number): Promise<void> {
+  const src = `
+    const fs = await import('node:fs');
+    fs.writeFileSync(${JSON.stringify(lockPath)}, '');
+    await new Promise((r) => setTimeout(r, ${ms}));
+    fs.rmSync(${JSON.stringify(lockPath)}, { force: true });
+  `;
+  const proc = spawn(process.execPath, ['--input-type=module', '-e', src], { stdio: ['ignore', 'pipe', 'pipe'] });
+  return new Promise((resolve) => proc.on('exit', () => resolve()));
+}
+
 beforeEach(() => {
   observed = [];
   wfDir = fs.mkdtempSync(path.join(os.tmpdir(), 'clawo-inv-wf-'));
@@ -536,6 +548,17 @@ describe('single owner, enforced', () => {
     });
   }
 
+  /**
+   * Create a run and hand the claim straight back, so the test can take it as
+   * whoever it likes. Creating and claiming are one step now — a run cannot
+   * exist unowned even for an instant — so "seed a directory" is spelled this
+   * way rather than by a bare create.
+   */
+  async function seedRun(runId: string, spec: unknown = { name: 'x', nodes: [] }): Promise<void> {
+    const { createAndAcquire, releaseLease } = await import('../kernel/store.js');
+    releaseLease(createAndAcquire(runId, spec as never, 'seed'));
+  }
+
   function record(runId: string, over: Record<string, unknown> = {}): never {
     return {
       runId,
@@ -557,15 +580,19 @@ describe('single owner, enforced', () => {
     // and then hammer the claim for a fixed window, so neither can win by
     // outliving the other — and each reports whether it ever got a guard AND
     // whether that guard was good enough to write with.
-    const { createRunDir, readEvents } = await import('../kernel/store.js');
-    createRunDir('race-run', { name: 'x', nodes: [] } as never);
+    const { readEvents } = await import('../kernel/store.js');
+    await seedRun('race-run');
     const startAt = Date.now() + 700;
 
     const src = (label: string) => `
       const { acquireLease, commit } = await import(${JSON.stringify(`${DIST2}/kernel/store.js`)});
       await new Promise((r) => setTimeout(r, Math.max(0, ${startAt} - Date.now())));
       let held = false, commits = 0;
-      const until = Date.now() + 1200;
+      // An absolute deadline, shared by both processes: a relative one let the
+      // first process exit while the second was still trying, and the second
+      // then legitimately took over a lease whose holder was gone — which is
+      // correct behaviour, and made the test measure the wrong thing.
+      const until = ${startAt} + 1200;
       while (Date.now() < until) {
         try {
           const g = acquireLease('race-run', ${JSON.stringify(label)});
@@ -574,6 +601,8 @@ describe('single owner, enforced', () => {
                                     message: ${JSON.stringify(label)} }] })) commits++;
         } catch { /* refused, which is the correct outcome for the loser */ }
       }
+      // Outlive the other process, so neither can win by being last standing.
+      await new Promise((r) => setTimeout(r, Math.max(0, ${startAt + 2200} - Date.now())));
       console.log(JSON.stringify({ label: ${JSON.stringify(label)}, held, commits }));
     `;
     const run = (label: string): Promise<{ label: string; held: boolean; commits: number }> =>
@@ -636,8 +665,8 @@ describe('single owner, enforced', () => {
   it('the fence never repeats within one incarnation, even across release', async () => {
     // It used to be read off the lease, which release deletes — so the counter
     // restarted at 1 and a stale holder's token could match a fresh owner's.
-    const { acquireLease, createRunDir, releaseLease } = await import('../kernel/store.js');
-    createRunDir('fence-run', { name: 'x', nodes: [] } as never);
+    const { acquireLease, releaseLease } = await import('../kernel/store.js');
+    await seedRun('fence-run');
     const first = acquireLease('fence-run', 'owner-1');
     releaseLease(first);
     const second = acquireLease('fence-run', 'owner-2');
@@ -650,13 +679,13 @@ describe('single owner, enforced', () => {
   it('re-acquiring supersedes the previous guard, even for the same owner', async () => {
     // Re-entrancy that hands back the same capability is not re-entrancy, it is
     // two capabilities for one run. A second claim is a new claim.
-    const { acquireLease, commit, createRunDir, loadRun } = await import('../kernel/store.js');
-    createRunDir('reclaim-run', { name: 'x', nodes: [] } as never);
+    const { acquireLease, commit, loadRun } = await import('../kernel/store.js');
+    await seedRun('reclaim-run');
     const first = acquireLease('reclaim-run', 'same-owner');
     const second = acquireLease('reclaim-run', 'same-owner');
     expect(second.acquisitionId).not.toBe(first.acquisitionId);
-    expect(commit(second, { record: record('reclaim-run', { workflow: 'second' }) })).toBe(true);
-    expect(commit(first, { record: record('reclaim-run', { workflow: 'first' }) })).toBe(false);
+    expect(commit(second, { record: record('reclaim-run', { workflow: 'second' }) }).outcome).toBe('committed');
+    expect(commit(first, { record: record('reclaim-run', { workflow: 'first' }) }).outcome).toBe('superseded');
     expect(loadRun('reclaim-run')!.workflow).toBe('second');
   });
 
@@ -664,16 +693,16 @@ describe('single owner, enforced', () => {
     // The previous version checked the fence once per node, so every checkpoint,
     // event and terminal verdict after that check was unguarded: a stale owner
     // could still declare the run complete.
-    const { acquireLease, commit, createRunDir, loadRun } = await import('../kernel/store.js');
-    createRunDir('commit-run', { name: 'x', nodes: [] } as never);
+    const { acquireLease, commit, loadRun } = await import('../kernel/store.js');
+    await seedRun('commit-run');
     const mine = acquireLease('commit-run', 'owner-old');
-    expect(commit(mine, { record: record('commit-run') })).toBe(true);
+    expect(commit(mine, { record: record('commit-run') }).outcome).toBe('committed');
 
     // A real takeover, performed by the real acquisition path.
     await goQuietOnAnotherHost('commit-run');
     acquireLease('commit-run', 'owner-new');
 
-    expect(commit(mine, { record: record('commit-run', { state: 'completed' }) })).toBe(false);
+    expect(commit(mine, { record: record('commit-run', { state: 'completed' }) }).outcome).toBe('superseded');
     expect(loadRun('commit-run')?.state).not.toBe('completed');
   });
 
@@ -751,21 +780,22 @@ describe('single owner, enforced', () => {
     // the deleted run becomes valid a second time. The incarnation id is what
     // makes that impossible; this test asserts the fence really does repeat, so
     // it is testing the thing that actually saves us.
-    const { acquireLease, commit, createRunDir, deleteRunDir, loadRun } = await import('../kernel/store.js');
-    const spec = { name: 'x', nodes: [] } as never;
-    createRunDir('aba-run', spec);
+    const { acquireLease, commit, deleteRunDir, loadRun } = await import('../kernel/store.js');
+    await seedRun('aba-run');
     const old = acquireLease('aba-run', 'same-owner');
-    expect(commit(old, { record: record('aba-run', { workflow: 'old' }) })).toBe(true);
+    expect(commit(old, { record: record('aba-run', { workflow: 'old' }) }).outcome).toBe('committed');
 
     deleteRunDir('aba-run');
-    createRunDir('aba-run', spec);
+    await seedRun('aba-run');
     const fresh = acquireLease('aba-run', 'same-owner');
     expect(fresh.fence).toBe(old.fence);
     expect(fresh.incarnationId).not.toBe(old.incarnationId);
-    expect(commit(fresh, { record: record('aba-run', { workflow: 'new' }) })).toBe(true);
+    expect(commit(fresh, { record: record('aba-run', { workflow: 'new' }) }).outcome).toBe('committed');
 
     // The old attempt, still alive, tries to finish the run it thinks it owns.
-    expect(commit(old, { record: record('aba-run', { workflow: 'old', state: 'completed' }) })).toBe(false);
+    expect(commit(old, { record: record('aba-run', { workflow: 'old', state: 'completed' }) }).outcome).toBe(
+      'superseded',
+    );
     expect(loadRun('aba-run')!.workflow).toBe('new');
     expect(loadRun('aba-run')!.state).not.toBe('completed');
   });
@@ -812,6 +842,191 @@ describe('single owner, enforced', () => {
     expect(disk.nodes.a.output).toBe('second run output');
     expect(disk.nodes.a.data).toBeUndefined();
     expect(JSON.stringify(readEvents('reused-id'))).not.toContain('GHOST');
+  }, 30_000);
+
+  it('two real processes creating the same run ids: exactly one wins each', async () => {
+    // Creating used to be `runExists()` then `mkdirSync({recursive:true})` —
+    // check-then-write, and it lost the race routinely: two processes creating
+    // the same id both "succeeded" most of the time, leaving one workflow
+    // executing while the other's spec.json sat on disk under it. The
+    // non-recursive mkdir is the claim now, so exactly one caller can create a
+    // given id.
+    const { loadSpec } = await import('../kernel/store.js');
+    const ids = Array.from({ length: 40 }, (_, i) => `dup-${i}`);
+    const startAt = Date.now() + 700;
+    const src = (label: string) => `
+      const { createAndAcquire, releaseLease } = await import(${JSON.stringify(`${DIST2}/kernel/store.js`)});
+      await new Promise((r) => setTimeout(r, Math.max(0, ${startAt} - Date.now())));
+      const created = [];
+      for (const id of ${JSON.stringify(ids)}) {
+        try {
+          const g = createAndAcquire(id, { name: ${JSON.stringify(label)}, nodes: [] }, ${JSON.stringify(label)});
+          created.push(id);
+          releaseLease(g);
+        } catch { /* the other process got there first */ }
+      }
+      console.log(JSON.stringify({ label: ${JSON.stringify(label)}, created }));
+    `;
+    const run = (label: string): Promise<{ label: string; created: string[] }> =>
+      new Promise((resolve, reject) => {
+        const proc = spawn(process.execPath, ['--input-type=module', '-e', src(label)], {
+          env: { ...process.env, CLAWO_WF_DIR: wfDir },
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        let out = '';
+        proc.stdout!.on('data', (d: Buffer) => (out += d.toString()));
+        proc.on('exit', () => {
+          try {
+            resolve(JSON.parse(out.trim().split('\n').pop() ?? '{}'));
+          } catch (e) {
+            reject(e);
+          }
+        });
+        proc.on('error', reject);
+      });
+
+    const [a, b] = await Promise.all([run('workflow-a'), run('workflow-b')]);
+    const both = a.created.filter((id) => b.created.includes(id));
+    expect(both).toEqual([]);
+    expect([...a.created, ...b.created].sort()).toEqual([...ids].sort());
+    // And the run that exists is the one whose creator believes it created it.
+    for (const id of ids) {
+      const owner = a.created.includes(id) ? 'workflow-a' : 'workflow-b';
+      expect(loadSpec(id)?.name).toBe(owner);
+    }
+  }, 60_000);
+
+  it('a commit that reports committed has its events, or it is not committed', async () => {
+    // The event append used to swallow its own errors, so a commit could report
+    // success with a finished checkpoint and no events at all. The batch is
+    // published by one atomic directory rename now: either both are there or
+    // neither is.
+    const { acquireLease, commit, loadRun, readEvents, runDir } = await import('../kernel/store.js');
+    await seedRun('batch-run');
+    const guard = acquireLease('batch-run', 'o');
+    expect(
+      commit(guard, {
+        record: record('batch-run', { workflow: 'with-events' }),
+        events: [{ ts: 't', type: 'log', level: 'info', message: 'IN-THE-BATCH' }],
+        artifacts: [{ nodeId: 'a', name: 'out.txt', body: 'artifact body' }],
+      }).outcome,
+    ).toBe('committed');
+    expect(loadRun('batch-run')!.workflow).toBe('with-events');
+    expect(JSON.stringify(readEvents('batch-run'))).toContain('IN-THE-BATCH');
+    expect(fs.readFileSync(path.join(runDir('batch-run'), 'nodes', 'a', 'out.txt'), 'utf8')).toBe('artifact body');
+
+    // A batch that cannot be staged leaves nothing behind — not the artifact it
+    // had already written, which the old order did leave.
+    const circular: Record<string, unknown> = { runId: 'batch-run' };
+    circular.self = circular;
+    const failed = commit(guard, {
+      record: circular as never,
+      events: [{ ts: 't', type: 'log', level: 'info', message: 'SHOULD-NOT-APPEAR' }],
+      artifacts: [{ nodeId: 'b', name: 'out.txt', body: 'should not survive' }],
+    });
+    expect(failed.outcome).toBe('blocked');
+    expect(fs.existsSync(path.join(runDir('batch-run'), 'nodes', 'b', 'out.txt'))).toBe(false);
+    expect(JSON.stringify(readEvents('batch-run'))).not.toContain('SHOULD-NOT-APPEAR');
+    expect(loadRun('batch-run')!.workflow).toBe('with-events');
+  });
+
+  it('a transaction committed but not applied is finished by the next reader', async () => {
+    // What a crash between the commit point and the application looks like on
+    // disk, and what recovery has to do with it. Applying is idempotent — the
+    // manifest records the event log's length before the transaction, so it
+    // truncates and re-appends rather than appending twice.
+    const { acquireLease, commit, loadRun, readEvents, runDir } = await import('../kernel/store.js');
+    await seedRun('recover-run');
+    const guard = acquireLease('recover-run', 'o');
+    commit(guard, {
+      record: record('recover-run', { workflow: 'before' }),
+      events: [{ ts: 't0', type: 'log', level: 'info', message: 'FIRST' }],
+    });
+    const dir = runDir('recover-run');
+    const eventsBefore = fs.statSync(path.join(dir, 'events.jsonl')).size;
+
+    const stage = (): void => {
+      const tx = path.join(dir, '.tx');
+      fs.mkdirSync(tx, { recursive: true });
+      fs.writeFileSync(
+        path.join(tx, 'manifest.json'),
+        JSON.stringify({ eventsOffset: eventsBefore, hasRecord: true, hasEvents: true, artifacts: [] }),
+      );
+      fs.writeFileSync(path.join(tx, 'run.json'), JSON.stringify(record('recover-run', { workflow: 'after' })));
+      fs.writeFileSync(
+        path.join(tx, 'events.jsonl'),
+        JSON.stringify({ ts: 't1', type: 'log', level: 'info', message: 'SECOND' }) + '\n',
+      );
+    };
+
+    stage();
+    expect(loadRun('recover-run')!.workflow).toBe('after');
+    expect(readEvents('recover-run').map((e) => (e as { message?: string }).message)).toEqual(['FIRST', 'SECOND']);
+    expect(fs.existsSync(path.join(dir, '.tx'))).toBe(false);
+
+    // Replaying the same transaction must not duplicate its events.
+    stage();
+    loadRun('recover-run');
+    expect(readEvents('recover-run').map((e) => (e as { message?: string }).message)).toEqual(['FIRST', 'SECOND']);
+  });
+
+  it('a moment of lock contention is not a lost run', async () => {
+    // `withLock` threw immediately on a fresh lock and `commit` turned every
+    // error into "you no longer own this", so a millisecond of contention ended
+    // the run permanently. The lock waits now, and only a real takeover is a
+    // takeover.
+    const { RunKernel } = await import('../kernel/engine.js');
+    const { runDir } = await import('../kernel/store.js');
+    const kernel = new RunKernel({ nodeTimeoutMs: 10_000 });
+    kernel.setExecutor('agent', async (_node, ctx) => {
+      // A real other process holds the lock: the wait is synchronous, so a
+      // same-thread holder could never be waited out — and could never exist,
+      // since these critical sections do not nest.
+      const holder = holdLock(path.join(runDir('contended-run'), 'lease.lock'), 150);
+      await new Promise((r) => setTimeout(r, 60));
+      // Hits the lock while it is held, and must wait rather than give up.
+      ctx.emit({ ts: new Date().toISOString(), type: 'log', level: 'info', message: 'THROUGH-CONTENTION' });
+      await holder;
+      return { ok: true };
+    });
+    const rec = await kernel.start(
+      { name: 'contended', cwd: os.tmpdir(), nodes: [{ id: 'a', kind: 'agent', prompt: 'x' }] },
+      { runId: 'contended-run' },
+    );
+    const done = await kernel.wait(rec.runId);
+    expect(done!.state).toBe('completed');
+    const { readEvents } = await import('../kernel/store.js');
+    expect(JSON.stringify(readEvents('contended-run'))).toContain('THROUGH-CONTENTION');
+  }, 30_000);
+
+  it('a run that truly cannot write hands its claim back instead of wedging', async () => {
+    // The other half of the same fix. An owner that gives up must not keep the
+    // lease: a live local pid is never judged stale, so a lease left behind by a
+    // stopped run can never be taken over and the run is lost for good.
+    const { RunKernel } = await import('../kernel/engine.js');
+    const { readLease, runDir } = await import('../kernel/store.js');
+    const kernel = new RunKernel({ nodeTimeoutMs: 10_000 });
+    kernel.setExecutor('agent', async (_node, ctx) => {
+      // Held for longer than the lock's wait, so this write genuinely fails.
+      holdLock(path.join(runDir('wedged-run'), 'lease.lock'), 900);
+      await new Promise((r) => setTimeout(r, 60));
+      ctx.emit({ ts: new Date().toISOString(), type: 'log', level: 'info', message: 'NEVER-LANDS' });
+      return { ok: true };
+    });
+    const rec = await kernel.start(
+      { name: 'wedged', cwd: os.tmpdir(), nodes: [{ id: 'a', kind: 'agent', prompt: 'x' }] },
+      { runId: 'wedged-run' },
+    );
+    const done = await kernel.wait(rec.runId);
+    expect(done!.state).not.toBe('completed');
+
+    // The claim comes back once the lock clears, so the run is resumable.
+    for (let i = 0; i < 40 && readLease('wedged-run'); i++) await new Promise((r) => setTimeout(r, 100));
+    expect(readLease('wedged-run')).toBeUndefined();
+    const other = new RunKernel({ nodeTimeoutMs: 5_000 });
+    other.setExecutor('agent', async () => ({ ok: true }));
+    await expect(other.resume('wedged-run')).resolves.toBeDefined();
+    await other.wait('wedged-run');
   }, 30_000);
 
   it('does not declare a live local owner stale for going quiet', async () => {
@@ -1013,6 +1228,48 @@ describe('races that need real processes', () => {
     }
   });
 
+  it('a queue that cannot claim the state file does not run the build anyway', async () => {
+    // The recheck added last round mixed two failures into one boolean: "I have
+    // been superseded" and "I could not get the lock". `enqueue` and
+    // `tryDispatch` both treated the second as permission to proceed, so a queue
+    // whose state file on disk already named a new owner still ran the build.
+    const { UltraappBuildQueue } = await import('../ultraapp/build.js');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'clawo-inv-q3-'));
+    try {
+      const statePath = path.join(dir, 'q.json');
+      const seen: string[] = [];
+      const q = new UltraappBuildQueue({
+        statePath,
+        worker: async (id: string) => {
+          seen.push(id);
+        },
+      });
+      expect(q.ownsQueue()).toBe(true);
+
+      // A new owner is inside the critical section and has already written
+      // itself in — exactly the window the old queue used to dispatch through.
+      fs.writeFileSync(
+        statePath,
+        JSON.stringify({
+          pending: ['theirs'],
+          current: null,
+          owner: { ownerId: 'the-new-owner', pid: process.pid, renewedAt: new Date().toISOString() },
+        }),
+      );
+      const holder = holdLock(`${statePath}.lock`, 900);
+      await new Promise((r) => setTimeout(r, 60));
+
+      await expect(q.enqueue('stale-work')).rejects.toThrow(/locked by another process/);
+      expect(seen).toEqual([]);
+      const disk = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+      expect(disk.owner.ownerId).toBe('the-new-owner');
+      expect(disk.pending).toEqual(['theirs']);
+      await holder;
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   it('a fresh process resumes a custom-engine run only when given the reference', async () => {
     // Credentials are never persisted, so a crashed custom-engine run could not
     // be resumed by anyone who did not still have them in memory. The earlier
@@ -1021,7 +1278,7 @@ describe('races that need real processes', () => {
     // (`SessionManager.autoloopResume`) in a process that never held the config,
     // twice: without the reference it is refused for the documented reason, with
     // it the run gets past that gate.
-    const { acquireLease, commit, createRunDir, releaseLease } = await import('../kernel/store.js');
+    const { acquireLease, commit, createAndAcquire, releaseLease } = await import('../kernel/store.js');
     const runId = 'custom-engine-resume';
     const spec = {
       name: 'autoloop',
@@ -1034,7 +1291,7 @@ describe('races that need real processes', () => {
         },
       ],
     };
-    createRunDir(runId, spec as never);
+    releaseLease(createAndAcquire(runId, spec as never, 'seed'));
     const fixture = acquireLease(runId, 'fixture');
     commit(fixture, {
       record: {

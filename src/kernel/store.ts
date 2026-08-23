@@ -23,11 +23,15 @@
  * rewritten; a run that lost both is unrecoverable and `loadRun` returns
  * undefined rather than inventing a state.
  *
- * The two write helpers here replace four near-identical implementations that
- * had grown across the codebase (`session-manager.ts` sync + async variants,
- * `ultraapp/store.ts`, `ultraapp/patcher.ts`). The tmp-name shape is kept from
- * the ultraapp one, whose comment records the CI bug it fixed: a reader catching
- * a plain `writeFile` mid-flight and parsing a truncated object.
+ * There is exactly one way to write to a run — `commit()` — and it is not
+ * optional: the checkpoint writer and the event appender are module-private, and
+ * a batch is published by a single atomic directory rename rather than by a
+ * sequence of writes that can each fail on their own. `atomicWriteJson` replaces
+ * four near-identical implementations that had grown across the codebase
+ * (`session-manager.ts` sync + async variants, `ultraapp/store.ts`,
+ * `ultraapp/patcher.ts`); the tmp-name shape is kept from the ultraapp one,
+ * whose comment records the CI bug it fixed: a reader catching a plain
+ * `writeFile` mid-flight and parsing a truncated object.
  */
 
 import crypto from 'node:crypto';
@@ -35,6 +39,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { Logger } from '../logger.js';
+import { withFileLock, type LockResult } from './file-lock.js';
 import type { KernelEvent, NodeRecord, RunRecord, RunState, WorkflowSpec } from './types.js';
 
 export function wfDir(): string {
@@ -101,16 +106,6 @@ export function atomicWriteJson(file: string, value: unknown): void {
   }
 }
 
-/** Append one JSONL row. Best-effort: a log failure must never change control flow. */
-export function appendJsonl(file: string, value: unknown, logger?: Logger): void {
-  try {
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.appendFileSync(file, JSON.stringify(value) + '\n');
-  } catch (err) {
-    logger?.warn?.(`[kernel-store] append failed for ${path.basename(file)}: ${(err as Error).message}`);
-  }
-}
-
 function readJson<T>(file: string): T | undefined {
   try {
     return JSON.parse(fs.readFileSync(file, 'utf8')) as T;
@@ -129,12 +124,6 @@ export function runExists(runId: string): boolean {
   }
 }
 
-/**
- * Create a run's directory. Refuses to reuse an existing run id: overwriting
- * `spec.json` would discard the first run's definition while its `events.jsonl`
- * kept accumulating, leaving one log describing two different runs and a replay
- * that reconstructs neither.
- */
 /**
  * Keys whose values never reach disk.
  *
@@ -160,44 +149,11 @@ export function sanitizeForDisk<T>(value: T): T {
   return out as unknown as T;
 }
 
-export function createRunDir(runId: string, spec: WorkflowSpec): void {
-  if (runExists(runId)) {
-    throw new Error(`Run '${runId}' already exists — pick another id, or resume it instead of starting over`);
-  }
-  const dir = runDir(runId);
-  fs.mkdirSync(dir, { recursive: true });
-  // Minted before the spec, so a run directory never exists without an
-  // incarnation to identify it. See `Incarnation` for why this is not optional.
-  atomicWriteJson(incarnationFile(runId), { incarnationId: crypto.randomUUID(), nextFence: 0 } as Incarnation);
-  atomicWriteJson(path.join(dir, 'spec.json'), sanitizeForDisk(spec));
-}
-
-/**
- * Write a checkpoint.
- *
- * Deliberately NOT exported. "Unguarded on purpose, and nothing outside the
- * store should call it" was the previous comment, and it was not true: the
- * engine imported it and wrote checkpoints directly from `start`, `resume`,
- * `publish` and `setChild`. A rule enforced by a comment is not a rule. The only
- * way to a checkpoint is now {@link commit}, which cannot be reached without a
- * {@link RunGuard}.
- */
-function writeRunRecord(record: RunRecord): void {
-  // The checkpoint embeds the spec, so it gets the same scrub.
-  atomicWriteJson(path.join(runDir(record.runId), 'run.json'), sanitizeForDisk(record));
-}
-
 export function loadSpec(runId: string): WorkflowSpec | undefined {
   // Lookups treat an invalid id as "no such run" rather than throwing: a query
   // for a nonsense id has an answer, and it is "nothing".
   if (!isValidRunId(runId)) return undefined;
   return readJson<WorkflowSpec>(path.join(runDir(runId), 'spec.json'));
-}
-
-/** Internal for the same reason as {@link writeRunRecord}: appends go through {@link commit}. */
-function appendEventRaw(runId: string, event: KernelEvent, logger?: Logger): void {
-  if (!isValidRunId(runId)) return;
-  appendJsonl(path.join(runDir(runId), 'events.jsonl'), event, logger);
 }
 
 export function readEvents(runId: string, limit?: number): KernelEvent[] {
@@ -296,6 +252,9 @@ export function replayRun(runId: string, spec: WorkflowSpec): RunRecord | undefi
 export function loadRun(runId: string): RunRecord | undefined {
   const spec = loadSpec(runId);
   if (!spec) return undefined;
+  // A transaction the last owner committed but died before applying is finished
+  // here, so a reader never sees the state from before a committed change.
+  recoverPending(runId);
   const checkpoint = readJson<RunRecord>(path.join(runDir(runId), 'run.json'));
   if (checkpoint && checkpoint.runId === runId && checkpoint.nodes) {
     checkpoint.spec = checkpoint.spec ?? spec;
@@ -359,26 +318,18 @@ export function nodeArtifactPath(runId: string, nodeId: string, name: string): s
   return path.relative(runDir(runId), file);
 }
 
-function writeNodeArtifactRaw(runId: string, nodeId: string, name: string, body: string): void {
-  const dir = nodeDir(runId, nodeId);
-  fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(path.join(dir, name.replace(/[^\w.-]/g, '_')), body);
-}
-
-// ─── Ownership: incarnation, lease, guard, commit ───────────────────────────
+// ─── Ownership and the storage transaction ──────────────────────────────────
 //
-// A run has one owner at a time, and every durable change it makes is checked
-// against a capability that only that owner holds. Without the first, two
-// processes each `resume` the same run and every side effect happens twice.
-// Without the second, the first is decoration: the previous version had a lease
-// file and a fence, and the engine still wrote checkpoints, events and terminal
-// verdicts straight past both.
+// A run has one owner at a time, every durable change it makes is checked
+// against a capability only that owner holds, and each change lands in full or
+// not at all. Each of those three was added after the previous two turned out to
+// be decoration without it.
 //
-// The capability is a `RunGuard`. It names four things, and all four are
-// checked on every write:
+// The capability is a `RunGuard`, naming four things, all checked on every
+// write:
 //
 //   incarnationId  which *creation* of this run id this is
-//   ownerId        which RunKernel instance (never the pid — see `Owner`)
+//   ownerId        which RunKernel instance (never the pid — see `RunLease`)
 //   acquisitionId  which claim by that owner
 //   fence          monotonic within the incarnation, for ordering and logs
 //
@@ -386,13 +337,30 @@ function writeNodeArtifactRaw(runId: string, nodeId: string, name: string, body:
 // another with the same id and the directory — fence counter included — is
 // gone, so the new run's first fence is 1 again and a stale attempt still
 // holding `{ownerId, fence: 1}` from the old run became valid a second time.
-// That is a textbook ABA, and it is not hypothetical: an abandoned timed-out
-// attempt outlives its run by construction. A fresh random id per creation
-// makes an old guard unusable no matter what the counter says.
+// That is a textbook ABA, and not hypothetical: an abandoned timed-out attempt
+// outlives its run by construction.
+//
+// Two distinctions this module is careful about, because collapsing either one
+// caused a real failure:
+//
+//   *Not the owner* is permanent; *could not take the lock* is transient. They
+//   are separate outcomes (`superseded` vs `blocked`), and a caller that treats
+//   a millisecond of contention as a loss stops forever while still holding its
+//   lease — so nothing can take the run over either.
+//
+//   *Committed* means the whole batch is durable, not that most of it was
+//   attempted. A batch is staged in a scratch directory and published by a
+//   single atomic directory rename; the rename is the commit point, and what
+//   follows is replayable application of an already-committed transaction.
 
 export const LEASE_TTL_MS = 60_000;
 /** How often a live owner refreshes its claim, independently of any work it is doing. */
 export const LEASE_HEARTBEAT_MS = 15_000;
+
+/** Staged, not yet committed. Removed on the next lock; never read. */
+const TX_STAGING = '.tx.staging';
+/** Committed and awaiting application. Its presence IS the commit. */
+const TX_COMMITTED = '.tx';
 
 /**
  * Identity of one creation of a run id, plus its fence counter.
@@ -441,11 +409,27 @@ export interface RunLease extends RunGuard {
 export interface CommitBatch {
   /** The new checkpoint. */
   record?: RunRecord;
-  /** Appended to `events.jsonl`, in order, after the checkpoint. */
+  /** Appended to `events.jsonl`, in order. */
   events?: KernelEvent[];
-  /** Node artifact files, written before the checkpoint that references them. */
+  /** Node artifact files, published together with the record that references them. */
   artifacts?: Array<{ nodeId: string; name: string; body: string }>;
 }
+
+/**
+ * Why a write did or did not happen.
+ *
+ * Three outcomes rather than a boolean, because the two failures call for
+ * opposite responses: `superseded` means stop permanently, `blocked` means this
+ * attempt did not get through and the run is still ours.
+ */
+export type CommitOutcome = 'committed' | 'superseded' | 'blocked';
+
+export interface CommitResult {
+  outcome: CommitOutcome;
+  reason?: string;
+}
+
+export type ReleaseOutcome = 'released' | 'not-ours' | 'blocked';
 
 function leaseFile(runId: string): string {
   return path.join(runDir(runId), 'lease.json');
@@ -457,6 +441,18 @@ function lockFile(runId: string): string {
 
 function incarnationFile(runId: string): string {
   return path.join(runDir(runId), 'incarnation.json');
+}
+
+function eventsFile(runId: string): string {
+  return path.join(runDir(runId), 'events.jsonl');
+}
+
+function fileSize(file: string): number {
+  try {
+    return fs.statSync(file).size;
+  } catch {
+    return 0;
+  }
 }
 
 function readIncarnation(runId: string): Incarnation | undefined {
@@ -510,44 +506,238 @@ export function leaseIsStale(lease: RunLease | undefined, now = Date.now()): boo
   return Number.isNaN(age) || age > LEASE_TTL_MS;
 }
 
-/**
- * Run `fn` inside the run's lock.
- *
- * Everything that inspects or changes ownership goes through here, so a check
- * and the write that depends on it cannot be separated by another process.
- */
-function withLock<T>(runId: string, fn: () => T): T {
-  const lock = lockFile(runId);
-  fs.mkdirSync(path.dirname(lock), { recursive: true });
+// ─── The transaction ────────────────────────────────────────────────────────
 
-  let fd: number;
-  try {
-    fd = fs.openSync(lock, 'wx');
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
-    // A lock left by a crashed holder would block the run forever. Acquisition
-    // is milliseconds; anything older than the TTL is debris.
-    let age = Infinity;
-    try {
-      age = Date.now() - fs.statSync(lock).mtimeMs;
-    } catch {
-      age = Infinity;
-    }
-    if (age < LEASE_TTL_MS) throw new Error(`Run '${runId}' is locked by another process right now`);
-    fs.rmSync(lock, { force: true });
-    fd = fs.openSync(lock, 'wx');
+interface TxManifest {
+  /**
+   * The length `events.jsonl` had before this transaction.
+   *
+   * Application truncates to it and then appends, which makes applying a
+   * transaction idempotent — a crash anywhere inside the apply cannot duplicate
+   * an event, however many times recovery replays it. An append with no such
+   * marker cannot offer that.
+   */
+  eventsOffset: number;
+  hasRecord: boolean;
+  hasEvents: boolean;
+  /** Paths relative to the run directory. */
+  artifacts: string[];
+}
+
+/**
+ * Apply a committed transaction. Idempotent, and safe to re-run after a crash.
+ *
+ * Caller holds the lock.
+ */
+function applyTxLocked(runId: string, logger?: Logger): void {
+  const dir = runDir(runId);
+  const tx = path.join(dir, TX_COMMITTED);
+  const manifest = readJson<TxManifest>(path.join(tx, 'manifest.json'));
+  if (!manifest) {
+    // No manifest means the rename landed a half-written staging directory,
+    // which cannot happen — but if it somehow did, it is not a commitment.
+    fs.rmSync(tx, { recursive: true, force: true });
+    return;
   }
 
+  for (const rel of manifest.artifacts) {
+    const from = path.join(tx, 'files', rel);
+    const to = path.join(dir, rel);
+    try {
+      fs.mkdirSync(path.dirname(to), { recursive: true });
+      fs.renameSync(from, to);
+    } catch (err) {
+      // ENOENT means a previous application already moved it.
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    }
+  }
+
+  if (manifest.hasEvents) {
+    const events = eventsFile(runId);
+    try {
+      fs.truncateSync(events, manifest.eventsOffset);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    }
+    fs.appendFileSync(events, fs.readFileSync(path.join(tx, 'events.jsonl')));
+  }
+
+  if (manifest.hasRecord) {
+    try {
+      fs.renameSync(path.join(tx, 'run.json'), path.join(dir, 'run.json'));
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    }
+  }
+
+  fs.rmSync(tx, { recursive: true, force: true });
+  logger?.debug?.(`[kernel-store] ${runId}: applied a pending transaction`);
+}
+
+/** Stage a batch and publish it with one atomic rename. Caller holds the lock. */
+function stageLocked(runId: string, batch: CommitBatch): void {
+  const dir = runDir(runId);
+  const staging = path.join(dir, TX_STAGING);
+  fs.rmSync(staging, { recursive: true, force: true });
+  fs.mkdirSync(staging, { recursive: true });
+
+  const manifest: TxManifest = {
+    eventsOffset: fileSize(eventsFile(runId)),
+    hasRecord: Boolean(batch.record),
+    hasEvents: Boolean(batch.events?.length),
+    artifacts: [],
+  };
+
+  for (const artifact of batch.artifacts ?? []) {
+    const rel = nodeArtifactPath(runId, artifact.nodeId, artifact.name);
+    const dest = path.join(staging, 'files', rel);
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.writeFileSync(dest, artifact.body);
+    manifest.artifacts.push(rel);
+  }
+  if (batch.record) {
+    // The checkpoint embeds the spec, so it gets the same scrub.
+    fs.writeFileSync(path.join(staging, 'run.json'), JSON.stringify(sanitizeForDisk(batch.record), null, 2));
+  }
+  if (batch.events?.length) {
+    fs.writeFileSync(path.join(staging, 'events.jsonl'), batch.events.map((e) => JSON.stringify(e)).join('\n') + '\n');
+  }
+  fs.writeFileSync(path.join(staging, 'manifest.json'), JSON.stringify(manifest));
+
+  // THE COMMIT POINT. Renaming a directory is atomic, so the transaction is
+  // either wholly present or wholly absent — never a checkpoint whose events
+  // were silently dropped, or an artifact left behind by a write that failed
+  // afterwards. Both of those were real: the event append swallowed its own
+  // errors, and artifacts were written before the checkpoint they belonged to.
+  fs.renameSync(staging, path.join(dir, TX_COMMITTED));
+}
+
+/** Finish any transaction that was committed but not yet applied. Caller holds the lock. */
+function recoverPendingLocked(runId: string, logger?: Logger): void {
+  const dir = runDir(runId);
   try {
-    return fn();
-  } finally {
-    fs.closeSync(fd);
-    fs.rmSync(lock, { force: true });
+    // Staging that outlived its process was never committed.
+    fs.rmSync(path.join(dir, TX_STAGING), { recursive: true, force: true });
+  } catch {
+    // Debris; the next attempt overwrites it.
+  }
+  if (!fs.existsSync(path.join(dir, TX_COMMITTED))) return;
+  try {
+    applyTxLocked(runId, logger);
+  } catch (err) {
+    logger?.warn?.(`[kernel-store] ${runId}: could not apply a pending transaction: ${(err as Error).message}`);
   }
 }
 
 /**
- * Claim a run and receive the capability to write to it.
+ * Run `fn` inside the run's lock, with any pending transaction applied first.
+ *
+ * Everything that inspects or changes ownership goes through here, so a check
+ * and the write that depends on it cannot be separated by another process — and
+ * so no caller can observe a run mid-transaction.
+ */
+function withRunLock<T>(runId: string, fn: () => T, logger?: Logger): LockResult<T> {
+  return withFileLock(
+    lockFile(runId),
+    () => {
+      recoverPendingLocked(runId, logger);
+      return fn();
+    },
+    // Never `createParent`: a run directory that has been deleted must stay
+    // deleted. Recreating it to hold a lock left an empty directory behind, and
+    // the id then looked taken by a run that no longer existed.
+    { staleMs: LEASE_TTL_MS },
+  );
+}
+
+/** Whether the run directory is still there at all. A gone run is not contention. */
+function runDirExists(runId: string): boolean {
+  try {
+    return fs.existsSync(runDir(runId));
+  } catch {
+    return false;
+  }
+}
+
+/** Apply anything a crashed owner committed but did not finish writing. */
+export function recoverPending(runId: string, logger?: Logger): void {
+  if (!isValidRunId(runId)) return;
+  try {
+    if (!fs.existsSync(path.join(runDir(runId), TX_COMMITTED))) return;
+  } catch {
+    return;
+  }
+  withRunLock(runId, () => undefined, logger);
+}
+
+// ─── Claiming ───────────────────────────────────────────────────────────────
+
+function acquireLocked(runId: string, ownerId: string): RunGuard {
+  const incarnation = ensureIncarnationLocked(runId);
+  const existing = readLease(runId);
+  if (existing && existing.ownerId !== ownerId && !leaseIsStale(existing)) {
+    throw new Error(
+      `Run '${runId}' is owned by ${existing.ownerId} (pid ${existing.pid} on ${existing.host}, ` +
+        `last seen ${existing.renewedAt}) — only one owner may run it at a time`,
+    );
+  }
+  const fence = incarnation.nextFence + 1;
+  atomicWriteJson(incarnationFile(runId), { ...incarnation, nextFence: fence });
+  const now = new Date().toISOString();
+  const lease: RunLease = {
+    runId,
+    incarnationId: incarnation.incarnationId,
+    ownerId,
+    acquisitionId: crypto.randomUUID(),
+    fence,
+    pid: process.pid,
+    host: os.hostname(),
+    acquiredAt: existing?.ownerId === ownerId ? existing.acquiredAt : now,
+    renewedAt: now,
+  };
+  atomicWriteJson(leaseFile(runId), lease);
+  return { runId, incarnationId: lease.incarnationId, ownerId, acquisitionId: lease.acquisitionId, fence };
+}
+
+/**
+ * Create a run and claim it, atomically.
+ *
+ * The non-recursive `mkdir` IS the claim: it fails with EEXIST for everyone but
+ * the first caller, so exactly one process can create a given run id. The
+ * previous version asked `runExists()` and then created with
+ * `{ recursive: true }`, which is a check-then-write race and lost it routinely
+ * — two processes creating the same id 80 times had both "succeed" 76 times,
+ * leaving one workflow executing while the other's `spec.json` sat on disk, and
+ * a lease belonging to an incarnation that had already been overwritten.
+ */
+export function createAndAcquire(runId: string, spec: WorkflowSpec, ownerId: string): RunGuard {
+  const dir = runDir(runId);
+  fs.mkdirSync(wfDir(), { recursive: true });
+  try {
+    fs.mkdirSync(dir);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
+      throw new Error(`Run '${runId}' already exists — pick another id, or resume it instead of starting over`);
+    }
+    throw err;
+  }
+  // Nobody else can be inside a directory that did not exist a moment ago, so
+  // this lock is uncontended by construction; taking it anyway keeps every
+  // write to the run under the same discipline.
+  const locked = withRunLock(runId, () => {
+    atomicWriteJson(incarnationFile(runId), { incarnationId: crypto.randomUUID(), nextFence: 0 } as Incarnation);
+    atomicWriteJson(path.join(dir, 'spec.json'), sanitizeForDisk(spec));
+    return acquireLocked(runId, ownerId);
+  });
+  if (!locked.ok) {
+    fs.rmSync(dir, { recursive: true, force: true });
+    throw new Error(`Run '${runId}' could not be created: ${locked.error}`);
+  }
+  return locked.value;
+}
+
+/**
+ * Claim an existing run and receive the capability to write to it.
  *
  * Refused when someone else's claim is still live. Allowed for the same owner —
  * but the guard it returns is a NEW one, and the previous guard is dead from
@@ -555,38 +745,12 @@ function withLock<T>(runId: string, fn: () => T): T {
  * anything still holding the old guard stops being able to write.
  */
 export function acquireLease(runId: string, ownerId: string): RunGuard {
-  return withLock(runId, () => {
-    const incarnation = ensureIncarnationLocked(runId);
-    const existing = readLease(runId);
-    if (existing && existing.ownerId !== ownerId && !leaseIsStale(existing)) {
-      throw new Error(
-        `Run '${runId}' is owned by ${existing.ownerId} (pid ${existing.pid} on ${existing.host}, ` +
-          `last seen ${existing.renewedAt}) — only one owner may run it at a time`,
-      );
-    }
-    const fence = incarnation.nextFence + 1;
-    atomicWriteJson(incarnationFile(runId), { ...incarnation, nextFence: fence });
-    const now = new Date().toISOString();
-    const lease: RunLease = {
-      runId,
-      incarnationId: incarnation.incarnationId,
-      ownerId,
-      acquisitionId: crypto.randomUUID(),
-      fence,
-      pid: process.pid,
-      host: os.hostname(),
-      acquiredAt: existing?.ownerId === ownerId ? existing.acquiredAt : now,
-      renewedAt: now,
-    };
-    atomicWriteJson(leaseFile(runId), lease);
-    return {
-      runId,
-      incarnationId: lease.incarnationId,
-      ownerId,
-      acquisitionId: lease.acquisitionId,
-      fence,
-    };
-  });
+  if (!runDirExists(runId)) throw new Error(`Run '${runId}' not found`);
+  const locked = withRunLock(runId, () => acquireLocked(runId, ownerId));
+  if (!locked.ok) {
+    throw new Error(`Run '${runId}' could not be claimed right now: ${locked.error}`);
+  }
+  return locked.value;
 }
 
 /** Whether the on-disk lease still answers to this guard. Caller must hold the lock. */
@@ -605,63 +769,97 @@ function guardIsCurrentLocked(guard: RunGuard): boolean {
 
 /** Heartbeat. Best-effort: losing a renewal must not break the run. */
 export function renewLease(guard: RunGuard): void {
-  try {
-    withLock(guard.runId, () => {
-      if (!guardIsCurrentLocked(guard)) return;
-      const existing = readLease(guard.runId)!;
+  if (!runDirExists(guard.runId)) return;
+  withRunLock(guard.runId, () => {
+    if (!guardIsCurrentLocked(guard)) return;
+    const existing = readLease(guard.runId)!;
+    try {
       atomicWriteJson(leaseFile(guard.runId), { ...existing, renewedAt: new Date().toISOString() });
-    });
-  } catch {
-    // The next renewal will try again.
-  }
+    } catch {
+      // The next renewal will try again.
+    }
+  });
 }
 
 /**
  * The one way to change anything durable about a run.
  *
- * The guard is verified and every write happens inside a single critical
- * section, so a holder that has been superseded cannot land a write between the
- * check and the change. Returns false when the guard is no longer current — the
- * caller must then stop, not retry.
+ * The guard is verified and the transaction is published inside a single
+ * critical section, so a holder that has been superseded cannot land a write
+ * between the check and the change.
  *
  * Callers pass a record they have already produced by copying and mutating,
  * never the record they are still using: `commit` persists what it is given, and
- * the caller adopts it only if this returns true. That is what keeps a refused
- * write from leaving a run *in memory* claiming a state the disk rejected.
+ * the caller adopts it only on `committed`. That is what keeps a refused write
+ * from leaving a run *in memory* claiming a state the disk rejected.
  */
-export function commit(guard: RunGuard, batch: CommitBatch, logger?: Logger): boolean {
-  try {
-    return withLock(guard.runId, () => {
-      if (!guardIsCurrentLocked(guard)) return false;
-      for (const artifact of batch.artifacts ?? []) {
-        writeNodeArtifactRaw(guard.runId, artifact.nodeId, artifact.name, artifact.body);
-      }
-      if (batch.record) writeRunRecord(batch.record);
-      for (const event of batch.events ?? []) appendEventRaw(guard.runId, event, logger);
-      const lease = readLease(guard.runId)!;
-      atomicWriteJson(leaseFile(guard.runId), { ...lease, renewedAt: new Date().toISOString() });
-      return true;
-    });
-  } catch {
-    // A lock we could not take means someone else is mid-write; treat it the
-    // same as having lost the run rather than writing without the lock.
-    return false;
+export function commit(guard: RunGuard, batch: CommitBatch, logger?: Logger): CommitResult {
+  // A deleted run is not contention, and must not be reported as something to
+  // retry: there is nothing left to write to, ever.
+  if (!runDirExists(guard.runId)) {
+    return { outcome: 'superseded', reason: `run '${guard.runId}' no longer exists` };
   }
+  const locked = withRunLock(
+    guard.runId,
+    (): CommitResult => {
+      if (!guardIsCurrentLocked(guard)) {
+        const current = readLease(guard.runId);
+        return {
+          outcome: 'superseded',
+          reason: current
+            ? `run is now held by ${current.ownerId} at fence ${current.fence}`
+            : `run '${guard.runId}' no longer exists, or its claim was released`,
+        };
+      }
+      try {
+        stageLocked(guard.runId, batch);
+      } catch (err) {
+        try {
+          fs.rmSync(path.join(runDir(guard.runId), TX_STAGING), { recursive: true, force: true });
+        } catch {
+          // Debris only; nothing was published.
+        }
+        return { outcome: 'blocked', reason: `could not stage the change: ${(err as Error).message}` };
+      }
+      // Past the commit point. Application is replayable, so a failure here is a
+      // delay, not a loss — and reporting it as "not committed" would be wrong.
+      try {
+        applyTxLocked(guard.runId, logger);
+      } catch (err) {
+        logger?.warn?.(
+          `[kernel-store] ${guard.runId}: change is committed but not yet applied ` +
+            `(${(err as Error).message}); it will be applied on the next lock`,
+        );
+      }
+      try {
+        const lease = readLease(guard.runId)!;
+        atomicWriteJson(leaseFile(guard.runId), { ...lease, renewedAt: new Date().toISOString() });
+      } catch {
+        // The heartbeat is not part of the commitment.
+      }
+      return { outcome: 'committed' };
+    },
+    logger,
+  );
+  return locked.ok ? locked.value : { outcome: 'blocked', reason: locked.error };
 }
 
 /**
  * Release the claim. The incarnation file is deliberately NOT removed — the
  * fence must keep increasing for as long as this creation of the run exists.
+ *
+ * `blocked` is not `not-ours`: an owner that is standing down and cannot take
+ * the lock still has to hand the run back, so the caller retries rather than
+ * leaving a lease behind that no one can take over.
  */
-export function releaseLease(guard: RunGuard): void {
-  try {
-    withLock(guard.runId, () => {
-      if (!guardIsCurrentLocked(guard)) return;
-      fs.rmSync(leaseFile(guard.runId), { force: true });
-    });
-  } catch {
-    // A lease left behind expires on its own.
-  }
+export function releaseLease(guard: RunGuard): ReleaseOutcome {
+  if (!runDirExists(guard.runId)) return 'not-ours';
+  const locked = withRunLock(guard.runId, (): ReleaseOutcome => {
+    if (!guardIsCurrentLocked(guard)) return 'not-ours';
+    fs.rmSync(leaseFile(guard.runId), { force: true });
+    return 'released';
+  });
+  return locked.ok ? locked.value : 'blocked';
 }
 
 // ─── Cross-process listing ──────────────────────────────────────────────────

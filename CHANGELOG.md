@@ -237,6 +237,28 @@ because a verifier is a node in the thing that survives.
     a comment while the engine wrote checkpoints directly from `start`, `resume`,
     `publish`, `setChild` and the whole result-absorbing path, and a rule
     enforced by a comment is not a rule.
+  - **A batch lands whole.** It is staged in a scratch directory and published by
+    one atomic directory rename, which is the commit point; what follows is
+    replayable application of an already-committed transaction, finished by the
+    next reader if the owner died in between. Application is idempotent — the
+    manifest records the event log's length from before the batch, so recovery
+    truncates and re-appends instead of duplicating. Before this, `committed`
+    meant "most of it was attempted": the event append swallowed its own errors,
+    so a finished checkpoint could land with its events silently dropped, and a
+    batch that failed partway left behind the artifacts it had already written.
+  - **Creating a run and claiming it are one step.** The run directory is made
+    with a non-recursive `mkdir`, which _is_ the claim. Asking `runExists()` and
+    then creating with `{ recursive: true }` is a check-then-write race, and it
+    lost routinely: two processes creating the same id 80 times both "succeeded"
+    76 times, leaving one workflow executing under another's `spec.json`, or a
+    lease belonging to an incarnation that had already been overwritten.
+  - **Contention is not a takeover.** `commit` reports `committed`, `superseded`
+    or `blocked`, and only `superseded` is permanent. The lock waits briefly
+    rather than failing on sight, and an owner that still cannot write stops
+    _and hands its claim back_ — because a live local pid is never judged stale,
+    so a lease left behind by a stopped run could never be taken over and the run
+    was lost for good. One boolean for both failures is what let a millisecond of
+    contention wedge a run permanently.
   - **Copy-on-write.** A change is applied to a clone, committed, and adopted
     only if the disk accepted it. A superseded owner therefore does not merely
     fail to persist: the record it hands back to its own caller stops advancing
@@ -264,17 +286,22 @@ because a verifier is a node in the thing that survives.
   In-process, starting a run whose id is already live retires the previous run
   first — the same rule, applied where a lease cannot see.
 
-  The UltraApp build queue takes an equivalent claim, with the same correction
-  applied to the same place: read-and-claim happens in one `O_EXCL` critical
+  The UltraApp build queue takes an equivalent claim, with the same corrections
+  applied to the same places: read-and-claim happens in one `O_EXCL` critical
   section (two processes starting with no state file both saw "free", and nothing
   wrote an owner until the first enqueue), the owner is an id of its own rather
-  than a pid, and **every** state write re-checks the claim inside the lock it
-  writes in. Checking only at construction was not ownership — the heartbeat is
-  the same write, so a queue that had lapsed and been taken over would stamp
-  itself back in as owner on its next persist, clobber the new owner's pending
-  list and run its builds a second time. A queue that finds it has been
-  superseded stands down: it stops heartbeating, drops its pending list, and
-  refuses `enqueue` and dispatch.
+  than a pid, **every** state write re-checks the claim inside the lock it writes
+  in, and that check has the same three outcomes as the run store's. Checking
+  only at construction was not ownership — the heartbeat is the same write, so a
+  queue that had lapsed and been taken over would stamp itself back in as owner
+  on its next persist, clobber the new owner's pending list and run its builds a
+  second time. And answering "could not take the lock" with the same `false` as
+  "I have been superseded" meant `enqueue` and dispatch carried on through it,
+  running a build whose queue state on disk already named a different owner. A
+  queue that finds it has been superseded stands down: it stops heartbeating,
+  drops its pending list, and refuses `enqueue` and dispatch. A queue that merely
+  cannot get the lock refuses the enqueue and re-tries the dispatch, bounded, and
+  fails the build with the reason rather than starting it.
 
 - Run ids are validated as a single path segment before any path is derived from
   them. They can be supplied by the caller — including through a tool call — and
@@ -329,6 +356,15 @@ because a verifier is a node in the thing that survives.
 
   Its ownership section is written as races rather than as descriptions of
   races, because the earlier version's names were stronger than its coverage.
+  Two real processes create the same forty run ids at the same instant and the
+  assertion is that no id was created by both and every id was created by one.
+  A real other process holds the lock file while a run tries to write, briefly in
+  one test (the run must get through) and past the wait in another (the run must
+  stop _and_ give the claim back, so a second kernel can resume it). A batch that
+  cannot be staged leaves no artifact, no event and no checkpoint behind, and a
+  transaction committed but not applied is finished by the next reader without
+  duplicating its events. And an ultraapp queue that hits the lock while a new
+  owner is inside it runs nothing.
   Two real processes wait for the same instant and then contend for a claim for a
   fixed window, so neither can win by outliving the other, and the assertion is
   that exactly one ever holds it and exactly one ever commits. Two processes

@@ -17,7 +17,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { RunKernel } from '../../kernel/engine.js';
 import { registerDefaultExecutors } from '../../kernel/nodes/index.js';
-import { createRunDir, deleteRunDir, isValidRunId, listRunIds, loadRun, runDir } from '../../kernel/store.js';
+import { createAndAcquire, deleteRunDir, isValidRunId, listRunIds, loadRun, runDir } from '../../kernel/store.js';
 import { exec } from '../../kernel/exec.js';
 import type { WorkflowSpec } from '../../kernel/types.js';
 
@@ -70,8 +70,8 @@ describe('run id validation', () => {
   });
 
   it('refuses to reuse an existing run id rather than overwriting its spec', () => {
-    createRunDir('dup', { name: 'first', nodes: [] } as WorkflowSpec);
-    expect(() => createRunDir('dup', { name: 'second', nodes: [] } as WorkflowSpec)).toThrow(/already exists/);
+    createAndAcquire('dup', { name: 'first', nodes: [] } as WorkflowSpec, 'a');
+    expect(() => createAndAcquire('dup', { name: 'second', nodes: [] } as WorkflowSpec, 'b')).toThrow(/already exists/);
     expect(loadRun('dup')?.workflow ?? 'first').toBeTruthy();
   });
 

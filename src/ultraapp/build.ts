@@ -27,6 +27,7 @@ import crypto from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import path from 'node:path';
+import { withFileLock } from '../kernel/file-lock.js';
 import type { BuildEvent } from './build-events.js';
 
 export type Worker = (runId: string, emit: (e: BuildEvent) => void) => Promise<void>;
@@ -72,6 +73,16 @@ export interface QueueOwner {
   renewedAt: string;
 }
 
+/**
+ * What a persist attempt did.
+ *
+ * `blocked` is not `superseded`: one says the claim moved on and this queue must
+ * stop, the other says we could not get into the critical section and should try
+ * again. Collapsing them into a boolean is what let a queue dispatch a build
+ * while the state file on disk already named a different owner.
+ */
+type PersistOutcome = 'committed' | 'superseded' | 'blocked' | 'ephemeral';
+
 /** How long an owner may go without a heartbeat before the queue is up for grabs. */
 const OWNER_TTL_MS = 60_000;
 /** Refresh interval, comfortably inside the TTL. */
@@ -100,6 +111,8 @@ export class UltraappBuildQueue {
   private heartbeat?: ReturnType<typeof setInterval>;
   /** This queue instance's identity as an owner. Per instance, not per process. */
   readonly ownerId = `queue-${crypto.randomUUID()}`;
+  /** Consecutive failed dispatch claims, per build. Cleared once it starts. */
+  private readonly dispatchRetries = new Map<string, number>();
   private idlePromise: Promise<void> = Promise.resolve();
   private idleResolve: (() => void) | null = null;
 
@@ -125,9 +138,27 @@ export class UltraappBuildQueue {
   /** Set when another live queue holds the claim. */
   private notOwner?: QueueOwner;
 
-  /** True when this process is executing the queue. */
+  /**
+   * True when this process is executing the queue.
+   *
+   * Reads the state file rather than answering from the last decision, so a
+   * queue that has been taken over reports it even before its next write finds
+   * out. Advisory only — nothing acts on this answer; `enqueue` and dispatch
+   * re-check under the lock, because a lock-free read is a snapshot and a claim
+   * is not.
+   */
   ownsQueue(): boolean {
-    return !this.notOwner;
+    if (this.notOwner) return false;
+    if (!this.statePath) return true;
+    try {
+      const parsed = JSON.parse(fs.readFileSync(this.statePath, 'utf8')) as PersistedQueue;
+      if (parsed?.owner && parsed.owner.ownerId !== this.ownerId && ownerIsLive(parsed.owner, this.ownerId)) {
+        return false;
+      }
+    } catch {
+      // No state file yet, or unreadable: nothing says anyone else has it.
+    }
+    return true;
   }
 
   /** Refuse an operation that only the owner may perform. */
@@ -177,44 +208,15 @@ export class UltraappBuildQueue {
   }
 
   /**
-   * Run `fn` inside the queue's lock.
+   * Run `fn` inside the queue's lock, waiting briefly for it.
    *
-   * Extracted because claiming was not the only thing that needed it. Every
-   * write to the state file has to check the owner in the same critical section
-   * it writes in — see {@link persist}.
+   * Shared with the run store, and for the same reason: a lock that is merely
+   * busy must not be reported the same way as a claim that has moved on.
    */
   private withLock<T>(fn: () => T, onContended: T): T | undefined {
     if (!this.statePath) return undefined;
-    const lock = `${this.statePath}.lock`;
-    fs.mkdirSync(path.dirname(this.statePath), { recursive: true });
-
-    let fd: number;
-    try {
-      fd = fs.openSync(lock, 'wx');
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') return undefined;
-      let age = Infinity;
-      try {
-        age = Date.now() - fs.statSync(lock).mtimeMs;
-      } catch {
-        age = Infinity;
-      }
-      // A lock from a crashed claimant must not wedge the queue forever.
-      if (age < OWNER_TTL_MS) return onContended;
-      fs.rmSync(lock, { force: true });
-      try {
-        fd = fs.openSync(lock, 'wx');
-      } catch {
-        return undefined;
-      }
-    }
-
-    try {
-      return fn();
-    } finally {
-      fs.closeSync(fd);
-      fs.rmSync(lock, { force: true });
-    }
+    const result = withFileLock(`${this.statePath}.lock`, fn, { staleMs: OWNER_TTL_MS, createParent: true });
+    return result.ok ? result.value : onContended;
   }
 
   /** The critical section of `restore`: inspect the owner and take it, or step aside. */
@@ -253,14 +255,15 @@ export class UltraappBuildQueue {
    * itself back in as owner on its next persist, clobbering the new owner's
    * pending list and running its builds a second time.
    */
-  private persist(): boolean {
-    if (!this.statePath || this.notOwner) return false;
-    return this.withLock(() => this.writeStateLocked(), false) ?? false;
+  private persist(): PersistOutcome {
+    if (!this.statePath) return 'ephemeral';
+    if (this.notOwner) return 'superseded';
+    return this.withLock(() => this.writeStateLocked(), 'blocked' as PersistOutcome) ?? 'blocked';
   }
 
   /** Caller must hold the lock. Steps aside — permanently — if the claim moved on. */
-  private writeStateLocked(): boolean {
-    if (!this.statePath) return false;
+  private writeStateLocked(): PersistOutcome {
+    if (!this.statePath) return 'ephemeral';
     let parsed: PersistedQueue | undefined;
     try {
       parsed = JSON.parse(fs.readFileSync(this.statePath, 'utf8')) as PersistedQueue;
@@ -269,10 +272,10 @@ export class UltraappBuildQueue {
     }
     if (parsed?.owner && parsed.owner.ownerId !== this.ownerId && ownerIsLive(parsed.owner, this.ownerId)) {
       this.standDown(parsed.owner);
-      return false;
+      return 'superseded';
     }
     this.writeStateUnchecked();
-    return true;
+    return 'committed';
   }
 
   /**
@@ -323,10 +326,22 @@ export class UltraappBuildQueue {
     // in. Owning the queue at construction says nothing about owning it now: the
     // heartbeat can have lapsed and someone else can have taken over, and an
     // `enqueue` that only consulted the construction-time answer would run their
-    // builds a second time. (An ephemeral queue has no state file and no owner,
-    // so `persist` reports false there too — `assertOwner` is what distinguishes
-    // the two, and it stays silent when there is nothing to own.)
-    if (!this.persist()) this.assertOwner('enqueue');
+    // builds a second time.
+    //
+    // Three outcomes, not two. `superseded` refuses. `blocked` — we could not
+    // even get into the critical section — also refuses, because an enqueue that
+    // cannot be recorded may be an enqueue into a queue somebody else now owns;
+    // the earlier version returned a bare `false` here and carried on, and ran a
+    // build whose queue state on disk already belonged to another process.
+    const persisted = this.persist();
+    if (persisted === 'superseded') this.assertOwner('enqueue');
+    if (persisted === 'blocked') {
+      this.pending.pop();
+      throw new Error(
+        `Cannot enqueue: the build queue state file is locked by another process, so this build cannot be ` +
+          `recorded. Retry in a moment.`,
+      );
+    }
     this.markBusy();
     const pos = this.position(runId);
     if (pos > 0) {
@@ -377,13 +392,25 @@ export class UltraappBuildQueue {
       return;
     }
     this.currentRunId = next.runId;
-    // Same check before starting work as before recording it: if the claim moved
-    // on while this queue was idle, the build belongs to whoever holds it now.
-    if (!this.persist() && this.notOwner) {
+    // Same check before starting work as before recording it, and with the same
+    // three outcomes: only `committed` (or an ephemeral queue, which owns
+    // nothing and persists nothing) may dispatch. Dispatching on `blocked` is
+    // how a superseded queue ran a build whose state on disk already named
+    // another owner.
+    const persisted = this.persist();
+    if (persisted === 'superseded') {
       this.currentRunId = null;
       this.markIdle();
       return;
     }
+    if (persisted === 'blocked') {
+      // Transient: put the build back at the front and try again shortly.
+      this.currentRunId = null;
+      this.pending.unshift(next);
+      this._retryDispatch(next.runId);
+      return;
+    }
+    this.dispatchRetries.delete(next.runId);
     try {
       await this.worker(next.runId, (e) => this.emit(e));
     } catch (e) {
@@ -398,6 +425,33 @@ export class UltraappBuildQueue {
       this.persist();
       void this.tryDispatch();
     }
+  }
+
+  /**
+   * Re-attempt a dispatch that could not claim the state file.
+   *
+   * Bounded: a queue that cannot record what it is doing must eventually say so
+   * rather than spinning, and the build is failed with the reason instead of
+   * quietly never starting.
+   */
+  private _retryDispatch(runId: string): void {
+    const attempts = (this.dispatchRetries.get(runId) ?? 0) + 1;
+    this.dispatchRetries.set(runId, attempts);
+    if (attempts > 8) {
+      this.dispatchRetries.delete(runId);
+      const idx = this.pending.findIndex((p) => p.runId === runId);
+      if (idx >= 0) this.pending.splice(idx, 1);
+      this.emit({
+        type: 'build-failed',
+        runId,
+        phase: 'orchestrator',
+        reason: 'the build queue state file stayed locked by another process; the build was not started',
+      });
+      if (this.pending.length === 0 && this.currentRunId === null) this.markIdle();
+      return;
+    }
+    const timer = setTimeout(() => void this.tryDispatch(), 100 * attempts);
+    if (typeof timer.unref === 'function') timer.unref();
   }
 
   private emit(e: BuildEvent): void {

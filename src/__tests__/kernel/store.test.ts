@@ -12,7 +12,7 @@ import {
   acquireLease,
   atomicWriteJson,
   commit,
-  createRunDir,
+  createAndAcquire,
   deleteRunDir,
   listRunIds,
   listRuns,
@@ -35,12 +35,16 @@ function owner(runId: string, ownerId = 'test-owner'): ReturnType<typeof acquire
   return acquireLease(runId, ownerId);
 }
 
-function saveRun(record: RunRecord, ownerId = 'test-owner'): boolean {
-  return commit(owner(record.runId, ownerId), { record });
+function createRunDir(runId: string, spec: WorkflowSpec): void {
+  createAndAcquire(runId, spec, 'test-owner');
 }
 
-function appendEvent(runId: string, event: KernelEvent, ownerId = 'test-owner'): boolean {
-  return commit(owner(runId, ownerId), { events: [event] });
+function saveRun(record: RunRecord, ownerId = 'test-owner'): string {
+  return commit(owner(record.runId, ownerId), { record }).outcome;
+}
+
+function appendEvent(runId: string, event: KernelEvent, ownerId = 'test-owner'): string {
+  return commit(owner(runId, ownerId), { events: [event] }).outcome;
 }
 
 function writeNodeArtifact(runId: string, nodeId: string, name: string, body: string): string {

@@ -51,9 +51,9 @@ import type { SessionManagerLike } from './agent-step.js';
 import {
   acquireLease,
   commit,
+  createAndAcquire,
   LEASE_HEARTBEAT_MS,
   renewLease,
-  createRunDir,
   isValidRunId,
   releaseLease,
   deleteRunDir,
@@ -63,6 +63,7 @@ import {
   runDir,
   summarize,
   type CommitBatch,
+  type CommitOutcome,
   type ListRunsQuery,
   type RunGuard,
   type RunSummary,
@@ -183,8 +184,18 @@ export type NodeExecutor = (node: NodeSpec, ctx: NodeContext) => Promise<NodeRes
  */
 class RunTxn {
   private _record: RunRecord;
-  /** Set the first time a write is refused; from then on this owner writes nothing. */
+  /** The run was taken over. Permanent: this owner may never write again. */
   lost = false;
+  /**
+   * A write could not get through, but nothing says we lost the run.
+   *
+   * Kept apart from `lost` because the responses are opposite. Treating a
+   * millisecond of lock contention as a takeover made a run stop forever while
+   * still holding its lease — so nobody could take it over either, and a live
+   * local pid is never judged stale. Stalling stops the run and hands the claim
+   * back, which leaves it resumable.
+   */
+  stalled = false;
 
   constructor(
     readonly guard: RunGuard,
@@ -192,14 +203,19 @@ class RunTxn {
     private readonly logger: Logger,
     /** Notified with the events of each accepted commit, for the in-process stream. */
     private readonly onEvents: (events: KernelEvent[]) => void,
-    /** Called once, when the run is lost, so the executor can stop. */
-    private readonly onLost: () => void,
+    /** Called once, when this owner stops writing, with which of the two it was. */
+    private readonly onStop: (outcome: 'superseded' | 'blocked', reason: string) => void,
   ) {
     this._record = record;
   }
 
   get record(): RunRecord {
     return this._record;
+  }
+
+  /** True once this owner has stopped writing, for either reason. */
+  get finished(): boolean {
+    return this.lost || this.stalled;
   }
 
   /**
@@ -213,10 +229,11 @@ class RunTxn {
     events: KernelEvent[] = [],
     artifacts: NonNullable<CommitBatch['artifacts']> = [],
   ): boolean {
-    if (this.lost) return false;
+    if (this.finished) return false;
     const draft = JSON.parse(JSON.stringify(this._record)) as RunRecord;
     mutate(draft);
-    if (!commit(this.guard, { record: draft, events, artifacts }, this.logger)) return this._lose();
+    const result = commit(this.guard, { record: draft, events, artifacts }, this.logger);
+    if (result.outcome !== 'committed') return this._stop(result.outcome, result.reason);
     this._record = draft;
     this.onEvents(events);
     return true;
@@ -224,21 +241,30 @@ class RunTxn {
 
   /** Append events without changing state. Fenced like every other write. */
   emit(...events: KernelEvent[]): boolean {
-    if (this.lost) return false;
-    if (!commit(this.guard, { events }, this.logger)) return this._lose();
+    if (this.finished) return false;
+    const result = commit(this.guard, { events }, this.logger);
+    if (result.outcome !== 'committed') return this._stop(result.outcome, result.reason);
     this.onEvents(events);
     return true;
   }
 
-  private _lose(): boolean {
-    if (!this.lost) {
+  private _stop(outcome: Exclude<CommitOutcome, 'committed'>, reason?: string): boolean {
+    if (this.finished) return false;
+    const why = reason ?? 'no reason given';
+    if (outcome === 'superseded') {
       this.lost = true;
       this.logger.warn?.(
         `[kernel] ${this.guard.runId}: write refused — this owner (fence ${this.guard.fence}) no longer holds ` +
-          `the run, so it stops here rather than carrying on in memory`,
+          `the run (${why}), so it stops here rather than carrying on in memory`,
       );
-      this.onLost();
+    } else {
+      this.stalled = true;
+      this.logger.warn?.(
+        `[kernel] ${this.guard.runId}: write could not be committed (${why}) — the run stops and its claim is ` +
+          `handed back, so it can be resumed rather than wedged`,
+      );
     }
+    this.onStop(outcome, why);
     return false;
   }
 }
@@ -428,11 +454,38 @@ export class RunKernel extends EventEmitter {
           this.emit(guard.runId, event);
         }
       },
-      () => {
+      (outcome, reason) => {
         signal.aborted = true;
+        // Being superseded means someone else already owns the run; handing it
+        // back would take it from them. Being blocked means we still hold a
+        // claim we can no longer use, and leaving that behind is what wedges a
+        // run permanently — a live local pid is never judged stale, so nobody
+        // else could ever take it.
+        if (outcome === 'blocked') this._scheduleRelease(guard, reason);
       },
     );
     return { txn, signal };
+  }
+
+  /**
+   * Hand a claim back, retrying while the lock is merely busy.
+   *
+   * Best-effort with a bound: contention here is measured in microseconds, so a
+   * few backed-off attempts cover everything short of a wedged filesystem — and
+   * if it is wedged, saying so beats retrying forever.
+   */
+  private _scheduleRelease(guard: RunGuard, reason?: string, attempt = 0): void {
+    const outcome = releaseLease(guard);
+    if (outcome !== 'blocked') return;
+    if (attempt >= 6) {
+      this.logger.error?.(
+        `[kernel] ${guard.runId}: could not hand the claim back after ${attempt} attempts` +
+          `${reason ? ` (${reason})` : ''} — resuming it elsewhere will have to wait for the lease to expire`,
+      );
+      return;
+    }
+    const timer = setTimeout(() => this._scheduleRelease(guard, reason, attempt + 1), 250 * 2 ** attempt);
+    if (typeof timer.unref === 'function') timer.unref();
   }
 
   // ─── Lifecycle ────────────────────────────────────────────────────────────
@@ -489,10 +542,12 @@ export class RunKernel extends EventEmitter {
     // first. This is the in-process half of what the lease does across
     // processes.
     await this._retire(runId);
-    // A fresh directory means a fresh incarnation id, which is what stops a
-    // guard from the previous life of this run id from ever being valid again.
-    createRunDir(runId, spec);
-    const guard = acquireLease(runId, this.ownerId);
+    // Creating and claiming are one step, and the directory creation is itself
+    // the claim: two processes cannot both come away believing they made this
+    // run. A fresh directory also means a fresh incarnation id, which is what
+    // stops a guard from the previous life of this run id from ever being valid
+    // again.
+    const guard = createAndAcquire(runId, spec, this.ownerId);
     record.baseSha = await captureBaseline(cwd);
     const { txn, signal } = this._open(guard, record);
     if (!txn.apply(() => undefined, [{ ts: now, type: 'run_created', runId, workflow: spec.name }])) {
@@ -686,6 +741,10 @@ export class RunKernel extends EventEmitter {
     this.live.set(runId, handle);
     handle.done = this._run(handle).finally(() => {
       if (handle.heartbeat) clearInterval(handle.heartbeat);
+      // A run that stopped because it could not write still holds its claim.
+      // `_scheduleRelease` was already started by the stop callback; this covers
+      // the case where the run ended for another reason while stalled.
+      if (txn.stalled) this._scheduleRelease(txn.guard);
       // Identity-checked: a run id can be reused, and deleting by key alone
       // meant a finishing run evicted the handle of the run that had just
       // replaced it.
@@ -713,7 +772,7 @@ export class RunKernel extends EventEmitter {
     if (!ok) return false;
     // Hand the run back once it is over, so another owner can pick it up
     // without waiting out the lease. After the writes, never before.
-    if (terminal) releaseLease(txn.guard);
+    if (terminal) this._scheduleRelease(txn.guard);
     return true;
   }
 
@@ -834,7 +893,7 @@ export class RunKernel extends EventEmitter {
     while (cursor) {
       // Losing the run outranks everything else: this owner may not write, so
       // there is nothing left for it to do but stop.
-      if (txn.lost) return txn.record;
+      if (txn.finished) return txn.record;
       if (handle.signal.aborted) {
         this._setRunState(handle, 'cancelled');
         return txn.record;
@@ -867,7 +926,7 @@ export class RunKernel extends EventEmitter {
       if (spec.kind === 'verifier') this._setRunState(handle, 'verifying');
 
       const result = await this._runWithRetry(handle, spec);
-      if (txn.lost) return txn.record;
+      if (txn.finished) return txn.record;
 
       // Cancel wins regardless of what the node returned. A runner that never
       // looked at the signal and reported success anyway used to carry the run
@@ -882,7 +941,7 @@ export class RunKernel extends EventEmitter {
 
       if (result.awaitHuman) {
         const approved = await this._park(handle, nodeId);
-        if (txn.lost) return txn.record;
+        if (txn.finished) return txn.record;
         if (!approved) {
           this._setNodeState(handle, nodeId, 'failed', { error: 'rejected at human gate' });
           this._setRunState(handle, handle.signal.aborted ? 'cancelled' : 'failed', 'rejected at human gate');
@@ -894,7 +953,7 @@ export class RunKernel extends EventEmitter {
       }
 
       this._absorb(handle, nodeId, result);
-      if (txn.lost) return txn.record;
+      if (txn.finished) return txn.record;
 
       if (!result.ok) {
         this._setNodeState(handle, nodeId, 'failed', { error: result.error });
@@ -1129,7 +1188,7 @@ export class RunKernel extends EventEmitter {
         },
         [{ ts: new Date().toISOString(), type: 'log', level: 'warn', message: `[verify] ${reason}` }],
       );
-      if (txn.lost) return;
+      if (txn.finished) return;
     }
 
     if (error || outcome === 'refuted') {
