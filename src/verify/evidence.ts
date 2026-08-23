@@ -12,7 +12,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { Logger } from '../logger.js';
 import { exec } from '../kernel/exec.js';
-import { capturePatch, changedFilesSince, type ChangedFile } from './baseline.js';
+import { capturePatch, changedFilesSince, treeFingerprint, type ChangedFile } from './baseline.js';
 import { contractPassed, type CheckResult } from './contract.js';
 
 export interface EvidenceBundle {
@@ -30,6 +30,13 @@ export interface EvidenceBundle {
   rounds: number;
   results: CheckResult[];
   changedFiles: ChangedFile[];
+  /**
+   * Digest of the working tree at the moment the checks finished. The kernel
+   * re-computes it when the run ends: if it moved, this bundle describes an
+   * earlier tree and the verdict no longer applies to what is on disk.
+   * Undefined outside a git repo, where we cannot tell.
+   */
+  treeFingerprint?: string;
 }
 
 export function evidenceRoot(runDir: string): string {
@@ -88,6 +95,7 @@ export async function writeEvidence(args: WriteEvidenceArgs): Promise<EvidenceBu
     rounds: args.rounds,
     results: args.results,
     changedFiles,
+    treeFingerprint: await treeFingerprint(args.cwd),
   };
 
   try {

@@ -24,6 +24,15 @@ because a verifier is a node in the thing that survives.
   spec is stored apart from the mutable checkpoint, so a torn `run.json` is
   recovered by replaying `events.jsonl` rather than lost.
   Three built-in templates ship as ordinary specs: `solve`, `council`, `fanout`.
+
+  Two limits stated plainly rather than glossed. Node execution is
+  **at-least-once**: there is no idempotency key, attempt lease, or side-effect
+  commit marker, so a node that wrote files and died before its checkpoint runs
+  again from the top. And this is a runtime the modes _can_ be moved onto, not
+  one they go through today — `council_start`, `fanout_start`, `autoloop_start`
+  and ultraapp keep their own lifecycles, and a run started through them is not
+  a kernel run.
+
 - **Verification plane (`src/verify/`).** Acceptance contracts the runtime runs
   itself: `command` (argv, gated on exit code), `http`, `screenshot`,
   `diff_policy`, `file`. A run carrying a contract cannot reach `completed`
@@ -110,6 +119,26 @@ because a verifier is a node in the thing that survives.
   the event loop open for 30 minutes after a fan-out that failed to start.
 - A node that overran its timeout reported the whole run as `cancelled` rather
   than `failed`, because the timeout and a user cancel shared one signal.
+
+### Security
+
+- Run ids are validated as a single path segment before any path is derived from
+  them. They can be supplied by the caller — including through a tool call — and
+  every path in the run store came from `path.join(root, runId)`, with delete
+  implemented as a recursive `rmSync`. `../` in an id resolved outside the store,
+  so `workflow_delete` could remove an unrelated directory. Reusing an existing
+  run id is refused as well: overwriting `spec.json` discarded one run's
+  definition while its event log kept growing, leaving a log describing two runs
+  and a replay that reconstructed neither.
+- A passing verdict no longer survives later edits to the tree it describes.
+  Evidence records a digest of the working tree, and a workspace-touching node
+  running after the verdict causes the digest to be rechecked at the end of the
+  run; if it moved, the outcome drops to `unverified` with the reason recorded.
+  The `solve` template's reviewer fan-out has moved ahead of the gate — it shared
+  the project directory, so reviewers could edit a tree the verifier had already
+  signed off while the run still reported `verified`.
+- Agent nodes name their session per attempt. A timed-out attempt is abandoned
+  rather than killed, and its teardown would otherwise stop the retry's session.
 
 ### Removed
 

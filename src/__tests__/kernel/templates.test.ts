@@ -49,9 +49,17 @@ describe('solve workflow', () => {
     expect(ids.indexOf('approve')).toBeLessThan(ids.indexOf('implement'));
   });
 
-  it('appends reviewers after the verifier, not before it', () => {
-    const ids = build({ reviewers: [{ name: 'r' }] }).nodes.map((n) => n.id);
-    expect(ids.indexOf('review')).toBeGreaterThan(ids.indexOf('verify'));
+  it('puts reviewers BEFORE the gate, so nothing side-effecting follows the evidence', () => {
+    // The reverse order shipped first and was wrong: a reviewer fan-out shares
+    // the project directory, so it could edit the tree the verifier had already
+    // signed off while the run still reported `verified`.
+    const spec = build({ reviewers: [{ name: 'r' }] });
+    const ids = spec.nodes.map((n) => n.id);
+    expect(ids.indexOf('review')).toBeGreaterThan(ids.indexOf('implement'));
+    expect(ids.indexOf('review')).toBeLessThan(ids.indexOf('verify'));
+
+    const afterGate = spec.nodes.slice(spec.nodes.findIndex((n) => n.kind === 'verifier') + 1);
+    expect(afterGate.every((n) => n.kind === 'router')).toBe(true);
   });
 
   it('loops back to implement only while the verifier is red and budget remains', () => {

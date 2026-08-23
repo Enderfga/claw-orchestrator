@@ -15,7 +15,9 @@ export async function executeAgentNode(node: NodeSpec, ctx: NodeContext): Promis
 
   const result = await runAgentStep({
     manager: ctx.manager,
-    sessionName: spec.sessionName || `${ctx.runId}-${spec.id}`,
+    // Attempt-scoped unless the author pinned a name deliberately: an abandoned
+    // attempt is still alive and will tear down whatever session it named.
+    sessionName: spec.sessionName || `${ctx.runId}-${spec.id}-a${ctx.attempt}`,
     prompt,
     parentRunId: ctx.runId,
     timeoutMs: spec.timeoutMs,

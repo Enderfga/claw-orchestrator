@@ -80,6 +80,7 @@ export async function executeVerifierNode(node: NodeSpec, ctx: NodeContext): Pro
     ok: passed,
     passed,
     evidenceId: bundle.evidenceId,
+    treeFingerprint: bundle.treeFingerprint,
     output: results.map((r) => `[${r.passed ? 'PASS' : r.required ? 'FAIL' : 'warn'}] ${r.id}: ${r.detail}`).join('\n'),
     error: passed ? undefined : `acceptance contract failed: ${failed.map((r) => r.detail).join('; ')}`,
   };

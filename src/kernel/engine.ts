@@ -1,14 +1,26 @@
 /**
  * The run kernel.
  *
- * One executor for every orchestration mode. It owns what the six hand-rolled
- * state machines each owned separately and differently: what is running, what to
- * do when a step fails, when to give up, how to stop, and — the part none of
- * them had — how to come back after the process dies.
+ * A durable executor for workflow runs. It owns what the existing state machines
+ * each owned separately and differently: what is running, what to do when a step
+ * fails, when to give up, how to stop, and — the part none of them had — how to
+ * come back after the process dies.
  *
- * Durability contract: every state transition is checkpointed (atomic `run.json`)
- * and appended to `events.jsonl` before the next step begins. A kernel that
- * crashes between two nodes resumes at the node boundary, never mid-node.
+ * What it is not, yet: the single runtime every mode goes through. Council,
+ * fanout, autoloop and ultraapp keep their own lifecycles, maps and cleanup, and
+ * the `council` / `fanout` nodes call those runners from inside a kernel run
+ * rather than replacing them. So a run started through `council_start` is not a
+ * kernel run and gets none of this. Collapsing those lifecycles is the work this
+ * layer exists to make possible; it has not happened, and nothing here should be
+ * read as claiming it has.
+ *
+ * Durability contract, stated precisely: every state transition is checkpointed
+ * (atomic `run.json`) and appended to `events.jsonl` before the next step
+ * begins, and `resume` restarts at the last node boundary. That makes node
+ * execution **at-least-once**, not exactly-once — there is no idempotency key,
+ * no attempt lease, and no side-effect commit marker, so a node that died after
+ * writing files but before its checkpoint runs again from the top. Workflows
+ * whose nodes are not safe to repeat need to make them safe.
  *
  * Control flow is linear with an explicit `router` node for branches and loops.
  * Parallelism is the `fanout` node rather than a general parallel/join construct:
@@ -25,11 +37,12 @@ import { EventEmitter } from 'node:events';
 import crypto from 'node:crypto';
 import { createConsoleLogger, type Logger } from '../logger.js';
 import { normalizeContract, type AcceptanceContract } from '../verify/contract.js';
-import { captureBaseline } from '../verify/baseline.js';
+import { captureBaseline, treeFingerprint } from '../verify/baseline.js';
 import type { SessionManagerLike } from './agent-step.js';
 import {
   appendEvent,
   createRunDir,
+  isValidRunId,
   deleteRunDir,
   listRuns,
   loadRun,
@@ -65,6 +78,8 @@ export interface NodeResult {
   evidenceId?: string;
   /** Verifier nodes only: whether the contract passed. */
   passed?: boolean;
+  /** Verifier nodes only: the tree digest at the moment the checks finished. */
+  treeFingerprint?: string;
   /** human_gate nodes: park the run until a human answers. */
   awaitHuman?: boolean;
   costUsd?: number;
@@ -73,12 +88,22 @@ export interface NodeResult {
   consensusVotes?: ConsensusVote[];
   /** Router nodes: the node id control should move to. */
   goto?: string;
+  /** Subflow nodes: the child run this node started. */
+  childRunId?: string;
 }
 
 export interface NodeContext {
   runId: string;
   record: RunRecord;
   cwd: string;
+  /**
+   * 1-based attempt number for this visit. Nodes that name external resources
+   * must include it: a timed-out attempt is abandoned, not killed, so it is
+   * still running — and still holds a `finally` that tears down whatever it
+   * named. Sharing a name with the retry means the dying attempt stops the live
+   * one's session.
+   */
+  attempt: number;
   manager?: SessionManagerLike;
   logger: Logger;
   signal: { aborted: boolean };
@@ -156,6 +181,11 @@ export class RunKernel extends EventEmitter {
     const contract = opts.contract !== undefined ? normalizeContract(opts.contract) : rawSpec.contract;
     const spec = prepareSpec({ ...rawSpec, contract });
     const runId = opts.runId || `wf-${Date.now().toString(36)}-${crypto.randomBytes(3).toString('hex')}`;
+    // Validated here as well as in the store: failing before any directory is
+    // created keeps a rejected id from leaving a half-made run behind.
+    if (!isValidRunId(runId)) {
+      throw new Error(`Invalid run id ${JSON.stringify(runId)}: must be a single path segment ([A-Za-z0-9._-])`);
+    }
     const cwd = opts.cwd || spec.cwd || process.cwd();
     const now = new Date().toISOString();
 
@@ -219,6 +249,12 @@ export class RunKernel extends EventEmitter {
     if (!handle) return false;
     handle.signal.aborted = true;
     handle.gate?.resolve(false);
+    // Cancellation propagates to subflows. Without this a cancelled parent
+    // leaves its children running and spending, with nothing pointing at them.
+    const record = loadRun(runId);
+    for (const node of Object.values(record?.nodes ?? {})) {
+      if (node.childRunId) this.cancel(node.childRunId);
+    }
     return true;
   }
 
@@ -449,7 +485,7 @@ export class RunKernel extends EventEmitter {
       if (!result.ok) {
         this._setNodeState(record, nodeRec, 'failed', { error: result.error });
         if ((spec.onFailure ?? 'fail') === 'fail') {
-          this._finish(record, `node '${cursor}' failed: ${result.error ?? 'unknown'}`);
+          await this._finish(record, `node '${cursor}' failed: ${result.error ?? 'unknown'}`);
           return record;
         }
         // `continue` — record it and move on.
@@ -464,7 +500,7 @@ export class RunKernel extends EventEmitter {
       cursor = spec.next ?? this._nextInOrder(record, cursor);
     }
 
-    this._finish(record);
+    await this._finish(record);
     return record;
   }
 
@@ -490,6 +526,7 @@ export class RunKernel extends EventEmitter {
         runId: record.runId,
         record,
         cwd: record.cwd,
+        attempt,
         manager: this.manager,
         logger: this.logger,
         signal: {
@@ -530,7 +567,13 @@ export class RunKernel extends EventEmitter {
     return approved;
   }
 
+  /** Node kinds that can change the workspace. Routers and gates cannot. */
+  private static readonly SIDE_EFFECT_KINDS: readonly NodeKind[] = ['agent', 'fanout', 'council', 'subflow'];
+
   private _absorb(record: RunRecord, nodeRec: NodeRecord, result: NodeResult): void {
+    if (RunKernel.SIDE_EFFECT_KINDS.includes(nodeRec.kind)) {
+      record.sideEffectSeq = (record.sideEffectSeq ?? 0) + 1;
+    }
     if (result.output !== undefined) {
       nodeRec.output = result.output.length > 4000 ? result.output.slice(0, 4000) + '\n…[truncated]' : result.output;
       this._event(record, {
@@ -541,6 +584,7 @@ export class RunKernel extends EventEmitter {
       });
     }
     if (result.artifacts?.length) nodeRec.artifacts = result.artifacts;
+    if (result.childRunId) nodeRec.childRunId = result.childRunId;
     if (typeof result.costUsd === 'number') record.costUsd = (record.costUsd ?? 0) + result.costUsd;
     if (result.consensusVotes?.length) {
       record.consensusVotes = [...(record.consensusVotes ?? []), ...result.consensusVotes];
@@ -549,6 +593,13 @@ export class RunKernel extends EventEmitter {
       nodeRec.evidenceId = result.evidenceId;
       record.evidenceId = result.evidenceId;
       record.outcome = result.passed ? 'verified' : 'refuted';
+      record.outcomeReason = undefined;
+      record.verdict = {
+        node: nodeRec.id,
+        evidenceId: result.evidenceId,
+        treeFingerprint: result.treeFingerprint,
+        sideEffectSeq: record.sideEffectSeq ?? 0,
+      };
       this._event(record, {
         ts: new Date().toISOString(),
         type: 'evidence',
@@ -564,13 +615,51 @@ export class RunKernel extends EventEmitter {
    * a run with no contract completes as `unverified`, which says we did not check
    * rather than claiming success.
    */
-  private _finish(record: RunRecord, error?: string): void {
+  private async _finish(record: RunRecord, error?: string): Promise<void> {
+    await this._expireStaleVerdict(record);
     const outcome: RunOutcome = record.outcome;
     if (error || outcome === 'refuted') {
       this._setRunState(record, 'failed', error ?? 'acceptance contract was not satisfied');
       return;
     }
     this._setRunState(record, 'completed');
+  }
+
+  /**
+   * A passing verdict only stands while it still describes the tree.
+   *
+   * `prepareSpec` cannot enforce this structurally: a router can send control
+   * anywhere, so which node runs last is not a property of the spec. And a
+   * "nothing after the verifier" rule would be the wrong rule anyway — what
+   * matters is not that a node ran, but that the tree moved. So this measures.
+   *
+   * When it has moved, the outcome drops to `unverified` with the reason
+   * recorded. Not `refuted`: no check failed. We simply no longer know, and
+   * saying so is the whole point of having three outcomes.
+   */
+  private async _expireStaleVerdict(record: RunRecord): Promise<void> {
+    if (record.outcome !== 'verified' || !record.verdict) return;
+
+    // Nothing that could touch the workspace ran after the checks, so the
+    // verdict still describes the tree. This is the ordinary case, and it must
+    // not depend on git: a contract that passed in a plain directory passed.
+    if ((record.sideEffectSeq ?? 0) === record.verdict.sideEffectSeq) return;
+
+    const before = record.verdict.treeFingerprint;
+    const after = await treeFingerprint(record.cwd);
+    if (before !== undefined && after !== undefined && before === after) return;
+
+    record.outcome = 'unverified';
+    record.outcomeReason =
+      before === undefined || after === undefined
+        ? `evidence ${record.verdict.evidenceId} passed, but nodes ran afterwards and ${record.cwd} is not a git repository, so we cannot tell whether it still describes the tree`
+        : `evidence ${record.verdict.evidenceId} passed, but the working tree changed afterwards — the verdict describes an earlier state`;
+    this._event(record, {
+      ts: new Date().toISOString(),
+      type: 'log',
+      level: 'warn',
+      message: `[verify] ${record.outcomeReason}`,
+    });
   }
 }
 

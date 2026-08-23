@@ -121,6 +121,26 @@ export function solveWorkflow(args: SolveArgs): WorkflowSpec {
     onFailure: 'continue',
   });
 
+  // Review sits BEFORE the gate, not after it.
+  //
+  // It used to come last, which put a fan-out that shares the project directory
+  // downstream of the evidence: the reviewers could edit the tree the verifier
+  // had already signed off, and the run still reported `verified`. "Reviewers
+  // only read" was a sentence in a prompt, not something the runtime could
+  // enforce. Ordering it before the gate makes the question moot — anything the
+  // reviewers change is checked, and their findings feed the repair loop.
+  if (args.reviewers?.length) {
+    nodes.push({
+      id: 'review',
+      kind: 'fanout',
+      prompt: `Review the change that was just made for this task. Report problems only.\n\n${args.task}`,
+      agents: args.reviewers,
+      synthesize: args.reviewers.length >= 2,
+      cwd: args.cwd,
+      onFailure: 'continue',
+    });
+  }
+
   nodes.push({ id: 'verify', kind: 'verifier', contract: 'run', cwd: args.cwd, onFailure: 'continue' });
 
   // Loop back only while the verifier is red AND there is repair budget left.
@@ -143,19 +163,7 @@ export function solveWorkflow(args: SolveArgs): WorkflowSpec {
     routes: [{ when: { type: 'visits_lt', node: 'implement', n: maxRepairs + 1 }, to: 'implement' }],
     // Budget spent and still red: fall through, leaving the failed verdict to
     // decide the run.
-    default: args.reviewers?.length ? 'review' : undefined,
   });
-
-  if (args.reviewers?.length) {
-    nodes.push({
-      id: 'review',
-      kind: 'fanout',
-      prompt: `Review the change that was just made for this task. Report problems only.\n\n${args.task}`,
-      agents: args.reviewers,
-      synthesize: args.reviewers.length >= 2,
-      cwd: args.cwd,
-    });
-  }
 
   // No second verifier at the end: the last `verify` visit already produced the
   // run's verdict, and re-running a contract that shells out to a test suite

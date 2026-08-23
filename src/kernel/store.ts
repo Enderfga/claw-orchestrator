@@ -9,10 +9,19 @@
  *   nodes/<id>/    per-node artifacts
  *   evidence/<id>/ evidence bundles (see verify/evidence.ts)
  *
- * Splitting the immutable spec from the mutable checkpoint is what makes crash
- * recovery total: if `run.json` is missing or half-written, the state is rebuilt
- * by replaying `events.jsonl` against `spec.json`. The atomic rewrite makes that
- * path rare; the replay makes it survivable anyway.
+ * Splitting the immutable spec from the mutable checkpoint is what carries crash
+ * recovery: if `run.json` is missing or half-written, the state is rebuilt by
+ * replaying `events.jsonl` against `spec.json`. The atomic rewrite makes that
+ * path rare; the replay makes it usually survivable.
+ *
+ * Usually, not always, and the reason is worth stating rather than hiding: event
+ * appends are best-effort (a log failure is warned and swallowed, because a
+ * logging failure must not break the run it describes), yet the replay treats
+ * that same log as authoritative when the checkpoint is gone. Those two
+ * properties are in tension. In practice the checkpoint is the primary record
+ * and the replay is a fallback for the narrow window where it was being
+ * rewritten; a run that lost both is unrecoverable and `loadRun` returns
+ * undefined rather than inventing a state.
  *
  * The two write helpers here replace four near-identical implementations that
  * had grown across the codebase (`session-manager.ts` sync + async variants,
@@ -32,8 +41,41 @@ export function wfDir(): string {
   return process.env.CLAWO_WF_DIR || path.join(os.homedir(), '.claw-orchestrator', 'wf');
 }
 
+/**
+ * A run id is a single path segment: letters, digits, dot, dash, underscore.
+ *
+ * It has to be enforced, not merely expected. A run id can be supplied by the
+ * caller — including through a tool call, which means through an agent — and
+ * every path in this module is derived from it by `path.join`. `../escaped`
+ * resolves outside the store, and `deleteRunDir` is a recursive `rmSync`, so an
+ * unvalidated id turns a delete into arbitrary directory removal. A leading dot
+ * is refused too, so no id can produce `.` or `..` by itself.
+ */
+const VALID_RUN_ID = /^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$/;
+
+export function isValidRunId(runId: string): boolean {
+  return typeof runId === 'string' && VALID_RUN_ID.test(runId);
+}
+
+/**
+ * Resolve a run's directory. Throws on an invalid id rather than returning a
+ * path, because this is the chokepoint every other path derives from — checking
+ * here means no caller can forget to.
+ */
 export function runDir(runId: string): string {
-  return path.join(wfDir(), runId);
+  if (!isValidRunId(runId)) {
+    throw new Error(
+      `Invalid run id ${JSON.stringify(runId)}: must match ${VALID_RUN_ID.source} (a single path segment)`,
+    );
+  }
+  const dir = path.join(wfDir(), runId);
+  // Belt to the regex's braces: if any future change to the pattern lets a
+  // separator through, this still refuses to hand back a path outside the root.
+  const root = wfDir();
+  if (path.dirname(dir) !== root) {
+    throw new Error(`Invalid run id ${JSON.stringify(runId)}: resolves outside the run store`);
+  }
+  return dir;
 }
 
 export function nodeDir(runId: string, nodeId: string): string {
@@ -79,7 +121,24 @@ function readJson<T>(file: string): T | undefined {
 
 // ─── Run lifecycle ──────────────────────────────────────────────────────────
 
+export function runExists(runId: string): boolean {
+  try {
+    return fs.existsSync(path.join(runDir(runId), 'spec.json'));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Create a run's directory. Refuses to reuse an existing run id: overwriting
+ * `spec.json` would discard the first run's definition while its `events.jsonl`
+ * kept accumulating, leaving one log describing two different runs and a replay
+ * that reconstructs neither.
+ */
 export function createRunDir(runId: string, spec: WorkflowSpec): void {
+  if (runExists(runId)) {
+    throw new Error(`Run '${runId}' already exists — pick another id, or resume it instead of starting over`);
+  }
   const dir = runDir(runId);
   fs.mkdirSync(dir, { recursive: true });
   atomicWriteJson(path.join(dir, 'spec.json'), spec);
@@ -90,14 +149,19 @@ export function saveRun(record: RunRecord): void {
 }
 
 export function loadSpec(runId: string): WorkflowSpec | undefined {
+  // Lookups treat an invalid id as "no such run" rather than throwing: a query
+  // for a nonsense id has an answer, and it is "nothing".
+  if (!isValidRunId(runId)) return undefined;
   return readJson<WorkflowSpec>(path.join(runDir(runId), 'spec.json'));
 }
 
 export function appendEvent(runId: string, event: KernelEvent, logger?: Logger): void {
+  if (!isValidRunId(runId)) return;
   appendJsonl(path.join(runDir(runId), 'events.jsonl'), event, logger);
 }
 
 export function readEvents(runId: string, limit?: number): KernelEvent[] {
+  if (!isValidRunId(runId)) return [];
   let raw: string;
   try {
     raw = fs.readFileSync(path.join(runDir(runId), 'events.jsonl'), 'utf8');
@@ -205,7 +269,8 @@ export function listRunIds(): string[] {
     return fs
       .readdirSync(wfDir(), { withFileTypes: true })
       .filter((d) => d.isDirectory())
-      .map((d) => d.name);
+      .map((d) => d.name)
+      .filter(isValidRunId);
   } catch {
     return [];
   }
@@ -217,8 +282,12 @@ export function listRunIds(): string[] {
  * does not: deleting someone's history is not ours to decide.
  */
 export function deleteRunDir(runId: string, logger?: Logger): void {
+  // Validate before the try, so a bad id surfaces as an error instead of being
+  // swallowed alongside genuine I/O failures. This is a recursive rmSync — the
+  // one call in this module where a bad id is not merely wrong but destructive.
+  const dir = runDir(runId);
   try {
-    fs.rmSync(runDir(runId), { recursive: true, force: true });
+    fs.rmSync(dir, { recursive: true, force: true });
   } catch (err) {
     logger?.warn?.(`[kernel-store] delete failed for ${runId}: ${(err as Error).message}`);
   }

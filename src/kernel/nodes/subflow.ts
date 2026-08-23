@@ -31,6 +31,7 @@ export function makeSubflowExecutor(kernel: RunKernel, resolve?: WorkflowResolve
 
     const finished = (await kernel.wait(record.runId)) ?? record;
     return {
+      childRunId: record.runId,
       ok: finished.state === 'completed',
       output: `subflow ${finished.runId}: ${finished.state} / ${finished.outcome}`,
       error: finished.state === 'completed' ? undefined : (finished.error ?? `subflow ended ${finished.state}`),

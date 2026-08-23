@@ -157,6 +157,8 @@ export interface NodeRecord {
   /** Paths relative to the run directory. */
   artifacts?: string[];
   evidenceId?: string;
+  /** Subflow nodes: the child run this node started, so it stays addressable. */
+  childRunId?: string;
 }
 
 /** Advisory only. A vote is recorded, never used as a termination condition. */
@@ -187,6 +189,23 @@ export interface RunRecord {
   /** Recorded for the record. Never consulted to decide completion. */
   consensusVotes?: ConsensusVote[];
   costUsd?: number;
+  /**
+   * Why the outcome is what it is, when that needs saying — chiefly when a
+   * passing verdict was downgraded because the tree moved after the check.
+   */
+  outcomeReason?: string;
+  /**
+   * The verdict currently in force: which node produced it, and the tree digest
+   * at that moment. Compared against the tree when the run ends, so evidence
+   * overtaken by later edits cannot keep standing as `verified`.
+   */
+  verdict?: { node: string; evidenceId: string; treeFingerprint?: string; sideEffectSeq: number };
+  /**
+   * Count of completed nodes that can touch the workspace (`agent`, `fanout`,
+   * `council`, `subflow`). Compared against the value stored on the verdict, so
+   * the kernel knows whether anything ran after the checks at all.
+   */
+  sideEffectSeq?: number;
 }
 
 // ─── Events ─────────────────────────────────────────────────────────────────

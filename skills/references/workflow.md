@@ -1,8 +1,20 @@
 # Workflow kernel — durable runs
 
-One executor for every orchestration mode: what is running, what happens when a
-step fails, when to stop, and — the part none of the previous five state machines
-had — how to come back after the process dies.
+A durable executor for workflow runs: what is running, what happens when a step
+fails, when to stop, and — the part none of the previous state machines had — how
+to come back after the process dies.
+
+## What this is not (yet)
+
+It is not the single runtime every mode goes through. Council, fanout, autoloop
+and ultraapp still own their own lifecycles, maps and cleanup; the `council` and
+`fanout` nodes call those runners from inside a kernel run rather than replacing
+them. A run started through `council_start` is not a kernel run and gets none of
+the durability described below.
+
+Collapsing those lifecycles is what this layer exists to make possible. Until it
+happens, the accurate description is "a durable runtime that the modes can be
+moved onto", not "the runtime the modes use".
 
 ## Why this exists
 
@@ -40,6 +52,20 @@ replay makes it survivable anyway.
 A kernel resumes at a **node boundary**, never mid-node. Nodes already marked
 succeeded are not re-run; the node that was in flight when the process died is
 retried from the start, because a half-finished node left no result to trust.
+
+**This makes node execution at-least-once, not exactly-once.** There is no
+idempotency key, no attempt lease, and no side-effect commit marker, so a node
+that wrote files and then died before its checkpoint runs again from the top,
+and two processes resuming the same run will both execute it. Workflows whose
+nodes are not safe to repeat need to make them safe. Resume is also explicit —
+`workflow_resume` — not automatic.
+
+One more caveat worth stating plainly: event appends are best-effort (a log
+failure is warned and swallowed so it cannot break the run it describes), yet
+the replay path treats that log as authoritative when the checkpoint is gone.
+Those two properties are in tension. The checkpoint is the primary record; the
+replay covers the narrow window where it was mid-rewrite. A run that lost both
+is unrecoverable and reads back as "not found".
 
 ## Node kinds
 
@@ -128,6 +154,31 @@ test suite would double the most expensive part of the run to learn nothing new.
 
 These are ordinary specs, not privileged paths.
 
+## The verifier is a terminal barrier
+
+A passing verdict only stands while it still describes the tree.
+
+This cannot be enforced by inspecting the spec — a router can send control
+anywhere, so which node runs last is not a property of the graph. And "nothing
+may follow the verifier" would be the wrong rule anyway: what matters is not that
+a node ran, but that the tree moved. So the kernel measures. Each evidence bundle
+records a digest of the working tree (`git rev-parse HEAD` plus
+`git status --porcelain`), and when the run ends, if any workspace-touching node
+ran after the verdict, the digest is recomputed.
+
+If it moved, the outcome drops from `verified` to `unverified` with the reason
+recorded on the run. Not `refuted` — no check failed; we simply stopped knowing,
+which is exactly what the third outcome is for.
+
+Outside a git repository the digest is unavailable. Nothing running after the
+checks means the verdict stands regardless (a contract that passed in a plain
+directory passed); something running after it means we cannot vouch, and the run
+says so.
+
+The built-in `solve` template puts its reviewer fan-out **before** the gate for
+this reason. It shipped the other way round first, which let reviewers edit a
+tree the verifier had already signed off while the run still reported `verified`.
+
 ## Completion
 
 `RunState` is `pending | running | awaiting_human | verifying | completed |
@@ -160,7 +211,11 @@ belong before the task.
 
 - A node timeout stops the kernel waiting and marks the node failed. The
   in-flight agent turn is owned by the session layer and finishes on its own
-  schedule; the kernel does not pretend to kill it.
+  schedule; the kernel does not pretend to kill it. The abandoned attempt keeps
+  running, so agent nodes name their session per attempt
+  (`<runId>-<nodeId>-a<n>`) — otherwise the dying attempt's teardown would stop
+  the retry's session. A node that writes to a fixed path outside the run
+  directory can still race its own retry; scope such writes per attempt.
 - Cancel and a node timeout are different things. A timeout is a node failure
   (it still gets its retries and still honours `onFailure`); cancelling ends the
   run.

@@ -18,6 +18,7 @@
  * proper new-file patch without an `add -N`.
  */
 
+import crypto from 'node:crypto';
 import path from 'node:path';
 import { exec } from '../kernel/exec.js';
 
@@ -125,6 +126,29 @@ export async function capturePatch(cwd: string, baseSha: string | undefined): Pr
   }
 
   return parts.join('');
+}
+
+/**
+ * A cheap digest of the working tree's current state.
+ *
+ * Evidence describes the tree as it was when the checks ran. If anything moves
+ * afterwards the bundle still exists but no longer describes what is there, and
+ * a run that keeps reporting `verified` on the strength of it is claiming
+ * something nobody measured. Comparing this before and after is how the kernel
+ * notices.
+ *
+ * `git status --porcelain` covers tracked modifications, staged changes, and
+ * untracked files; HEAD covers commits. Returns undefined outside a repo — a
+ * caller that cannot fingerprint must not assume the tree held still.
+ */
+export async function treeFingerprint(cwd: string): Promise<string | undefined> {
+  const head = await exec('git', ['-C', cwd, 'rev-parse', 'HEAD'], { timeoutMs: GIT_TIMEOUT_MS });
+  const status = await exec('git', ['-C', cwd, 'status', '--porcelain'], { timeoutMs: GIT_TIMEOUT_MS });
+  if (status.code !== 0) return undefined;
+  return crypto
+    .createHash('sha256')
+    .update(`${head.code === 0 ? head.out.trim() : 'no-head'}\n${status.out}`)
+    .digest('hex');
 }
 
 /**
