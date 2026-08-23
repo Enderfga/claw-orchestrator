@@ -357,6 +357,41 @@
         border-top: 1px solid var(--border);
         background: var(--surface);
       }
+      /* ─── Workflow tab ───────────────────────────────────────── */
+      .verdict {
+        font-size: 11px;
+        padding: 1px 6px;
+        border-radius: 3px;
+        border: 1px solid currentColor;
+      }
+      .verdict.verified {
+        color: #2e7d32;
+      }
+      .verdict.refuted {
+        color: #c62828;
+      }
+      /* Deliberately neutral: an unchecked run is not a failed one. */
+      .verdict.unchecked {
+        color: #888;
+      }
+      .wf-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 13px;
+        margin-bottom: 18px;
+      }
+      .wf-table th,
+      .wf-table td {
+        text-align: left;
+        padding: 4px 8px;
+        border-bottom: 1px solid rgba(128, 128, 128, 0.25);
+        vertical-align: top;
+      }
+      .wf-error {
+        color: #c62828;
+        font-size: 13px;
+      }
+
       /* ─── Forge tab ──────────────────────────────────────────── */
       .forge-layout {
         display: grid;
@@ -802,6 +837,7 @@
           <button class="tab" role="tab" aria-selected="true" data-tab="autoloop">Autoloop</button>
           <button class="tab" role="tab" aria-selected="false" data-tab="council">Council</button>
           <button class="tab" role="tab" aria-selected="false" data-tab="forge">Forge</button>
+          <button class="tab" role="tab" aria-selected="false" data-tab="workflow">Runs</button>
         </nav>
         <div class="grow"></div>
         <small id="spend" title="Spend recorded in the run ledger over the last 24h, across every engine"></small>
@@ -918,7 +954,13 @@
           b.setAttribute('aria-selected', String(b.dataset.tab === tab));
         });
         $('sidebarTitle').textContent =
-          tab === 'autoloop' ? 'Autoloop runs' : tab === 'council' ? 'Council sessions' : 'Forge apps';
+          tab === 'autoloop'
+            ? 'Autoloop runs'
+            : tab === 'council'
+              ? 'Council sessions'
+              : tab === 'forge'
+                ? 'Forge apps'
+                : 'Workflow runs';
         $('forgeNew').hidden = tab !== 'forge';
         $('councilNew').hidden = tab !== 'council';
         $('autoloopNew').hidden = tab !== 'autoloop';
@@ -963,6 +1005,7 @@
           autoloop: 'autoloop run',
           council: 'council session',
           forge: 'forge app',
+          workflow: 'workflow run',
         };
         const noun = labels[state.tab] || 'run';
         if (state.runs.length === 0) {
@@ -984,15 +1027,20 @@
       async function refreshList() {
         try {
           const url =
-            state.tab === 'autoloop' ? '/autoloop/list' : state.tab === 'council' ? '/council/list' : '/ultraapp/list';
+            state.tab === 'autoloop'
+              ? '/autoloop/list'
+              : state.tab === 'council'
+                ? '/council/list'
+                : state.tab === 'workflow'
+                  ? '/workflow/list?limit=50'
+                  : '/ultraapp/list';
           const opts =
             state.tab === 'forge'
               ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }
               : {};
           const r = await fetch(url, opts);
           const j = await r.json();
-          state.runs =
-            state.tab === 'autoloop' ? j.runs || [] : state.tab === 'council' ? j.councils || [] : j.runs || [];
+          state.runs = state.tab === 'council' ? j.councils || [] : j.runs || [];
           renderList();
           // Refresh the empty-state CTA — runs may have just appeared or
           // disappeared, and renderEmptyMain's text depends on state.runs.length.
@@ -1030,7 +1078,14 @@
       function renderList() {
         const ul = $('runlist');
         if (state.runs.length === 0) {
-          const noun = state.tab === 'autoloop' ? 'runs' : state.tab === 'council' ? 'councils' : 'apps';
+          const noun =
+            state.tab === 'autoloop'
+              ? 'runs'
+              : state.tab === 'council'
+                ? 'councils'
+                : state.tab === 'workflow'
+                  ? 'workflow runs'
+                  : 'apps';
           ul.innerHTML = '<li class="empty" style="padding:20px;list-style:none">No active ' + noun + '.</li>';
           return;
         }
@@ -1056,6 +1111,21 @@
                   <div class="meta">
                     <span class="badge ${r.status}">${r.status}</span>
                     <span>${r.responses?.length ?? 0} resp</span>
+                  </div>
+                </li>`;
+            } else if (state.tab === 'workflow') {
+              // Three outcomes, shown as three things. `unchecked` means no
+              // acceptance contract was declared — it is not a failure, and
+              // colouring it like one would misreport every run that simply
+              // never asked to be checked.
+              const verdict = r.outcome === 'verified' ? 'verified' : r.outcome === 'refuted' ? 'refuted' : 'unchecked';
+              return `
+                <li class="runItem" data-id="${escapeHtml(r.runId)}" aria-selected="${r.runId === state.selectedId}">
+                  <div class="id">${escapeHtml(r.runId)}</div>
+                  <div class="meta">
+                    <span class="badge ${escapeHtml(r.state)}">${escapeHtml(r.state)}</span>
+                    <span class="verdict ${verdict}">${verdict}</span>
+                    ${r.costUsd ? `<span>$${Number(r.costUsd).toFixed(3)}</span>` : ''}
                   </div>
                 </li>`;
             } else {
@@ -1148,7 +1218,99 @@
         closeStreams();
         if (state.tab === 'autoloop') openAutoloop(id);
         else if (state.tab === 'council') openCouncil(id);
+        else if (state.tab === 'workflow') openWorkflow(id);
         else openForgeRun(id);
+      }
+
+      // ─── Workflow runs ────────────────────────────────────────────
+      // Node states plus the evidence bundle: what the runtime itself checked,
+      // as opposed to what an agent said about its own work.
+      async function openWorkflow(id) {
+        $('main').innerHTML = '<div class="empty" style="margin-top:80px">Loading…</div>';
+        let run;
+        try {
+          const r = await fetch(`/workflow/${encodeURIComponent(id)}/state`);
+          const j = await r.json();
+          if (!j.ok) throw new Error(j.error || 'not found');
+          run = j.run;
+        } catch (err) {
+          $('main').innerHTML =
+            `<div class="empty" style="margin-top:80px">Failed to load: ${escapeHtml(String(err.message || err))}</div>`;
+          return;
+        }
+
+        let evidence = null;
+        if (run.evidenceId) {
+          try {
+            const r = await fetch(`/workflow/${encodeURIComponent(id)}/evidence`);
+            const j = await r.json();
+            if (j.ok) evidence = j.evidence;
+          } catch {
+            /* evidence is optional in the view */
+          }
+        }
+
+        const verdict = run.outcome === 'verified' ? 'verified' : run.outcome === 'refuted' ? 'refuted' : 'unchecked';
+        const nodeRows = Object.values(run.nodes || {})
+          .map(
+            (n) => `
+              <tr>
+                <td><code>${escapeHtml(n.id)}</code></td>
+                <td>${escapeHtml(n.kind)}</td>
+                <td><span class="badge ${escapeHtml(n.state)}">${escapeHtml(n.state)}</span></td>
+                <td>${n.attempts || 0}${n.visits > 1 ? ` / ${n.visits} visits` : ''}</td>
+                <td>${n.error ? escapeHtml(String(n.error).slice(0, 160)) : ''}</td>
+              </tr>`,
+          )
+          .join('');
+
+        const checkRows = evidence
+          ? evidence.results
+              .map(
+                (c) => `
+                  <tr>
+                    <td>${c.passed ? 'PASS' : c.required ? 'FAIL' : 'warn'}</td>
+                    <td><code>${escapeHtml(c.id)}</code></td>
+                    <td>${escapeHtml(c.type)}</td>
+                    <td>${escapeHtml(String(c.detail || '').slice(0, 200))}</td>
+                  </tr>`,
+              )
+              .join('')
+          : '';
+
+        const votes = (run.consensusVotes || []).length
+          ? `<h3>Consensus votes <small>(advisory — recorded, not used to decide completion)</small></h3>
+             <p>${run.consensusVotes
+               .map(
+                 (v) =>
+                   `${escapeHtml(v.agent)} r${v.round}: <strong>${v.vote ? 'YES' : 'NO'}</strong> <small>(${escapeHtml(v.source)})</small>`,
+               )
+               .join(' · ')}</p>`
+          : '';
+
+        $('main').innerHTML = `
+          <h2>${escapeHtml(run.runId)} <span class="badge ${escapeHtml(run.state)}">${escapeHtml(run.state)}</span>
+            <span class="verdict ${verdict}">${verdict}</span></h2>
+          <p><small>${escapeHtml(run.workflow)} · ${escapeHtml(run.cwd || '')}${run.costUsd ? ` · $${Number(run.costUsd).toFixed(4)}` : ''}</small></p>
+          ${run.error ? `<p class="wf-error">${escapeHtml(run.error)}</p>` : ''}
+          ${
+            verdict === 'unchecked'
+              ? '<p><small>No acceptance contract was declared for this run, so nothing checked the work. That is not the same as a failure.</small></p>'
+              : ''
+          }
+          <h3>Nodes</h3>
+          <table class="wf-table"><thead><tr><th>node</th><th>kind</th><th>state</th><th>attempts</th><th>error</th></tr></thead>
+          <tbody>${nodeRows}</tbody></table>
+          ${votes}
+          ${
+            evidence
+              ? `<h3>Evidence <small>${escapeHtml(evidence.evidenceId)}${evidence.rounds ? ` · ${evidence.rounds} fix round(s)` : ''}</small></h3>
+                 <table class="wf-table"><thead><tr><th></th><th>check</th><th>type</th><th>detail</th></tr></thead>
+                 <tbody>${checkRows}</tbody></table>
+                 <p><small>${evidence.changedFiles.length} file(s) changed${evidence.baseSha ? ` since ${escapeHtml(evidence.baseSha.slice(0, 12))}` : ''}</small></p>`
+              : ''
+          }
+        `;
       }
 
       // ─── Forge ────────────────────────────────────────────────────
