@@ -301,6 +301,13 @@ all new in this version, so none of these paths exist in 5.x or before.
     lost routinely: two processes creating the same id 80 times both "succeeded"
     76 times, leaving one workflow executing under another's `spec.json`, or a
     lease belonging to an incarnation that had already been overwritten.
+  - **The lock's wait is bounded on every path.** Two of the retry paths out of
+    the acquisition loop continued past the deadline check without yielding, so a
+    lock that could neither be taken nor broken became a hot loop with no exit —
+    not a failure, not a return, just a burnt core. The deadline is checked once
+    per iteration now, before anything can continue past it. Found by running the
+    suite on CI for the first time, where it presented as a job that went silent
+    for fourteen minutes after finishing a test file.
   - **Contention is not a takeover.** `commit` reports `committed`, `superseded`
     or `blocked`, and only `superseded` is permanent. The lock waits briefly
     rather than failing on sight, and an owner that still cannot write stops
