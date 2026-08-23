@@ -68,8 +68,8 @@ The plugin does not manage authentication — it expects each CLI to be ready to
 
 The embedded HTTP server (used by CLI and standalone mode) optionally supports bearer token authentication:
 
-| Variable | Purpose |
-|----------|---------|
+| Variable                | Purpose                                                                                                       |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------- |
 | `OPENCLAW_SERVER_TOKEN` | Set to enable bearer token auth. All requests (except `/health`) must include `Authorization: Bearer <token>` |
 
 When set, the token is also written to `~/.openclaw/server-token` for the CLI to read automatically. Default: no auth (localhost binding is the primary security boundary).
@@ -83,11 +83,11 @@ The server exposes an OpenAI-compatible API at `/v1/chat/completions`. It serves
 
 Quick config for any client:
 
-| Setting | Value |
-|---------|-------|
-| API Base URL | `http://127.0.0.1:18796/v1` |
-| API Key | The value of `OPENCLAW_SERVER_TOKEN`, or any string if auth is disabled |
-| Model | `claude-fable-5`, `claude-opus-5`, `claude-sonnet-5`, `gpt-5.5`, `agy-pro`, etc. |
+| Setting      | Value                                                                            |
+| ------------ | -------------------------------------------------------------------------------- |
+| API Base URL | `http://127.0.0.1:18796/v1`                                                      |
+| API Key      | The value of `OPENCLAW_SERVER_TOKEN`, or any string if auth is disabled          |
+| Model        | `claude-fable-5`, `claude-opus-5`, `claude-sonnet-5`, `gpt-5.5`, `agy-pro`, etc. |
 
 See [openai-compat.md](./openai-compat.md) for the full session-keying rules, `X-Session-Reset` semantics, the legacy-heuristic env var, and the `/v1/sessions` inspection endpoint.
 
@@ -111,12 +111,12 @@ In `~/.openclaw/openclaw.json`:
           "proxy": {
             "enabled": false,
             "bigModel": "gemini-3.1-pro-preview",
-            "smallModel": "gemini-3-flash-preview"
-          }
-        }
-      }
-    }
-  }
+            "smallModel": "gemini-3-flash-preview",
+          },
+        },
+      },
+    },
+  },
 }
 ```
 

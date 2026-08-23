@@ -388,3 +388,35 @@ comment above it saying the claim was not trusted.
 ## Related
 
 - [`verification.md`](./verification.md) — contracts, checks, evidence
+
+## Lifecycle moved to the kernel (6.0.0)
+
+An autoloop is a kernel run whose single node holds the loop for as long as it
+lives. Tool signatures are unchanged.
+
+What went away: the `autoloops` map; `~/.claw-orchestrator/autoloop-registry.jsonl`
+with its four bespoke helpers (append, remove-then-append upsert, reverse-scan
+dedup, rewrite-via-tmp-file); and the two `Set`s — `_startingAutoloops` and
+`_deletingAutoloops` — that existed only because a start and a delete could race
+each other over that shared map.
+
+Two things get better rather than merely moving:
+
+- **`autoloop_status` on a run that is not live in this process** used to return
+  an all-zero stub labelled `reconstructed from registry — not in current process
+memory`: iter 0, no metrics, no error history, because the registry only ever
+  held identity. The record holds the last state the loop published, so a
+  historical run opens with its real iteration count.
+- **The engines `spawn_subagents` actually chose** land on the run record
+  alongside the rest of its state, instead of in a parallel file with its own
+  lifecycle.
+
+`autoloop_resume` restarts a terminated run from the stored spec — the immutable
+record of how it was started — rather than from a registry row whose older
+versions omitted the engine fields entirely. Custom-engine configs are the one
+thing the spec does not carry (they can hold secrets), so a resume must be given
+them again.
+
+Cancelling a run now tears the loop down the way a stop does. It previously left
+the three persistent agents running and their session names claimed, which
+surfaced much later as `session name already in use`.

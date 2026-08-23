@@ -1,4 +1,7 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { UltraappBuildQueue } from '../../ultraapp/build.js';
 import type { BuildEvent } from '../../ultraapp/build-events.js';
 
@@ -91,5 +94,78 @@ describe('UltraappBuildQueue', () => {
     await q.enqueue('a');
     await q.idle();
     expect(events).toEqual([]);
+  });
+});
+
+// ─── Durability (6.0.0) ─────────────────────────────────────────────────────
+
+describe('durable queue', () => {
+  let dir: string;
+  let statePath: string;
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'clawo-bq-'));
+    statePath = path.join(dir, 'build-queue.json');
+  });
+
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('survives the process that accepted the build', async () => {
+    // The old queue kept pending builds in an array and nothing else: a restart
+    // dropped every queued build with no record it had been asked for.
+    const blocked = new Promise<void>(() => undefined);
+    const first = new UltraappBuildQueue({ statePath, worker: () => blocked });
+    await first.enqueue('run-a');
+    await first.enqueue('run-b');
+    await new Promise((r) => setTimeout(r, 10));
+
+    const seen: string[] = [];
+    const restored: string[][] = [];
+    const second = new UltraappBuildQueue({
+      statePath,
+      worker: async (runId) => {
+        seen.push(runId);
+      },
+      onRestore: (ids) => restored.push(ids),
+    });
+    await second.idle();
+
+    // The in-flight build comes back first: it was asked for first, and the
+    // user has been waiting on it longest.
+    expect(restored[0]).toEqual(['run-a', 'run-b']);
+    expect(seen).toEqual(['run-a', 'run-b']);
+  });
+
+  it('clears the state once the queue drains', async () => {
+    const q = new UltraappBuildQueue({ statePath, worker: async () => undefined });
+    await q.enqueue('run-a');
+    await q.idle();
+    expect(JSON.parse(fs.readFileSync(statePath, 'utf8'))).toEqual({ pending: [], current: null });
+  });
+
+  it('forgets a cancelled build', async () => {
+    const blocked = new Promise<void>(() => undefined);
+    const q = new UltraappBuildQueue({ statePath, worker: () => blocked });
+    await q.enqueue('run-a');
+    await q.enqueue('run-b');
+    await new Promise((r) => setTimeout(r, 10));
+    q.cancel('run-b');
+    expect(JSON.parse(fs.readFileSync(statePath, 'utf8')).pending).toEqual([]);
+  });
+
+  it('ignores an unreadable or corrupt state file rather than refusing to start', () => {
+    fs.writeFileSync(statePath, '{not json');
+    const restored: string[][] = [];
+    new UltraappBuildQueue({ statePath, worker: async () => undefined, onRestore: (ids) => restored.push(ids) });
+    expect(restored).toEqual([]);
+  });
+
+  it('stays ephemeral when no statePath is given', async () => {
+    const q = new UltraappBuildQueue({ worker: async () => undefined });
+    await q.enqueue('run-a');
+    await q.idle();
+    expect(fs.existsSync(statePath)).toBe(false);
   });
 });

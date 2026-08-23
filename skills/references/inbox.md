@@ -56,10 +56,10 @@ console.log(`Delivered ${count} queued messages`);
 
 ## Tools
 
-| Tool | Description |
-|------|-------------|
-| `session_send_to` | Send message between sessions |
-| `session_inbox` | Read inbox messages |
+| Tool                    | Description                             |
+| ----------------------- | --------------------------------------- |
+| `session_send_to`       | Send message between sessions           |
+| `session_inbox`         | Read inbox messages                     |
 | `session_deliver_inbox` | Deliver queued messages to idle session |
 
 ## Message Format

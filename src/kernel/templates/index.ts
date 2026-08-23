@@ -8,7 +8,7 @@
  */
 
 import type { AcceptanceContract } from '../../verify/contract.js';
-import type { FanoutAgentSpec, WorkflowSpec } from '../types.js';
+import type { CouncilNode, FanoutAgentSpec, FanoutNode, WorkflowSpec } from '../types.js';
 
 export interface CommonArgs {
   task: string;
@@ -176,6 +176,104 @@ export function solveWorkflow(args: SolveArgs): WorkflowSpec {
     // router's own `visits_lt` guard is the real budget; this is the backstop.
     maxNodeVisits: maxRepairs + 3,
     nodes,
+  };
+}
+
+// ─── Legacy mode workflows ──────────────────────────────────────────────────
+//
+// The `council_*`, `fanout_*`, `ultraplan_*` and `ultrareview_*` tools keep
+// their signatures, but each now starts one of these instead of a mode-private
+// state machine. Every one uses a single node called `main`, which is what the
+// projections in `kernel/projections.ts` read.
+
+import type { EngineType, EffortLevel, PermissionMode } from '../../types.js';
+import { LEGACY_NODE } from '../projections.js';
+
+export interface LegacyCouncilArgs {
+  task: string;
+  cwd: string;
+  agents: CouncilNode['agents'];
+  maxRounds: number;
+  timeoutMs?: number;
+}
+
+export function legacyCouncilWorkflow(args: LegacyCouncilArgs): WorkflowSpec {
+  return {
+    name: 'council',
+    cwd: args.cwd,
+    nodes: [
+      {
+        id: LEGACY_NODE,
+        kind: 'council',
+        task: args.task,
+        agents: args.agents,
+        projectDir: args.cwd,
+        maxRounds: args.maxRounds,
+        timeoutMs: args.timeoutMs,
+      },
+    ],
+  };
+}
+
+export interface LegacyFanoutArgs {
+  task: string;
+  cwd: string;
+  agents: FanoutNode['agents'];
+  synthesize?: boolean;
+  timeoutMs?: number;
+  name?: string;
+}
+
+export function legacyFanoutWorkflow(args: LegacyFanoutArgs): WorkflowSpec {
+  return {
+    name: args.name ?? 'fanout',
+    cwd: args.cwd,
+    nodes: [
+      {
+        id: LEGACY_NODE,
+        kind: 'fanout',
+        prompt: args.task,
+        agents: args.agents,
+        synthesize: args.synthesize,
+        cwd: args.cwd,
+        timeoutMs: args.timeoutMs,
+      },
+    ],
+  };
+}
+
+export const ULTRAPLAN_SYSTEM_PROMPT =
+  'You are in ultraplan mode. Explore the project thoroughly, analyze feasibility, and produce a detailed, ' +
+  'actionable plan. Do NOT write code — plan only. Output your final plan in a clear markdown format.';
+
+export interface LegacyUltraplanArgs {
+  task: string;
+  cwd: string;
+  model?: string;
+  engine?: EngineType;
+  timeoutMs: number;
+}
+
+export function legacyUltraplanWorkflow(args: LegacyUltraplanArgs): WorkflowSpec {
+  return {
+    name: 'ultraplan',
+    cwd: args.cwd,
+    nodes: [
+      {
+        id: LEGACY_NODE,
+        kind: 'agent',
+        cwd: args.cwd,
+        engine: args.engine,
+        model: args.model,
+        permissionMode: 'plan' as PermissionMode,
+        effort: 'max' as EffortLevel,
+        timeoutMs: args.timeoutMs,
+        prompt:
+          `# Ultraplan Task\n\n${args.task}\n\nExplore the project, understand the codebase, analyze ` +
+          `feasibility, and produce a comprehensive implementation plan. Take your time (up to 30 minutes). ` +
+          `Be thorough.`,
+      },
+    ],
   };
 }
 

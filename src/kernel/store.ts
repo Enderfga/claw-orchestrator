@@ -293,6 +293,20 @@ export function deleteRunDir(runId: string, logger?: Logger): void {
   }
 }
 
+/**
+ * Full text a node produced, preferring the artifact file over the record's
+ * preview. `NodeRecord.output` is capped so a checkpoint stays small, but the
+ * whole point of some nodes is their text — an ultraplan whose plan is silently
+ * cut at 4 kB has lost the deliverable.
+ */
+export function readNodeOutput(runId: string, nodeId: string): string | undefined {
+  try {
+    return fs.readFileSync(path.join(nodeDir(runId, nodeId), 'output.txt'), 'utf8');
+  } catch {
+    return loadRun(runId)?.nodes[nodeId]?.output;
+  }
+}
+
 export function writeNodeArtifact(runId: string, nodeId: string, name: string, body: string): string {
   const dir = nodeDir(runId, nodeId);
   fs.mkdirSync(dir, { recursive: true });

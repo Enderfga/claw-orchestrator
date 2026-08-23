@@ -9,6 +9,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { execFile, execFileSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
@@ -123,7 +124,18 @@ import { CircuitBreaker } from './circuit-breaker.js';
 import { detectRepoLang } from './kernel/repo.js';
 import { RunKernel, runDir as kernelRunDir } from './kernel/engine.js';
 import { registerDefaultExecutors } from './kernel/nodes/index.js';
-import { loadRun, type RunSummary } from './kernel/store.js';
+import { autoloopStateFromRecord, makeAutoloopExecutor, type AutoloopHandle } from './kernel/nodes/autoloop.js';
+import { loadRun, readNodeOutput, type RunSummary } from './kernel/store.js';
+import {
+  LEGACY_NODE,
+  joinFindings,
+  toCouncilSession,
+  toFanoutSession,
+  toUltraplanResult,
+  toUltrareviewResult,
+  type FanoutNodeData,
+} from './kernel/projections.js';
+import { legacyCouncilWorkflow, legacyFanoutWorkflow, legacyUltraplanWorkflow } from './kernel/templates/index.js';
 import type { KernelEvent, RunRecord, RunState, WorkflowSpec } from './kernel/types.js';
 import { normalizeContract } from './verify/contract.js';
 import { runContract } from './verify/runner.js';
@@ -193,9 +205,7 @@ import {
   CLEANUP_INTERVAL_MS,
   TURN_TIMEOUT_MS,
   GREP_HISTORY_FETCH,
-  RESULT_TTL_MS,
   ULTRAPLAN_TIMEOUT_MS,
-  ULTRAREVIEW_POLL_INTERVAL_MS,
   STOP_SIGKILL_DELAY_MS,
   SESSION_EVENT,
   DEFAULT_HISTORY_LIMIT,
@@ -248,45 +258,20 @@ type CodexAppSession = ISession & {
   }) => Promise<{ data: unknown[]; nextCursor: string | null }>;
 };
 
-// ─── Disk enumeration (cross-process visibility) ────────────────────────────
+// ─── Cross-process visibility ───────────────────────────────────────────────
 //
-// When the dashboard's standalone clawo-serve and the OpenClaw plugin run as
-// separate processes, each has its own in-memory map of active runs. To make
-// past runs visible across processes we read what's persisted on disk:
-//   - Council: transcripts at ~/.openclaw/council-logs/council-*.md
-//   - Autoloop: registry at ~/.claw-orchestrator/autoloop-registry.jsonl
-
-const DEFAULT_COUNCIL_LOG_DIR = path.join(os.homedir(), '.openclaw', 'council-logs');
-const DEFAULT_AUTOLOOP_REGISTRY = path.join(os.homedir(), '.claw-orchestrator', 'autoloop-registry.jsonl');
-
-/** Public shape returned by listCouncilsFromDisk(). Mirrors a subset of CouncilSession. */
-export interface CouncilDiskRecord {
-  id: string;
-  task: string;
-  status: string;
-  startTime: string;
-}
-
-/**
- * One row in ~/.claw-orchestrator/autoloop-registry.jsonl. Used to make
- * autoloop runs visible across processes (the ledger lives at
- * <workspace>/tasks/<run_id>/, workspaces vary, so we keep a central
- * append-only index here).
- */
-export interface AutoloopRegistryEntry {
-  run_id: string;
-  workspace: string;
-  ledger_dir: string;
-  started_at: string;
-  planner_session: string;
-  /** Optional for compatibility with registry rows written before role-level engine support. */
-  planner_engine?: EngineType;
-  planner_model?: string;
-  coder_engine?: EngineType;
-  coder_model?: string;
-  reviewer_engine?: EngineType;
-  reviewer_model?: string;
-}
+// There used to be two separate answers here, neither of them good. Councils
+// were enumerated by reading `~/.openclaw/council-logs/*.md` and pulling the id,
+// task and status out with regexes — a stub session with no responses and an
+// empty config. Autoloop kept its own append-only JSONL registry at
+// `~/.claw-orchestrator/autoloop-registry.jsonl`, with its own append / upsert /
+// reverse-scan-dedup / rewrite-via-tmp-file implementation, because its ledgers
+// lived in whichever workspace the user picked.
+//
+// Both are gone. Every mode is a kernel run, every run lives under one root, and
+// the run store is the index — so `listRuns()` is the single answer, and it
+// returns real records rather than reconstructions. Council transcripts are
+// still written for humans to read; nothing parses them.
 
 type AutoloopRoleName = 'planner' | 'coder' | 'reviewer';
 
@@ -357,124 +342,6 @@ function validateAutoloopRole(
   }
   return resolved;
 }
-
-/** Append-only registry write. Safe under concurrent writers — append is atomic for short lines. */
-export function appendAutoloopRegistry(file: string, entry: AutoloopRegistryEntry): void {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.appendFileSync(file, JSON.stringify(entry) + '\n');
-}
-
-/**
- * Write the current row for a run, dropping any older rows for the same id.
- *
- * The registry is append-only and `listAutoloopsFromRegistry` dedups on read
- * (newest wins), so correctness never depended on cleanup — but a run now emits
- * a row at start, another on every successful `spawn_subagents`, and another on
- * every resume, none of which were ever removed. The file grew monotonically and
- * every list / resume parses all of it. Callers use this AFTER the operation
- * succeeds, so a failed start still leaves the previous row intact.
- */
-export function upsertAutoloopRegistry(file: string, entry: AutoloopRegistryEntry): void {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  removeAutoloopFromRegistry(file, entry.run_id);
-  fs.appendFileSync(file, JSON.stringify(entry) + '\n');
-}
-
-/**
- * Read the registry, dedup by run_id (newest entry wins), drop entries whose
- * ledger_dir no longer exists on disk (cleanup of moved/deleted workspaces).
- * Returns entries newest-first.
- */
-export function listAutoloopsFromRegistry(file = DEFAULT_AUTOLOOP_REGISTRY): AutoloopRegistryEntry[] {
-  if (!fs.existsSync(file)) return [];
-  const lines = fs.readFileSync(file, 'utf-8').split('\n').filter(Boolean);
-  const seen = new Set<string>();
-  const out: AutoloopRegistryEntry[] = [];
-  // Walk in reverse so the latest entry for a given run_id wins.
-  for (const line of [...lines].reverse()) {
-    try {
-      const e = JSON.parse(line) as AutoloopRegistryEntry;
-      if (seen.has(e.run_id)) continue;
-      seen.add(e.run_id);
-      if (!fs.existsSync(e.ledger_dir)) continue; // stale entry, ledger gone
-      out.push(e);
-    } catch {
-      // malformed line; skip
-    }
-  }
-  return out; // already newest-first because we reversed
-}
-
-/**
- * Rewrite the registry with every line for the given run_id filtered out.
- * Used by autoloopDelete to scrub a run from cross-process visibility.
- * No-op if the file does not exist. Returns the number of lines removed.
- */
-export function removeAutoloopFromRegistry(file: string, runId: string): number {
-  if (!fs.existsSync(file)) return 0;
-  const lines = fs.readFileSync(file, 'utf-8').split('\n');
-  let removed = 0;
-  const kept: string[] = [];
-  for (const line of lines) {
-    if (!line) {
-      kept.push(line);
-      continue;
-    }
-    try {
-      const e = JSON.parse(line) as AutoloopRegistryEntry;
-      if (e.run_id === runId) {
-        removed += 1;
-        continue;
-      }
-    } catch {
-      // malformed line — keep it, we only filter recognizable entries
-    }
-    kept.push(line);
-  }
-  if (removed === 0) return 0;
-  const tmp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, kept.join('\n'));
-  fs.renameSync(tmp, file);
-  return removed;
-}
-
-/**
- * Enumerate council sessions from on-disk transcripts. Called by
- * SessionManager.councilList() to surface runs that the current process didn't
- * spawn itself (e.g. runs started in another process whose transcripts have
- * already been flushed to ~/.openclaw/council-logs/).
- *
- * Format parsed (matches src/council.ts saveTranscript):
- *   - **ID**: <session.id>
- *   - **Time**: <iso>
- *   - **Task**: <text>
- *   - **Status**: <consensus|max_rounds|...>
- *
- * Legacy transcripts written before the ID field was added fall back to a
- * filename-derived id (basename without .md). That's stable across reruns
- * even if uncomfortable as a display id.
- */
-export function listCouncilsFromDisk(logDir = DEFAULT_COUNCIL_LOG_DIR): CouncilDiskRecord[] {
-  if (!fs.existsSync(logDir)) return [];
-  const out: CouncilDiskRecord[] = [];
-  for (const entry of fs.readdirSync(logDir)) {
-    if (!entry.startsWith('council-') || !entry.endsWith('.md')) continue;
-    let head: string;
-    try {
-      head = fs.readFileSync(path.join(logDir, entry), 'utf-8').slice(0, 2000);
-    } catch {
-      continue;
-    }
-    const id = /^-\s+\*\*ID\*\*:\s*([^\n]+)/m.exec(head)?.[1]?.trim() || entry.replace(/\.md$/, '');
-    const task = /^-\s+\*\*Task\*\*:\s*([^\n]+)/m.exec(head)?.[1]?.trim() || '(no task recorded)';
-    const startTime = /^-\s+\*\*Time\*\*:\s*([^\n]+)/m.exec(head)?.[1]?.trim() || '';
-    const status = /^-\s+\*\*Status\*\*:\s*([^\n]+)/m.exec(head)?.[1]?.trim() || 'unknown';
-    out.push({ id, task, status, startTime });
-  }
-  return out;
-}
-
-// ─── SessionManager ──────────────────────────────────────────────────────────
 
 export class SessionManager {
   private sessions = new Map<string, ManagedSession>();
@@ -1010,9 +877,38 @@ export class SessionManager {
    */
   private get kernel(): RunKernel {
     if (!this._kernel) {
-      this._kernel = registerDefaultExecutors(new RunKernel({ manager: this, logger: this.logger }), (name) =>
+      const kernel = registerDefaultExecutors(new RunKernel({ manager: this, logger: this.logger }), (name) =>
         this._resolveTemplate(name),
       );
+      // The autoloop engine needs sessions, prompt files and push channels, so
+      // its executor is registered here with a builder closed over `this`
+      // rather than living in the kernel.
+      kernel.setExecutor(
+        'autoloop',
+        makeAutoloopExecutor({
+          boot: (config) =>
+            this._bootAutoloop({
+              ...(config as Parameters<SessionManager['_bootAutoloop']>[0]),
+              // Custom-engine configs can carry secrets and are never persisted,
+              // so a resume re-supplies them out of band.
+              ...(this._autoloopResumeConfig.get(String(config.runId)) ?? {}),
+            }),
+          ready: (runId, value) => {
+            const deferred = this._autoloopReady.get(runId);
+            if (!deferred) return;
+            if (value instanceof Error) deferred.reject(value);
+            else deferred.resolve(value);
+          },
+          waitForExit: (handle, signal) => this._awaitAutoloopExit(handle, signal),
+          registerPublisher: (runId, publish) => this._autoloopPublishers.set(runId, publish),
+          unregisterPublisher: (runId) => this._autoloopPublishers.delete(runId),
+          extra: (runId) => {
+            const roleSelection = this._autoloopSelection.get(runId);
+            return roleSelection ? { roleSelection } : {};
+          },
+        }),
+      );
+      this._kernel = kernel;
     }
     return this._kernel;
   }
@@ -1557,28 +1453,13 @@ export class SessionManager {
       clearInterval(this.cleanupTimer);
       this.cleanupTimer = null;
     }
-    // Stop ultrareview pollers
-    for (const [, timer] of this.ultrareviewPollers) clearInterval(timer);
-    this.ultrareviewPollers.clear();
-    // Clear council/fanout cleanup timers — their 30-min closures capture `this`
-    // and would otherwise fire after shutdown (and council timers, before this
-    // fix, were not unref'd so they blocked a clean process exit).
-    for (const [, timer] of this.councilCleanupTimers) clearTimeout(timer);
-    this.councilCleanupTimers.clear();
-    this.councils.clear();
-    for (const [, timer] of this.fanoutCleanupTimers) clearTimeout(timer);
-    this.fanoutCleanupTimers.clear();
-    this.fanouts.clear();
-    // Stop autoloops (graceful: dispatch a terminate envelope so each run
-    // shuts down its three persistent agents and cleans up the ledger lock).
-    for (const [, ctx] of this.autoloops) {
-      try {
-        await ctx.runner.send(AutoloopMsg.terminate(ctx.runner.state.iter, { reason: 'manager-shutdown' }));
-      } catch {
-        // Best-effort.
-      }
-    }
-    this.autoloops.clear();
+    // Council, fan-out, ultraplan and ultrareview no longer have timers or maps
+    // to tear down here: the kernel owns their lifecycle, and `shutdown` on it
+    // cancels every live run. Four separate 30-minute TTL closures used to sit
+    // in this method, each capturing `this`.
+    // Autoloops included: cancelling their run stops the loop, which shuts down
+    // its three persistent agents. One teardown path for every mode.
+    if (this._kernel) await this._kernel.shutdown();
     // Stop all sessions
     for (const [name, managed] of this.sessions) {
       try {
@@ -2394,192 +2275,155 @@ export class SessionManager {
   }
 
   // ─── Council ──────────────────────────────────────────────────────────
+  //
+  // The council's lifecycle belongs to the run kernel now. What used to live
+  // here — a `Map` of live `Council` objects, a 30-minute TTL timer per entry,
+  // and a `councilList` that regex-scraped markdown transcripts to see runs from
+  // other processes — is gone. A council is a one-node workflow; its state is
+  // the run record, which is durable, cross-process, and does not evaporate.
+  //
+  // What still needs a live object is in-flight control: `inject` and `abort`
+  // have to reach the `Council` instance that is running right now. The kernel
+  // publishes it for the duration of the node, and says so honestly — after a
+  // restart the run is readable and resumable, but there is no turn to inject
+  // into.
 
-  private councils = new Map<string, Council>();
-  private councilCleanupTimers = new Map<string, ReturnType<typeof setTimeout>>();
-
-  councilStart(task: string, config: CouncilConfig): CouncilSession {
-    const council = new Council(config, this, this.logger);
-    const initialSession = council.init(task);
-
-    // Store BEFORE running so council_status/abort/inject work while it's active
-    this.councils.set(initialSession.id, council);
-
-    // Run in background — callers poll via councilStatus()
-    council
-      .run()
-      .then(() => {
-        // Keep completed council queryable; schedule cleanup after TTL
-        this._scheduleCouncilCleanup(initialSession.id);
-      })
-      .catch((err) => {
-        this.logger.error(`Council ${initialSession.id} failed:`, err);
-        this._scheduleCouncilCleanup(initialSession.id);
-      });
-
-    return initialSession;
-  }
-
-  private _scheduleCouncilCleanup(id: string): void {
-    // Clear any existing timer before scheduling a new one
-    const existing = this.councilCleanupTimers.get(id);
-    if (existing) clearTimeout(existing);
-
-    const timer = setTimeout(() => {
-      // Abort if still running to prevent orphaned background tasks
-      const council = this.councils.get(id);
-      if (council) {
-        const session = council.getSession();
-        if (session?.status === 'running') {
-          this.logger.info(`Council ${id} still running at TTL expiry — aborting`);
-          council.abort();
-        }
-      }
-      this.councils.delete(id);
-      this.councilCleanupTimers.delete(id);
-    }, RESULT_TTL_MS);
-    // Don't let a pending 30-min cleanup timer keep the process alive or block shutdown.
-    timer.unref();
-    this.councilCleanupTimers.set(id, timer);
-  }
-
-  /** Clear and forget a cleanup timer (used on abort/shutdown so it can't fire late). */
-  private _clearCleanupTimer(map: Map<string, ReturnType<typeof setTimeout>>, id: string): void {
-    const t = map.get(id);
-    if (t) {
-      clearTimeout(t);
-      map.delete(id);
-    }
+  async councilStart(task: string, config: CouncilConfig): Promise<CouncilSession> {
+    const runId = `council-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`;
+    const record = await this.kernel.start(
+      legacyCouncilWorkflow({
+        task,
+        cwd: config.projectDir,
+        agents: config.agents,
+        maxRounds: config.maxRounds,
+        timeoutMs: config.agentTimeoutMs,
+      }),
+      { runId, cwd: config.projectDir },
+    );
+    return toCouncilSession(record);
   }
 
   councilStatus(id: string): CouncilSession | undefined {
-    const council = this.councils.get(id);
-    return council?.getSession();
+    const record = loadRun(id);
+    if (!record || record.workflow !== 'council') return undefined;
+    return toCouncilSession(record);
   }
 
   /**
-   * List all council sessions visible to this process.
+   * Every council this machine has run, newest first.
    *
-   * Includes (a) in-memory sessions managed by this SessionManager and (b)
-   * sessions reconstructed from on-disk transcripts at ~/.openclaw/council-logs/.
-   * The disk path lets the dashboard see runs started in OTHER processes
-   * (e.g. plugin-managed runs visible to a standalone clawo-serve dashboard).
-   * Dedup by id; in-memory wins. Sorted by startTime descending so the newest
-   * appears at the top of the sidebar.
+   * Cross-process visibility used to come from scraping `~/.openclaw/council-logs/*.md`
+   * with a regex and fabricating a stub session with no responses and an empty
+   * config. Runs are stored records now, so the dashboard sees the real thing.
    */
   councilList(): CouncilSession[] {
-    const inMemory = Array.from(this.councils.values())
-      .map((c) => c.getSession())
-      .filter((s): s is CouncilSession => s !== null && s !== undefined);
-    const inMemIds = new Set(inMemory.map((s) => s.id));
-    const fromDisk: CouncilSession[] = listCouncilsFromDisk()
-      .filter((r) => !inMemIds.has(r.id))
-      .map(
-        (r) =>
-          ({
-            id: r.id,
-            task: r.task,
-            status: r.status as CouncilSession['status'],
-            startTime: r.startTime,
-            responses: [],
-            config: { agents: [], maxRounds: 0, projectDir: '' },
-          }) as CouncilSession,
-      );
-    return [...inMemory, ...fromDisk].sort((a, b) => (b.startTime || '').localeCompare(a.startTime || ''));
+    return this.kernel
+      .list({ workflow: 'council' })
+      .map((r) => loadRun(r.runId))
+      .filter((r): r is RunRecord => Boolean(r))
+      .map(toCouncilSession);
   }
 
   /** Used by embedded-server to subscribe to a council's event stream. */
   getCouncil(id: string): Council | undefined {
-    return this.councils.get(id);
+    return this.kernel.handle<Council>(id, LEGACY_NODE);
+  }
+
+  /** The live council for a run, or a clear error about why there isn't one. */
+  private _liveCouncil(id: string): Council {
+    const council = this.kernel.handle<Council>(id, LEGACY_NODE);
+    if (council) return council;
+    const record = loadRun(id);
+    if (!record) throw new Error(`Council '${id}' not found`);
+    throw new Error(
+      `Council '${id}' is ${record.state} and not running in this process — its record is readable, but there is no live round to act on`,
+    );
   }
 
   councilAbort(id: string): void {
-    const council = this.councils.get(id);
-    if (!council) throw new Error(`Council '${id}' not found`);
-    council.abort();
-    this.councils.delete(id);
-    // Drop the orphaned cleanup timer so it doesn't fire later on a deleted council.
-    this._clearCleanupTimer(this.councilCleanupTimers, id);
+    // Cancel the run first so the kernel stops advancing, then abort the engine
+    // so the current round tears down its worktrees.
+    if (!this.kernel.cancel(id) && !loadRun(id)) throw new Error(`Council '${id}' not found`);
+    this.kernel.handle<Council>(id, LEGACY_NODE)?.abort();
   }
 
   councilInject(id: string, message: string): void {
-    const council = this.councils.get(id);
-    if (!council) throw new Error(`Council '${id}' not found`);
-    council.injectMessage(message);
+    this._liveCouncil(id).injectMessage(message);
   }
 
   async councilReview(id: string): Promise<CouncilReviewResult> {
-    const council = this.councils.get(id);
-    if (!council) throw new Error(`Council '${id}' not found`);
-    this._scheduleCouncilCleanup(id); // reset TTL — user is actively reviewing
-    return council.review();
+    return this._councilForPostProcessing(id).review();
   }
 
   async councilAccept(id: string): Promise<CouncilAcceptResult> {
-    const council = this.councils.get(id);
-    if (!council) throw new Error(`Council '${id}' not found`);
-    const result = await council.accept();
-    // Accepted — no longer needed, clean up after short grace period
-    this._scheduleCouncilCleanup(id);
-    return result;
+    return this._councilForPostProcessing(id).accept();
   }
 
   async councilReject(id: string, feedback: string): Promise<CouncilRejectResult> {
-    const council = this.councils.get(id);
-    if (!council) throw new Error(`Council '${id}' not found`);
-    const result = await council.reject(feedback);
-    this._scheduleCouncilCleanup(id); // reset TTL — council may be restarted
-    return result;
+    return this._councilForPostProcessing(id).reject(feedback);
+  }
+
+  /**
+   * A `Council` for review / accept / reject.
+   *
+   * These three act on the git state a finished council left behind — branches,
+   * worktrees, plan.md — so they do not need the instance that produced it, only
+   * one pointed at the same project directory. Reconstructing from the run
+   * record is what makes them work after a restart, which the in-memory map made
+   * impossible.
+   */
+  private _councilForPostProcessing(id: string): Council {
+    const live = this.kernel.handle<Council>(id, LEGACY_NODE);
+    if (live) return live;
+    const record = loadRun(id);
+    if (!record || record.workflow !== 'council') throw new Error(`Council '${id}' not found`);
+    const session = toCouncilSession(record);
+    const council = new Council(session.config, this, this.logger);
+    council.adoptSession(session);
+    return council;
   }
 
   // ─── Fan-out (parallel multi-engine task, no consensus) ────────────────
-
-  private fanouts = new Map<string, Fanout>();
-  private fanoutCleanupTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  //
+  // Also a one-node workflow. This is the mode the old design failed hardest:
+  // a fan-out wrote nothing to disk at all, so 30 minutes after it finished
+  // `fanoutStatus` threw "not found" and the results were simply gone.
 
   /**
    * Start a fan-out: run the task across N engine/model agents in parallel and
    * collect their answers (optional synthesis). Runs in the background; poll
    * with fanoutStatus. Distinct from council — no rounds, votes, or worktrees.
    */
-  fanoutStart(config: FanoutConfig): FanoutSession {
+  async fanoutStart(config: FanoutConfig): Promise<FanoutSession> {
     if (!config.agents?.length) throw new Error('fanoutStart: at least one agent is required');
     const names = config.agents.map((a) => a.name);
     if (new Set(names).size !== names.length) {
       throw new Error('fanoutStart: agent names must be unique (they form session names)');
     }
-    const fanout = new Fanout(config, this, this.logger);
-    const session = fanout.init();
-    this.fanouts.set(session.id, fanout);
-    fanout
-      .run()
-      .catch((err) => this.logger.error(`Fanout ${session.id} failed:`, err))
-      .finally(() => this._scheduleFanoutCleanup(session.id));
-    return session;
+    const runId = `fanout-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`;
+    const record = await this.kernel.start(
+      legacyFanoutWorkflow({
+        task: config.task,
+        cwd: config.projectDir,
+        agents: config.agents,
+        synthesize: config.synthesize,
+        timeoutMs: config.agentTimeoutMs,
+      }),
+      { runId, cwd: config.projectDir },
+    );
+    return toFanoutSession(record);
   }
 
   fanoutStatus(id: string): FanoutSession {
-    const fanout = this.fanouts.get(id);
-    if (!fanout) throw new Error(`Fanout '${id}' not found`);
-    return fanout.getSession();
+    const record = loadRun(id);
+    if (!record) throw new Error(`Fanout '${id}' not found`);
+    return toFanoutSession(record);
   }
 
   fanoutAbort(id: string): void {
-    const fanout = this.fanouts.get(id);
-    if (!fanout) throw new Error(`Fanout '${id}' not found`);
-    fanout.abort();
-    this._scheduleFanoutCleanup(id);
-  }
-
-  private _scheduleFanoutCleanup(id: string): void {
-    const existing = this.fanoutCleanupTimers.get(id);
-    if (existing) clearTimeout(existing);
-    const timer = setTimeout(() => {
-      this.fanouts.delete(id);
-      this.fanoutCleanupTimers.delete(id);
-    }, RESULT_TTL_MS);
-    if (typeof timer.unref === 'function') timer.unref();
-    this.fanoutCleanupTimers.set(id, timer);
+    if (!loadRun(id)) throw new Error(`Fanout '${id}' not found`);
+    this.kernel.cancel(id);
+    this.kernel.handle<Fanout>(id, LEGACY_NODE)?.abort();
   }
 
   // ─── Inbox (cross-session messaging) — delegated to InboxManager ────
@@ -2612,101 +2456,66 @@ export class SessionManager {
   }
 
   // ─── Ultraplan ────────────────────────────────────────────────────────
+  //
+  // A one-node workflow. What is gone: a `Map` of results, and an inline
+  // 30-minute timer that doubled as the timeout — a plan still running when the
+  // TTL fired was rewritten as `error: 'Timed out (TTL expired)'` and then
+  // deleted, so a long plan could be destroyed by its own eviction timer. The
+  // node's `timeoutMs` is the timeout now, and the record does not expire.
 
   private _kernel: RunKernel | null = null;
-  private ultraplans = new Map<string, UltraplanResult>();
-  ultraplanStart(task: string, opts?: { model?: string; cwd?: string; timeout?: number }): UltraplanResult {
-    const id = `ultraplan-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-    const sessionName = `ultraplan-${id}`;
-    const timeout = opts?.timeout || ULTRAPLAN_TIMEOUT_MS;
+  /**
+   * Deferreds resolved by the `autoloop` node once its engine is up, so
+   * `autoloopStart` can return the Planner session name the caller expects
+   * without polling.
+   */
+  private _autoloopReady = new Map<
+    string,
+    { resolve: (v: { plannerSession: string; state: AutoloopState }) => void; reject: (e: Error) => void }
+  >();
+  /** Latest role selection per run, published into the node payload. */
+  private _autoloopSelection = new Map<string, unknown>();
+  /** Custom-engine configs for a resume; never persisted, so never on disk. */
+  private _autoloopResumeConfig = new Map<string, Parameters<SessionManager['_bootAutoloop']>[0]>();
+  /** Per-run checkpoint refreshers, registered by the autoloop node executor. */
+  private _autoloopPublishers = new Map<string, () => void>();
 
-    const result: UltraplanResult = {
-      id,
-      status: 'running',
-      sessionName,
-      startTime: new Date().toISOString(),
-    };
-    this.ultraplans.set(id, result);
-
-    // Run in background
-    this._runUltraplan(id, sessionName, task, opts?.model || 'opus', opts?.cwd || process.cwd(), timeout)
-      .catch((err) => {
-        result.status = 'error';
-        result.error = (err as Error).message;
-        result.endTime = new Date().toISOString();
-      })
-      .finally(() => {
-        // Cleanup session
-        this.stopSession(sessionName).catch((err) => {
-          this.logger.error(`Failed to stop ultraplan session '${sessionName}':`, err);
-        });
-        const ttlTimer = setTimeout(() => {
-          // Mark as error if still running at TTL expiry
-          const plan = this.ultraplans.get(id);
-          if (plan?.status === 'running') {
-            this.logger.info(`Ultraplan ${id} still running at TTL expiry — marking as error`);
-            plan.status = 'error';
-            plan.error = 'Timed out (TTL expired)';
-            plan.endTime = new Date().toISOString();
-          }
-          this.ultraplans.delete(id);
-        }, RESULT_TTL_MS);
-        ttlTimer.unref(); // don't block process exit on a 30-min TTL timer
-      });
-
-    return result;
-  }
-
-  private async _runUltraplan(
-    id: string,
-    sessionName: string,
+  async ultraplanStart(
     task: string,
-    model: string,
-    cwd: string,
-    timeout: number,
-  ): Promise<void> {
-    const result = this.ultraplans.get(id)!;
-
-    await this.startSession({
-      name: sessionName,
-      cwd,
-      model,
-      permissionMode: 'plan',
-      effort: 'max',
-      appendSystemPrompt:
-        'You are in ultraplan mode. Explore the project thoroughly, analyze feasibility, and produce a detailed, actionable plan. Do NOT write code — plan only. Output your final plan in a clear markdown format.',
-    });
-
-    const planPrompt = `# Ultraplan Task\n\n${task}\n\nExplore the project, understand the codebase, analyze feasibility, and produce a comprehensive implementation plan. Take your time (up to 30 minutes). Be thorough.`;
-
-    const sendResult = await this.sendMessage(sessionName, planPrompt, { timeout });
-
-    // Detect error responses: empty output or output that looks like an error message
-    const output = sendResult.output?.trim() || '';
-    const looksLikeError =
-      !output ||
-      /^(Error|not logged in|authentication|auth failed|permission denied)/i.test(output) ||
-      (sendResult.error && sendResult.error.length > 0);
-
-    if (looksLikeError) {
-      result.status = 'error';
-      result.error = sendResult.error || output || 'Empty response from engine';
-    } else {
-      result.plan = output;
-      result.status = 'completed';
-    }
-    result.endTime = new Date().toISOString();
+    opts?: { model?: string; cwd?: string; timeout?: number },
+  ): Promise<UltraplanResult> {
+    const runId = `ultraplan-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`;
+    const cwd = opts?.cwd || process.cwd();
+    const record = await this.kernel.start(
+      legacyUltraplanWorkflow({
+        task,
+        cwd,
+        model: opts?.model || 'opus',
+        timeoutMs: opts?.timeout || ULTRAPLAN_TIMEOUT_MS,
+      }),
+      { runId, cwd },
+    );
+    return toUltraplanResult(record, undefined);
   }
 
   ultraplanStatus(id: string): UltraplanResult | undefined {
-    return this.ultraplans.get(id);
+    const record = loadRun(id);
+    if (!record || record.workflow !== 'ultraplan') return undefined;
+    // Read the plan from the node artifact, not the record's preview: a plan is
+    // routinely longer than the inline cap, and returning a truncated one would
+    // quietly hand back a broken deliverable.
+    return toUltraplanResult(record, readNodeOutput(id, LEGACY_NODE));
   }
 
   // ─── Ultrareview ──────────────────────────────────────────────────────
 
-  private ultrareviews = new Map<string, UltrareviewResult>();
-  private ultrareviewPollers = new Map<string, ReturnType<typeof setInterval>>();
-  ultrareviewStart(
+  // No map and no poller. Ultrareview used to hold its results in a `Map`, then
+  // `setInterval` every 5 seconds asking the fan-out whether it had finished —
+  // which meant its correctness depended on the fan-out's 30-minute eviction
+  // timer: evict first and the poll threw, the interval was cleared, and the
+  // review stayed `running` forever. It is one run now, and there is nothing to
+  // poll.
+  async ultrareviewStart(
     cwd: string,
     opts?: {
       agentCount?: number;
@@ -2715,7 +2524,7 @@ export class SessionManager {
       focus?: string;
       engines?: EngineType[];
     },
-  ): UltrareviewResult {
+  ): Promise<UltrareviewResult> {
     const id = `ultrareview-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
     const agentCount = Math.min(20, Math.max(1, opts?.agentCount || 5));
 
@@ -2726,7 +2535,6 @@ export class SessionManager {
       agentCount,
       startTime: new Date().toISOString(),
     };
-    this.ultrareviews.set(id, result);
 
     // Build reviewer agents
     const reviewAngles = [
@@ -2875,107 +2683,94 @@ export class SessionManager {
       permissionMode: 'plan',
     }));
 
-    let fanoutSession: FanoutSession;
-    try {
-      fanoutSession = this.fanoutStart({
+    const runId = id;
+    await this.kernel.start(
+      legacyFanoutWorkflow({
+        name: 'ultrareview',
         task: reviewInstruction,
-        projectDir: cwd,
+        cwd,
         agents,
         synthesize: true,
-        agentTimeoutMs: maxMinutes * 60 * 1000,
-        maxTurnsPerAgent: 20,
-      });
-    } catch (err) {
-      // Fan-out failed to even start (e.g. validation) — surface it on the
-      // stored result instead of leaving it frozen at 'running'.
-      result.status = 'error';
-      result.error = (err as Error).message;
-      result.endTime = new Date().toISOString();
-      {
-        // unref'd like every other TTL timer here: a 30-minute handle that keeps
-        // the event loop alive would hold a CLI process open for half an hour
-        // after a fan-out that failed to start.
-        const ttlDelete = setTimeout(() => this.ultrareviews.delete(id), RESULT_TTL_MS);
-        ttlDelete.unref();
-      }
-      return result;
-    }
-
-    // `councilId` is kept for the UltrareviewResult contract; it now holds the
-    // fan-out id (an opaque run id used only by ultrareview_status).
-    result.councilId = fanoutSession.id;
-
-    // Poll the fan-out for completion (store ref for shutdown cleanup).
-    const pollInterval = setInterval(() => {
-      try {
-        const status = this.fanoutStatus(fanoutSession.id);
-        if (!status || status.status === 'running') return;
-
-        clearInterval(pollInterval);
-        this.ultrareviewPollers.delete(id);
-        result.status = status.status === 'error' ? 'error' : 'completed';
-        result.endTime = new Date().toISOString();
-
-        // Prefer the synthesis pass; fall back to joining successful results.
-        if (status.synthesis) {
-          result.findings = status.synthesis;
-        } else if (status.results.length > 0) {
-          result.findings = status.results
-            .filter((r) => r.ok)
-            .map((r) => `## ${r.agent}\n\n${r.output}`)
-            .join('\n\n---\n\n');
-        }
-
-        {
-          const ttlDelete = setTimeout(() => this.ultrareviews.delete(id), RESULT_TTL_MS);
-          ttlDelete.unref();
-        }
-      } catch {
-        // Fan-out may have been cleaned up; stop polling.
-        clearInterval(pollInterval);
-        this.ultrareviewPollers.delete(id);
-      }
-    }, ULTRAREVIEW_POLL_INTERVAL_MS);
-    this.ultrareviewPollers.set(id, pollInterval);
-
+        timeoutMs: maxMinutes * 60 * 1000,
+      }),
+      { runId, cwd },
+    );
+    // `councilId` is kept for the UltrareviewResult contract; it holds the run
+    // id, which is also the fan-out id — they are the same run now.
+    result.councilId = runId;
     return result;
   }
 
   ultrareviewStatus(id: string): UltrareviewResult | undefined {
-    return this.ultrareviews.get(id);
+    const record = loadRun(id);
+    if (!record || record.workflow !== 'ultrareview') return undefined;
+    const data = record.nodes[LEGACY_NODE]?.data as FanoutNodeData | undefined;
+    return toUltrareviewResult(record, joinFindings(data));
   }
 
   // ─── Autoloop (three-agent architecture) ───────────────────────────
 
-  private autoloops = new Map<
-    string,
-    {
-      runner: AutoloopRunner;
-      dispatcher: ClaudeAgentDispatcher;
-      workspace: string;
-      ledgerDir: string;
-      pushPolicy: PushPolicy;
-    }
-  >();
-  // runIds currently being torn down by autoloopDelete. Guards against a
-  // concurrent autoloopStart recreating the same id (or autoloopChat using a
-  // dispatcher mid-shutdown) during the async delete window.
-  private _deletingAutoloops = new Set<string>();
-  /**
-   * Runs whose Planner is mid-startup. The delete fence was one-directional:
-   * a start could not race a delete, but a delete COULD race a start — it would
-   * resolve `true`, drop the registry row, and leave the still-starting Planner
-   * session orphaned (no run to stop it, no entry to find it by). Deleting a run
-   * that is still coming up is rejected instead.
-   */
-  private _startingAutoloops = new Set<string>();
+  // No map, no registry file, and no start/delete fences.
+  //
+  // What used to live here: `autoloops`, holding the live runner and dispatcher;
+  // `_deletingAutoloops` and `_startingAutoloops`, two `Set`s that existed only
+  // because a start and a delete could race each other over that map; and four
+  // bespoke helpers over `~/.claw-orchestrator/autoloop-registry.jsonl` for
+  // cross-process listing. A run has exactly one owner now, run ids collide in
+  // the run store rather than in a map that only saw this process, and the
+  // record is the registry.
 
   /**
-   * Start a v2 autoloop in chat mode. Creates the Planner persistent session,
-   * returns the run handle. Coder/Reviewer are NOT started until S3's
-   * spawn_subagents tool is called.
+   * Build and start the Planner/Coder/Reviewer engine for a run.
+   *
+   * This is everything `autoloopStart` used to be except the bookkeeping: the
+   * `autoloops` map and the private JSONL registry are gone, and the kernel owns
+   * the lifecycle. Called from the `autoloop` node executor, which holds the
+   * returned objects for as long as the loop runs.
    */
-  async autoloopStart(opts: {
+  /**
+   * Resolve until the loop stops.
+   *
+   * The runner is an event emitter, not a promise: it settles when a
+   * `terminate` envelope is drained or the phase-error circuit trips. Cancelling
+   * the run stops it too, which is what makes `workflow_cancel` work on an
+   * autoloop.
+   */
+  private _awaitAutoloopExit(handle: AutoloopHandle, signal: { aborted: boolean }): Promise<void> {
+    return new Promise<void>((resolve) => {
+      const runner = handle.runner as unknown as {
+        state: AutoloopState;
+        on(event: string, fn: () => void): void;
+        off(event: string, fn: () => void): void;
+        stop(): void;
+      };
+      const done = (): boolean => runner.state.status === 'terminated' || runner.state.status === 'crashed';
+      if (done()) return resolve();
+      const check = (): void => {
+        if (done() || signal.aborted) {
+          runner.off('state', check);
+          clearInterval(poll);
+          if (signal.aborted) {
+            // Cancelling a run has to tear the loop down the way a stop does.
+            // Without this the three persistent agents keep running and their
+            // session names stay claimed, so the run cannot be restarted — the
+            // failure looks like "session name already in use" a long way from
+            // its cause.
+            runner.stop();
+            void handle.dispatcher.shutdown('cancelled').catch(() => undefined);
+          }
+          resolve();
+        }
+      };
+      runner.on('state', check);
+      // The runner emits on state changes, but a cancel arrives out of band and
+      // a crashed loop may emit nothing at all, so poll as the backstop.
+      const poll = setInterval(check, 1000);
+      if (typeof poll.unref === 'function') poll.unref();
+    });
+  }
+
+  private async _bootAutoloop(opts: {
     runId: string;
     workspace: string;
     plannerPromptPath?: string;
@@ -2989,13 +2784,12 @@ export class SessionManager {
     reviewerModel?: string;
     reviewerCustomEngine?: CustomEngineConfig;
     sendTimeoutMs?: number;
-  }): Promise<{ runId: string; plannerSession: string; state: AutoloopState }> {
-    if (this.autoloops.has(opts.runId)) {
-      throw new Error(`Autoloop with id '${opts.runId}' already exists`);
-    }
-    if (this._deletingAutoloops.has(opts.runId)) {
-      throw new Error(`Autoloop with id '${opts.runId}' is being deleted`);
-    }
+  }): Promise<{
+    runner: AutoloopRunner;
+    dispatcher: ClaudeAgentDispatcher;
+    ledgerDir: string;
+    pushPolicy: PushPolicy;
+  }> {
     const plannerEngine = validateAutoloopRole('planner', opts.plannerEngine, opts.plannerCustomEngine);
     const coderEngine = validateAutoloopRole('coder', opts.coderEngine, opts.coderCustomEngine);
     const reviewerEngine = validateAutoloopRole('reviewer', opts.reviewerEngine, opts.reviewerCustomEngine);
@@ -3038,23 +2832,11 @@ export class SessionManager {
         runnerRef?.markSubagentsSpawned();
       },
       onRoleSelectionChanged: async (selection) => {
-        try {
-          upsertAutoloopRegistry(DEFAULT_AUTOLOOP_REGISTRY, {
-            run_id: runId,
-            workspace: opts.workspace,
-            ledger_dir: ledgerDir,
-            started_at: runnerRef?.state.started_at ?? new Date().toISOString(),
-            planner_session: dispatcherRef?.sessionNames.planner ?? `autoloop-${runId}-planner`,
-            planner_engine: plannerEngine,
-            planner_model: opts.plannerModel,
-            coder_engine: selection.coder.engine,
-            coder_model: selection.coder.model,
-            reviewer_engine: selection.reviewer.engine,
-            reviewer_model: selection.reviewer.model,
-          });
-        } catch (err) {
-          this.logger.warn?.(`[autoloop/${runId}] registry update after spawn failed: ${(err as Error).message}`);
-        }
+        // Used to write a row into a private append-only registry file. The run
+        // record is the registry now, so this just refreshes the published
+        // payload the `autoloop_status` projection reads.
+        this._autoloopSelection.set(runId, selection);
+        this._autoloopPublishers.get(runId)?.();
       },
     };
     const dispatcher = new ClaudeAgentDispatcher(dispatcherConfig);
@@ -3087,18 +2869,9 @@ export class SessionManager {
       dispatcher,
     });
     runnerRef = runner;
-    this.autoloops.set(opts.runId, {
-      runner,
-      dispatcher,
-      workspace: opts.workspace,
-      ledgerDir,
-      pushPolicy,
-    });
-    this._startingAutoloops.add(opts.runId);
     try {
       await runner.start();
     } catch (err) {
-      this.autoloops.delete(opts.runId);
       try {
         await dispatcher.shutdown('start-failed', { purge: true });
       } catch (cleanupErr) {
@@ -3106,34 +2879,73 @@ export class SessionManager {
       }
       runner.stop();
       throw err;
-    } finally {
-      this._startingAutoloops.delete(opts.runId);
     }
-    // Record into the cross-process registry so the dashboard / another
-    // SessionManager instance can list this run even after it ends. Best
-    // effort — registry failure should not block the run.
+    return { runner, dispatcher, ledgerDir, pushPolicy };
+  }
+
+  /**
+   * Start a v2 autoloop in chat mode. Creates the Planner persistent session,
+   * returns the run handle. Coder/Reviewer are NOT started until S3's
+   * spawn_subagents tool is called.
+   *
+   * The run is a kernel run whose single `autoloop` node holds the loop for as
+   * long as it lives. That is what replaced the `autoloops` map, the
+   * `autoloop-registry.jsonl` file with its four bespoke read/write helpers, and
+   * the two `Set`s that fenced start against delete: a run has one owner now,
+   * and `runId` collisions are refused by the run store rather than by a map
+   * lookup that only saw this process.
+   */
+  async autoloopStart(opts: {
+    runId: string;
+    workspace: string;
+    plannerPromptPath?: string;
+    plannerEngine?: EngineType;
+    plannerModel?: string;
+    plannerCustomEngine?: CustomEngineConfig;
+    coderEngine?: EngineType;
+    coderModel?: string;
+    coderCustomEngine?: CustomEngineConfig;
+    reviewerEngine?: EngineType;
+    reviewerModel?: string;
+    reviewerCustomEngine?: CustomEngineConfig;
+    sendTimeoutMs?: number;
+  }): Promise<{ runId: string; plannerSession: string; state: AutoloopState }> {
+    // Fail before the run directory exists, so a rejected start leaves nothing.
+    validateAutoloopRole('planner', opts.plannerEngine, opts.plannerCustomEngine);
+    validateAutoloopRole('coder', opts.coderEngine, opts.coderCustomEngine);
+    validateAutoloopRole('reviewer', opts.reviewerEngine, opts.reviewerCustomEngine);
+    for (const role of ['planner', 'coder', 'reviewer'] as const) {
+      const sessionName = `autoloop-${opts.runId}-${role}`;
+      if (this.sessions.has(sessionName) || this._pendingSessions.has(sessionName)) {
+        throw new Error(`Autoloop session name '${sessionName}' is already in use`);
+      }
+    }
+
+    const ready = new Promise<{ plannerSession: string; state: AutoloopState }>((resolve, reject) => {
+      this._autoloopReady.set(opts.runId, { resolve, reject });
+    });
+    await this.kernel.start(
+      {
+        name: 'autoloop',
+        cwd: opts.workspace,
+        nodes: [
+          { id: LEGACY_NODE, kind: 'autoloop', workspace: opts.workspace, config: opts as Record<string, unknown> },
+        ],
+      },
+      { runId: opts.runId, cwd: opts.workspace },
+    );
     try {
-      upsertAutoloopRegistry(DEFAULT_AUTOLOOP_REGISTRY, {
-        run_id: opts.runId,
-        workspace: opts.workspace,
-        ledger_dir: ledgerDir,
-        started_at: runner.state.started_at,
-        planner_session: dispatcher.sessionNames.planner,
-        planner_engine: plannerEngine,
-        planner_model: opts.plannerModel,
-        coder_engine: coderEngine,
-        coder_model: opts.coderModel,
-        reviewer_engine: reviewerEngine,
-        reviewer_model: opts.reviewerModel,
-      });
+      const { plannerSession, state } = await ready;
+      return { runId: opts.runId, plannerSession, state };
     } catch (err) {
-      this.logger.warn?.(`[autoloop/${runId}] registry append failed: ${(err as Error).message}`);
+      // A start that never came up must not leave the id claimed. The store
+      // refuses to reuse a run id, so without this a failed Planner startup
+      // would make that id permanently unusable.
+      this.kernel.delete(opts.runId);
+      throw err;
+    } finally {
+      this._autoloopReady.delete(opts.runId);
     }
-    return {
-      runId: opts.runId,
-      plannerSession: dispatcher.sessionNames.planner,
-      state: runner.state,
-    };
   }
 
   /**
@@ -3141,8 +2953,7 @@ export class SessionManager {
    * natural-language reply.
    */
   async autoloopChat(runId: string, text: string): Promise<{ reply: string }> {
-    const ctx = this.autoloops.get(runId);
-    if (!ctx || this._deletingAutoloops.has(runId)) throw new Error(`Autoloop run '${runId}' not found`);
+    const ctx = this._liveAutoloop(runId);
     let reply = '';
     const onReply = (...args: unknown[]) => {
       const t = args[0];
@@ -3157,79 +2968,64 @@ export class SessionManager {
     return { reply };
   }
 
+  /**
+   * The running loop for a run, or a clear reason why there is not one.
+   *
+   * Chatting with a Planner needs the live dispatcher; a run that finished or
+   * belongs to another process has a readable record and no one to talk to.
+   */
+  private _liveAutoloop(runId: string): AutoloopHandle & {
+    runner: AutoloopRunner;
+    dispatcher: ClaudeAgentDispatcher;
+  } {
+    const handle = this.kernel.handle<AutoloopHandle & { runner: AutoloopRunner; dispatcher: ClaudeAgentDispatcher }>(
+      runId,
+      LEGACY_NODE,
+    );
+    if (handle) return handle;
+    const record = loadRun(runId);
+    if (!record || record.workflow !== 'autoloop') throw new Error(`Autoloop run '${runId}' not found`);
+    throw new Error(
+      `Autoloop run '${runId}' is ${record.state} and not running in this process — resume it before chatting`,
+    );
+  }
+
   autoloopStatus(runId: string): AutoloopState | undefined {
-    const live = this.autoloops.get(runId)?.runner.state;
+    const live = this.kernel.handle<AutoloopHandle>(runId, LEGACY_NODE)?.runner.state;
     if (live) return live;
-    // Fallback: rebuild a terminated-state shape from the cross-process
-    // registry so the dashboard can open historical runs (read chat
-    // history, view plan.md, push_log) instead of hanging on a 404 forever.
-    const entry = listAutoloopsFromRegistry().find((e) => e.run_id === runId);
-    if (!entry) return undefined;
-    return {
-      run_id: entry.run_id,
-      status: 'terminated',
-      iter: 0,
-      subagents_spawned: false,
-      started_at: entry.started_at,
-      workspace: entry.workspace,
-      ledger_dir: entry.ledger_dir,
-      push_log_count: 0,
-      status_reason: 'reconstructed from registry — not in current process memory',
-      consecutive_phase_errors: 0,
-      recent_phase_errors: [],
-      metric_history: [],
-      last_activity_at: 0,
-    };
+    // Not running here. The record still holds the last state the loop
+    // published, so a historical run opens with its real iteration count and
+    // workspace instead of the all-zero stub the registry fallback produced.
+    const record = loadRun(runId);
+    if (!record || record.workflow !== 'autoloop') return undefined;
+    return autoloopStateFromRecord(record);
   }
 
   autoloopList(): AutoloopState[] {
-    const inMemory = Array.from(this.autoloops.values()).map((c) => c.runner.state);
-    const inMemIds = new Set(inMemory.map((s) => s.run_id));
-    const fromDisk: AutoloopState[] = listAutoloopsFromRegistry()
-      .filter((e) => !inMemIds.has(e.run_id))
-      .map(
-        (e): AutoloopState => ({
-          run_id: e.run_id,
-          status: 'terminated',
-          iter: 0,
-          subagents_spawned: false,
-          started_at: e.started_at,
-          workspace: e.workspace,
-          ledger_dir: e.ledger_dir,
-          push_log_count: 0,
-          status_reason: 'reconstructed from registry — not in current process memory',
-          consecutive_phase_errors: 0,
-          recent_phase_errors: [],
-          metric_history: [],
-          last_activity_at: 0,
-        }),
-      );
-    return [...inMemory, ...fromDisk].sort((a, b) => (b.started_at || '').localeCompare(a.started_at || ''));
+    return this.kernel
+      .list({ workflow: 'autoloop' })
+      .map((r) => this.autoloopStatus(r.runId))
+      .filter((s): s is AutoloopState => Boolean(s));
   }
 
-  /**
-   * Reset a single subagent on a v2 run. Useful when an agent has drifted
-   * (chat memory implies hallucination, repeated rejects, or context bloat).
-   * Coder/Reviewer: safe to reset; the next directive/review_request will
-   * re-prime from system prompt + ledger artifacts.
-   * Planner: requires force=true and discards user-conversation context.
-   */
   async autoloopResetAgent(
     runId: string,
     agent: 'planner' | 'coder' | 'reviewer',
     opts: { force?: boolean; eagerRestart?: boolean } = {},
   ): Promise<boolean> {
-    const ctx = this.autoloops.get(runId);
+    const ctx = this.kernel.handle<AutoloopHandle & { dispatcher: ClaudeAgentDispatcher }>(runId, LEGACY_NODE);
     if (!ctx) return false;
     await ctx.dispatcher.resetAgent(agent, opts);
     return true;
   }
 
   async autoloopStop(runId: string, reason = 'user-stop'): Promise<boolean> {
-    const ctx = this.autoloops.get(runId);
+    const ctx = this.kernel.handle<AutoloopHandle & { runner: AutoloopRunner }>(runId, LEGACY_NODE);
     if (!ctx) return false;
+    // Soft stop: a terminate envelope, so the three persistent agents shut down
+    // and the persisted sessions survive for a later resume. The node's exit
+    // watcher sees the status change and lets the run finish on its own.
     await ctx.runner.send(AutoloopMsg.terminate(ctx.runner.state.iter, { reason }));
-    this.autoloops.delete(runId);
     return true;
   }
 
@@ -3258,65 +3054,85 @@ export class SessionManager {
       reviewerCustomEngine?: CustomEngineConfig;
     } = {},
   ): Promise<AutoloopState> {
-    const existing = this.autoloops.get(runId);
-    if (existing) return existing.runner.state;
+    const live = this.kernel.handle<AutoloopHandle>(runId, LEGACY_NODE);
+    if (live) return live.runner.state;
 
-    const entry = listAutoloopsFromRegistry().find((e) => e.run_id === runId);
-    if (!entry) throw new Error(`Autoloop run '${runId}' not found in registry`);
+    const record = loadRun(runId);
+    if (!record || record.workflow !== 'autoloop') throw new Error(`Autoloop run '${runId}' not found`);
+    const config = (record.spec.nodes.find((n) => n.id === LEGACY_NODE) as { config?: Record<string, unknown> })
+      ?.config;
+    if (!config) throw new Error(`Autoloop run '${runId}' has no stored configuration to restart from`);
 
-    // Validate the full restart configuration before touching the registry.
-    // Old rows omit these fields and intentionally recover the legacy Claude defaults.
-    const plannerEngine = validateAutoloopRole('planner', entry.planner_engine, opts.plannerCustomEngine);
-    const coderEngine = validateAutoloopRole('coder', entry.coder_engine, opts.coderCustomEngine);
-    const reviewerEngine = validateAutoloopRole('reviewer', entry.reviewer_engine, opts.reviewerCustomEngine);
+    // Validate the full restart configuration before touching anything. The
+    // spec is the immutable record of how the run was started, so a resume
+    // reproduces it exactly instead of reconstructing it from a registry row
+    // whose older versions omitted the engine fields entirely.
+    validateAutoloopRole('planner', config.plannerEngine as EngineType | undefined, opts.plannerCustomEngine);
+    validateAutoloopRole('coder', config.coderEngine as EngineType | undefined, opts.coderCustomEngine);
+    validateAutoloopRole('reviewer', config.reviewerEngine as EngineType | undefined, opts.reviewerCustomEngine);
 
-    // The registry is append-only and newest entry wins. Leave the prior row
-    // untouched while starting so a transient failure cannot erase or restore
-    // stale cross-process state. A successful start appends the replacement.
-    return (
-      await this.autoloopStart({
-        runId: entry.run_id,
-        workspace: entry.workspace,
-        plannerEngine,
-        plannerModel: entry.planner_model,
-        plannerCustomEngine: opts.plannerCustomEngine,
-        coderEngine,
-        coderModel: entry.coder_model,
-        coderCustomEngine: opts.coderCustomEngine,
-        reviewerEngine,
-        reviewerModel: entry.reviewer_model,
-        reviewerCustomEngine: opts.reviewerCustomEngine,
-      })
-    ).state;
+    // Custom-engine configs are never persisted (they can carry secrets), so a
+    // resume must be given them again by the caller.
+    const resumed = await this._resumeAutoloopRun(runId, {
+      ...config,
+      plannerCustomEngine: opts.plannerCustomEngine,
+      coderCustomEngine: opts.coderCustomEngine,
+      reviewerCustomEngine: opts.reviewerCustomEngine,
+    } as Parameters<SessionManager['_bootAutoloop']>[0]);
+    return resumed;
+  }
+
+  /** Re-attach a stored autoloop run: same run id, same spec, fresh engine. */
+  private async _resumeAutoloopRun(
+    runId: string,
+    config: Parameters<SessionManager['_bootAutoloop']>[0],
+  ): Promise<AutoloopState> {
+    const ready = new Promise<{ plannerSession: string; state: AutoloopState }>((resolve, reject) => {
+      this._autoloopReady.set(runId, { resolve, reject });
+    });
+    // Stash the custom-engine configs the spec could not carry, so the node's
+    // boot call sees them without them ever being written to disk.
+    this._autoloopResumeConfig.set(runId, config);
+    try {
+      // `restart: true` because an autoloop resume means "bring the loop back
+      // up", not "carry on from where the kernel left off" — the run is
+      // normally terminated when someone resumes it.
+      const record = await this.kernel.resume(runId, { restart: true });
+      // Race readiness against the run ending: a node that fails before it
+      // publishes would otherwise leave this awaiting a signal that is never
+      // coming.
+      const finished = this.kernel
+        .wait(record.runId)
+        .then((r) => Promise.reject(new Error(r?.error ?? `autoloop run '${runId}' ended before it came up`)));
+      const { state } = await Promise.race([ready, finished]);
+      return state;
+    } finally {
+      this._autoloopReady.delete(runId);
+      this._autoloopResumeConfig.delete(runId);
+    }
   }
 
   /**
-   * Delete a run from the system: stop the runner if it's still alive in this
-   * process, then scrub the row from the cross-process registry so it stops
-   * appearing in `autoloop_list` / the dashboard. The ledger directory on disk
-   * is NOT removed — postmortem artifacts (chat history, push log, plan.md)
-   * are kept for the user to inspect or `rm` manually.
+   * Delete a run: really gone, not paused.
    *
-   * Returns true if anything was removed (in-memory entry OR registry row).
+   * The two `Set` fences this used to open with — one refusing a delete while a
+   * start was in flight, one blocking a concurrent start during the async
+   * teardown — protected a shared `Map` that no longer exists. Cancelling the
+   * run is what stops it, and the run store refuses to recreate a live id.
    */
   async autoloopDelete(runId: string): Promise<boolean> {
     // Refuse to tear down a run that is still coming up: its Planner session is
-    // mid-startSession, so deleting now would drop the registry row and orphan a
-    // session that finishes starting a moment later.
-    if (this._startingAutoloops.has(runId)) {
+    // mid-startSession, so deleting now would drop the run and orphan a session
+    // that finishes starting a moment later. `_autoloopReady` holds an entry for
+    // exactly the window between "run created" and "engine up", which is the
+    // window that used to need a dedicated `_startingAutoloops` Set.
+    if (this._autoloopReady.has(runId)) {
       throw new Error(`Autoloop with id '${runId}' is still starting`);
     }
-    // Fence the async teardown so a concurrent start/chat can't race on this id.
-    this._deletingAutoloops.add(runId);
-    try {
-      return await this._autoloopDeleteInner(runId);
-    } finally {
-      this._deletingAutoloops.delete(runId);
-    }
-  }
-
-  private async _autoloopDeleteInner(runId: string): Promise<boolean> {
-    const ctx = this.autoloops.get(runId);
+    const ctx = this.kernel.handle<AutoloopHandle & { runner: AutoloopRunner; dispatcher: ClaudeAgentDispatcher }>(
+      runId,
+      LEGACY_NODE,
+    );
     let touched = false;
     if (ctx) {
       // Delete = "really gone". Call dispatcher.shutdown directly with
@@ -3336,7 +3152,7 @@ export class SessionManager {
       } catch {
         /* runner may already be stopped */
       }
-      this.autoloops.delete(runId);
+      this.kernel.cancel(runId);
       touched = true;
     } else {
       // Disk-only run: ensure any leftover persistedSessions entry for the
@@ -3351,20 +3167,24 @@ export class SessionManager {
       this.persistedSessions.delete(`autoloop-${runId}-reviewer`);
       savePersistedSessions(this.persistedSessions, this.logger);
     }
-    try {
-      const removed = removeAutoloopFromRegistry(DEFAULT_AUTOLOOP_REGISTRY, runId);
-      if (removed > 0) touched = true;
-    } catch (err) {
-      this.logger.warn?.(`[autoloop/${runId}] registry scrub failed: ${(err as Error).message}`);
+    // No registry to scrub: the run record IS the registry, and removing it is
+    // the delete. The ledger directory under tasks/<runId>/ is deliberately left
+    // alone — postmortem artifacts (chat history, push log, plan.md) outlive the
+    // run, exactly as before.
+    if (loadRun(runId)) {
+      this.kernel.delete(runId);
+      touched = true;
     }
     return touched;
   }
 
-  /** Used by embedded-server to attach SSE listeners. */
+  /** Used by embedded-server to attach SSE listeners. Live runs only. */
   getAutoloop(runId: string): { runner: AutoloopRunner; dispatcher: ClaudeAgentDispatcher } | undefined {
-    const ctx = this.autoloops.get(runId);
-    if (!ctx) return undefined;
-    return { runner: ctx.runner, dispatcher: ctx.dispatcher };
+    const handle = this.kernel.handle<{ runner: AutoloopRunner; dispatcher: ClaudeAgentDispatcher }>(
+      runId,
+      LEGACY_NODE,
+    );
+    return handle ? { runner: handle.runner, dispatcher: handle.dispatcher } : undefined;
   }
 
   private _cleanupIdleSessions(): void {

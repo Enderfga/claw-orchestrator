@@ -416,6 +416,18 @@ export class Council extends EventEmitter {
     this.logger = logger || createConsoleLogger('Council');
   }
 
+  /**
+   * Adopt a session that was reconstructed from the durable run record.
+   *
+   * `review` / `accept` / `reject` act on the git state a finished council left
+   * behind — branches, worktrees, plan.md — not on live agents, so they work
+   * from a rebuilt session. This is what lets them run after a restart, which
+   * the in-memory registry made impossible.
+   */
+  adoptSession(session: CouncilSession): void {
+    this._session = session;
+  }
+
   getSession(): CouncilSession | undefined {
     return this._session ?? undefined;
   }

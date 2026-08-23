@@ -4,17 +4,32 @@ A durable executor for workflow runs: what is running, what happens when a step
 fails, when to stop, and — the part none of the previous state machines had — how
 to come back after the process dies.
 
-## What this is not (yet)
+## Every mode runs on it
 
-It is not the single runtime every mode goes through. Council, fanout, autoloop
-and ultraapp still own their own lifecycles, maps and cleanup; the `council` and
-`fanout` nodes call those runners from inside a kernel run rather than replacing
-them. A run started through `council_start` is not a kernel run and gets none of
-the durability described below.
+`council_start`, `fanout_start`, `ultraplan_start`, `ultrareview_start` and
+`autoloop_start` all create a kernel run. Their tool signatures are unchanged and
+their result shapes are unchanged — `CouncilSession`, `FanoutSession`,
+`UltraplanResult`, `UltrareviewResult`, `AutoloopState` are now _projected_ from
+the run record rather than held in a map.
 
-Collapsing those lifecycles is what this layer exists to make possible. Until it
-happens, the accurate description is "a durable runtime that the modes can be
-moved onto", not "the runtime the modes use".
+The engines that do the work — `Council`, `Fanout`, the autoloop
+planner/coder/reviewer dispatcher — are untouched. What they lost is ownership of
+a lifecycle. Deleted along the way:
+
+| Gone               | Was                                                                              |
+| ------------------ | -------------------------------------------------------------------------------- |
+| 5 result maps      | `councils`, `fanouts`, `ultraplans`, `ultrareviews`, `autoloops`                 |
+| 4 eviction timers  | a 30-minute TTL per mode, three of them separate implementations                 |
+| 1 poller           | ultrareview asking the fan-out every 5s whether it had finished                  |
+| 2 fences           | `_startingAutoloops` / `_deletingAutoloops`, guarding a shared map               |
+| 2 disk enumerators | a regex over council markdown transcripts; a bespoke JSONL registry for autoloop |
+
+Concretely, three bugs went with them: a fan-out's results vanished 30 minutes
+after it finished; an ultraplan still running when its TTL fired was rewritten as
+`error: 'Timed out (TTL expired)'` and deleted, so a long plan could be destroyed
+by its own eviction timer; and ultrareview's correctness depended on the
+fan-out's TTL — evict first and its poll threw, the interval was cleared, and the
+review stayed `running` forever.
 
 ## Why this exists
 

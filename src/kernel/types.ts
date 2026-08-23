@@ -37,7 +37,7 @@ export type NodeState = 'pending' | 'running' | 'awaiting_human' | 'succeeded' |
 
 // ─── Node specs ─────────────────────────────────────────────────────────────
 
-export type NodeKind = 'agent' | 'fanout' | 'council' | 'verifier' | 'human_gate' | 'router' | 'subflow';
+export type NodeKind = 'agent' | 'fanout' | 'council' | 'verifier' | 'human_gate' | 'router' | 'subflow' | 'autoloop';
 
 export interface NodeBase {
   id: string;
@@ -122,7 +122,29 @@ export interface SubflowNode extends NodeBase {
   workflow: string | WorkflowSpec;
 }
 
-export type NodeSpec = AgentNode | FanoutNode | CouncilNode | VerifierNode | HumanGateNode | RouterNode | SubflowNode;
+/**
+ * A long-lived Planner / Coder / Reviewer loop.
+ *
+ * Unlike the other node kinds this one runs for as long as the user keeps
+ * talking to it — it settles when the loop terminates, not when a turn returns.
+ * The spec carries only JSON, because it is checkpointed; the executor that
+ * knows how to build a dispatcher is registered by SessionManager.
+ */
+export interface AutoloopNode extends NodeBase {
+  kind: 'autoloop';
+  workspace: string;
+  config: Record<string, unknown>;
+}
+
+export type NodeSpec =
+  | AgentNode
+  | FanoutNode
+  | CouncilNode
+  | VerifierNode
+  | HumanGateNode
+  | RouterNode
+  | SubflowNode
+  | AutoloopNode;
 
 // ─── Workflow spec ──────────────────────────────────────────────────────────
 
@@ -159,6 +181,16 @@ export interface NodeRecord {
   evidenceId?: string;
   /** Subflow nodes: the child run this node started, so it stays addressable. */
   childRunId?: string;
+  /**
+   * Mode-specific payload, checkpointed with the run.
+   *
+   * This is what lets the legacy per-mode shapes (`CouncilSession`,
+   * `FanoutSession`, …) be projected from a run instead of held in their own
+   * in-memory maps. It has to be durable for the same reason the rest of the
+   * record does: a fan-out's results used to evaporate 30 minutes after it
+   * finished, because the only copy was in a `Map`.
+   */
+  data?: unknown;
 }
 
 /** Advisory only. A vote is recorded, never used as a termination condition. */

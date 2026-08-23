@@ -231,6 +231,18 @@ app to a missing browser. Set `CLAWO_ULTRAAPP_VISUAL_GATE=strict` to make a
 failed capture block the deploy. Chrome is resolved from `CLAWO_CHROME_BIN`, then
 the usual macOS app paths, then `PATH`.
 
+## Durable build queue (6.0.0)
+
+The build queue is persisted to `<store>/build-queue.json` and restored on
+startup. Its own comment used to say a restart mid-build meant "the build is
+marked failed and the user can rerun"; in practice nothing was marked — the
+pending list vanished along with any queued build the user was waiting on, with
+no record it had been asked for.
+
+A build that was in flight when the process died is **re-queued, not resumed**,
+and goes to the front: each build starts from a fresh council worktree, so
+re-running is safe and continuing a half-built tree is not.
+
 ## Known limitations
 
 - The done-mode patcher loop occasionally hangs between

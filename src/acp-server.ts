@@ -63,16 +63,16 @@ interface SessionManagerLike {
   getStatus?(name: string): { stats: { contextPercent?: number } };
   getCost?(name: string): { totalUsd?: number };
 
-  councilStart?(task: string, config: CouncilConfig): CouncilSession;
+  councilStart?(task: string, config: CouncilConfig): Promise<CouncilSession>;
   councilStatus?(id: string): CouncilSession | undefined;
   councilAbort?(id: string): void;
   councilAccept?(id: string): Promise<unknown>;
   councilReject?(id: string, feedback: string): Promise<unknown>;
   getCouncil?(id: string): { on(event: string, cb: (e: CouncilEvent) => void): unknown } | undefined;
 
-  ultraplanStart?(task: string, opts?: { model?: string; cwd?: string; timeout?: number }): { id: string };
+  ultraplanStart?(task: string, opts?: { model?: string; cwd?: string; timeout?: number }): Promise<{ id: string }>;
   ultraplanStatus?(id: string): OrchestrationSnapshot | undefined;
-  ultrareviewStart?(cwd: string, opts?: { focus?: string; agentCount?: number }): { id: string };
+  ultrareviewStart?(cwd: string, opts?: { focus?: string; agentCount?: number }): Promise<{ id: string }>;
   ultrareviewStatus?(id: string): OrchestrationSnapshot | undefined;
 }
 
@@ -606,7 +606,7 @@ async function runCouncilMode(
 
   let council: CouncilSession;
   try {
-    council = manager.councilStart(task, {
+    council = await manager.councilStart(task, {
       name: 'ACP Council',
       agents: ACP_COUNCIL_AGENTS.map((a) => ({ ...a, permissionMode: state.permissionMode })),
       maxRounds: ACP_COUNCIL_MAX_ROUNDS,
@@ -748,8 +748,8 @@ async function runPollingMode(
 ): Promise<{ stopReason: 'end_turn' | 'cancelled' | 'refusal' }> {
   const isPlan = state.modeId === 'ultraplan';
   const started = isPlan
-    ? manager.ultraplanStart?.(task, { cwd: state.cwd, model: state.model })
-    : manager.ultrareviewStart?.(state.cwd, { focus: task });
+    ? await manager.ultraplanStart?.(task, { cwd: state.cwd, model: state.model })
+    : await manager.ultrareviewStart?.(state.cwd, { focus: task });
   if (!started) throw acp.RequestError.internalError(`Mode '${state.modeId}' is not available on this manager`);
 
   const readStatus = () => (isPlan ? manager.ultraplanStatus?.(started.id) : manager.ultrareviewStatus?.(started.id));

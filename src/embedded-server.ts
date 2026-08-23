@@ -690,7 +690,7 @@ export class EmbeddedServer {
           json(400, { ok: false, error: 'projectDir failed sanitization' });
           return;
         }
-        const session = this.manager.councilStart(task, {
+        const session = await this.manager.councilStart(task, {
           projectDir: safeProjectDir,
           agents: [
             {
@@ -1137,13 +1137,13 @@ export class EmbeddedServer {
         return;
       }
 
-      // ─── Autoloop — delete a run from the registry ────────────
+      // ─── Autoloop — delete a run ──────────────────────────────
       //
       // POST /autoloop/<run_id>/delete
       //
-      // Stops the runner if still alive in this process, then scrubs the
-      // row from ~/.claw-orchestrator/autoloop-registry.jsonl. Ledger files
-      // under <workspace>/tasks/<run_id>/ are kept on disk for postmortem.
+      // Stops the loop if still alive in this process, then removes the run
+      // record. Ledger files under <workspace>/tasks/<run_id>/ are kept on disk
+      // for postmortem — deleting the run does not delete its artifacts.
       const v2DeleteMatch = path.match(/^\/autoloop\/([^/]+)\/delete$/);
       if (v2DeleteMatch) {
         const id = v2DeleteMatch[1];

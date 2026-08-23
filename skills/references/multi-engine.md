@@ -39,6 +39,7 @@ Default engine. Long-running subprocess with streaming JSON I/O. Tested with Cla
 - Fork subagent (`forkSubagent`), tool search (`enableToolSearch`), OpenTelemetry logging toggles (`otelLogUserPrompts`, `otelLogRawApiBodies`), `xhigh` effort tier (Opus 4.7), and `stats.pluginErrors` capture — see [CLI 2.1.121 options in SKILL.md](../SKILL.md) and [tools.md](./tools.md)
 
 > **Behavior changes from upstream Claude CLI 2.1.121** (worth knowing if you set permission rules):
+>
 > - `--agent` / `--print` now enforce agent frontmatter `permissionMode`, `tools`, `disallowedTools` (was advisory). Affects `council` agent personas.
 > - `Bash(find:*)` permission rule no longer auto-approves `find -exec` or `find -delete`. Add explicit rules if you depend on these.
 > - `--dangerously-skip-permissions` also skips prompts for `.claude/skills/` directory. Treat with care.
@@ -47,7 +48,7 @@ Default engine. Long-running subprocess with streaming JSON I/O. Tested with Cla
 ```typescript
 await manager.startSession({
   name: 'claude-task',
-  engine: 'claude',       // default, can omit
+  engine: 'claude', // default, can omit
   model: 'opus',
   cwd: '/project',
 });
@@ -140,6 +141,7 @@ in print mode. Verified against `agy` **1.1.13**.
   `gemini-3.1-pro has no "medium" effort (available: low, high)`. The adapter
   passes the requested effort through rather than substituting a tier the caller
   did not ask for; run `agy models` to see the tiers a slug actually exposes.
+
 - Permission modes: `bypassPermissions` → `--dangerously-skip-permissions`,
   `default` → `--sandbox` (terminal-restricted), and
   `sandboxMode: 'read-only'` → `--mode plan` (takes precedence). Other modes
@@ -325,12 +327,12 @@ is not the answer on every engine. See "Stats & Monitoring" in `sessions.md`.
 
 Team tools (`team_list`, `team_send`) operate on the same virtual-team layer for **every** engine: the "team" is the set of all active sessions managed by SessionManager.
 
-| Engine | `team_list` | `team_send` |
-|--------|------------|-------------|
-| Claude | Lists other active SessionManager sessions | Routes via cross-session inbox |
-| Codex | Lists other active SessionManager sessions | Routes via cross-session inbox |
+| Engine      | `team_list`                                | `team_send`                    |
+| ----------- | ------------------------------------------ | ------------------------------ |
+| Claude      | Lists other active SessionManager sessions | Routes via cross-session inbox |
+| Codex       | Lists other active SessionManager sessions | Routes via cross-session inbox |
 | Antigravity | Lists other active SessionManager sessions | Routes via cross-session inbox |
-| Cursor | Lists other active SessionManager sessions | Routes via cross-session inbox |
+| Cursor      | Lists other active SessionManager sessions | Routes via cross-session inbox |
 
 Messages are delivered via the inbox system — idle sessions receive immediately, busy sessions queue for later delivery.
 
@@ -349,12 +351,13 @@ If OpenClaw gateway is running, everything is automatic:
 await manager.startSession({
   name: 'task',
   engine: 'claude',
-  model: 'openclaw',        // gateway routes to your configured model
+  model: 'openclaw', // gateway routes to your configured model
   cwd: '/project',
 });
 ```
 
 What happens behind the scenes:
+
 1. Plugin reads `~/.openclaw/openclaw.json` for gateway port + auth
 2. Starts a local proxy server (random port, auto-managed)
 3. Claude Code CLI sends Anthropic-format requests → proxy converts to OpenAI → gateway → any model
@@ -363,12 +366,12 @@ What happens behind the scenes:
 
 Override with environment variables if needed:
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `GATEWAY_URL` | Auto-detected from openclaw.json | Gateway endpoint (e.g. `http://127.0.0.1:18789/v1`) |
-| `GATEWAY_KEY` | Auto-detected from openclaw.json | Gateway auth password/token |
-| `GEMINI_API_KEY` | - | Direct Gemini API access (bypasses gateway) |
-| `OPENAI_API_KEY` | - | Direct OpenAI API access (bypasses gateway) |
+| Variable         | Default                          | Description                                         |
+| ---------------- | -------------------------------- | --------------------------------------------------- |
+| `GATEWAY_URL`    | Auto-detected from openclaw.json | Gateway endpoint (e.g. `http://127.0.0.1:18789/v1`) |
+| `GATEWAY_KEY`    | Auto-detected from openclaw.json | Gateway auth password/token                         |
+| `GEMINI_API_KEY` | -                                | Direct Gemini API access (bypasses gateway)         |
+| `OPENAI_API_KEY` | -                                | Direct OpenAI API access (bypasses gateway)         |
 
 ### Architecture
 
@@ -384,46 +387,47 @@ Claude Code CLI (Anthropic format)
 Integrate **any** coding agent CLI without writing engine-specific code. You provide a `CustomEngineConfig` that maps your CLI's flags to OpenClaw session concepts.
 
 Two protocol modes:
+
 - **Persistent** (`persistent: true`) — long-running subprocess with stream-json I/O over stdin/stdout (like Claude Code)
 - **One-shot** (`persistent: false`, default) — new process spawned per `send()` (like Codex/Antigravity)
 
 ### CustomEngineConfig
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `name` | string | yes | Display name (used in logs, session IDs) |
-| `bin` | string | yes | Binary path or command name |
-| `binEnv` | string | | Env var name that overrides `bin` at runtime |
-| `persistent` | boolean | | `true` = persistent subprocess, `false` = one-shot (default) |
-| `args` | object | yes | CLI flag mappings (see below) |
-| `permissionModes` | object | | Maps OpenClaw mode names to CLI-specific values |
-| `pricing` | object | | `{ input, output, cached? }` per 1M tokens |
-| `contextWindow` | number | | Context window size (default: 200,000) |
-| `env` | object | | Extra environment variables for the CLI process |
-| `sanitizePatterns` | string[] | | Regex patterns to redact from stderr |
+| Field              | Type     | Required | Description                                                  |
+| ------------------ | -------- | -------- | ------------------------------------------------------------ |
+| `name`             | string   | yes      | Display name (used in logs, session IDs)                     |
+| `bin`              | string   | yes      | Binary path or command name                                  |
+| `binEnv`           | string   |          | Env var name that overrides `bin` at runtime                 |
+| `persistent`       | boolean  |          | `true` = persistent subprocess, `false` = one-shot (default) |
+| `args`             | object   | yes      | CLI flag mappings (see below)                                |
+| `permissionModes`  | object   |          | Maps OpenClaw mode names to CLI-specific values              |
+| `pricing`          | object   |          | `{ input, output, cached? }` per 1M tokens                   |
+| `contextWindow`    | number   |          | Context window size (default: 200,000)                       |
+| `env`              | object   |          | Extra environment variables for the CLI process              |
+| `sanitizePatterns` | string[] |          | Regex patterns to redact from stderr                         |
 
 ### args field
 
-| Key | Example | Description |
-|-----|---------|-------------|
-| `print` | `"-p"` | Non-interactive/print mode flag |
-| `outputFormat` | `"--output-format"` | Output format flag |
-| `outputFormatValue` | `"stream-json"` | Value for stream-json output |
-| `inputFormat` | `"--input-format"` | Input format flag (persistent only) |
-| `inputFormatValue` | `"stream-json"` | Value for stream-json input |
-| `skipPermissions` | `"-y"` | Skip all permissions flag |
-| `permissionMode` | `"--permission-mode"` | Permission mode flag |
-| `model` | `"--model"` | Model selection flag |
-| `systemPrompt` | `"--system-prompt"` | System prompt override flag |
-| `appendSystemPrompt` | `"--append-system-prompt"` | Append system prompt flag |
-| `maxTurns` | `"--max-turns"` | Max agent turns flag |
-| `resume` | `"--resume"` | Session resume flag (persistent only) |
-| `verbose` | `"--verbose"` | Verbose output flag |
-| `replayUserMessages` | `"--replay-user-messages"` | Replay user messages (persistent only) |
+| Key                      | Example                        | Description                                |
+| ------------------------ | ------------------------------ | ------------------------------------------ |
+| `print`                  | `"-p"`                         | Non-interactive/print mode flag            |
+| `outputFormat`           | `"--output-format"`            | Output format flag                         |
+| `outputFormatValue`      | `"stream-json"`                | Value for stream-json output               |
+| `inputFormat`            | `"--input-format"`             | Input format flag (persistent only)        |
+| `inputFormatValue`       | `"stream-json"`                | Value for stream-json input                |
+| `skipPermissions`        | `"-y"`                         | Skip all permissions flag                  |
+| `permissionMode`         | `"--permission-mode"`          | Permission mode flag                       |
+| `model`                  | `"--model"`                    | Model selection flag                       |
+| `systemPrompt`           | `"--system-prompt"`            | System prompt override flag                |
+| `appendSystemPrompt`     | `"--append-system-prompt"`     | Append system prompt flag                  |
+| `maxTurns`               | `"--max-turns"`                | Max agent turns flag                       |
+| `resume`                 | `"--resume"`                   | Session resume flag (persistent only)      |
+| `verbose`                | `"--verbose"`                  | Verbose output flag                        |
+| `replayUserMessages`     | `"--replay-user-messages"`     | Replay user messages (persistent only)     |
 | `includePartialMessages` | `"--include-partial-messages"` | Include partial messages (persistent only) |
-| `effort` | `"--effort"` | Effort level flag |
-| `workspace` | `"--workspace"` | Workspace/cwd flag (one-shot only) |
-| `extra` | `["--trust"]` | Additional static arguments |
+| `effort`                 | `"--effort"`                   | Effort level flag                          |
+| `workspace`              | `"--workspace"`                | Workspace/cwd flag (one-shot only)         |
+| `extra`                  | `["--trust"]`                  | Additional static arguments                |
 
 ### Example: Persistent mode (Claude Code-compatible CLI)
 
@@ -471,7 +475,7 @@ await manager.startSession({
   customEngine: {
     name: 'simple-agent',
     bin: '/usr/local/bin/simple-agent',
-    persistent: false,  // default
+    persistent: false, // default
     args: {
       print: '-p',
       outputFormat: '--output-format',
@@ -505,11 +509,11 @@ await manager.startSession({
   dangerouslySkipPermissions: true,
   customEngine: {
     name: 'antigravity',
-    bin: 'agy',           // install: curl -fsSL https://antigravity.google/cli/install.sh | bash
+    bin: 'agy', // install: curl -fsSL https://antigravity.google/cli/install.sh | bash
     binEnv: 'AGY_BIN',
     persistent: false,
     args: {
-      print: '-p',                                  // single-prompt headless mode
+      print: '-p', // single-prompt headless mode
       skipPermissions: '--dangerously-skip-permissions',
       workspace: '--add-dir',
       // NOTE: agy 1.0.2 has NO --output-format flag — output is plain text only.

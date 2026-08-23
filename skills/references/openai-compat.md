@@ -11,13 +11,13 @@ Both modes share the same wire protocol; the difference is how a "new conversati
 
 ## Endpoint
 
-| | |
-|---|---|
-| **URL** | `http://127.0.0.1:18796/v1/chat/completions` |
-| **Models endpoint** | `GET /v1/models` |
-| **Inspection endpoint** | `GET /v1/sessions` (lists active openai-compat sessions with caching stats) |
-| **Auth** | Bearer token via `Authorization: Bearer $OPENCLAW_SERVER_TOKEN` (set the env var to enable; otherwise no auth and the server is loopback-only) |
-| **Wire format** | OpenAI Chat Completions, both streaming (SSE) and non-streaming |
+|                         |                                                                                                                                                |
+| ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| **URL**                 | `http://127.0.0.1:18796/v1/chat/completions`                                                                                                   |
+| **Models endpoint**     | `GET /v1/models`                                                                                                                               |
+| **Inspection endpoint** | `GET /v1/sessions` (lists active openai-compat sessions with caching stats)                                                                    |
+| **Auth**                | Bearer token via `Authorization: Bearer $OPENCLAW_SERVER_TOKEN` (set the env var to enable; otherwise no auth and the server is loopback-only) |
+| **Wire format**         | OpenAI Chat Completions, both streaming (SSE) and non-streaming                                                                                |
 
 ## Session keying
 
@@ -56,20 +56,20 @@ Without this flag, those frontends would silently continue the previous CLI sess
 
 The env var is read on every request, so ops can flip it via `launchctl setenv` (or equivalent) without restarting the server.
 
-| Mode | Best for | New-conversation signals |
-|---|---|---|
-| **Default** | OpenClaw main agent, cron jobs, subagents, scripted clients | `X-Session-Reset: 1` only |
+| Mode              | Best for                                                    | New-conversation signals                            |
+| ----------------- | ----------------------------------------------------------- | --------------------------------------------------- |
+| **Default**       | OpenClaw main agent, cron jobs, subagents, scripted clients | `X-Session-Reset: 1` only                           |
 | **`HEURISTIC=1`** | ChatGPT-Next-Web, Open WebUI, LobeChat, data labeling tools | `X-Session-Reset: 1` **and** `[system, user]` shape |
 
 ## Status webhook
 
 When `OPENAI_COMPAT_STATUS_URL` is set (full HTTP URL), each chat completion sends best-effort `POST` requests with `Content-Type: application/json` and body:
 
-| Field | Type | Meaning |
-|---|---|---|
-| `state` | string | `thinking` (turn started), `working` (a tool is running), or `idle` (turn finished or stream closed). |
-| `activity` | string | Short human-readable line, e.g. `Processing request...`, `Reading: foo.ts`, `Running: npm test...`. |
-| `tool` | string \| null | Tool name when `state === working`, otherwise `null`. |
+| Field      | Type           | Meaning                                                                                               |
+| ---------- | -------------- | ----------------------------------------------------------------------------------------------------- |
+| `state`    | string         | `thinking` (turn started), `working` (a tool is running), or `idle` (turn finished or stream closed). |
+| `activity` | string         | Short human-readable line, e.g. `Processing request...`, `Reading: foo.ts`, `Running: npm test...`.   |
+| `tool`     | string \| null | Tool name when `state === working`, otherwise `null`.                                                 |
 
 Failures are ignored (no retries). Use this from a small local HTTP handler that forwards status into your webchat UI.
 
@@ -78,17 +78,17 @@ Failures are ignored (no retries). Use this from a small local HTTP handler that
 When the request carries `tools`, the schemas have to reach the CLI somehow. Which
 mechanism is used depends on whether the engine keeps the conversation itself.
 
-| Engine | Turn 1 | Later turns |
-|---|---|---|
-| `claude` | Schemas go into the session system prompt (`--system-prompt`) | Nothing injected — the system prompt persists |
-| `codex`, `codex-app`, `agy`, `opencode`, `grok` | Full schema block prepended to the message | A short reminder of the calling convention, no schemas — but only once the conversation id has been captured; until then the full block is sent again |
-| `gemini`, one-shot `custom` | Full schema block prepended to the message | Full schema block again — these have no resume surface, so nothing persists between sends |
+| Engine                                          | Turn 1                                                        | Later turns                                                                                                                                           |
+| ----------------------------------------------- | ------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `claude`                                        | Schemas go into the session system prompt (`--system-prompt`) | Nothing injected — the system prompt persists                                                                                                         |
+| `codex`, `codex-app`, `agy`, `opencode`, `grok` | Full schema block prepended to the message                    | A short reminder of the calling convention, no schemas — but only once the conversation id has been captured; until then the full block is sent again |
+| `gemini`, one-shot `custom`                     | Full schema block prepended to the message                    | Full schema block again — these have no resume surface, so nothing persists between sends                                                             |
 
 The middle row is the one worth understanding. Those engines resume a conversation by id, so
 everything injected stays in the transcript. Re-sending the full block each turn
 grows the prompt without bound — a 54-tool block runs to roughly 17k tokens, so a
 handful of turns is enough to overflow the context window mid-loop and fail the
-run outright. Sending *nothing* on resume turns is not the answer either: the
+run outright. Sending _nothing_ on resume turns is not the answer either: the
 block also carries the "emit a tool call, do not carry out the work yourself"
 framing, and without it the CLI starts doing the work directly.
 
@@ -116,16 +116,16 @@ does change mid-conversation.
 
 ## Environment variables
 
-| Variable | Default | Purpose |
-|---|---|---|
-| `OPENCLAW_SERVER_TOKEN` | (unset) | Bearer token for HTTP auth. Set to enable; written to `~/.openclaw/server-token` for the CLI. |
-| `OPENCLAW_RATE_LIMIT` | `300` | Max requests per IP per 60-second sliding window. |
-| `OPENCLAW_CORS_ORIGINS` | (loopback only) | Set to `*` to allow all origins (the `/v1/*` paths already do this). |
-| `OPENAI_COMPAT_NEW_CONVO_HEURISTIC` | (unset) | Set to `1` to enable webchat mode (see above). |
-| `OPENAI_COMPAT_TOOLS_PER_MESSAGE` | (unset) | Set to `1` to re-send the full tool schemas on every turn (see [Tool definitions](#tool-definitions-and-where-they-live)). Needed only when the tool set changes mid-conversation; costs per-turn prompt growth. |
-| `OPENAI_COMPAT_STATUS_URL` | (unset) | If set, the bridge POSTs JSON status updates to this URL (fire-and-forget, 2s timeout). See [Status webhook](#status-webhook). |
-| `OPENCLAW_SERVE_MAX_SESSIONS` | `32` | Max concurrent OpenAI-compat sessions in serve mode. Bumped from the in-plugin default of 5 because each distinct caller now gets its own `sys-<hash>` session. |
-| `OPENCLAW_SERVE_TTL_MINUTES` | `60` | Idle TTL for OpenAI-compat sessions in serve mode. Idle sessions are reaped by a 60s background loop; persisted disk registry is kept for 7 days so a returning caller is auto-resumed. |
+| Variable                            | Default         | Purpose                                                                                                                                                                                                          |
+| ----------------------------------- | --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `OPENCLAW_SERVER_TOKEN`             | (unset)         | Bearer token for HTTP auth. Set to enable; written to `~/.openclaw/server-token` for the CLI.                                                                                                                    |
+| `OPENCLAW_RATE_LIMIT`               | `300`           | Max requests per IP per 60-second sliding window.                                                                                                                                                                |
+| `OPENCLAW_CORS_ORIGINS`             | (loopback only) | Set to `*` to allow all origins (the `/v1/*` paths already do this).                                                                                                                                             |
+| `OPENAI_COMPAT_NEW_CONVO_HEURISTIC` | (unset)         | Set to `1` to enable webchat mode (see above).                                                                                                                                                                   |
+| `OPENAI_COMPAT_TOOLS_PER_MESSAGE`   | (unset)         | Set to `1` to re-send the full tool schemas on every turn (see [Tool definitions](#tool-definitions-and-where-they-live)). Needed only when the tool set changes mid-conversation; costs per-turn prompt growth. |
+| `OPENAI_COMPAT_STATUS_URL`          | (unset)         | If set, the bridge POSTs JSON status updates to this URL (fire-and-forget, 2s timeout). See [Status webhook](#status-webhook).                                                                                   |
+| `OPENCLAW_SERVE_MAX_SESSIONS`       | `32`            | Max concurrent OpenAI-compat sessions in serve mode. Bumped from the in-plugin default of 5 because each distinct caller now gets its own `sys-<hash>` session.                                                  |
+| `OPENCLAW_SERVE_TTL_MINUTES`        | `60`            | Idle TTL for OpenAI-compat sessions in serve mode. Idle sessions are reaped by a 60s background loop; persisted disk registry is kept for 7 days so a returning caller is auto-resumed.                          |
 
 ## Inspection: `GET /v1/sessions`
 
@@ -235,14 +235,14 @@ Errors use the OpenAI error envelope:
 { "error": { "message": "...", "type": "invalid_request_error" } }
 ```
 
-| Status | When |
-|---|---|
-| 400 | `messages` empty/missing, no user message, invalid `max_tokens` |
-| 401 | Missing or wrong bearer token (when auth enabled) |
-| 415 | POST without `Content-Type: application/json` |
-| 429 | Rate limited (`OPENCLAW_RATE_LIMIT` exceeded) |
-| 503 | Failed to start a new session (model unavailable, CLI crashed at boot) |
-| 500 | Mid-turn failure |
+| Status | When                                                                   |
+| ------ | ---------------------------------------------------------------------- |
+| 400    | `messages` empty/missing, no user message, invalid `max_tokens`        |
+| 401    | Missing or wrong bearer token (when auth enabled)                      |
+| 415    | POST without `Content-Type: application/json`                          |
+| 429    | Rate limited (`OPENCLAW_RATE_LIMIT` exceeded)                          |
+| 503    | Failed to start a new session (model unavailable, CLI crashed at boot) |
+| 500    | Mid-turn failure                                                       |
 
 ## Related
 

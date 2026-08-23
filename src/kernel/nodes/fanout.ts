@@ -28,6 +28,7 @@ export async function executeFanoutNode(node: NodeSpec, ctx: NodeContext): Promi
   );
 
   if (ctx.signal.aborted) return { ok: false, error: 'cancelled' };
+  ctx.setHandle(fanout);
   const session = await fanout.run();
 
   const failures = session.results.filter((r) => !r.ok);
@@ -39,5 +40,11 @@ export async function executeFanoutNode(node: NodeSpec, ctx: NodeContext): Promi
     ok: session.status !== 'error' && failures.length < session.results.length,
     output: body,
     error: failures.length > 0 ? `${failures.length}/${session.results.length} agent(s) failed` : undefined,
+    data: {
+      task: session.task,
+      agentCount: session.agentCount,
+      results: session.results,
+      synthesis: session.synthesis,
+    },
   };
 }

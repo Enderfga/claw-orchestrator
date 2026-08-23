@@ -109,6 +109,12 @@ export class UltraappManager {
     this.skillContent = loadSkill(opts.skillPath);
     this.buildQueue = new UltraappBuildQueue({
       worker: (runId, emit) => this.runBuild(runId, emit),
+      // Durable: a queued build survives a restart of the orchestrator instead
+      // of disappearing with the process that accepted it.
+      statePath: path.join(opts.store.rootDir(), 'build-queue.json'),
+      onRestore: (runIds) => {
+        console.info(`[ultraapp] re-queued ${runIds.length} build(s) left by a previous process: ${runIds.join(', ')}`);
+      },
     });
     this.buildQueue.subscribe((ev) => this.onBuildEvent(ev));
   }

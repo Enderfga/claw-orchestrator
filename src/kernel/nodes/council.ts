@@ -36,6 +36,24 @@ export async function executeCouncilNode(node: NodeSpec, ctx: NodeContext): Prom
   );
 
   if (ctx.signal.aborted) return { ok: false, error: 'cancelled' };
+  // Published so `council_inject` / `council_abort` can reach the running
+  // engine. Only meaningful while this process is running it.
+  ctx.setHandle(council);
+  council.on('council-event', () => {
+    const live = council.getSession?.();
+    if (live) {
+      ctx.publish({
+        task: live.task,
+        responses: live.responses,
+        councilStatus: live.status,
+        finalSummary: live.finalSummary,
+        compactContext: live.compactContext,
+        agents: spec.agents,
+        maxRounds: spec.maxRounds ?? 8,
+        projectDir: spec.projectDir || ctx.cwd,
+      });
+    }
+  });
   const session = await council.run(spec.task);
 
   const consensusVotes: ConsensusVote[] = session.responses.map((r) => {
@@ -55,5 +73,15 @@ export async function executeCouncilNode(node: NodeSpec, ctx: NodeContext): Prom
       session.responses.map((r) => `## ${r.agent} (round ${r.round})\n\n${r.content}`).join('\n\n'),
     error: ok ? undefined : 'council ended in error',
     consensusVotes,
+    data: {
+      task: session.task,
+      responses: session.responses,
+      councilStatus: session.status,
+      finalSummary: session.finalSummary,
+      compactContext: session.compactContext,
+      agents: spec.agents,
+      maxRounds: spec.maxRounds ?? 8,
+      projectDir: spec.projectDir || ctx.cwd,
+    },
   };
 }

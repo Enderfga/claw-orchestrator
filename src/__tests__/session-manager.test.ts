@@ -8,6 +8,9 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { EventEmitter } from 'node:events';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import type {
   ISession,
   SessionConfig,
@@ -178,47 +181,63 @@ function patchCreateSession(manager: InstanceType<typeof SessionManager>): void 
 // BEFORE importing SessionManager. However, SessionManager also uses fs for
 // agents/skills/rules, so we only mock what we need.
 
+// The kernel's run store writes under CLAWO_WF_DIR. Redirect it for the whole
+// file: these tests use fixed run ids, and without this they would write into —
+// and collide inside — the developer's real ~/.claw-orchestrator/wf.
+const TEST_WF_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'clawo-sm-wf-'));
+process.env.CLAWO_WF_DIR = TEST_WF_DIR;
+
 vi.mock('node:fs', async () => {
   const actual = await vi.importActual<typeof import('node:fs')>('node:fs');
-  return {
-    ...actual,
-    default: {
-      ...actual,
-      // Override persistence-related functions to be no-ops in tests
-      existsSync: vi.fn((p: string) => {
-        if (typeof p === 'string' && p.includes('claude-sessions.json')) return false;
-        return actual.existsSync(p);
-      }),
-      readFileSync: vi.fn((p: string, enc?: string) => {
-        if (typeof p === 'string' && p.includes('claude-sessions.json')) return '[]';
-        return actual.readFileSync(p, enc as BufferEncoding);
-      }),
-      writeFileSync: vi.fn((..._args: unknown[]) => {}),
-      appendFileSync: vi.fn((..._args: unknown[]) => {}),
-      mkdirSync: vi.fn((..._args: unknown[]) => {}),
-      renameSync: vi.fn((..._args: unknown[]) => {}),
-      writeFile: vi.fn((_p: unknown, _d: unknown, cb: (err: null) => void) => cb(null)),
-      rename: vi.fn((_o: unknown, _n: unknown, cb: (err: null) => void) => cb(null)),
-      mkdir: vi.fn((_p: unknown, _opts: unknown, cb: (err: null) => void) => cb(null)),
-      unlink: vi.fn((_p: unknown, cb: () => void) => cb()),
-    },
-    existsSync: vi.fn((p: string) => {
-      if (typeof p === 'string' && p.includes('claude-sessions.json')) return false;
-      return actual.existsSync(p);
-    }),
-    readFileSync: vi.fn((p: string, enc?: string) => {
-      if (typeof p === 'string' && p.includes('claude-sessions.json')) return '[]';
-      return actual.readFileSync(p, enc as BufferEncoding);
-    }),
-    writeFileSync: vi.fn((..._args: unknown[]) => {}),
-    appendFileSync: vi.fn((..._args: unknown[]) => {}),
-    mkdirSync: vi.fn((..._args: unknown[]) => {}),
-    renameSync: vi.fn((..._args: unknown[]) => {}),
+
+  // Only the two files SessionManager persists into the developer's real
+  // ~/.openclaw are stubbed. Everything else passes through.
+  //
+  // This used to no-op every write in the process, which kept the home
+  // directory clean and quietly broke any other code that touched the disk —
+  // the run store writes its checkpoints through the same `fs`, so a
+  // kernel-backed mode looked like it had lost every run. A mock that stubs a
+  // whole module to protect two paths is a landmine; this one names them.
+  const PROTECTED = ['claude-sessions.json', 'session-pids.json'];
+  const isProtected = (p: unknown): boolean => typeof p === 'string' && PROTECTED.some((name) => p.includes(name));
+
+  const existsSync = vi.fn((p: string) => (isProtected(p) ? false : actual.existsSync(p)));
+  const readFileSync = vi.fn((p: string, enc?: string) =>
+    isProtected(p) ? '[]' : actual.readFileSync(p, enc as BufferEncoding),
+  );
+  const writeFileSync = vi.fn((p: unknown, ...rest: unknown[]) => {
+    if (isProtected(p)) return;
+    (actual.writeFileSync as (...a: unknown[]) => void)(p, ...rest);
+  });
+  const appendFileSync = vi.fn((p: unknown, ...rest: unknown[]) => {
+    if (isProtected(p)) return;
+    (actual.appendFileSync as (...a: unknown[]) => void)(p, ...rest);
+  });
+  const mkdirSync = vi.fn((p: unknown, ...rest: unknown[]) => {
+    if (isProtected(p)) return undefined;
+    return (actual.mkdirSync as (...a: unknown[]) => string | undefined)(p, ...rest);
+  });
+  const renameSync = vi.fn((from: unknown, to: unknown) => {
+    if (isProtected(from) || isProtected(to)) return;
+    (actual.renameSync as (...a: unknown[]) => void)(from, to);
+  });
+
+  const shim = {
+    existsSync,
+    readFileSync,
+    writeFileSync,
+    appendFileSync,
+    mkdirSync,
+    renameSync,
+    // The async persistence path is stubbed wholesale: nothing else in the
+    // codebase uses these callback forms.
     writeFile: vi.fn((_p: unknown, _d: unknown, cb: (err: null) => void) => cb(null)),
     rename: vi.fn((_o: unknown, _n: unknown, cb: (err: null) => void) => cb(null)),
     mkdir: vi.fn((_p: unknown, _opts: unknown, cb: (err: null) => void) => cb(null)),
     unlink: vi.fn((_p: unknown, cb: () => void) => cb()),
   };
+
+  return { ...actual, ...shim, default: { ...actual, ...shim } };
 });
 
 // Import AFTER mocking fs
@@ -252,6 +271,11 @@ describe('SessionManager', () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     mockSessions = [];
     createdConfigs = [];
+    // Fresh run store per test. These cases use fixed run ids, and the store
+    // now refuses to reuse one — which is the point, but it means the tests
+    // have to start from an empty directory rather than leaking into each other.
+    fs.rmSync(TEST_WF_DIR, { recursive: true, force: true });
+    fs.mkdirSync(TEST_WF_DIR, { recursive: true });
     mgr = createManager();
   });
 
@@ -923,115 +947,108 @@ describe('SessionManager', () => {
     });
   });
 
-  // ─── Ultraplan ──────────────────────────────────────────────────────
+  // ─── Ultraplan / Ultrareview ────────────────────────────────────────
+  //
+  // Both are kernel runs now, so these drive the real path — a temp run store
+  // and stubbed node executors — instead of stubbing `fanoutStart`, which
+  // ultrareview no longer calls. The assertions moved with them: what used to be
+  // checked on the arguments handed to `fanoutStart` is now checked on the spec
+  // that reached the kernel, which is the thing that actually gets executed.
 
-  describe('ultraplan', () => {
-    it('ultraplanStart creates a result with running status', () => {
-      const result = mgr.ultraplanStart('build a feature', { cwd: '/tmp' });
+  describe('ultraplan / ultrareview', () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let started: any[];
+
+    beforeEach(() => {
+      started = [];
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const kernel = (mgr as any).kernel;
+      for (const kind of ['agent', 'fanout'] as const) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        kernel.setExecutor(kind, async (nodeSpec: any) => {
+          started.push(nodeSpec);
+          // Park so the run stays `running` while the assertions look at it.
+          await new Promise((r) => setTimeout(r, 50));
+          return { ok: true, output: 'stub' };
+        });
+      }
+    });
+
+    it('ultraplanStart creates a result with running status', async () => {
+      const result = await mgr.ultraplanStart('build a feature', { cwd: '/tmp' });
       expect(result.id).toMatch(/^ultraplan-/);
       expect(result.status).toBe('running');
       expect(result.sessionName).toContain('ultraplan-');
       expect(result.startTime).toBeDefined();
     });
 
-    it('ultraplanStatus returns the result by id', () => {
-      const result = mgr.ultraplanStart('plan task', { cwd: '/tmp' });
+    it('ultraplanStatus returns the result by id, from disk', async () => {
+      const result = await mgr.ultraplanStart('plan task', { cwd: '/tmp' });
       const status = mgr.ultraplanStatus(result.id);
       expect(status).toBeDefined();
       expect(status!.id).toBe(result.id);
       expect(status!.status).toBe('running');
     });
 
+    it('plans in plan mode at max effort', async () => {
+      await mgr.ultraplanStart('plan task', { cwd: '/tmp' });
+      expect(started[0]).toMatchObject({ kind: 'agent', permissionMode: 'plan', effort: 'max' });
+    });
+
     it('ultraplanStatus returns undefined for unknown id', () => {
       expect(mgr.ultraplanStatus('nonexistent')).toBeUndefined();
     });
-  });
 
-  // ─── Ultrareview ────────────────────────────────────────────────────
-
-  describe('ultrareview', () => {
-    it('ultrareviewStart creates result with running status', () => {
-      // Mock fanoutStart (ultrareview now fans out reviewers) so we don't spawn real sessions.
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (mgr as any).fanoutStart = vi.fn().mockReturnValue({
-        id: 'council-mock-123',
-        status: 'running',
-        task: 'review',
-        config: {},
-        responses: [],
-        startTime: new Date().toISOString(),
-      });
-
-      const result = mgr.ultrareviewStart('/tmp', { agentCount: 3 });
+    it('ultrareviewStart creates result with running status', async () => {
+      const result = await mgr.ultrareviewStart('/tmp', { agentCount: 3 });
       expect(result.id).toMatch(/^ultrareview-/);
       expect(result.status).toBe('running');
       expect(result.agentCount).toBe(3);
-      expect(result.councilId).toBe('council-mock-123');
+      // The fan-out id and the run id are the same thing now.
+      expect(result.councilId).toBe(result.id);
     });
 
-    it('runs reviewers read-only (plan mode) and fans out with synthesis', () => {
-      const spy = vi.fn().mockReturnValue({
-        id: 'fanout-x',
-        status: 'running',
-        task: '',
-        agentCount: 2,
-        startedAt: new Date().toISOString(),
-        results: [],
-      });
+    it('runs reviewers read-only (plan mode) and fans out with synthesis', async () => {
+      await mgr.ultrareviewStart('/tmp', { agentCount: 2, engines: ['claude', 'codex'] });
+      const spec = started[0];
+      expect(spec.kind).toBe('fanout');
+      expect(spec.synthesize).toBe(true);
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (mgr as any).fanoutStart = spy;
-      mgr.ultrareviewStart('/tmp', { agentCount: 2, engines: ['claude', 'codex'] });
-      const cfg = spy.mock.calls[0][0];
-      expect(cfg.synthesize).toBe(true);
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      expect(cfg.agents.every((a: any) => a.permissionMode === 'plan')).toBe(true);
-      // engines round-robin across the two requested engines
-      expect(cfg.agents.map((a: { engine: string }) => a.engine)).toEqual(['claude', 'codex']);
+      expect(spec.agents.every((a: any) => a.permissionMode === 'plan')).toBe(true);
+      expect(spec.agents.map((a: { engine: string }) => a.engine)).toEqual(['claude', 'codex']);
     });
 
-    it('ultrareviewStart clamps agentCount to max 20', () => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (mgr as any).fanoutStart = vi.fn().mockReturnValue({
-        id: 'council-mock-456',
-        status: 'running',
-        task: 'review',
-        config: {},
-        responses: [],
-        startTime: new Date().toISOString(),
-      });
-
+    it('ultrareviewStart clamps agentCount', async () => {
       // agentCount: 0 is falsy, so `0 || 5` defaults to 5
-      const result1 = mgr.ultrareviewStart('/tmp', { agentCount: 0 });
-      expect(result1.agentCount).toBe(5);
-
-      // Explicit 1 should stay 1
-      const result3 = mgr.ultrareviewStart('/tmp', { agentCount: 1 });
-      expect(result3.agentCount).toBe(1);
-
-      // Over 20 gets clamped
-      const result2 = mgr.ultrareviewStart('/tmp', { agentCount: 50 });
-      expect(result2.agentCount).toBe(20);
+      expect((await mgr.ultrareviewStart('/tmp', { agentCount: 0 })).agentCount).toBe(5);
+      expect((await mgr.ultrareviewStart('/tmp', { agentCount: 1 })).agentCount).toBe(1);
+      expect((await mgr.ultrareviewStart('/tmp', { agentCount: 50 })).agentCount).toBe(20);
     });
 
     it('ultrareviewStatus returns undefined for unknown id', () => {
       expect(mgr.ultrareviewStatus('nonexistent')).toBeUndefined();
     });
 
-    it('ultrareviewStatus returns the stored result', () => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (mgr as any).fanoutStart = vi.fn().mockReturnValue({
-        id: 'council-mock-789',
-        status: 'running',
-        task: 'review',
-        config: {},
-        responses: [],
-        startTime: new Date().toISOString(),
-      });
-
-      const result = mgr.ultrareviewStart('/tmp');
+    it('ultrareviewStatus returns the stored result', async () => {
+      const result = await mgr.ultrareviewStart('/tmp');
       const status = mgr.ultrareviewStatus(result.id);
       expect(status).toBeDefined();
       expect(status!.id).toBe(result.id);
+    });
+
+    it('keeps results readable after the run finishes — no 30-minute eviction', async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const kernel = (mgr as any).kernel;
+      kernel.setExecutor('fanout', async () => ({
+        ok: true,
+        output: 'done',
+        data: { task: 't', agentCount: 1, results: [{ agent: 'a', ok: true, output: 'found a bug' }] },
+      }));
+      const result = await mgr.ultrareviewStart('/tmp', { agentCount: 1 });
+      await kernel.wait(result.id);
+      const status = mgr.ultrareviewStatus(result.id);
+      expect(status!.status).toBe('completed');
+      expect(status!.findings).toContain('found a bug');
     });
   });
 
@@ -1091,24 +1108,28 @@ describe('SessionManager', () => {
       expect((mgr2 as any).cleanupTimer).toBeNull();
     });
 
-    it('clears ultrareview pollers', async () => {
+    it('cancels live kernel runs (there are no per-mode timers left to clear)', async () => {
+      // Ultrareview used to keep a `setInterval` per review and a map of
+      // results, both torn down here. Every mode is a kernel run now, so
+      // shutdown has exactly one thing to stop.
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (mgr as any).fanoutStart = vi.fn().mockReturnValue({
-        id: 'council-shutdown',
-        status: 'running',
-        task: 'review',
-        config: {},
-        responses: [],
-        startTime: new Date().toISOString(),
+      const kernel = (mgr as any).kernel;
+      let cancelled = false;
+      kernel.setExecutor('fanout', async (_n: unknown, ctx: { signal: { aborted: boolean } }) => {
+        for (let i = 0; i < 200; i++) {
+          if (ctx.signal.aborted) {
+            cancelled = true;
+            return { ok: false, error: 'cancelled' };
+          }
+          await new Promise((r) => setTimeout(r, 5));
+        }
+        return { ok: true };
       });
 
-      mgr.ultrareviewStart('/tmp');
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      expect((mgr as any).ultrareviewPollers.size).toBe(1);
-
+      const review = await mgr.ultrareviewStart('/tmp');
+      await vi.waitFor(() => expect(mgr.ultrareviewStatus(review.id)?.status).toBe('running'));
       await mgr.shutdown();
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      expect((mgr as any).ultrareviewPollers.size).toBe(0);
+      expect(cancelled).toBe(true);
     });
 
     it('is idempotent', async () => {
@@ -1409,7 +1430,10 @@ describe('SessionManager', () => {
       };
 
       const starting = mgr.autoloopStart({ runId: 'slow-start', workspace: '/tmp' });
-      await vi.waitFor(() => expect(mgr.getAutoloop('slow-start')).toBeDefined());
+      // The live handle is published only once the engine is up, which is
+      // exactly what this test blocks. "A start is in flight" is observable from
+      // the run record existing while nothing has been published on it yet.
+      await vi.waitFor(() => expect(mgr.workflowList({ workflow: 'autoloop' }).length).toBe(1));
 
       await expect(mgr.autoloopDelete('slow-start')).rejects.toThrow("Autoloop with id 'slow-start' is still starting");
       releaseStart();
@@ -1437,29 +1461,20 @@ describe('SessionManager', () => {
       });
     });
 
-    it('leaves the existing registry row untouched when resume startup fails', async () => {
-      const mockedFs = await import('node:fs');
-      const existsMock = vi.mocked(mockedFs.existsSync);
-      const readMock = vi.mocked(mockedFs.readFileSync);
-      const previousExists = existsMock.getMockImplementation()!;
-      const previousRead = readMock.getMockImplementation()!;
-      const entry = {
-        run_id: 'resume-no-scrub',
-        workspace: '/tmp',
-        ledger_dir: '/tmp/tasks/resume-no-scrub',
-        started_at: '2026-07-12T00:00:00.000Z',
-        planner_session: 'autoloop-resume-no-scrub-planner',
-      };
-      existsMock.mockImplementation((file) =>
-        String(file).includes('autoloop-registry.jsonl') || String(file) === entry.ledger_dir
-          ? true
-          : previousExists(file),
-      );
-      readMock.mockImplementation((file, encoding) =>
-        String(file).includes('autoloop-registry.jsonl') ? `${JSON.stringify(entry)}\n` : previousRead(file, encoding),
-      );
-      vi.mocked(mockedFs.renameSync).mockClear();
-      vi.mocked(mockedFs.appendFileSync).mockClear();
+    it('leaves the stored run intact when a resume fails to start', async () => {
+      // The behaviour this protects: a resume that cannot bring the Planner up
+      // must not destroy the record, or the run becomes unrecoverable. It used
+      // to be phrased against an append-only registry file; the record is the
+      // registry now, so that is what gets checked.
+      await mgr.autoloopStart({ runId: 'resume-fail', workspace: '/tmp' });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const kernel = (mgr as any).kernel;
+      kernel.cancel('resume-fail');
+      await kernel.wait('resume-fail');
+
+      const before = mgr.workflowStatus('resume-fail');
+      expect(before).toBeDefined();
+
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (mgr as any)._createSession = (): ISession => {
         const mock = new MockSession();
@@ -1468,41 +1483,33 @@ describe('SessionManager', () => {
         };
         return mock;
       };
+      await expect(mgr.autoloopResume('resume-fail')).rejects.toThrow('resume planner failed');
 
-      try {
-        await expect(mgr.autoloopResume('resume-no-scrub')).rejects.toThrow('resume planner failed');
-        expect(mockedFs.renameSync).not.toHaveBeenCalled();
-        const registryAppends = vi
-          .mocked(mockedFs.appendFileSync)
-          .mock.calls.filter(([file]) => String(file).includes('autoloop-registry.jsonl'));
-        expect(registryAppends).toEqual([]);
-      } finally {
-        existsMock.mockImplementation(previousExists);
-        readMock.mockImplementation(previousRead);
-      }
+      const after = mgr.workflowStatus('resume-fail');
+      expect(after).toBeDefined();
+      expect(after.spec).toEqual(before!.spec);
     });
 
-    it('persists successful spawn engine and model overrides to the registry', async () => {
+    it('records the engines and models spawn_subagents actually chose', async () => {
+      // Used to be written as a row into autoloop-registry.jsonl. It lands on
+      // the run record now, which is what `autoloop_status` and a later resume
+      // read — and unlike the registry, it survives alongside the rest of the
+      // run's state rather than in a parallel file with its own lifecycle.
       await mgr.autoloopStart({ runId: 'spawn-persist', workspace: '/tmp' });
-      const mockedFs = await import('node:fs');
-      vi.mocked(mockedFs.appendFileSync).mockClear();
-
       await mgr.getAutoloop('spawn-persist')!.dispatcher.spawnSubagents({
         coder_engine: 'codex',
         coder_model: 'gpt-coder',
         reviewer_engine: 'gemini',
       });
 
-      const registryWrites = vi
-        .mocked(mockedFs.appendFileSync)
-        .mock.calls.filter(([file]) => String(file).includes('autoloop-registry.jsonl'));
-      expect(registryWrites).toHaveLength(1);
-      const entry = JSON.parse(String(registryWrites[0][1]));
-      expect(entry).toMatchObject({
-        run_id: 'spawn-persist',
-        coder_engine: 'codex',
-        coder_model: 'gpt-coder',
-        reviewer_engine: 'gemini',
+      await vi.waitFor(() => {
+        const run = mgr.workflowStatus('spawn-persist');
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const data = run.nodes.main?.data as any;
+        expect(data?.roleSelection).toMatchObject({
+          coder: { engine: 'codex', model: 'gpt-coder' },
+          reviewer: { engine: 'gemini' },
+        });
       });
     });
   });

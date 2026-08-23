@@ -209,4 +209,22 @@ describe('listRuns', () => {
   it('is empty when nothing has run', () => {
     expect(listRuns()).toEqual([]);
   });
+
+  it('skips a directory whose spec is gone rather than failing the listing', () => {
+    // Inherited from the enumerators this replaced: a workspace that was moved
+    // or deleted out from under a run used to be dropped from the autoloop
+    // registry listing. One unreadable run must not make the rest invisible.
+    createRunDir('good', spec);
+    saveRun(baseRecord('good'));
+    fs.mkdirSync(path.join(tmp, 'half-deleted'), { recursive: true });
+    expect(listRuns().map((r) => r.runId)).toEqual(['good']);
+  });
+
+  it('ignores directories whose names are not valid run ids', () => {
+    fs.mkdirSync(path.join(tmp, '..hidden'), { recursive: true });
+    fs.mkdirSync(path.join(tmp, '.tmp-junk'), { recursive: true });
+    createRunDir('real', spec);
+    saveRun(baseRecord('real'));
+    expect(listRuns().map((r) => r.runId)).toEqual(['real']);
+  });
 });

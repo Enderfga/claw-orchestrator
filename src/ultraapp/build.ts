@@ -4,12 +4,22 @@
  * Default concurrency = 1. Pending builds are FIFO. Subscribers receive every
  * BuildEvent emitted by the worker for any currently-running build.
  *
- * Disk persistence (in-progress + pending lists) is NOT done in v0.2 — if the
- * orchestrator restarts mid-build, the build is marked failed and the user
- * can rerun. Adding restart resilience is later scope.
+ * The queue is durable as of 6.0.0. It used to say so in this comment: "Disk
+ * persistence (in-progress + pending lists) is NOT done in v0.2 — if the
+ * orchestrator restarts mid-build, the build is marked failed and the user can
+ * rerun." In practice a restart did not mark anything: the pending list simply
+ * vanished, along with any queued build the user was waiting on, with no record
+ * that it had ever been asked for.
+ *
+ * Now the pending list and the in-flight run id are written on every change and
+ * restored on construction. A build that was in flight when the process died is
+ * re-queued rather than resumed — each build starts from a fresh council
+ * worktree, so re-running is safe and resuming a half-built tree is not.
  */
 
 import { EventEmitter } from 'node:events';
+import fs from 'node:fs';
+import path from 'node:path';
 import type { BuildEvent } from './build-events.js';
 
 export type Worker = (runId: string, emit: (e: BuildEvent) => void) => Promise<void>;
@@ -17,10 +27,23 @@ export type Worker = (runId: string, emit: (e: BuildEvent) => void) => Promise<v
 export interface UltraappBuildQueueOptions {
   worker: Worker;
   concurrency?: number; // default 1
+  /**
+   * Where the queue is persisted. Omit for an ephemeral queue — the tests that
+   * only exercise ordering do not need a file.
+   */
+  statePath?: string;
+  /** Notified when a restored in-flight build is re-queued. */
+  onRestore?: (runIds: string[]) => void;
 }
 
 interface PendingItem {
   runId: string;
+}
+
+interface PersistedQueue {
+  pending: string[];
+  /** The build that was running when the state was last written. */
+  current: string | null;
 }
 
 export class UltraappBuildQueue {
@@ -29,12 +52,62 @@ export class UltraappBuildQueue {
   private currentRunId: string | null = null;
   private readonly worker: Worker;
   private readonly concurrency: number;
+  private readonly statePath?: string;
   private idlePromise: Promise<void> = Promise.resolve();
   private idleResolve: (() => void) | null = null;
 
   constructor(opts: UltraappBuildQueueOptions) {
     this.worker = opts.worker;
     this.concurrency = opts.concurrency ?? 1;
+    this.statePath = opts.statePath;
+    const restored = this.restore();
+    if (restored.length > 0) {
+      opts.onRestore?.(restored);
+      this.markBusy();
+      void this.tryDispatch();
+    }
+  }
+
+  /**
+   * Read back a queue left by a previous process.
+   *
+   * A build that was in flight goes to the FRONT of the restored queue: it was
+   * asked for first, and the user has been waiting on it longest.
+   */
+  private restore(): string[] {
+    if (!this.statePath) return [];
+    let raw: string;
+    try {
+      raw = fs.readFileSync(this.statePath, 'utf8');
+    } catch {
+      return [];
+    }
+    let parsed: PersistedQueue;
+    try {
+      parsed = JSON.parse(raw) as PersistedQueue;
+    } catch {
+      return [];
+    }
+    const ids = [
+      ...(parsed.current ? [parsed.current] : []),
+      ...(Array.isArray(parsed.pending) ? parsed.pending.filter((x) => typeof x === 'string') : []),
+    ];
+    for (const runId of ids) this.pending.push({ runId });
+    return ids;
+  }
+
+  /** Best-effort, like every other log write here: never break a build over it. */
+  private persist(): void {
+    if (!this.statePath) return;
+    try {
+      fs.mkdirSync(path.dirname(this.statePath), { recursive: true });
+      const state: PersistedQueue = { pending: this.pending.map((p) => p.runId), current: this.currentRunId };
+      const tmp = `${this.statePath}.tmp.${process.pid}`;
+      fs.writeFileSync(tmp, JSON.stringify(state));
+      fs.renameSync(tmp, this.statePath);
+    } catch {
+      // A queue that cannot be persisted still works for this process.
+    }
   }
 
   /**
@@ -43,6 +116,7 @@ export class UltraappBuildQueue {
    */
   async enqueue(runId: string): Promise<void> {
     this.pending.push({ runId });
+    this.persist();
     this.markBusy();
     const pos = this.position(runId);
     if (pos > 0) {
@@ -55,6 +129,7 @@ export class UltraappBuildQueue {
     const idx = this.pending.findIndex((p) => p.runId === runId);
     if (idx >= 0) {
       this.pending.splice(idx, 1);
+      this.persist();
       this.emit({ type: 'build-cancelled', runId });
       if (this.pending.length === 0 && this.currentRunId === null) this.markIdle();
     }
@@ -91,6 +166,7 @@ export class UltraappBuildQueue {
       return;
     }
     this.currentRunId = next.runId;
+    this.persist();
     try {
       await this.worker(next.runId, (e) => this.emit(e));
     } catch (e) {
@@ -102,6 +178,7 @@ export class UltraappBuildQueue {
       });
     } finally {
       this.currentRunId = null;
+      this.persist();
       void this.tryDispatch();
     }
   }

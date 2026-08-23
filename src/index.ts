@@ -1088,7 +1088,7 @@ const plugin = {
         required: ['task', 'projectDir', 'agents'],
       },
       execute: async (_id, args) => {
-        const session = getManager().fanoutStart({
+        const session = await getManager().fanoutStart({
           task: args.task as string,
           projectDir: sanitizeCwd(args.projectDir as string)!,
           agents: args.agents as FanoutConfig['agents'],
@@ -1556,7 +1556,7 @@ const plugin = {
           defaultPermissionMode: args.defaultPermissionMode as CouncilConfig['defaultPermissionMode'],
         };
 
-        const session = getManager().councilStart(args.task as string, config);
+        const session = await getManager().councilStart(args.task as string, config);
         return { ok: true, ...session, note: 'Council running in background. Poll with council_status.' };
       },
     });
@@ -1754,7 +1754,7 @@ const plugin = {
         required: ['task'],
       },
       execute: async (_id, args) => {
-        const result = getManager().ultraplanStart(args.task as string, {
+        const result = await getManager().ultraplanStart(args.task as string, {
           cwd: sanitizeCwd(args.cwd as string | undefined),
           model: args.model as string | undefined,
           timeout: args.timeout as number | undefined,
@@ -1807,7 +1807,7 @@ const plugin = {
         required: ['cwd'],
       },
       execute: async (_id, args) => {
-        const result = getManager().ultrareviewStart(sanitizeCwd(args.cwd as string)!, {
+        const result = await getManager().ultrareviewStart(sanitizeCwd(args.cwd as string)!, {
           agentCount: args.agentCount as number | undefined,
           maxDurationMinutes: args.maxDurationMinutes as number | undefined,
           model: args.model as string | undefined,

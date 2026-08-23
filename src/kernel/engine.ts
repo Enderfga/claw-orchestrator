@@ -6,13 +6,13 @@
  * fails, when to give up, how to stop, and — the part none of them had — how to
  * come back after the process dies.
  *
- * What it is not, yet: the single runtime every mode goes through. Council,
- * fanout, autoloop and ultraapp keep their own lifecycles, maps and cleanup, and
- * the `council` / `fanout` nodes call those runners from inside a kernel run
- * rather than replacing them. So a run started through `council_start` is not a
- * kernel run and gets none of this. Collapsing those lifecycles is the work this
- * layer exists to make possible; it has not happened, and nothing here should be
- * read as claiming it has.
+ * Every mode goes through it. `council_start`, `fanout_start`, `ultraplan_start`,
+ * `ultrareview_start` and `autoloop_start` each create a run here; the engines
+ * they wrap (`Council`, `Fanout`, the autoloop dispatcher) still do the work,
+ * but they no longer own a lifecycle. What that replaced: five result maps, four
+ * 30-minute eviction timers, a 5-second poller, two `Set`s fencing a start
+ * against a delete, and two incompatible ways of listing past runs across
+ * processes.
  *
  * Durability contract, stated precisely: every state transition is checkpointed
  * (atomic `run.json`) and appended to `events.jsonl` before the next step
@@ -49,6 +49,7 @@ import {
   runDir,
   saveRun,
   stampTerminal,
+  writeNodeArtifact,
   summarize,
   type ListRunsQuery,
   type RunSummary,
@@ -70,6 +71,8 @@ export const DEFAULT_NODE_TIMEOUT_MS = 30 * 60_000;
 export const DEFAULT_MAX_NODE_VISITS = 50;
 /** Terminal verifier appended when the workflow declares a run-level contract. */
 export const IMPLICIT_VERIFIER_ID = '__verify';
+/** How much node text the checkpoint carries inline. The rest goes to disk. */
+export const OUTPUT_PREVIEW_CHARS = 4000;
 
 export interface NodeResult {
   ok: boolean;
@@ -90,6 +93,8 @@ export interface NodeResult {
   goto?: string;
   /** Subflow nodes: the child run this node started. */
   childRunId?: string;
+  /** Mode-specific payload to checkpoint on the node record. */
+  data?: unknown;
 }
 
 export interface NodeContext {
@@ -112,6 +117,16 @@ export interface NodeContext {
   emit(event: KernelEvent): void;
   /** The workflow-level contract, for a `contract: 'run'` verifier node. */
   runContract?: AcceptanceContract;
+  /**
+   * Publish the live engine object for this node (a `Council`, a `Fanout`, an
+   * autoloop dispatcher) so in-flight control — inject, abort, chat — can reach
+   * it. In-memory by necessity: you cannot inject into a turn in a process that
+   * is gone, and pretending otherwise would be the kind of claim this release
+   * exists to remove. After a restart a run resumes; it does not reconnect.
+   */
+  setHandle(handle: unknown): void;
+  /** Checkpoint mode payload as the node runs, not only when it finishes. */
+  publish(data: unknown): void;
 }
 
 export type NodeExecutor = (node: NodeSpec, ctx: NodeContext) => Promise<NodeResult>;
@@ -122,6 +137,8 @@ interface RunHandle {
   /** Resolves when a parked human_gate is answered. */
   gate?: { resolve: (approved: boolean) => void };
   done: Promise<RunRecord>;
+  /** Live engine objects published by running nodes, keyed by node id. */
+  handles: Map<string, unknown>;
 }
 
 export interface KernelOptions {
@@ -221,7 +238,7 @@ export class RunKernel extends EventEmitter {
    * re-run; the node that was in flight when the process ended is retried from
    * the start, because a half-finished node left no result to trust.
    */
-  async resume(runId: string): Promise<RunRecord> {
+  async resume(runId: string, opts: { restart?: boolean } = {}): Promise<RunRecord> {
     if (this.live.has(runId)) {
       const existing = loadRun(runId);
       if (!existing) throw new Error(`Run '${runId}' not found`);
@@ -229,14 +246,24 @@ export class RunKernel extends EventEmitter {
     }
     const record = loadRun(runId);
     if (!record) throw new Error(`Run '${runId}' not found`);
-    if (isTerminalRunState(record.state)) return record;
+    // A finished run stays finished by default: silently re-running a completed
+    // workflow because someone polled `resume` would be a nasty surprise.
+    // `restart` is for callers whose "resume" genuinely means "bring it back up"
+    // — autoloop, whose runs terminate and are expected to be restartable.
+    if (isTerminalRunState(record.state) && !opts.restart) return record;
 
     for (const n of Object.values(record.nodes)) {
-      if (n.state === 'running') {
+      if (n.state === 'running' || (opts.restart && isTerminalRunState(record.state))) {
         n.state = 'pending';
         n.attempts = 0;
         n.error = undefined;
       }
+    }
+    if (opts.restart) {
+      record.endedAt = undefined;
+      record.outcome = 'unverified';
+      record.outcomeReason = undefined;
+      record.verdict = undefined;
     }
     record.error = undefined;
     saveRun(record);
@@ -287,6 +314,15 @@ export class RunKernel extends EventEmitter {
     return loadRun(runId);
   }
 
+  /**
+   * The live engine object a running node published, if the run is still going
+   * in this process. Undefined once the node finishes or the process restarts —
+   * which is the honest answer, not a gap.
+   */
+  handle<T>(runId: string, nodeId: string): T | undefined {
+    return this.live.get(runId)?.handles.get(nodeId) as T | undefined;
+  }
+
   list(query: ListRunsQuery = {}): RunSummary[] {
     return listRuns(query);
   }
@@ -318,6 +354,7 @@ export class RunKernel extends EventEmitter {
     const handle: RunHandle = {
       signal: { aborted: false },
       steer: [],
+      handles: new Map(),
       done: Promise.resolve(record),
     };
     // Registered before the run starts: a workflow with no nodes finishes
@@ -540,6 +577,12 @@ export class RunKernel extends EventEmitter {
         takeSteer: () => handle.steer.splice(0, handle.steer.length),
         emit: (event) => this._event(record, event),
         runContract: record.spec.contract,
+        setHandle: (h) => handle.handles.set(spec.id, h),
+        publish: (data) => {
+          nodeRec.data = data;
+          record.updatedAt = new Date().toISOString();
+          saveRun(record);
+        },
       };
 
       last = await this._executeNode(spec, ctx, timeoutMs, attemptSignal);
@@ -575,7 +618,24 @@ export class RunKernel extends EventEmitter {
       record.sideEffectSeq = (record.sideEffectSeq ?? 0) + 1;
     }
     if (result.output !== undefined) {
-      nodeRec.output = result.output.length > 4000 ? result.output.slice(0, 4000) + '\n…[truncated]' : result.output;
+      // The record keeps a preview so checkpoints stay small; the full text goes
+      // to the node's artifact directory, because for some nodes the text *is*
+      // the deliverable and a silent 4 kB cut would lose it.
+      if (result.output.length > OUTPUT_PREVIEW_CHARS) {
+        try {
+          const rel = writeNodeArtifact(record.runId, nodeRec.id, 'output.txt', result.output);
+          nodeRec.artifacts = [...new Set([...(nodeRec.artifacts ?? []), rel])];
+        } catch (err) {
+          this.logger.warn?.(`[kernel] could not store full output for ${nodeRec.id}: ${(err as Error).message}`);
+        }
+      }
+      nodeRec.output =
+        result.output.length > OUTPUT_PREVIEW_CHARS
+          ? result.output.slice(0, OUTPUT_PREVIEW_CHARS) +
+            '\n…[truncated — full text in nodes/' +
+            nodeRec.id +
+            '/output.txt]'
+          : result.output;
       this._event(record, {
         ts: new Date().toISOString(),
         type: 'node_output',
@@ -584,6 +644,7 @@ export class RunKernel extends EventEmitter {
       });
     }
     if (result.artifacts?.length) nodeRec.artifacts = result.artifacts;
+    if (result.data !== undefined) nodeRec.data = result.data;
     if (result.childRunId) nodeRec.childRunId = result.childRunId;
     if (typeof result.costUsd === 'number') record.costUsd = (record.costUsd ?? 0) + result.costUsd;
     if (result.consensusVotes?.length) {

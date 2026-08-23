@@ -28,11 +28,11 @@ Implemented: `initialize`, `authenticate`, `session/new`, `session/prompt`,
 
 ## Configuration
 
-| Env var | Default | Meaning |
-|---|---|---|
-| `CLAWO_ACP_MODEL` | `claude-sonnet-4-6` | Model (and therefore engine) for a new session |
-| `CLAWO_ACP_PERMISSION` | `acceptEdits` | `plan` \| `acceptEdits` \| `bypassPermissions`; an unrecognised value is ignored with a warning |
-| `OPENCLAW_LOG_LEVEL` | `info` | Set `warn` to quieten the stderr channel |
+| Env var                | Default             | Meaning                                                                                         |
+| ---------------------- | ------------------- | ----------------------------------------------------------------------------------------------- |
+| `CLAWO_ACP_MODEL`      | `claude-sonnet-4-6` | Model (and therefore engine) for a new session                                                  |
+| `CLAWO_ACP_PERMISSION` | `acceptEdits`       | `plan` \| `acceptEdits` \| `bypassPermissions`; an unrecognised value is ignored with a warning |
+| `OPENCLAW_LOG_LEVEL`   | `info`              | Set `warn` to quieten the stderr channel                                                        |
 
 ## Session modes
 
@@ -41,24 +41,24 @@ a client surfaces a mode picker is up to the client** — the VS Code ACP extens
 (0.2.0, measured) renders config options and not modes. So every mode also has a
 slash command, advertised through `available_commands_update` when the session opens:
 
-| Command | Effect |
-|---|---|
+| Command                                                | Effect                                                                                                                        |
+| ------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------- |
 | `/single` · `/council` · `/ultraplan` · `/ultrareview` | Switch mode. Text after the command runs in that mode straight away — `/council fix the failing test` is one step, not three. |
 
 That is the only way to reach a mode in a client that does not draw the picker.
 
-| Mode | What a turn does |
-|---|---|
-| `single` | One engine answers. Text streams as `agent_message_chunk`; tool use becomes `tool_call`. |
-| `council` | Several engines debate in isolated git worktrees. Each agent becomes a `tool_call` the client can collapse, each round emits a `plan`, and the synthesis arrives as text. |
-| `ultraplan` | Long-horizon planning pass. Result arrives as a `plan` update and as text. |
-| `ultrareview` | Parallel reviewers sweep the working tree; findings arrive the same way. |
+| Mode          | What a turn does                                                                                                                                                          |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `single`      | One engine answers. Text streams as `agent_message_chunk`; tool use becomes `tool_call`.                                                                                  |
+| `council`     | Several engines debate in isolated git worktrees. Each agent becomes a `tool_call` the client can collapse, each round emits a `plan`, and the synthesis arrives as text. |
+| `ultraplan`   | Long-horizon planning pass. Result arrives as a `plan` update and as text.                                                                                                |
+| `ultrareview` | Parallel reviewers sweep the working tree; findings arrive the same way.                                                                                                  |
 
 ### Council
 
 Council defaults here are deliberately far below the library's own — that config is
 tuned for a long unattended run (three agents, fifteen rounds, one session per agent
-*per round*), which is the wrong shape behind an editor turn. The ACP path uses **two
+_per round_), which is the wrong shape behind an editor turn. The ACP path uses **two
 agents on distinct engines (Claude and Codex) and three rounds**.
 
 It still is not fast: a measured two-round run on a one-line bug took **~9 minutes**.
@@ -76,9 +76,9 @@ surface as an `invalid params` error naming the reason.
 **Consensus parks the run rather than finishing it.** The turn ends at the gate, and
 the decision becomes a slash command, advertised through `available_commands_update`:
 
-| Command | Effect |
-|---|---|
-| `/council_accept` | Merge the winning agent's worktree. |
+| Command                      | Effect                                                      |
+| ---------------------------- | ----------------------------------------------------------- |
+| `/council_accept`            | Merge the winning agent's worktree.                         |
 | `/council_reject <feedback>` | Discard the result; the text is passed through as feedback. |
 
 Any other prompt while a council is parked is refused, so a second run cannot start

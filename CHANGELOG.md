@@ -60,6 +60,35 @@ because a verifier is a node in the thing that survives.
 
 ### Changed
 
+- **Every orchestration mode runs on the kernel.** `council_start`,
+  `fanout_start`, `ultraplan_start`, `ultrareview_start` and `autoloop_start`
+  each create a durable run. Tool signatures and result shapes are unchanged —
+  `CouncilSession`, `FanoutSession`, `UltraplanResult`, `UltrareviewResult` and
+  `AutoloopState` are projected from the run record instead of held in memory —
+  and the engines that do the work are untouched. What they lost is ownership of
+  a lifecycle. Deleted: five result maps, four 30-minute eviction timers, a
+  5-second poller, the two `Set`s fencing an autoloop start against a delete, and
+  both cross-process enumerators (a regex over council markdown transcripts, and
+  `autoloop-registry.jsonl` with its four bespoke read/write helpers).
+
+  Three bugs went with them. A fan-out's results vanished 30 minutes after it
+  finished, because the only copy was in a `Map`. An ultraplan still running when
+  its TTL fired was rewritten as `error: 'Timed out (TTL expired)'` and deleted,
+  so a long plan could be destroyed by its own eviction timer. And ultrareview's
+  correctness depended on the fan-out's TTL: evict first and its poll threw, the
+  interval was cleared, and the review stayed `running` forever.
+
+  `autoloop_status` for a run not live in this process previously returned an
+  all-zero stub labelled `reconstructed from registry`; it now returns the last
+  state the loop published.
+
+- **Breaking:** `councilStart`, `fanoutStart`, `ultraplanStart` and
+  `ultrareviewStart` are async. Tool and HTTP callers are unaffected; direct
+  TypeScript callers need an `await`.
+- **`council_review` / `accept` / `reject` work after a restart.** They act on
+  the git state a finished council left behind, so they now run against a
+  `Council` rebuilt from the run record rather than requiring the instance that
+  produced it.
 - **Council consensus is advisory.** A council used to end when a regex found
   `[CONSENSUS: YES]` in every agent's prose. Votes are still collected and are
   now recorded on the run with their parse source, but they no longer decide
@@ -90,6 +119,12 @@ because a verifier is a node in the thing that survives.
   assesses the file. It was hardcoded to `'clean'` for every entry, which read as
   "reviewed and found fine" when nothing had looked at it. The new `change` field
   carries git's own account.
+- **UltraApp's build queue is durable.** Its own comment claimed a restart
+  mid-build "is marked failed and the user can rerun"; nothing was marked — the
+  pending list vanished with the process, along with any queued build the user
+  was waiting on. It is persisted and restored now, with an in-flight build
+  re-queued at the front rather than resumed, because each build starts from a
+  fresh worktree.
 - `ultraapp/fix-on-failure.ts` is now an adapter over `src/verify/`; its public
   signature is unchanged.
 - One child-process wrapper, one atomic-write helper, one append-JSONL helper,
@@ -139,11 +174,26 @@ because a verifier is a node in the thing that survives.
   signed off while the run still reported `verified`.
 - Agent nodes name their session per attempt. A timed-out attempt is abandoned
   rather than killed, and its teardown would otherwise stop the retry's session.
+- Cancelling an autoloop run tears the loop down instead of leaving its three
+  persistent agents running with their session names claimed — which surfaced
+  much later, and far from its cause, as `session name already in use`.
+- `autoloopResume` no longer hangs forever on a terminated run. `kernel.resume`
+  left terminal runs untouched while the caller awaited a readiness signal that
+  was never coming; resuming an autoloop now restarts it, and readiness is raced
+  against the run ending.
+- The `node:fs` mock in the SessionManager tests no-op'd **every** write in the
+  process to keep two files out of the developer's home directory. It now names
+  those two files and passes everything else through.
 
 ### Removed
 
-- Nothing. All 69 previous tools and their behaviour are unchanged; a caller that
-  declares no contract sees the same completion semantics as 5.1.0.
+- `listCouncilsFromDisk`, `appendAutoloopRegistry`, `upsertAutoloopRegistry`,
+  `listAutoloopsFromRegistry`, `removeAutoloopFromRegistry` and the
+  `AutoloopRegistryEntry` type. Cross-process listing is `listRuns()`.
+- `RESULT_TTL_MS`, `ULTRAREVIEW_POLL_INTERVAL_MS` and `GIT_LOG_DEPTH` — the
+  eviction, polling and magic-window constants have nothing left to configure.
+- No tools were removed. All 69 previous tools keep their behaviour, and a caller
+  that declares no contract sees the same completion semantics as 5.1.0.
 
 ## [5.1.0] - 2026-08-23
 

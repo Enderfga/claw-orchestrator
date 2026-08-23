@@ -44,8 +44,6 @@ export const EMPTY_RESPONSE_RETRY_DELAY_MS = 5_000;
 export const FOLLOWUP_TIMEOUT_MS = 60_000;
 /** Timeout for ultraplan sessions */
 export const ULTRAPLAN_TIMEOUT_MS = 1_800_000;
-/** How long completed results remain queryable */
-export const RESULT_TTL_MS = 1_800_000;
 /** Session TTL cleanup check interval */
 export const CLEANUP_INTERVAL_MS = 60_000;
 /** Debounce delay for persisted session writes */
@@ -54,9 +52,6 @@ export const DEBOUNCED_SAVE_MS = 5_000;
 export const PERSIST_DISK_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 /** Fetch timeout for proxy forward requests */
 export const FETCH_TIMEOUT_MS = 600_000;
-/** Ultrareview polling interval */
-export const ULTRAREVIEW_POLL_INTERVAL_MS = 5_000;
-
 // ─── Server ─────────────────────────────────────────────────────────────────
 
 /** Default port for the embedded HTTP server */
@@ -90,9 +85,6 @@ export const COMPACT_CONTEXT_CHARS = 300;
 export const DEFAULT_MAX_ROUNDS = 15;
 /** Default max turns per agent */
 export const DEFAULT_MAX_TURNS_PER_AGENT = 50;
-/** Git log depth for council review */
-export const GIT_LOG_DEPTH = 50;
-
 // ─── Session Manager Limits ─────────────────────────────────────────────────
 
 /** Max messages per session inbox */

@@ -242,7 +242,26 @@ workflow_start({
 Without a contract the council behaves exactly as before and the run completes
 `unverified` — nothing checked it.
 
-`council_start` and the rest of the `council_*` tools are unchanged.
+`council_start` and the rest of the `council_*` tools keep their signatures, with
+one change forced by the cutover: **`councilStart` is now async** (it creates a
+durable run before returning). The same applies to `fanoutStart`,
+`ultraplanStart` and `ultrareviewStart`. Tool callers are unaffected; direct
+TypeScript callers need an `await`.
+
+## Lifecycle moved to the kernel
+
+A council is a kernel run. `councils`, its 30-minute eviction timer, and
+`listCouncilsFromDisk` — which read `~/.openclaw/council-logs/*.md` with a regex
+and fabricated a stub session with no responses and an empty config — are gone.
+`council_list` returns real records, from disk, across processes.
+
+`council_review` / `accept` / `reject` work after a restart now. They act on the
+git state a finished council left behind, not on live agents, so they run against
+a `Council` rebuilt from the record. Only `council_inject` still needs the live
+engine, and it says so plainly when there isn't one.
+
+Transcripts are still written to `~/.openclaw/council-logs/` for humans. Nothing
+parses them.
 
 ## Changed-file reporting
 
