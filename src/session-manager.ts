@@ -409,6 +409,10 @@ export class SessionManager {
         sessionManager: this,
         router: this._ultraappRouter ?? undefined,
         runtimeMode: this._ultraappRuntimeMode,
+        // The same kernel every other mode runs on, so an ultraapp build is a
+        // run like any other: listed by `workflow_list`, visible in the Runs
+        // tab, owned by one process, and resumable at a node boundary.
+        kernel: this.kernel,
       });
     }
     return this._ultraappManager;

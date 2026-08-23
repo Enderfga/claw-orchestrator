@@ -42,6 +42,34 @@ interview ─► queued ─► building ─► build-complete ─► deploying �
 | `done`           | App live at `/forge/<slug>/`. Chat input now goes to the done-mode classifier.  |
 | `failed`         | Council didn't reach consensus, or fix-on-failure couldn't get the build green. |
 
+### The build is a workflow run
+
+Everything from `building` onward is a run on the durable kernel — the same one
+`council_start`, `fanout_start` and `autoloop_start` use. The workflow has three
+nodes:
+
+| Node     | Kind              | Does                                                         |
+| -------- | ----------------- | ------------------------------------------------------------ |
+| `synth`  | `ultraapp_synth`  | The 3-agent council; snapshots consensus into `versions/v1/` |
+| `build`  | `verifier`        | The build contract, with its fix-on-red loop and evidence    |
+| `deploy` | `ultraapp_deploy` | Starts the app, registers the route, runs the §7g gate       |
+
+Three consequences worth knowing:
+
+- The run is listed by `workflow_list` and `clawo workflow list`, and shows up in
+  the dashboard's Runs tab, under the id `ultraapp-<run_id>`.
+- **A crash between stages does not redo the stage before it.** A build that died
+  after the council resumes into the build stage rather than paying for the
+  council twice.
+- The mode column above is a **projection** of that run's state, not a second
+  state machine. `interview` and `queued` are the exception — nothing is running
+  yet, so there is no run to project from.
+
+The interview and the done-mode conversation are deliberately not workflows.
+They are user-driven and open-ended, with no predetermined sequence of steps;
+a workflow expressing them would be a router self-loop or a single node with a
+state machine hidden inside it.
+
 ## Architectural conventions (§1–§7)
 
 Every generated app MUST satisfy these. They're embedded in the council

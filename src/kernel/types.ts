@@ -37,7 +37,17 @@ export type NodeState = 'pending' | 'running' | 'awaiting_human' | 'succeeded' |
 
 // ─── Node specs ─────────────────────────────────────────────────────────────
 
-export type NodeKind = 'agent' | 'fanout' | 'council' | 'verifier' | 'human_gate' | 'router' | 'subflow' | 'autoloop';
+export type NodeKind =
+  | 'agent'
+  | 'fanout'
+  | 'council'
+  | 'verifier'
+  | 'human_gate'
+  | 'router'
+  | 'subflow'
+  | 'autoloop'
+  | 'ultraapp_synth'
+  | 'ultraapp_deploy';
 
 export interface NodeBase {
   id: string;
@@ -165,6 +175,38 @@ export interface AutoloopNode extends NodeBase {
   config: Record<string, unknown>;
 }
 
+/**
+ * UltraApp's two expensive stages.
+ *
+ * They are their own kinds for the same reason `autoloop` is: the engine behind
+ * them needs a store, a router and a deploy strategy that the kernel has no
+ * business knowing about, so the executor is injected and the spec carries only
+ * JSON. What the kernel owns is what it owns for every other node — the
+ * checkpoint, the claim, the retry, the cancel, and the fact that a crash
+ * between them does not redo the one that already finished.
+ *
+ * The stage between them — running the build contract — is not here, because it
+ * is not UltraApp-specific: it is the ordinary `verifier` node.
+ */
+export interface UltraappSynthNode extends NodeBase {
+  kind: 'ultraapp_synth';
+  /** UltraApp's own run id — the key its store is organised by. */
+  appRunId: string;
+  /** Absolute per-run directory; the council project and the codebase live under it. */
+  runDir: string;
+  slug: string;
+}
+
+export interface UltraappDeployNode extends NodeBase {
+  kind: 'ultraapp_deploy';
+  appRunId: string;
+  runDir: string;
+  slug: string;
+  version: string;
+  /** Where the synthesised codebase lives, once `ultraapp_synth` has produced it. */
+  codebasePath: string;
+}
+
 export type NodeSpec =
   | AgentNode
   | FanoutNode
@@ -173,7 +215,9 @@ export type NodeSpec =
   | HumanGateNode
   | RouterNode
   | SubflowNode
-  | AutoloopNode;
+  | AutoloopNode
+  | UltraappSynthNode
+  | UltraappDeployNode;
 
 // ─── Workflow spec ──────────────────────────────────────────────────────────
 

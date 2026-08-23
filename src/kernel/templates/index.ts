@@ -8,7 +8,7 @@
  */
 
 import type { AcceptanceContract } from '../../verify/contract.js';
-import type { CouncilNode, FanoutAgentSpec, FanoutNode, WorkflowSpec } from '../types.js';
+import type { CouncilNode, FanoutAgentSpec, FanoutNode, NodeSpec, WorkflowSpec } from '../types.js';
 
 export interface CommonArgs {
   task: string;
@@ -315,3 +315,65 @@ export function legacyUltraplanWorkflow(args: LegacyUltraplanArgs): WorkflowSpec
 export type TemplateName = 'council' | 'fanout' | 'solve';
 
 export const TEMPLATE_NAMES: readonly TemplateName[] = ['council', 'fanout', 'solve'];
+
+export interface UltraappArgs {
+  /** UltraApp's own run id, which its store is keyed by. */
+  appRunId: string;
+  /** Absolute per-run directory. */
+  runDir: string;
+  slug: string;
+  version: string;
+  /** Where the synthesised codebase will be, and where the build contract runs. */
+  codebasePath: string;
+  buildContract: AcceptanceContract;
+  /**
+   * Whether to deploy. Without a router there is nowhere to deploy to, and
+   * `build-complete` is the resting state — so the workflow genuinely has one
+   * fewer node rather than a node that quietly does nothing.
+   */
+  deploy: boolean;
+}
+
+/**
+ * UltraApp's build pipeline.
+ *
+ * Three nodes, and the middle one is not UltraApp's: synthesise a codebase by
+ * council, run the build contract against it (the ordinary `verifier`, with its
+ * fix-on-red loop), then deploy and check the deployed thing.
+ *
+ * There is deliberately no run-level `contract` here. A run-level contract makes
+ * the kernel append an implicit terminal verifier, and this workflow already
+ * ends in one — the deploy stage returns its own evidence, because the §7g
+ * screenshots are taken against a URL that does not exist until the deploy has
+ * run. The last verdict is the run's verdict, which is what makes `completed`
+ * mean "the deployed app passed", not "the code compiled".
+ */
+export function ultraappWorkflow(args: UltraappArgs): WorkflowSpec {
+  const nodes: NodeSpec[] = [
+    {
+      id: 'synth',
+      kind: 'ultraapp_synth',
+      appRunId: args.appRunId,
+      runDir: args.runDir,
+      slug: args.slug,
+    },
+    {
+      id: 'build',
+      kind: 'verifier',
+      contract: args.buildContract,
+      cwd: args.codebasePath,
+    },
+  ];
+  if (args.deploy) {
+    nodes.push({
+      id: 'deploy',
+      kind: 'ultraapp_deploy',
+      appRunId: args.appRunId,
+      runDir: args.runDir,
+      slug: args.slug,
+      version: args.version,
+      codebasePath: args.codebasePath,
+    });
+  }
+  return { name: 'ultraapp', cwd: args.runDir, nodes };
+}

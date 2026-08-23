@@ -23,6 +23,18 @@ function fakeSessionManager(reply: string) {
   };
 }
 
+/**
+ * Build-stage contracts for the tests.
+ *
+ * The build stage is the ordinary `verifier` node now, so what used to be
+ * "stub the fix-on-failure module" is "declare a contract" — which is closer to
+ * how a caller actually configures it, and keeps the node under test real.
+ */
+const PASSING_BUILD = {
+  id: 'test-build',
+  checks: [{ id: 'exists', required: true, spec: { type: 'file' as const, path: '.', exists: true } }],
+};
+
 function questionReply(): string {
   return '```question\n{"question":"hi","options":[{"label":"a","value":"a"}],"recommended":"a","freeformAccepted":true}\n```';
 }
@@ -35,12 +47,19 @@ describe('UltraappManager', () => {
   // to (or instead of) using a local `const mgr` binding.
   let activeMgr: UltraappManager | null = null;
 
+  const savedWfDir = process.env.CLAWO_WF_DIR;
+
   beforeEach(() => {
     tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ua-mgr-'));
     store = new UltraappStore(tmp);
+    // The build pipeline is a kernel run, so it writes to the run store. Point
+    // that at the temp dir too, or a unit test scribbles in the developer's home.
+    process.env.CLAWO_WF_DIR = path.join(tmp, 'wf');
     activeMgr = null;
   });
   afterEach(async () => {
+    if (savedWfDir === undefined) delete process.env.CLAWO_WF_DIR;
+    else process.env.CLAWO_WF_DIR = savedWfDir;
     // Drain in-flight driveTurn() chains (createRun + submitAnswer + addFile +
     // applySpecEdit all fire detached follow-up turns). Otherwise an in-flight
     // appendChat can race rmSync and surface as an unhandled ENOENT rejection
@@ -112,16 +131,14 @@ describe('UltraappManager', () => {
 
   it('startBuild transitions interview→queued→building→build-complete and records artifact', async () => {
     const councilMod = await import('../../ultraapp/council-adapter.js');
-    const fixMod = await import('../../ultraapp/fix-on-failure.js');
     const synth = vi.spyOn(councilMod, 'runCouncilSynth').mockImplementation(async ({ runDir }) => {
       const codebase = path.join(runDir, 'versions', 'v1', 'codebase');
       fs.mkdirSync(codebase, { recursive: true });
       return { ok: true, worktreePath: codebase, rounds: 1 };
     });
-    const fix = vi.spyOn(fixMod, 'runFixOnFailure').mockResolvedValue({ ok: true, rounds: 0 });
 
     const sm = fakeSessionManager(questionReply());
-    const mgr = new UltraappManager({ store, sessionManager: sm as never });
+    const mgr = new UltraappManager({ store, sessionManager: sm as never, buildContract: PASSING_BUILD });
     activeMgr = mgr;
     const id = await mgr.createRun();
 
@@ -173,18 +190,15 @@ describe('UltraappManager', () => {
     expect(chat.some((e) => e.kind === 'narrator')).toBe(true);
 
     synth.mockRestore();
-    fix.mockRestore();
   });
 
   it('startBuild with router runs deploy after build, transitions to done, emits app-url', async () => {
     const councilMod = await import('../../ultraapp/council-adapter.js');
-    const fixMod = await import('../../ultraapp/fix-on-failure.js');
     const synth = vi.spyOn(councilMod, 'runCouncilSynth').mockImplementation(async ({ runDir }) => {
       const codebase = path.join(runDir, 'versions', 'v1', 'codebase');
       fs.mkdirSync(codebase, { recursive: true });
       return { ok: true, worktreePath: codebase, rounds: 1 };
     });
-    const fix = vi.spyOn(fixMod, 'runFixOnFailure').mockResolvedValue({ ok: true, rounds: 0 });
 
     const fakeRouter = {
       register: vi.fn(),
@@ -206,6 +220,7 @@ describe('UltraappManager', () => {
       sessionManager: sm as never,
       router: fakeRouter,
       deployFn,
+      buildContract: PASSING_BUILD,
       // Deploy-stage acceptance runs a headless browser against the deployed
       // URL; a stubbed deploy has none, so stub the checks the same way.
       runDeployChecksFn: async () => [],
@@ -237,18 +252,15 @@ describe('UltraappManager', () => {
     expect(urlEvents.length).toBe(1);
 
     synth.mockRestore();
-    fix.mockRestore();
   });
 
   it('startBuild marks failed when deploy fails', async () => {
     const councilMod = await import('../../ultraapp/council-adapter.js');
-    const fixMod = await import('../../ultraapp/fix-on-failure.js');
     const synth = vi.spyOn(councilMod, 'runCouncilSynth').mockImplementation(async ({ runDir }) => {
       const codebase = path.join(runDir, 'versions', 'v1', 'codebase');
       fs.mkdirSync(codebase, { recursive: true });
       return { ok: true, worktreePath: codebase, rounds: 1 };
     });
-    const fix = vi.spyOn(fixMod, 'runFixOnFailure').mockResolvedValue({ ok: true, rounds: 0 });
 
     const fakeRouter = {
       register: vi.fn(),
@@ -264,6 +276,7 @@ describe('UltraappManager', () => {
       sessionManager: sm as never,
       router: fakeRouter,
       deployFn,
+      buildContract: PASSING_BUILD,
       // Deploy-stage acceptance runs a headless browser against the deployed
       // URL; a stubbed deploy has none, so stub the checks the same way.
       runDeployChecksFn: async () => [],
@@ -282,7 +295,6 @@ describe('UltraappManager', () => {
     expect(s.failure).toMatch(/docker not running/);
 
     synth.mockRestore();
-    fix.mockRestore();
   });
 
   it('submitDoneModeMessage cosmetic branch invokes patcher and snapshots a new version', async () => {
@@ -290,7 +302,7 @@ describe('UltraappManager', () => {
       '```classification\n{"class":"cosmetic","reason":"r","proposedAction":"swap color"}\n```',
     );
     // First setup: pretend the run is in 'done' mode with a v1 deploy artifact
-    const mgr = new UltraappManager({ store, sessionManager: sm as never });
+    const mgr = new UltraappManager({ store, sessionManager: sm as never, buildContract: PASSING_BUILD });
     activeMgr = mgr;
     const id = await mgr.createRun();
     await store.setMode(id, 'done');
@@ -372,11 +384,9 @@ describe('UltraappManager', () => {
     // rmSync'd the tmp dir, causing flaky ENOTEMPTY teardown failures
     // in CI (race between rmSync and the live git workers).
     const councilMod = await import('../../ultraapp/council-adapter.js');
-    const fixMod = await import('../../ultraapp/fix-on-failure.js');
     const synth = vi
       .spyOn(councilMod, 'runCouncilSynth')
       .mockResolvedValue({ ok: false, reason: 'mocked — skipping build', rounds: 0 });
-    const fix = vi.spyOn(fixMod, 'runFixOnFailure').mockResolvedValue({ ok: false, rounds: 0 });
 
     // Set up a fake session whose sendMessage replies with a [COMPLETE]
     // marker every call EXCEPT the first (the kickoff at createRun must be
@@ -423,7 +433,6 @@ describe('UltraappManager', () => {
     // 'done'); the exact terminal state isn't load-bearing.
     expect(['queued', 'building', 'build-complete', 'failed']).toContain(finalState.mode);
     synth.mockRestore();
-    fix.mockRestore();
   });
 
   it('startBuild rejects when strict spec validation fails (cross-ref to undeclared input)', async () => {
@@ -457,11 +466,9 @@ describe('UltraappManager', () => {
 
   it('startBuild marks failed when council fails', async () => {
     const councilMod = await import('../../ultraapp/council-adapter.js');
-    const fixMod = await import('../../ultraapp/fix-on-failure.js');
     const synth = vi
       .spyOn(councilMod, 'runCouncilSynth')
       .mockResolvedValue({ ok: false, reason: 'no consensus', rounds: 8 });
-    const fix = vi.spyOn(fixMod, 'runFixOnFailure').mockResolvedValue({ ok: true, rounds: 0 });
 
     const sm = fakeSessionManager(questionReply());
     const mgr = new UltraappManager({ store, sessionManager: sm as never });
@@ -476,8 +483,6 @@ describe('UltraappManager', () => {
     const s = await store.readState(id);
     expect(s.mode).toBe('failed');
     expect(s.failure).toMatch(/no consensus/);
-    expect(fix).not.toHaveBeenCalled();
     synth.mockRestore();
-    fix.mockRestore();
   });
 });

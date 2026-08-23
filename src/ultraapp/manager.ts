@@ -3,7 +3,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { type AppSpec, validateAppSpec } from './spec.js';
-import { type UltraappStore, type ChatEntry } from './store.js';
+import { type UltraappStore, type ChatEntry, type RunMode } from './store.js';
 import { parseInterviewReply, type QuestionEnvelope } from './interview-parser.js';
 import { runToolCalls } from './interview-tools.js';
 import {
@@ -17,11 +17,20 @@ import { UltraappBuildQueue } from './build.js';
 import type { BuildEvent } from './build-events.js';
 import { runCouncilSynth } from './council-adapter.js';
 import { runFixOnFailure } from './fix-on-failure.js';
+import { RunKernel } from '../kernel/engine.js';
+import { registerDefaultExecutors } from '../kernel/nodes/index.js';
+import {
+  makeUltraappDeployExecutor,
+  makeUltraappSynthExecutor,
+  type UltraappDeployOutcome,
+  type UltraappNodeDeps,
+} from '../kernel/nodes/ultraapp.js';
+import { ultraappWorkflow } from '../kernel/templates/index.js';
+import type { KernelEvent, RunRecord } from '../kernel/types.js';
 import { ultraappBuildContract, ultraappDeployContract, visualGateIsStrict } from './contract.js';
 import { runChecks } from '../verify/runner.js';
 import { contractPassed, type AcceptanceContract, type CheckResult } from '../verify/contract.js';
 import { writeEvidence } from '../verify/evidence.js';
-import { spawnFixerSessionWith } from './fix-on-failure-session.js';
 import { deployArtifact, type DeployArgs, type DeployResult } from './deploy.js';
 import { dockerBuild, dockerRun, dockerRmi } from './docker.js';
 import { hostBuild, hostRun, hostRmi } from './host-strategy.js';
@@ -64,8 +73,27 @@ export interface UltraappManagerOptions {
       `build-complete` (v0.2 behaviour); when present, deploy runs after build
       and the run reaches `done` with a public-but-local URL. */
   router?: UltraappRouter;
+  /**
+   * The run kernel that drives the build pipeline.
+   *
+   * Supplied by SessionManager in production so UltraApp's runs share the one
+   * run store, listing and ownership model as everything else. Left out, a
+   * private kernel is wired up — which keeps the class usable on its own, and
+   * still means there is only one execution model, not two.
+   */
+  kernel?: RunKernel;
   /** Test seam: stub the deploy state machine. */
   deployFn?: (a: DeployArgs) => Promise<DeployResult>;
+  /**
+   * Override the build-stage acceptance contract.
+   *
+   * A caller-supplied contract, never an agent-supplied one — the same rule as
+   * everywhere else in the verification plane. It exists because the default
+   * really does run `npm install && npm run build && npm test` in the generated
+   * codebase, which a unit test has no business doing; tests declare a trivial
+   * contract the way they inject `deployFn`.
+   */
+  buildContract?: AcceptanceContract;
   /**
    * Test seam: stub the deploy-stage acceptance checks. The real one drives a
    * headless browser against the deployed URL, which a stubbed deploy has not
@@ -92,11 +120,51 @@ interface ActiveRun {
 
 const SESSION_KICKOFF = 'Begin the ultraapp interview now. Ask the first question per the skill contract.';
 
+/**
+ * The kernel run id for an app's current build.
+ *
+ * Stable rather than per-attempt, so `clawo workflow show ultraapp-<id>` always
+ * names the build that matters; a rebuild deletes the previous run and starts a
+ * new one under the same id, which the incarnation check makes safe.
+ */
+export function ultraappKernelRunId(appRunId: string): string {
+  return `ultraapp-${appRunId}`;
+}
+
+/**
+ * UltraApp's `RunMode`, derived from the kernel record.
+ *
+ * The build pipeline no longer has a state machine of its own: this reads the
+ * one the kernel keeps. `interview` and `queued` are not here because they are
+ * not pipeline states — nothing is running yet, and the interview genuinely is
+ * not a workflow.
+ */
+export function ultraappModeOf(record: RunRecord): RunMode {
+  if (record.state === 'cancelled') return 'cancelled';
+  if (record.state === 'failed') return 'failed';
+  const deploys = Boolean(record.nodes.deploy);
+  if (record.state === 'completed') return deploys ? 'done' : 'build-complete';
+  const deploy = record.nodes.deploy;
+  if (deploy && deploy.state !== 'pending') return 'deploying';
+  if (record.nodes.build?.state === 'succeeded') return 'build-complete';
+  return 'building';
+}
+
+/** Which stage a failed node belongs to, in the vocabulary `BuildEvent` uses. */
+function buildPhaseOf(nodeId: string | undefined): 'council' | 'fix-on-failure' | 'orchestrator' {
+  if (nodeId === 'synth') return 'council';
+  if (nodeId === 'build') return 'fix-on-failure';
+  return 'orchestrator';
+}
+
 export class UltraappManager {
   private readonly runs = new Map<string, ActiveRun>();
   private readonly skillContent: string;
   private readonly buildQueue: UltraappBuildQueue;
   private readonly narrators = new Map<string, Narrator>();
+  private readonly kernel: RunKernel;
+  /** Per-run serialisation for the mode projection. See {@link projectMode}. */
+  private readonly projectChain = new Map<string, Promise<void>>();
   private readonly classifierSessions = new Set<string>();
   // Tracks fire-and-forget background work (driveTurn chains, build-queue
   // enqueue, narrator finalisation) so tests (and dispose flows) can drain
@@ -117,6 +185,29 @@ export class UltraappManager {
       },
     });
     this.buildQueue.subscribe((ev) => this.onBuildEvent(ev));
+
+    // The two stages the kernel cannot know how to run on its own. Registered
+    // here rather than in `registerDefaultExecutors` for the same reason the
+    // autoloop executor is: they close over this manager's store, router and
+    // deploy strategy, none of which belong in the kernel.
+    this.kernel = opts.kernel ?? registerDefaultExecutors(new RunKernel({ manager: opts.sessionManager as never }));
+    const deps = this.ultraappNodeDeps();
+    this.kernel.setExecutor('ultraapp_synth', makeUltraappSynthExecutor(deps));
+    this.kernel.setExecutor('ultraapp_deploy', makeUltraappDeployExecutor(deps));
+  }
+
+  private ultraappNodeDeps(): UltraappNodeDeps {
+    return {
+      synth: async ({ appRunId, runDir }) =>
+        runCouncilSynth({
+          spec: await this.opts.store.readSpec(appRunId),
+          runId: appRunId,
+          runDir,
+          sessionManager: this.opts.sessionManager,
+        }),
+      deploy: async ({ appRunId, version, codebasePath, slug }) =>
+        this.deployStage({ runId: appRunId, version, worktreePath: codebasePath, slug }),
+    };
   }
 
   get store(): UltraappStore {
@@ -219,116 +310,221 @@ export class UltraappManager {
     return this.buildQueue.position(runId);
   }
 
+  /**
+   * Run the build pipeline as a kernel workflow.
+   *
+   * This used to be a hand-rolled sequence: council, then fix-on-failure, then
+   * deploy, with a mode enum written at each step and nothing checkpointed
+   * between them. It worked, but it meant UltraApp was a second runtime standing
+   * beside the one this release exists to be — its runs were invisible to
+   * `workflow_list` and the Runs tab, and a crash halfway through threw away a
+   * finished council and started it again from nothing.
+   *
+   * Now the sequence is a `WorkflowSpec` and the kernel drives it. What is left
+   * here is the part that is genuinely UltraApp's: turning kernel events into
+   * `BuildEvent`s for the dashboard, and keeping `RunMode` — which the whole
+   * UI and every stored run reads — as a projection of the kernel's state
+   * rather than as a second source of truth.
+   *
+   * The interview and the done-mode conversation are deliberately NOT here.
+   * They are user-driven and open-ended; expressing them as a workflow would
+   * mean a router self-loop fighting the visit bound, or one fake node with a
+   * state machine hidden inside it. That would be unification as theatre.
+   */
   private async runBuild(runId: string, emit: (e: BuildEvent) => void): Promise<void> {
     await this.opts.store.setMode(runId, 'building');
-
-    // Start the narrator before any build event fires so onBuildEvent can
-    // push synchronously without racing async session-spawn. Best-effort —
-    // narrator failure shouldn't sink the build.
-    const language = detectLanguage(await this.opts.store.readChat(runId));
-    const run = this.runs.get(runId);
-    if (run) {
-      const n = new Narrator({
-        runId,
-        sessionManager: this.opts.sessionManager,
-        language,
-        onChat: (text) => {
-          void this.opts.store.appendChat(runId, { role: 'system', kind: 'narrator', text });
-          this.emit(run, { type: 'chat', entry: { role: 'system', kind: 'narrator', text } });
-        },
-      });
-      this.narrators.set(runId, n);
-      try {
-        await n.start();
-      } catch {
-        this.narrators.delete(runId);
-      }
-    }
+    await this.startNarrator(runId);
 
     emit({ type: 'build-start', runId });
     const spec = await this.opts.store.readSpec(runId);
     const runDir = this.opts.store.runDirAbsolute(runId);
+    const version = 'v1';
+    const codebasePath = path.join(runDir, 'versions', version, 'codebase');
+    const useDocker = this.opts.runtimeMode === 'docker';
 
-    const council = await runCouncilSynth({
-      spec,
-      runId,
+    const workflow = ultraappWorkflow({
+      appRunId: runId,
       runDir,
-      sessionManager: this.opts.sessionManager,
+      slug: spec.meta.name,
+      version,
+      codebasePath,
+      // §4 of the conventions has always told the council that `npm run smoke`
+      // is binding; this is where it actually runs.
+      buildContract: this.opts.buildContract ?? ultraappBuildContract({ useDocker }),
+      deploy: Boolean(this.opts.router),
     });
-    if (!council.ok) {
-      emit({ type: 'build-failed', runId, phase: 'council', reason: council.reason ?? 'unknown' });
-      await this.opts.store.setMode(runId, 'failed', council.reason);
+
+    const kernelRunId = ultraappKernelRunId(runId);
+    // A rebuild reuses the id, so the previous run is removed first. Deleting
+    // takes its incarnation with it, so nothing left over from the old build can
+    // write to the new one.
+    if (this.kernel.get(kernelRunId) && !this.kernel.delete(kernelRunId)) {
+      const reason = `a previous build of ${runId} is still owned by another process`;
+      emit({ type: 'build-failed', runId, phase: 'orchestrator', reason });
+      await this.opts.store.setMode(runId, 'failed', reason);
       return;
     }
-    emit({ type: 'council-consensus', runId, rounds: council.rounds });
 
-    emit({ type: 'fix-start', runId });
-    const useDocker = this.opts.runtimeMode === 'docker';
-    const fix = await runFixOnFailure({
-      worktreePath: council.worktreePath!,
-      maxRounds: 5,
-      // Reuse the same SessionManager so the fixer doesn't spawn a fresh one per fix.
-      spawnFixer: (a) => spawnFixerSessionWith(this.opts.sessionManager, a),
-      // The build contract adds the `npm run smoke` step that §4 of the
-      // conventions has always told the council was binding, and that the code
-      // never actually ran. Host mode drops the docker-build check.
-      contract: ultraappBuildContract({ useDocker }),
-      artifactDir: path.join(this.opts.store.runDirAbsolute(runId), 'evidence', 'build-artifacts'),
-    });
-    if (fix.results) {
-      await writeEvidence({
-        runDir: this.opts.store.runDirAbsolute(runId),
-        runId,
-        node: 'build',
-        evidenceId: 'build-01',
-        cwd: council.worktreePath!,
-        contractId: 'ultraapp-build',
-        results: fix.results,
-        rounds: fix.rounds,
-      });
+    const off = this.subscribeKernel(kernelRunId, runId, emit, { version, codebasePath });
+    try {
+      await this.kernel.start(workflow, { runId: kernelRunId, cwd: runDir });
+      const record = await this.kernel.wait(kernelRunId);
+      // Unsubscribed BEFORE settling. A handler is async and re-reads the record
+      // itself, so one that started just before the terminal transition can
+      // finish just after it — and write the state it saw over the newer one.
+      off();
+      await this.settleBuild(runId, record, emit);
+    } catch (err) {
+      const reason = (err as Error).message;
+      emit({ type: 'build-failed', runId, phase: 'orchestrator', reason });
+      await this.opts.store.setMode(runId, 'failed', reason);
+    } finally {
+      off();
     }
-    if (!fix.ok) {
+  }
+
+  /** Best-effort narrator startup; its failure must not sink a build. */
+  private async startNarrator(runId: string): Promise<void> {
+    const language = detectLanguage(await this.opts.store.readChat(runId));
+    const run = this.runs.get(runId);
+    if (!run) return;
+    const n = new Narrator({
+      runId,
+      sessionManager: this.opts.sessionManager,
+      language,
+      onChat: (text) => {
+        void this.opts.store.appendChat(runId, { role: 'system', kind: 'narrator', text });
+        this.emit(run, { type: 'chat', entry: { role: 'system', kind: 'narrator', text } });
+      },
+    });
+    this.narrators.set(runId, n);
+    try {
+      await n.start();
+    } catch {
+      this.narrators.delete(runId);
+    }
+  }
+
+  /**
+   * Translate the run's kernel events into build events and mode transitions.
+   *
+   * The mode is recomputed from the record every time rather than stepped
+   * forward, so a handler that arrives late cannot write a stale value over a
+   * newer one — which it otherwise can, because these handlers are async and the
+   * kernel does not wait for them.
+   */
+  private subscribeKernel(
+    kernelRunId: string,
+    runId: string,
+    emit: (e: BuildEvent) => void,
+    ctx: { version: string; codebasePath: string },
+  ): () => void {
+    const onEvent = (event: KernelEvent): void => {
+      void this.onKernelEvent(event, runId, emit, ctx).catch(() => {
+        // Projection is best-effort: a failed mode write must not stop the run.
+      });
+    };
+    this.kernel.on(kernelRunId, onEvent);
+    return () => this.kernel.off(kernelRunId, onEvent);
+  }
+
+  private async onKernelEvent(
+    event: KernelEvent,
+    runId: string,
+    emit: (e: BuildEvent) => void,
+    ctx: { version: string; codebasePath: string },
+  ): Promise<void> {
+    if (event.type !== 'node_state') return;
+    const record = this.kernel.get(ultraappKernelRunId(runId));
+    const node = record?.nodes[event.node];
+    const rounds = Number((node?.data as { rounds?: number } | undefined)?.rounds ?? 0);
+
+    if (event.node === 'build' && event.state === 'running') emit({ type: 'fix-start', runId });
+    if (event.state === 'succeeded' && event.node === 'synth') {
+      emit({ type: 'council-consensus', runId, rounds });
+    }
+    if (event.state === 'succeeded' && event.node === 'build') {
+      emit({ type: 'fix-complete', runId, rounds });
+      await this.opts.store.recordBuildArtifact(runId, { worktreePath: ctx.codebasePath, version: ctx.version });
+      emit({ type: 'build-complete', runId, worktreePath: ctx.codebasePath });
+    }
+    await this.projectMode(runId);
+  }
+
+  /**
+   * Write UltraApp's mode as it is implied by the kernel record, right now.
+   *
+   * Serialised per run, and that is the whole mechanism. These are fired from
+   * async event handlers, so two of them can read the record at different
+   * moments and still write in the opposite order — which showed up as a run
+   * that had already failed reverting to `building`. Chaining read-compute-write
+   * makes the last write the one computed last, and the kernel record only ever
+   * moves forward, so the last computed value is the current one.
+   */
+  private projectMode(runId: string): Promise<void> {
+    const previous = this.projectChain.get(runId) ?? Promise.resolve();
+    const next = previous.then(() => this.projectModeNow(runId)).catch(() => undefined);
+    this.projectChain.set(runId, next);
+    return next;
+  }
+
+  private async projectModeNow(runId: string): Promise<void> {
+    const record = this.kernel.get(ultraappKernelRunId(runId));
+    if (!record) return;
+    const mode = ultraappModeOf(record);
+    const failure =
+      mode === 'failed'
+        ? (Object.values(record.nodes).find((n) => n.state === 'failed')?.error ?? record.error)
+        : undefined;
+    await this.opts.store.setMode(runId, mode, failure);
+  }
+
+  /** Emit the terminal build event and settle the mode from the final record. */
+  private async settleBuild(
+    runId: string,
+    record: RunRecord | undefined,
+    emit: (e: BuildEvent) => void,
+  ): Promise<void> {
+    if (!record) {
+      await this.opts.store.setMode(runId, 'failed', 'the build run disappeared');
+      return;
+    }
+    if (record.state !== 'completed' && record.state !== 'cancelled') {
+      const failing = Object.values(record.nodes).find((n) => n.state === 'failed');
       emit({
         type: 'build-failed',
         runId,
-        phase: 'fix-on-failure',
-        reason: fix.lastError ?? 'budget exhausted',
+        phase: buildPhaseOf(failing?.id),
+        reason: failing?.error ?? record.error ?? 'build failed',
       });
-      await this.opts.store.setMode(runId, 'failed', fix.lastError);
-      return;
     }
-    emit({ type: 'fix-complete', runId, rounds: fix.rounds });
-
-    const version = 'v1';
-    await this.opts.store.recordBuildArtifact(runId, {
-      worktreePath: council.worktreePath!,
-      version,
-    });
-    await this.opts.store.setMode(runId, 'build-complete');
-    emit({ type: 'build-complete', runId, worktreePath: council.worktreePath! });
-
-    // If a router is wired, continue into deploy. Without a router (legacy v0.2
-    // wiring or test setup), build-complete is the resting state.
-    if (!this.opts.router) return;
-
-    await this.runDeployStage({
-      runId,
-      version,
-      worktreePath: council.worktreePath!,
-      slug: spec.meta.name,
-      emit,
-    });
+    await this.projectMode(runId);
   }
 
-  private async runDeployStage(args: {
+  /**
+   * Deploy the built codebase and check the deployed thing.
+   *
+   * Returns an outcome rather than writing modes: the mode is projected from the
+   * kernel now, and a stage that also wrote it would put the two back out of
+   * step. The acceptance verdict comes back with the outcome because it is the
+   * run's terminal verdict — §7g screenshots are taken against a URL that does
+   * not exist until this has run, so the contract cannot sit in the spec.
+   */
+  private async deployStage(args: {
     runId: string;
     version: string;
     worktreePath: string;
     slug: string;
-    emit: (e: BuildEvent) => void;
-  }): Promise<void> {
+  }): Promise<UltraappDeployOutcome> {
     const router = this.opts.router!;
-    await this.opts.store.setMode(args.runId, 'deploying');
+    // Recorded here rather than only from the build-succeeded handler: those
+    // handlers are async and do not gate the next node, so the deploy could
+    // reach `recordDeploy` before the artifact it belongs to existed. Writing
+    // it is an upsert keyed by version, so doing it in both places is safe.
+    await this.opts.store.recordBuildArtifact(args.runId, {
+      worktreePath: args.worktreePath,
+      version: args.version,
+    });
     const taken = new Set(router.list().map((r) => r.port));
     const deploy = this.opts.deployFn ?? deployArtifact;
     const useDocker = this.opts.runtimeMode === 'docker';
@@ -363,16 +559,8 @@ export class UltraappManager {
       fetchFn: fetch,
       takenPorts: taken,
     });
-    if (!dep.ok) {
-      args.emit({
-        type: 'build-failed',
-        runId: args.runId,
-        phase: 'orchestrator',
-        reason: `deploy: ${dep.reason ?? 'unknown'}`,
-      });
-      await this.opts.store.setMode(args.runId, 'failed', dep.reason);
-      return;
-    }
+    if (!dep.ok) return { ok: false, reason: `deploy: ${dep.reason ?? 'unknown'}` };
+
     await this.opts.store.recordDeploy(args.runId, args.version, {
       url: dep.url!,
       port: dep.port!,
@@ -385,7 +573,8 @@ export class UltraappManager {
     // evidence, so "did anyone actually look" stops being an agent's claim.
     // We do not judge the pixels — that is still a reader's call.
     const deployContract = ultraappDeployContract(dep.url!);
-    const deployArtifactDir = path.join(this.opts.store.runDirAbsolute(args.runId), 'evidence', 'deploy-01');
+    const evidenceId = 'deploy-01';
+    const deployArtifactDir = path.join(this.opts.store.runDirAbsolute(args.runId), 'evidence', evidenceId);
     const deployChecks = this.opts.runDeployChecksFn
       ? await this.opts.runDeployChecksFn(deployContract, args.worktreePath, deployArtifactDir)
       : await runChecks(deployContract, { cwd: args.worktreePath, artifactDir: deployArtifactDir });
@@ -393,22 +582,22 @@ export class UltraappManager {
       runDir: this.opts.store.runDirAbsolute(args.runId),
       runId: args.runId,
       node: 'deploy',
-      evidenceId: 'deploy-01',
+      evidenceId,
       cwd: args.worktreePath,
       contractId: 'ultraapp-deploy',
       results: deployChecks,
       rounds: 0,
     });
-    if (!contractPassed(deployChecks)) {
+    const passed = contractPassed(deployChecks);
+    if (!passed) {
       const failed = deployChecks.filter((c) => c.required && !c.passed);
-      args.emit({
-        type: 'build-failed',
-        runId: args.runId,
-        phase: 'orchestrator',
+      return {
+        ok: false,
         reason: `acceptance: ${failed.map((f) => f.detail).join('; ')}`,
-      });
-      await this.opts.store.setMode(args.runId, 'failed', failed[0]?.detail);
-      return;
+        url: dep.url,
+        evidenceId,
+        passed: false,
+      };
     }
     if (!visualGateIsStrict()) {
       const shot = deployChecks.find((c) => c.id === 'frontend-gate');
@@ -421,11 +610,9 @@ export class UltraappManager {
       }
     }
 
-    await this.opts.store.setMode(args.runId, 'done');
     const run = this.runs.get(args.runId);
-    if (run) {
-      this.emit(run, { type: 'app-url', url: dep.url!, version: args.version });
-    }
+    if (run) this.emit(run, { type: 'app-url', url: dep.url!, version: args.version });
+    return { ok: true, url: dep.url, evidenceId, passed: true };
   }
 
   async startContainer(runId: string): Promise<{ ok: boolean; error?: string }> {

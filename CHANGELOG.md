@@ -28,9 +28,9 @@ because a verifier is a node in the thing that survives.
   Two limits stated plainly rather than glossed. Node execution is
   **at-least-once**: there is no idempotency key, attempt lease, or side-effect
   commit marker, so a node that wrote files and died before its checkpoint runs
-  again from the top. And UltraApp is not yet expressed as a workflow: it has the
-  kernel's ownership primitives but keeps its own store, mode state machine and
-  council adapter, so it remains a second runtime standing beside this one.
+  again from the top. And the boundaries are node boundaries: a node that dies
+  half-way is retried whole, because a half-finished node left no result worth
+  trusting.
 
 - **Verification plane (`src/verify/`).** Acceptance contracts the runtime runs
   itself: `command` (argv, gated on exit code), `http`, `screenshot`,
@@ -58,6 +58,30 @@ because a verifier is a node in the thing that survives.
   readable and nothing is backfilled.
 
 ### Changed
+
+- **UltraApp's build pipeline is a kernel workflow.** It was the last thing
+  running its own lifecycle: a mode enum in its own store, a call straight into
+  `new Council().run()`, and nothing checkpointed between the stages. So a crash
+  threw away a finished council — the most expensive thing in the run — and
+  started it again from nothing, and the run appeared in no listing.
+
+  It is now a three-node `WorkflowSpec`: synthesise by council, run the build
+  contract (the ordinary `verifier` node, fix-on-red loop and all), deploy and
+  check the deployed thing. `RunMode` survives as a projection of the kernel
+  record — every reader keeps working — but it is no longer a second source of
+  truth, and the projection is serialised per run so a late event handler cannot
+  write a stale mode over a newer one.
+
+  Two stages are UltraApp-specific node kinds (`ultraapp_synth`,
+  `ultraapp_deploy`) with injected executors, exactly as `autoloop` is: the
+  engine behind them needs a store, a router and a deploy strategy, and none of
+  that belongs in the kernel. The stage between them needed no new kind at all.
+
+  The interview and the done-mode conversation deliberately stay where they are.
+  They are user-driven and open-ended; expressing them as a workflow would mean a
+  router self-loop fighting the visit bound, or one fake node with a state
+  machine hidden inside it — unification as theatre. What moved is what is
+  actually a pipeline.
 
 - **Every orchestration mode runs on the kernel.** `council_start`,
   `fanout_start`, `ultraplan_start`, `ultrareview_start` and `autoloop_start`
@@ -356,6 +380,11 @@ because a verifier is a node in the thing that survives.
 
   Its ownership section is written as races rather than as descriptions of
   races, because the earlier version's names were stronger than its coverage.
+  UltraApp's pipeline gets the two assertions the move was made for: the build
+  is listed in the run store as a workflow with per-stage node records and a
+  build evidence bundle, and a build whose checkpoint says it died after the
+  council is resumed without running the council a second time.
+
   Two real processes create the same forty run ids at the same instant and the
   assertion is that no id was created by both and every id was created by one.
   A real other process holds the lock file while a run tries to write, briefly in

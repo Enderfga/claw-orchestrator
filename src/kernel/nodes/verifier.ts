@@ -81,6 +81,9 @@ export async function executeVerifierNode(node: NodeSpec, ctx: NodeContext): Pro
     passed,
     evidenceId: bundle.evidenceId,
     treeFingerprint: bundle.treeFingerprint,
+    // How many fix-on-red rounds it took, checkpointed with the node so a
+    // caller can report it without re-reading the evidence bundle.
+    data: { rounds, checks: results.length },
     output: results.map((r) => `[${r.passed ? 'PASS' : r.required ? 'FAIL' : 'warn'}] ${r.id}: ${r.detail}`).join('\n'),
     error: passed ? undefined : `acceptance contract failed: ${failed.map((r) => r.detail).join('; ')}`,
   };
