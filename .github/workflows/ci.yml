@@ -24,6 +24,4 @@ jobs:
       - run: npm run build
       - run: npm run lint
       - run: npm run format:check
-      # TEMPORARY: serial + verbose so a hang names the file it is in.
-      # Reverted once the CI hang this branch exposed is understood.
-      - run: npx vitest run --no-file-parallelism --reporter=verbose
+      - run: npm run test
