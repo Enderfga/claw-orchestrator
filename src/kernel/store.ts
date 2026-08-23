@@ -14,14 +14,14 @@
  * replaying `events.jsonl` against `spec.json`. The atomic rewrite makes that
  * path rare; the replay makes it usually survivable.
  *
- * Usually, not always, and the reason is worth stating rather than hiding: event
- * appends are best-effort (a log failure is warned and swallowed, because a
- * logging failure must not break the run it describes), yet the replay treats
- * that same log as authoritative when the checkpoint is gone. Those two
- * properties are in tension. In practice the checkpoint is the primary record
- * and the replay is a fallback for the narrow window where it was being
- * rewritten; a run that lost both is unrecoverable and `loadRun` returns
- * undefined rather than inventing a state.
+ * The checkpoint and the events it describes are written by the same
+ * transaction, so they cannot disagree: a commit that reports `committed` has
+ * both, and one that does not has neither. That was not always true — the event
+ * append used to swallow its own errors while the replay treated the same log as
+ * authoritative, which is a contradiction sitting in the recovery path. The
+ * replay is now a plain fallback for a lost `run.json`; a run that lost both it
+ * and the log is unrecoverable, and `loadRun` returns undefined rather than
+ * inventing a state.
  *
  * There is exactly one way to write to a run — `commit()` — and it is not
  * optional: the checkpoint writer and the event appender are module-private, and

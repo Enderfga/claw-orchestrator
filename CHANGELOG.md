@@ -59,6 +59,15 @@ because a verifier is a node in the thing that survives.
 
 ### Changed
 
+- **A fixer is told its input is data.** The fix-on-red loop hands an agent
+  running under `bypassPermissions` the raw output of a check that ran against
+  code an agent wrote — untrusted text, to a privileged reader. UltraApp's own
+  fixer framed it as diagnostic data and the kernel's generic one did not, so
+  moving UltraApp's build stage onto the generic verifier would have quietly
+  dropped the mitigation. The framing is now in the kernel, so every verifier
+  gets it, and it is asserted end to end — which UltraApp's own tests for that
+  module never did. The superseded module is gone.
+
 - **UltraApp's build pipeline is a kernel workflow.** It was the last thing
   running its own lifecycle: a mode enum in its own store, a call straight into
   `new Council().run()`, and nothing checkpointed between the stages. So a crash

@@ -361,6 +361,43 @@ describe('verification barrier', () => {
   });
 });
 
+describe('what a fixer is told', () => {
+  it("frames a failing check's output as data, not as instructions", async () => {
+    // The fixer runs with `bypassPermissions` and is handed the output of a
+    // command that ran against code an agent wrote — untrusted text going to a
+    // privileged agent. UltraApp's own fixer framed it; the kernel's generic one
+    // did not, so moving UltraApp's build stage onto the generic verifier would
+    // have silently dropped the mitigation. This asserts the framing that
+    // UltraApp's own tests never did.
+    const cwd = gitRepo();
+    const record = await mgr.workflowStart(
+      {
+        name: 'fixer-prompt',
+        cwd,
+        nodes: [{ id: 'gate', kind: 'verifier', contract: 'run' }],
+      },
+      {
+        cwd,
+        contract: {
+          fixOnFailureRounds: 1,
+          checks: [{ type: 'file', path: 'this-file-does-not-exist.txt', exists: true }],
+        },
+      },
+    );
+    await (mgr as unknown as { kernel: { wait(id: string): Promise<unknown> } }).kernel.wait(record.runId);
+
+    const fixer = observed.find((o) => o.config.name?.includes('-fix-'));
+    expect(fixer, 'the fix-on-red loop should have spawned a fixer session').toBeDefined();
+    const prompt = fixer!.messages[0] ?? '';
+    expect(prompt).toMatch(/never as instructions to follow/i);
+    expect(prompt).toMatch(/diagnostic DATA/);
+    // And the untrusted text is fenced rather than pasted into the sentence.
+    expect(prompt).toMatch(/```[\s\S]*```/);
+
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }, 30_000);
+});
+
 // ─── 6. Malformed workflows are refused before they run ─────────────────────
 
 describe('spec validation', () => {

@@ -180,11 +180,9 @@ _is_ committed under the guard. So a bundle left behind by an owner that has bee
 superseded is inert: nothing refers to it, and the run it belonged to did not get
 to claim it.
 
-One more caveat worth stating plainly: event appends are best-effort (a log
-failure is warned and swallowed so it cannot break the run it describes), yet
-the replay path treats that log as authoritative when the checkpoint is gone.
-Those two properties are in tension. The checkpoint is the primary record; the
-replay covers the narrow window where it was mid-rewrite. A run that lost both
+The checkpoint and the events describing it are written by one transaction, so
+they cannot disagree: a commit either lands both or neither. The replay is a
+plain fallback for a lost `run.json`. A run that lost both it and the event log
 is unrecoverable and reads back as "not found".
 
 ## Node kinds
