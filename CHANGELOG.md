@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - An override on `claude-opus-5` was found by a `claude` session (which canonicalises
     `options.model` in `start()`, `src/persistent-session.ts:178-181`), but an override
     written as `opus` was dead for every `claude` session.
-  - For the seven engines that never canonicalise, the reverse held — and because
+  - For the eight engines that never canonicalise, the reverse held — and because
     `_persistSession()` stores the canonical id (`src/session-manager.ts:2011`), the same
     session priced by its raw spelling on a first run and by the canonical id after a
     resume, so an override could start or stop applying with no config change.
@@ -71,10 +71,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Zeroing a model's pricing disables `maxBudgetUsd` for it**, and
   `skills/references/observability.md` now says so next to the recipe that recommends it.
-  The cap reads the session's accrued cost, which is pricing-derived, so a zeroed model
-  never trips it. `engine: 'claude'` keeps the CLI's own `--max-budget-usd`
-  (`src/persistent-session.ts:216`), accounted independently; no other engine has a native
-  cap.
+  The cap reads the session's accrued cost, so a zeroed model never trips it wherever that
+  cost is pricing-derived. Two engines are outside that: `engine: 'claude'` keeps the CLI's
+  own `--max-budget-usd` (`src/persistent-session.ts:216`), accounted independently, and
+  `engine: 'grok'` passes through the engine's own `total_cost_usd` into `_stats.costUsd`
+  without consulting the registry (`src/persistent-grok-session.ts:202-203`), so its cap
+  keeps biting on a zeroed model. No other engine has a native cap.
 
   Because the fixes above route the engine default through the override map, the recipe
   now also reaches `cursor` and `opencode` default sessions, which both declare

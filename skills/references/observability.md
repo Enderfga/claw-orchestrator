@@ -39,7 +39,7 @@ every engine passes through.
 | `cwd`                                     | Working directory the turn ran in                                                                                                                                                                |
 | `turn`                                    | 1-based turn index within the session                                                                                                                                                            |
 | `tokensIn` / `tokensOut` / `cachedTokens` | **Per-turn deltas**, not session totals                                                                                                                                                          |
-| `costUsd`                                 | Per-turn delta in USD — token count × the registry rate. On a flat-rate plan (a subscription seat) nobody was billed this: set `pricingOverrides` in the plugin config to zero the model out (`{"gpt-5.5": {"input": 0, "output": 0, "cached": 0}}`). Read [Zeroing a model's pricing](#zeroing-a-models-pricing) first — it disables `maxBudgetUsd` for that model |
+| `costUsd`                                 | Per-turn delta in USD — token count × the registry rate. On a flat-rate plan (a subscription seat) nobody was billed this: set `pricingOverrides` in the plugin config to zero the model out (`{"gpt-5.5": {"input": 0, "output": 0, "cached": 0}}`). Read [Zeroing a model's pricing](#zeroing-a-models-pricing) first — it disables `maxBudgetUsd` for that model, except on `grok`, which prices itself |
 | `tokensEstimated`                         | `true` when the counts came from `estimateTokens()` (see below)                                                                                                                                  |
 | `durationMs`                              | Wall-clock for the turn                                                                                                                                                                          |
 | `toolCalls` / `toolErrors`                | Per-turn deltas                                                                                                                                                                                  |
@@ -113,8 +113,10 @@ and that number is pricing-derived, so at a rate of 0 it never reaches any cap. 
 no separate token or turn ceiling behind it.
 
 - `engine: 'claude'` keeps the CLI's own `--max-budget-usd`, which the CLI accounts itself
-  and which a zeroed registry rate does not touch. No other engine has a native cap, so
-  for codex, cursor, agy, opencode and custom the runtime check is the only one.
+  and which a zeroed registry rate does not touch. `engine: 'grok'` is outside this for a
+  different reason: it writes the engine's own `total_cost_usd` into `_stats.costUsd` and
+  never consults the registry, so zeroing a model's pricing does not disable its cap.
+  For codex, cursor, agy, opencode and custom the runtime check is the only one.
 - `maxTurns` (and `maxRounds` on a council) still bound the work, and they are the right
   ceiling to reach for once a model prices at 0.
 - In a council the cap cannot bite before an agent's second turn in any case: the first
