@@ -12,10 +12,10 @@ Start a persistent coding session with full CLI flag support.
 |-----------|------|-------------|
 | `name` | string | Session name (auto-generated if omitted) |
 | `cwd` | string | Working directory |
-| `engine` | `'claude'` \| `'codex'` \| `'codex-app'` \| `'agy'` \| `'cursor'` \| `'opencode'` \| `'custom'` | Engine to use (default: `claude`). `agy` wraps Google Antigravity CLI. `opencode` wraps sst/opencode (pass model as `provider/model`). Use `custom` with `customEngine` for any CLI. (`'gemini'` is still accepted for existing callers, but Gemini CLI is sunset — use `agy` for Google.) |
+| `engine` | `'claude'` \| `'codex'` \| `'codex-app'` \| `'agy'` \| `'grok'` \| `'opencode'` \| `'custom'` | Engine to use (default: `claude`). `agy` wraps Google Antigravity CLI. `grok` wraps xAI Grok Build and reports its own per-turn cost. `opencode` wraps sst/opencode (pass model as `provider/model`). Use `custom` with `customEngine` for any CLI. (`'gemini'` and `'cursor'` are still accepted for existing callers but are legacy — not version-tracked; use `agy` for Google and `grok` in place of Cursor.) |
 | `model` | string | Model alias or full name |
 | `permissionMode` | string | `acceptEdits`, `bypassPermissions`, `plan`, `auto`, `manual`, `dontAsk` (`default` = legacy alias for `manual`) |
-| `sandboxMode` | `'read-only'` \| `'workspace-write'` \| `'danger-full-access'` | Sandbox policy. Codex supports all values. `read-only` is enforced on every other built-in engine too: Claude → plan mode; Antigravity / Cursor → their plan modes; OpenCode → a generated `clawo-readonly` agent denying `edit`/`bash`. A `custom` engine must map it via `permissionModes`, or the session refuses to start. Persisted across session resume. |
+| `sandboxMode` | `'read-only'` \| `'workspace-write'` \| `'danger-full-access'` | Sandbox policy. Codex supports all values. `read-only` is enforced on every other built-in engine too: Claude → plan mode; Antigravity → its plan mode; OpenCode → a generated `clawo-readonly` agent denying `edit`/`bash`. **`grok` refuses a read-only session** rather than approximate one — its enforcement has not been adversarially verified. A `custom` engine must map it via `permissionModes`, or the session refuses to start. Persisted across session resume. |
 | `effort` | string | `low`, `medium`, `high`, `max`, `auto` |
 | `allowedTools` | string[] | Tools to auto-approve |
 | `disallowedTools` | string[] | Tools to deny |

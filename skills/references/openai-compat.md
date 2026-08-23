@@ -2,7 +2,7 @@
 
 > **Cost warning**: This bridge routes requests through the Claude Code CLI, which uses your Claude Max subscription's **extra usage** quota. When OpenClaw's agent loop sends its system prompt (with distinctive tool definitions and agent instructions), Anthropic's backend recognizes this as programmatic/agent traffic and bills it against extra usage — **not** the included allowance. This is by design: the bridge does NOT bypass Anthropic's billing or subscription enforcement. Using it as OpenClaw's primary model backend means every agent turn consumes extra usage credits at standard API rates ($15/M input, $75/M output for Opus). Monitor your usage at [claude.ai/settings/usage](https://claude.ai/settings/usage).
 
-The embedded server exposes a drop-in OpenAI-compatible endpoint so any client that speaks `/v1/chat/completions` can talk to a persistent Claude Code (or Codex / Antigravity / Cursor) session. The bridge is designed to serve **two kinds of clients as first-class citizens**:
+The embedded server exposes a drop-in OpenAI-compatible endpoint so any client that speaks `/v1/chat/completions` can talk to a persistent Claude Code (or Codex / Antigravity / Grok) session. The bridge is designed to serve **two kinds of clients as first-class citizens**:
 
 1. **Upstream agents** that maintain their own conversation state and forward only the latest user turn — OpenClaw's main agent loop, cron jobs, subagents, programmatic clients.
 2. **OpenAI-compatible webchat / labeling tools** that re-send the full transcript on every turn — ChatGPT-Next-Web, Open WebUI, LobeChat, data-labeling pipelines.
@@ -81,7 +81,7 @@ mechanism is used depends on whether the engine keeps the conversation itself.
 | Engine | Turn 1 | Later turns |
 |---|---|---|
 | `claude` | Schemas go into the session system prompt (`--system-prompt`) | Nothing injected — the system prompt persists |
-| `codex`, `codex-app`, `agy`, `opencode`, `cursor` | Full schema block prepended to the message | A short reminder of the calling convention, no schemas — but only once the conversation id has been captured; until then the full block is sent again |
+| `codex`, `codex-app`, `agy`, `opencode`, `grok` | Full schema block prepended to the message | A short reminder of the calling convention, no schemas — but only once the conversation id has been captured; until then the full block is sent again |
 | `gemini`, one-shot `custom` | Full schema block prepended to the message | Full schema block again — these have no resume surface, so nothing persists between sends |
 
 The middle row is the one worth understanding. Those engines resume a conversation by id, so

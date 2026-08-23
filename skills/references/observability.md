@@ -34,7 +34,7 @@ every engine passes through.
 |---|---|
 | `ts` | ISO timestamp of turn completion |
 | `session` | SessionManager session name |
-| `engine` | `claude` / `codex` / `codex-app` / `cursor` / `opencode` / `agy` / `custom` |
+| `engine` | `claude` / `codex` / `codex-app` / `grok` / `opencode` / `agy` / `custom` |
 | `model` | Configured model, or the engine's own reported model when none was set |
 | `cwd` | Working directory the turn ran in |
 | `turn` | 1-based turn index within the session |
@@ -116,7 +116,8 @@ flagged `tokensEstimated: true`; the CLI marks those costs with a trailing `~`.
 | `claude` | Engine-reported |
 | `codex` | Engine-reported |
 | `codex-app` | Engine-reported |
-| `cursor` | Engine-reported when the stream carries `usage`, else estimated |
+| `grok` | Engine-reported — and so is the **cost**: this engine reports `total_cost_usd`, which the wrapper passes through instead of pricing tokens from the registry, so registry drift cannot affect a grok row |
+| `cursor` (legacy) | Engine-reported when the stream carries `usage`, else estimated |
 | `opencode` | Engine-reported when the run JSON carries `tokens`, else estimated |
 | `agy` | Engine-reported when the result event carries usage, else estimated |
 | `custom` | Depends on the CLI; estimated when it emits no usage |

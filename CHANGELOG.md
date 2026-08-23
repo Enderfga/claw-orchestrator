@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [5.1.0] - 2026-08-23
 
 ### Added
 
@@ -25,6 +25,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   registered for the context window and an indicative breakdown — not to price turns.
 
 ### Changed
+
+- Every reference doc that enumerated engines now lists `grok` and drops `cursor`
+  from the offered set — `tools.md`'s `engine` parameter, `sessions.md`, `cli.md`,
+  `observability.md`, `openai-compat.md`, `autoloop.md`, `getting-started.md`, `acp.md`.
+  Mentions of Cursor as an **MCP or ACP host** are unchanged; that is a different role.
+  While there, `autoloop.md` no longer claims Cursor and OpenCode lack native multi-turn
+  conversation — both resume by id, and `engineHasNativeConversation` has said so since
+  4.12.2.
 
 - **`engine: 'cursor'` is now legacy**, the same treatment `gemini` has: the wrapper
   still works and existing callers are not broken, but it is no longer a documented

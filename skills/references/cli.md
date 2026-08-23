@@ -42,7 +42,8 @@ The server exposes an OpenAI-compatible chat completions endpoint, enabling any 
 **Model routing:** The `model` field auto-routes to the correct engine:
 - `claude-*`, `opus`, `sonnet`, `haiku` → Claude engine
 - `gpt-*` → Codex engine
-- `composer-*` → Cursor engine
+- `grok-*` → Grok engine
+- `composer-*` → Cursor engine (legacy)
 - `gemini-3.5-flash`, `gemini-3.1-pro`, `agy-*`, `agy/*` → Antigravity (`agy`) engine
 - other `gemini-*` → the legacy `gemini` engine (Gemini CLI is sunset; prefer `agy`)
 
@@ -61,7 +62,7 @@ clawo session-start [name] [options]
 | Flag | Description |
 |------|-------------|
 | `-d, --cwd <dir>` | Working directory |
-| `-e, --engine <engine>` | Engine: `claude` (default), `codex`, `codex-app`, `agy`, `cursor`, `opencode`, or `custom` |
+| `-e, --engine <engine>` | Engine: `claude` (default), `codex`, `codex-app`, `agy`, `grok`, `opencode`, or `custom` |
 | `-m, --model <model>` | Model name or alias |
 | `--permission-mode <mode>` | `acceptEdits`, `plan`, `auto`, `bypassPermissions`, `manual`, `dontAsk` |
 | `--effort <level>` | `low`, `medium`, `high`, `max`, `auto` |

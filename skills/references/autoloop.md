@@ -34,15 +34,17 @@ uses its own default model rather than receiving the Claude `opus` / `sonnet`
 defaults. Role instructions are included in-band for engines that do not expose a
 native system-prompt flag.
 
-Engines without native multi-turn conversation (Cursor, OpenCode, one-shot custom
-engines) spawn a fresh process per send, so the dispatcher replays that role's
-transcript in-band as a `<conversation_history>` block, oldest turns dropped past a
-character budget. Claude, Codex and Antigravity keep context themselves and get no
-replay.
+Engines without native multi-turn conversation (Gemini and one-shot custom engines)
+spawn a fresh process per send with nothing to resume, so the dispatcher replays that
+role's transcript in-band as a `<conversation_history>` block, oldest turns dropped
+past a character budget. Claude, Codex, Antigravity, Grok, OpenCode and Cursor each
+resume their own conversation by id and get no replay — see
+`engineHasNativeConversation` in `types.ts`, which is the single source of truth for
+this and is checked with a two-turn recall test per engine.
 
 The Planner runs read-only so strategy cannot turn into source edits, and that is
 enforced by the engine rather than requested politely: Claude uses plan mode,
-Antigravity and Cursor use their plan modes, and OpenCode gets a generated
+Antigravity uses its plan mode, and OpenCode gets a generated
 `clawo-readonly` agent that denies `edit`/`bash`/`external_directory` (its built-in
 `plan` agent is a user-overridable preset that denies neither, so a "read-only"
 session could otherwise still author files through a shell heredoc). A custom
@@ -176,7 +178,7 @@ Reviewer 70 %. Override per run via `compactThresholds`. A 30 s debounce
 prevents re-fire while post-compact stats settle. Events: `compact` is
 emitted on the dispatcher EventEmitter AND appended to `decisions.jsonl`.
 
-One-shot engines (`codex`, `agy`, `cursor`, `opencode`) cannot compact — their
+One-shot engines (`codex`, `agy`, `grok`, `opencode`) cannot compact — their
 CLIs expose no such command. The threshold is still meaningful there because
 `contextPercent` now tracks real occupancy, but crossing it cannot free space:
 the session emits a single warning on its log channel the first time compaction

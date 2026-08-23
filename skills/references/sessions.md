@@ -29,7 +29,7 @@ Key options:
 
 | Option | Description |
 |--------|-------------|
-| `engine` | `'claude'` (default), `'codex'`, `'codex-app'`, `'agy'`, `'cursor'`, `'opencode'`, or `'custom'` — see [Multi-Engine](./multi-engine.md) |
+| `engine` | `'claude'` (default), `'codex'`, `'codex-app'`, `'agy'`, `'grok'`, `'opencode'`, or `'custom'` — see [Multi-Engine](./multi-engine.md) |
 | `model` | Model alias (`fable`, `opus`, `sonnet`, `haiku`, `agy-pro`) or full name |
 | `permissionMode` | `acceptEdits`, `bypassPermissions`, `plan`, `auto`, `manual`, `dontAsk` (`default` = legacy alias for `manual`) |
 | `effort` | `low`, `medium`, `high`, `max`, `auto` |
@@ -135,7 +135,7 @@ prompt over the window the engine actually enforces — so it rises and falls wi
 the conversation. `stats.tokensIn` is the different question of how many input
 tokens the session has been billed for in total, which only ever grows.
 `compactSession()` is a no-op on engines whose CLI has no compaction command
-(`codex`, `agy`, `cursor`, `opencode`); those sessions log a warning the first
+(`codex`, `agy`, `grok`, `opencode`); those sessions log a warning the first
 time it is called.
 
 `stats.turns` and `stats.turnsSucceeded` are the same kind of distinction.

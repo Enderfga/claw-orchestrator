@@ -94,7 +94,7 @@ cancelling one abandons the poll rather than stopping the work.
 
 `session/new` also returns a `category: "model"` config option whose values are
 **grouped by engine**, built from the shared registry in `src/models.ts`. One
-dropdown holds Claude, Codex and Cursor models at once. Changing it restarts the
+dropdown holds Claude, Codex and Grok models at once. Changing it restarts the
 underlying session on the new engine; the ACP session id is unaffected.
 
 Two engines are absent for different reasons:
