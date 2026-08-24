@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [6.0.2] - 2026-08-24
 
 ### Fixed
 
@@ -16,8 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its transcript already hold them?". The two come apart whenever there is no
   transcript. A `[..., tool, user]` or `[..., tool, assistant]` array sent to a
   session whose native conversation did not exist yet had every result dropped,
-  and the turn was answered without them while the request still returned
-  200. The decision is now `serializeToolResults()`'s alone, keyed on
+  and the turn was answered without them while the request still returned 200. The decision is now `serializeToolResults()`'s alone, keyed on
   `threadHasHistory` — the parameter that already described the engine. Requests
   carrying no tool results are untouched.
 
@@ -40,6 +39,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `skills/references/openai-compat.md` said a reset turn always stops the session
   and starts a new one; it now carries the exception.
 
+- **A refused request is drained before it is answered.** The 415 for a wrong
+  `Content-Type` ended the response without reading the body it was refusing, so the
+  connection could be torn down while the peer was still writing — `write ECONNRESET` on
+  the client, and a non-zero process exit in a test run where every test still reported
+  passing. Reported from a real run. It is not covered by a test: neither a 4 MB body nor
+  a staged write reproduces the reset on macOS, and a test that passes with the fix
+  deleted would be worse than none.
+
+### Testing
+
+- **Two lock-contention tests no longer race a wall clock.** They spawned a holder that
+  released on its own 150 ms timer while the acquisition waits
+  `DEFAULT_LOCK_WAIT_MS = 250` — a 100 ms margin, reported flaking 8 runs out of 8 on a
+  loaded 16-core box, and passing 4 of 4 on the same box unloaded. The holder now reports
+  when it actually holds the lock and releases on the test's signal, so contention is
+  established rather than assumed and the release is not a timer racing a deadline. The
+  second test is now deterministic: the holder does not let go until after the run has
+  ended, so the write it must fail cannot succeed by timing.
+
+  The `setTimeout(60)` they replaced was the worse half: it assumed the child had already
+  taken the lock, so on a slow spawn the test contended with nothing and passed anyway —
+  a silent second failure mode next to the loud one. Both mutation-checked: making the
+  lock fail on sight reddens the first, and removing both claim-handover paths reddens
+  the second.
+
 ## [6.0.1] - 2026-08-24
 
 ### Fixed
@@ -48,7 +72,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   override map was keyed by whatever string the user typed, while `getModelPricing()`
   stripped the vendor prefix before looking it up and never resolved aliases — so an
   override could silently miss the session it was written for, in both directions:
-
   - An override on `claude-opus-5` was found by a `claude` session (which canonicalises
     `options.model` in `start()`, `src/persistent-session.ts:178-181`), but an override
     written as `opus` was dead for every `claude` session.

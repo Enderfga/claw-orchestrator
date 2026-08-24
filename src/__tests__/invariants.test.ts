@@ -151,16 +151,46 @@ function runFiles(runId: string): string[] {
   return out;
 }
 
-/** Hold a lock file from a real other process for `ms`, then release it. */
-function holdLock(lockPath: string, ms: number): Promise<void> {
+/**
+ * Hold a lock file from a real other process.
+ *
+ * Coordinated rather than timed, and both halves matter. `ready` resolves only once the
+ * child actually holds the lock, so a caller never proceeds hoping the spawn was fast
+ * enough — the previous version slept 60 ms and hoped, which meant that on a slow spawn
+ * the test measured nothing and still passed. And `releaseOn` hands the release decision
+ * to the test instead of to a wall-clock timer racing the acquisition's own deadline:
+ * a 150 ms holder against a 250 ms wait is a 100 ms margin, which is a coin toss on a
+ * loaded machine and was reported flaking 8 runs out of 8 on one.
+ */
+function holdLock(
+  lockPath: string,
+  opts: { releaseOn: string; graceMs?: number },
+): {
+  ready: Promise<void>;
+  exited: Promise<void>;
+} {
   const src = `
     const fs = await import('node:fs');
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     fs.writeFileSync(${JSON.stringify(lockPath)}, '');
-    await new Promise((r) => setTimeout(r, ${ms}));
+    console.log('HELD');
+    while (!fs.existsSync(${JSON.stringify(opts.releaseOn)})) await sleep(2);
+    await sleep(${opts.graceMs ?? 0});
     fs.rmSync(${JSON.stringify(lockPath)}, { force: true });
   `;
-  const proc = spawn(process.execPath, ['--input-type=module', '-e', src], { stdio: ['ignore', 'pipe', 'pipe'] });
-  return new Promise((resolve) => proc.on('exit', () => resolve()));
+  const proc = spawn(process.execPath, ['--input-type=module', '-e', src], {
+    stdio: ['ignore', 'pipe', 'ignore'],
+  });
+  const ready = new Promise<void>((resolve, reject) => {
+    let out = '';
+    proc.stdout!.on('data', (d: Buffer) => {
+      out += d.toString();
+      if (out.includes('HELD')) resolve();
+    });
+    proc.on('exit', () => reject(new Error('lock holder exited before it took the lock')));
+  });
+  const exited = new Promise<void>((resolve) => proc.on('exit', () => resolve()));
+  return { ready, exited };
 }
 
 beforeEach(() => {
@@ -1191,15 +1221,26 @@ describe('single owner, enforced', () => {
     const { RunKernel } = await import('../kernel/engine.js');
     const { runDir } = await import('../kernel/store.js');
     const kernel = new RunKernel({ nodeTimeoutMs: 10_000 });
+    const release = path.join(wfDir, 'release-contended');
     kernel.setExecutor('agent', async (_node, ctx) => {
       // A real other process holds the lock: the wait is synchronous, so a
       // same-thread holder could never be waited out — and could never exist,
       // since these critical sections do not nest.
-      const holder = holdLock(path.join(runDir('contended-run'), 'lease.lock'), 150);
-      await new Promise((r) => setTimeout(r, 60));
+      //
+      // The holder lets go on our signal plus a grace far below
+      // DEFAULT_LOCK_WAIT_MS, not on a timer of its own. That is what keeps this
+      // off the wall clock: contention is guaranteed because we only proceed
+      // once it reports holding, and the release is a short timer we start,
+      // rather than a long one racing the acquisition's deadline.
+      const holder = holdLock(path.join(runDir('contended-run'), 'lease.lock'), {
+        releaseOn: release,
+        graceMs: 25,
+      });
+      await holder.ready;
+      fs.writeFileSync(release, '');
       // Hits the lock while it is held, and must wait rather than give up.
       ctx.emit({ ts: new Date().toISOString(), type: 'log', level: 'info', message: 'THROUGH-CONTENTION' });
-      await holder;
+      await holder.exited;
       return { ok: true };
     });
     const rec = await kernel.start(
@@ -1219,10 +1260,14 @@ describe('single owner, enforced', () => {
     const { RunKernel } = await import('../kernel/engine.js');
     const { readLease, runDir } = await import('../kernel/store.js');
     const kernel = new RunKernel({ nodeTimeoutMs: 10_000 });
+    const release = path.join(wfDir, 'release-wedged');
+    let holder!: ReturnType<typeof holdLock>;
     kernel.setExecutor('agent', async (_node, ctx) => {
-      // Held for longer than the lock's wait, so this write genuinely fails.
-      holdLock(path.join(runDir('wedged-run'), 'lease.lock'), 900);
-      await new Promise((r) => setTimeout(r, 60));
+      // Held until this test says otherwise — which it does not until the run has
+      // already ended. No timer to lose a race with: the write cannot succeed,
+      // deterministically, rather than probably.
+      holder = holdLock(path.join(runDir('wedged-run'), 'lease.lock'), { releaseOn: release });
+      await holder.ready;
       ctx.emit({ ts: new Date().toISOString(), type: 'log', level: 'info', message: 'NEVER-LANDS' });
       return { ok: true };
     });
@@ -1232,6 +1277,11 @@ describe('single owner, enforced', () => {
     );
     const done = await kernel.wait(rec.runId);
     expect(done!.state).not.toBe('completed');
+
+    // Only now does the obstruction clear, so the handover below is what is under
+    // test rather than a timer that happened to fire first.
+    fs.writeFileSync(release, '');
+    await holder.exited;
 
     // The claim comes back once the lock clears, so the run is resumable.
     for (let i = 0; i < 40 && readLease('wedged-run'); i++) await new Promise((r) => setTimeout(r, 100));

@@ -339,6 +339,14 @@ export class EmbeddedServer {
     if (req.method === 'POST') {
       const contentType = req.headers['content-type'] || '';
       if (!contentType.includes('application/json')) {
+        // Drain before answering. Ending a response while the peer is still
+        // writing lets the connection be torn down under it, which surfaces on
+        // the client as `write ECONNRESET` — and in a test run as a non-zero exit
+        // code while every test still reports passing, so it reads as a mystery
+        // flake. Reported against a real run; not covered by a test here, because
+        // neither a 4 MB body nor a staged write reproduces the reset on macOS,
+        // and a test that passes with this line deleted would be worse than none.
+        req.resume();
         res.writeHead(415, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: false, error: 'Content-Type must be application/json' }));
         return;
