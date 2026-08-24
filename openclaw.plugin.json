@@ -21,7 +21,7 @@
           "acceptEdits",
           "bypassPermissions",
           "default",
-          "delegate",
+          "manual",
           "dontAsk",
           "plan",
           "auto"
@@ -34,6 +34,7 @@
           "low",
           "medium",
           "high",
+          "xhigh",
           "max",
           "auto"
         ],
@@ -68,6 +69,34 @@
             "default": "gemini-2.5-flash",
             "description": "Default model for fast requests"
           }
+        }
+      },
+      "pricingOverrides": {
+        "type": "object",
+        "description": "Per-model pricing overrides, USD per 1M tokens, keyed by model id (aliases and vendor-prefixed forms resolve to the same entry). For a flat-rate plan (a subscription seat, where per-token cost is fiction) set the fields to 0 so costUsd stops reporting money nobody was billed: {\"gpt-5.5\": {\"input\": 0, \"output\": 0, \"cached\": 0}}. Unspecified fields fall back to the model's registry rate, so a partial override leaves the rest at list price; on a model the registry does not know there is no rate to fall back to and they become 0, which is logged. Zeroing a model disables maxBudgetUsd for it - see skills/references/observability.md.",
+        "additionalProperties": {
+          "type": "object",
+          "properties": {
+            "input": {
+              "type": "number",
+              "minimum": 0,
+              "description": "USD per 1M input tokens"
+            },
+            "output": {
+              "type": "number",
+              "minimum": 0,
+              "description": "USD per 1M output tokens"
+            },
+            "cached": {
+              "type": "number",
+              "minimum": 0,
+              "description": "USD per 1M cached input tokens"
+            }
+          },
+          "additionalProperties": false
+        },
+        "propertyNames": {
+          "minLength": 1
         }
       }
     }
