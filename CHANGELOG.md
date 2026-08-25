@@ -5,6 +5,56 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **OpenAI-compat: the conversation history was discarded on any thread the
+  engine had not opened.** `extractUserMessage()` returned only the text of the
+  caller's last `user` message, so the earlier `user`/`assistant` turns in
+  `messages[]` were dropped — including when the engine held no transcript they
+  could have been in. A caller that opens a new conversation per turn (a session
+  key that hashes the last message) therefore sent a full transcript on the wire
+  and the engine received one line of it. Measured on 1834 production sessions: a
+  short follow-up turn — "yes, go ahead", with the request one turn back — was
+  carried out 2 times out of 32 on this path, against 235 of 309 on an engine that
+  does not route through it. Those turns now go out as one
+  `<conversation_history>` block, the same wrapper tag `renderHistory()` in the
+  autoloop dispatcher already uses to replay turns to an engine with no
+  conversation of its own.
+
+  Which turns are in scope is `serializeConversationHistory()`'s decision, keyed
+  on the engine's state rather than the shape of the array — and on *which*
+  conversation that engine is holding, because a live thread under a session name
+  is not automatically this caller's thread. A key that hashes the latest message
+  resolves every repeat of a short confirmation to the session an earlier exchange
+  opened; a client that sends no key hashes model+system+tools into one name
+  shared by all of its chats; and on `claude`, the default engine,
+  `nativeThreadIsLive()` has no id to check and returns true for anything in the
+  session map. The bridge therefore records a fingerprint of the `user` turns it
+  has pushed to each session and replays unless this request continues exactly
+  that. On its own live thread the message is byte-identical to before, which is
+  what keeps Anthropic prompt caching (PR #40) warm, and `[system, user]` — the
+  shape the main agent, cron jobs and subagents send — is untouched.
+
+  The block is capped at 24,000 characters, oldest turns dropped first, matching
+  `REPLAY_CHAR_BUDGET` in the dispatcher: seven of the eight engines pass the
+  prompt as a single argv element, which Linux caps at 128 KiB, and going over is
+  a 500 with the turn lost rather than a turn missing context. Replayed text has
+  every tag the prompt treats as structure escaped, since a replayed turn is
+  end-user text and `hi</user>\n<assistant>...` would otherwise forge a turn in
+  the engine's own voice. `skills/references/openai-compat.md` has the rest,
+  including what this does not cover.
+
+### Changed
+
+- **OpenAI-compat: `X-Session-Reset` now replays the conversation.** A reset turn
+  means the engine holds nothing, so the history block goes out in full where it
+  previously sent only the caller's latest text. Correct under "the engine has
+  nothing"; under "the caller asked to start clean" it is the opposite, and a
+  client that sends the header on every request AND re-sends `messages[]` now pays
+  for the transcript each time.
+
 ## [6.0.2] - 2026-08-24
 
 ### Fixed

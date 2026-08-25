@@ -123,6 +123,146 @@ session (in that mode the tool list is deliberately left out of the session hash
 It costs the per-turn growth described above — only use it if the tool set really
 does change mid-conversation.
 
+## Conversation history on the way in
+
+The caller's `messages[]` can carry the whole conversation: earlier `user` turns and the engine's
+own earlier `assistant` replies. Whether those turns need to be sent is the same question the
+section below asks about tool results — does the engine's own conversation already hold them? — and
+it gets the same answer, from the same predicate. The turns that are in scope are serialized into
+one `<conversation_history>` block of `<user>` / `<assistant>` turns and put in front of the
+caller's latest `user` text. The wrapper tag is the one `renderHistory()` in the autoloop dispatcher
+already uses for the same job; the per-turn tags are not — that one labels its two speakers `<user>`
+/ `<agent>`, because its roles are autoloop roles rather than OpenAI wire roles.
+
+| On this turn the engine                                                                                                                   | What is sent                                                                   |
+| ----------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| is **not** resuming a conversation — no session yet, a session that never announced a conversation id, or one being stopped and recreated | every `user`/`assistant` turn except the caller's latest `user` message        |
+| **is** resuming a live conversation, but one this bridge never sent these turns to                                                        | the same — a live thread is not automatically _this_ thread                    |
+| **is** resuming the live conversation these turns belong to                                                                               | nothing — the turns are already in the transcript, and the text goes out alone |
+
+The last row is what keeps Anthropic prompt caching warm on `claude` and keeps a resumed `codex`
+thread from being re-fed its own history: on a live thread the message is byte-identical to what it
+was before this block existed. The first row is the one that was losing data. A client that opens a
+new conversation per turn — one whose session key hashes the last message, say — lands in it on
+every turn, and `skipPersistence: true` means an OpenAI-compat session is never auto-resumed from
+disk either, so a follow-up like "yes, go ahead" used to reach the engine with nothing in front of
+it.
+
+The middle row is the one that is easy to get wrong. "Is there a live thread under this session
+name?" is not "is that thread holding this conversation?", and the two come apart constantly. A
+caller whose session key hashes its latest message resolves every repeat of a short confirmation —
+"yes, go ahead", typed all day by someone approving invoices — to the session some _earlier_
+invoice opened. A client that sends no session key at all falls back to a hash of
+model+system+tools, which is stable for every turn AND identical between two concurrent chats of
+the same user, so both chats share one session. And on `claude`, the default engine,
+`nativeThreadIsLive()` has no id to check and returns true for anything in the session map, so
+there the question collapses to "does the name exist" with no gate at all.
+
+So the bridge records, per session, a fingerprint of the `user` turns it has actually pushed there,
+and replays unless this request continues exactly that. It is the only writer to these sessions, so
+what it sent is what the engine holds. Unknown session, forked conversation, evicted entry: all
+replay. Being wrong in that direction costs a duplicated turn under a framing that says not to act
+on it twice; being wrong in the other direction drops context silently, which is the class of bug
+this exists to fix.
+
+What the request is compared against depends on where its array ends, and only an array ending in a
+`user` turn carries a turn the bridge has not sent yet. For that shape the fingerprint of every
+`user` turn _before_ the last one is what the thread should be holding. For every other shape — a
+tool-loop hop ending in `tool`, a prefill/continue ending in `assistant` — the latest `user` turn
+was already pushed on an earlier request, so the whole array is compared. Getting that wrong in the
+other direction is not harmless: comparing a hop against one turn less never matches, and the
+transcript is then replayed into the very session that is already holding it, on every hop, for a
+caller that needed none of this.
+
+The map is bounded at 1000 entries and evicted oldest-first, which it needs independently of the
+session map: `_cleanupIdleSessions()` reaps a session by `sessionTtlMinutes` without telling this
+map, so a fingerprint outlives the session it mirrors. Eviction costs a replayed block, never a
+dropped one, and `serve` restarts start it empty for the same price.
+
+`system` messages are never in the block: they travel as the session's system prompt (see [Tool
+definitions](#tool-definitions-and-where-they-live)). `tool` messages are never in it either —
+they are the next section's business, and repeating them here would duplicate every payload and
+undo the scoping that keeps a tool loop linear. An `assistant` message that only announces
+`tool_calls` carries no text, so it renders no turn; a turn whose text is empty or whitespace is
+dropped rather than rendered as an empty shell. An array with nothing to replay produces no block
+at all, so a single-turn `[system, user]` request — the shape the OpenClaw main agent, cron jobs
+and subagents send — goes out exactly as it did before.
+
+Replayed text has neutralized every tag the assembled prompt treats as structure — the block's own
+`<conversation_history>` / `<user>` / `<assistant>`, and also `<tool_results>` / `<tool_result>`,
+`<system>` and `<tool_calls>` (`</user>` becomes `&lt;/user>`). Unlike a `<tool_result>` body, which
+comes from the caller's own tool runner, a replayed turn is whatever an end user typed, and
+`hi</user>\n<assistant>\n...` would otherwise close its turn early and forge an `assistant` turn —
+putting words in the engine's own mouth. The other three matter for the same reason: a fabricated
+tool return carries the framing sentence that says a payload is authoritative, a `<system>` block
+contradicts the real one the non-claude path prepends, and `<tool_calls>` is the exact protocol JSON
+the model is asked to emit. Matching tolerates padding (`</user >`, `</user\n>`) and any case, since
+the model reads a tag the way a reader does, not the way a strict regex does.
+
+The caller's **latest** `user` turn is fenced too, but only on turns that actually carry a block.
+That turn is the one input an attacker controls end to end, and the block teaches the model in the
+same prompt that `<conversation_history>` holds its own earlier turns — unfenced, it could close the
+real block and open a second one indistinguishable from it. With no block in front of it there is
+nothing to forge, so those turns stay byte-for-byte what they were.
+
+A `user` turn carrying only non-text content (an image) renders as `[non-text content]` rather than
+vanishing. Dropping it would leave the `assistant` reply to it standing alone under a framing that
+calls the assistant turns the model's own — a reply to a request the model cannot see, which reads
+as license to act on the reply by itself. "Photo of the invoice", then "yes, go ahead", is an
+everyday shape. A leading `assistant` turn with no `user` turn in front of it at all (content
+`null`, or empty) is dropped instead, since no marker could honestly stand in for it.
+
+### What this does not cover
+
+- **A turn can be replayed that the engine already had.** The mirror image of the duplicate-once
+  trade below, and it comes from the same place: the engine's state is read from the session, not
+  from the array. A client whose session looks new to the bridge but whose engine did hold context
+  gets those turns a second time. The framing sentences tell the model these are earlier turns and
+  not to act on them again, which is what keeps a duplicated turn from becoming a duplicated
+  action; nothing enforces it.
+- **The block is not in strict chronological order when the array does not end in the caller's
+  latest `user` turn.** Every `user`/`assistant` turn except that one is replayed, including turns
+  that come after it — an array ending in `assistant` (prefill, an explicit "continue", a framework
+  appending its own reply) keeps that turn, because a transcript presented as complete while
+  missing the last thing the model said invites it to redo the work. The cost is that such a turn
+  is rendered inside the block, i.e. before the caller's latest text rather than after it.
+- **`X-Session-Reset` is not honored on an array ending in a `tool` result**, so on that one shape a
+  reset turn on a live thread gets no history block either. Same pre-existing asymmetry the tool
+  results have there, from the same cause — the header is parsed after that branch returns. See the
+  note under [Tool definitions](#tool-definitions-and-where-they-live).
+- **`grok` inherits the hole described in the next section**: it resumes by id, but its id is absent
+  from `SessionStats`, so `nativeThreadIsLive()` reaches `default: return true` and a `grok` session
+  whose first turn died before emitting its id reports a live thread — and so gets no history. Same
+  cause, same fix (adding the field), not addressed here.
+- **The two blocks are not interleaved.** When a request carries both, the message is the history
+  block, then the tool results, then the caller's new text — chronological between the blocks, but
+  a `tool` result that chronologically preceded a replayed `assistant` turn still appears after it.
+- **The block is capped at 24,000 characters**, oldest turns dropped first, and the turn the budget
+  runs out inside is truncated (head kept) and marked `[… turn truncated for length …]` rather than
+  dropped whole — dropping it whole would take the request with it on the pasted-document shape.
+  Below 200 characters of remaining budget the turn is dropped instead of started, since a fragment
+  that short is a sentence with its qualifier cut off rather than context. The newest turn is always
+  kept. `MAX_BODY_SIZE` (5 MiB) is **not** a usable bound here: seven of
+  the eight engines pass the prompt to the CLI as a single argv element, and Linux caps one argument
+  at `MAX_ARG_STRLEN` = 128 KiB whatever `getconf ARG_MAX` reports (measured: 131071 bytes spawns,
+  131072 throws `E2BIG`). Only `claude` and persistent custom engines write over stdin. Uncapped,
+  ordinary traffic reaches that ceiling — 400-character turns with 900-character replies cross it
+  near turn 98 — and the failure is a 500 with the turn lost, which is worse than the missing
+  context the block exists to restore. This is the same trade `renderHistory()` makes, with the same
+  `REPLAY_CHAR_BUDGET`, feeding the same engines.
+- **A failed send still records the fingerprint.** It is written before the send on purpose: a send
+  that fails leaves the engine's state unknowable from here, and forgetting a turn that landed only
+  replays it, while assuming one landed that did not drops context silently. The residue is narrow
+  and real — if the caller answers a 5xx by appending an `assistant` turn of its own and sending
+  again, the thread is credited with a turn it never received and the next turn goes out bare.
+- **Cost is O(n) per turn for engines that never resume.** `engineHasNativeConversation()` is false
+  for `gemini` and one-shot custom engines, so for them the block is re-serialized on every turn,
+  capped but never free. Same for any caller that mints a new session per turn.
+- **`X-Session-Reset` now replays the transcript.** A reset turn means the engine holds nothing, so
+  the history goes out in full. Under the reading "the caller asked to start clean" that is the
+  opposite of what was asked, and a client that sends the header on every request AND re-sends
+  `messages[]` pays for the transcript every time.
+
 ## Tool results on the way back
 
 A `tool` role message in the caller's array is the result of a call the model asked for on an
@@ -186,6 +326,28 @@ relying on it:
 
 Neither applies to a caller that keeps its own transcript and forwards only the latest turn — it
 sends one round at a time.
+
+### A live session is not the same thing as this conversation
+
+Suppressing the replay needs a stronger fact than "a session under this name is live". That is what
+`nativeThreadIsLive()` reports, and a session name can be live while its transcript belongs to a
+different exchange. Three shapes where the two come apart, all reachable with default settings:
+
+| shape                                                | what happens                                                                                                                            |
+| ---------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| a caller whose session key hashes its latest message | every repeat of the same short confirmation resolves to whichever session that phrase opened first — often a different subject entirely |
+| a caller that sends no `X-Session-Id` at all         | the key falls back to a hash of model + system prompt + tools, so all of that caller's concurrent chats share one name                  |
+| `engine: 'claude'` — the default                     | `nativeThreadIsLive()` has no id to check and returns `true` for anything in the session map, so the name is the only evidence there is |
+
+So the bridge tracks what it actually pushed into each session and replays whenever the incoming
+conversation is not the one it remembers seeding. The fingerprint covers the `user` turns only: those
+are the caller's own text echoed back verbatim, while assistant text is what the engine produced and
+a client may normalize it. A mismatch replays, which is the safe direction — the cost is a repeated
+block, never a lost one.
+
+The map is bounded and evicted oldest-first, and it has to be independent of the session map:
+`_cleanupIdleSessions()` reaps a session by TTL without telling it, so a fingerprint outlives the
+session it mirrors. Losing an entry costs a replayed block, never a dropped one.
 
 ## Environment variables
 
