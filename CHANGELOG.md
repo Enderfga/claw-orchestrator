@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The fence around end-user text escaped the bracket, not the tag.** Matching up to the closing
+  `>` and re-emitting what was captured let `hola<user a</user>` smuggle a raw `</user>` through the
+  attribute slot of a tag that WAS matched, forging the `assistant` turn the fence exists to stop;
+  zero-width padding (`</user\u200B>`) evaded it outright, since `\s` does not match U+200B. Only the
+  `<` is escaped now, by lookahead, with a boundary class that covers the 6,060 zero-advance or
+  blank-rendering code points — `[\s></\p{Cc}\p{Cf}]` alone let 5,807 of them through. `</ user>`
+  with a visible space is still not fenced, on cost; the reference says which text that spares.
+- **A send that threw recorded the turn as delivered.** `seededConversations` was written before the
+  send, so a first turn that failed with a 500 left the thread credited with a turn it never received
+  and the caller's next, short turn went out with no history — the exact string this change set exists
+  to stop. Both handlers now report whether the send landed, and the record happens only then.
+  `sendMessage` returning is the signal: a returned error is answered with 502 and still records,
+  because the CLI received the prompt. A second request arriving while the first is in flight sees no
+  fingerprint and replays — a duplicate rather than a drop.
+
 - **OpenAI-compat: the conversation history was discarded on any thread the
   engine had not opened.** `extractUserMessage()` returned only the text of the
   caller's last `user` message, so the earlier `user`/`assistant` turns in
