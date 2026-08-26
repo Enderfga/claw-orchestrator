@@ -14,8 +14,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   attribute slot of a tag that WAS matched, forging the `assistant` turn the fence exists to stop;
   zero-width padding (`</user\u200B>`) evaded it outright, since `\s` does not match U+200B. Only the
   `<` is escaped now, by lookahead, with a boundary class that covers the 6,060 zero-advance or
-  blank-rendering code points — `[\s></\p{Cc}\p{Cf}]` alone let 5,807 of them through. `</ user>`
-  with a visible space is still not fenced, on cost; the reference says which text that spares.
+  blank-rendering code points — `[\s></\p{Cc}\p{Cf}]` alone let 5,806 of them through. The same
+  filler, plus the slash, is allowed before the name: `hola</​user>` renders as `hola</user>` and
+  forged a turn past a trailing-complete fence, so the lookahead now admits the zero-advance subset
+  (no `\s`, no U+2800) there too — swept over all three positions, 12,120 unfenced probes drop to 38,
+  the visible separators already excluded on cost. That leading part is ONE class `[/…]*`, not
+  `[…]*\/?[…]*`: two adjacent unbounded quantifiers over the same class backtrack O(n²) and a single
+  ~100 KB history message hung the event loop ~80 s. `</ user>` with a visible space is still not
+  fenced; the reference says which text that spares.
 - **A send that threw recorded the turn as delivered.** `seededConversations` was written before the
   send, so a first turn that failed with a 500 left the thread credited with a turn it never received
   and the caller's next, short turn went out with no history — the exact string this change set exists
@@ -52,12 +58,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   what keeps Anthropic prompt caching (PR #40) warm, and `[system, user]` — the
   shape the main agent, cron jobs and subagents send — is untouched.
 
-  The block is capped at 24,000 characters, oldest turns dropped first, matching
-  `REPLAY_CHAR_BUDGET` in the dispatcher: seven of the eight engines pass the
-  prompt as a single argv element, which Linux caps at 128 KiB, and going over is
-  a 500 with the turn lost rather than a turn missing context. Replayed text has
-  every tag the prompt treats as structure escaped, since a replayed turn is
-  end-user text and `hi</user>\n<assistant>...` would otherwise forge a turn in
+  The whole block is capped at 24,000 characters — wrapper tags, per-turn tags,
+  elision markers and framing included, not just the sum of the turn text —
+  oldest turns dropped first, matching `REPLAY_CHAR_BUDGET` in the dispatcher:
+  six of the nine engines pass the prompt as a single argv element, as does a
+  one-shot `custom` engine, and Linux caps one argument at 128 KiB, so going over
+  is a 500 with the turn lost rather than a turn missing context. Charging the
+  turn text alone was not a cap at all: 8,000 alternating one-word turns rendered
+  165,008 bytes, because the ~16 characters of tags per turn were never counted.
+  No turn is started with less than 200 characters of room left, in either
+  direction from the newest `user` turn in the block, which is otherwise held
+  back from the budget by up to 200 characters so that one long reply cannot
+  strand the ask behind it — before that reserve, replies adding past the cap
+  (two ordinary 12k ones sufficed) started the window past every `user` turn,
+  the leading-`assistant` rule cleared what was left, and nothing went out at
+  all: the caller's latest turn reached the engine alone, this change set's own
+  headline failure. Verified over 44,000 random shapes: max block 23,999
+  characters, none over 24,000, none rendered content-free, and none that had a
+  block before and lost it.
+
+  Replayed text has every tag the prompt treats as structure escaped, since a
+  replayed turn is end-user text and `hi</user>\n<assistant>...` would otherwise
+  forge a turn in
   the engine's own voice. `skills/references/openai-compat.md` has the rest,
   including what this does not cover.
 

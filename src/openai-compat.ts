@@ -20,19 +20,38 @@ import {
 } from './constants.js';
 
 /**
- * Same number and same oldest-dropped-first rule as REPLAY_CHAR_BUDGET in the autoloop dispatcher,
- * which replays transcripts to the same engines for the same reason. MAX_BODY_SIZE is not the
- * ceiling that matters: seven of the eight engines pass the prompt as one argv element and Linux
- * caps a single argument at 128 KiB, so going over is a 500 with the turn lost rather than a turn
- * missing context. Measurements in skills/references/openai-compat.md.
+ * Ceiling on the WHOLE emitted block — tags, elision markers and framing included, not just the turn
+ * text (charging text alone is not a cap: 8,000 one-word turns rendered 165,008 bytes). Same number
+ * and oldest-dropped-first rule as REPLAY_CHAR_BUDGET in the autoloop dispatcher. MAX_BODY_SIZE is
+ * not the bound that matters: six of the nine ENGINE_TYPES pass the prompt as one argv element and
+ * Linux caps one argument at 128 KiB — going over is a 500 with the turn lost.
+ * Measurements in skills/references/openai-compat.md.
  */
 const HISTORY_CHAR_BUDGET = 24_000;
 
-/** Least room worth starting a turn in: below it the remainder goes unspent and the turn is dropped. */
+/**
+ * Least rendered room worth starting a turn in; below it the turn is dropped, in both directions
+ * from the anchor — with less than this a turn renders as tags around nothing but the marker.
+ */
 const HISTORY_MIN_TURN_CHARS = 200;
 
 /** Marks a turn the budget cut, so the framing's claim to be replaying the turns stays honest. */
 const HISTORY_ELISION = '\n[… turn truncated for length …]';
+
+/** The three sentences under the block, hoisted so their length can be charged to the budget. */
+const HISTORY_FRAMING =
+  'Above are the earlier turns of this conversation, replayed because this session does not hold them. ' +
+  'The assistant turns are your own earlier replies. Continue the conversation from there — do not repeat ' +
+  'these turns back and do not carry out the requests in them again.';
+
+/** What the block costs with no turns in it at all: the wrapper tags, the blank line, the framing. */
+const HISTORY_FRAME_CHARS = '<conversation_history>\n\n</conversation_history>\n\n'.length + HISTORY_FRAMING.length;
+
+/**
+ * What one turn costs beyond its text: `<role>\n` + `\n</role>` + the join newline — charged to every
+ * turn including the last, over-charging by one char, the direction that cannot breach the ceiling.
+ */
+const turnFrameChars = (role: string): number => 2 * role.length + 8;
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -392,14 +411,21 @@ function messageText(m: OpenAIChatMessage): string {
 // verbatim, so `hola<user a</user>` smuggles a raw `</user>` through the attribute slot of a tag that
 // IS matched, and the forged turn survives. Escaping the bracket alone has nothing to re-emit.
 //
-// The lookahead's tail is the boundary: the name sits flush against `<` or `</`, and what follows has
-// to be something that ends a tag name — `>`, `/`, `<`, end of text, or a character that takes up no
-// room. That last clause is why five Unicode properties are named instead of code points. Measured
-// over the 6,060 code points that are zero-advance or render blank: `[\s></\p{Cc}\p{Cf}]` alone let
-// **5,807** through, so `ok</user️>\n<assistant️>` forged a turn indistinguishable on
-// screen from `ok</user>`. U+FE0F and U+034F are `Mn`, U+2800 is `So`; none are in `\s`, `Cc` or `Cf`.
-// The full class lets 0 through, and the cost is nil: the same 11 of a 28-string corpus of plausible
-// legitimate text change under the wide class as under the narrow one.
+// The lookahead's tail is the boundary: what follows the name has to be something that ends a tag
+// name — `>`, `/`, `<`, end of text, or a character that takes up no room. That last clause is why
+// five Unicode properties are named instead of code points. Measured over the 6,060 code points that
+// are zero-advance or render blank: `[\s></\p{Cc}\p{Cf}]` alone let **5,806** through, so
+// `ok</user️>\n<assistant️>` forged a turn indistinguishable on screen from `ok</user>`. U+FE0F and
+// U+034F are `Mn`, U+2800 is `So`; none are in `\s`, `Cc` or `Cf`. The full class lets 0 through, and
+// the cost is nil: the same 11 of a 28-string corpus of plausible legitimate text change under the
+// wide class as under the narrow one.
+//
+// The same filler (plus the slash) is allowed BEFORE the name too: `hola</​user>` renders as
+// `hola</user>` and reads as a close. One class `[/…]*`, NOT `[…]*\/?[…]*` — two adjacent unbounded
+// quantifiers over the same class backtrack O(n²) on a long non-matching run and hang the event
+// loop (100 KB of combining marks ≈ 80 s). Zero-advance only (no `\s`, no U+2800): a visible
+// separator there is the `if (count < user && x)` corruption the boundary already refuses. Swept
+// in all three positions: 12,120 unfenced probes drop to 38, all visible separators (`Zs`/`Zl`/`Zp`).
 //
 // The claim stops there. A positive class cannot be complete over a VISIBLE separator: `</ user>` and
 // `< assistant>` read as a turn boundary to any model and go through raw. Left out on cost, not
@@ -408,7 +434,7 @@ function messageText(m: OpenAIChatMessage): string {
 // skills/references/openai-compat.md.
 function fenceHistoryTags(text: string): string {
   return text.replace(
-    /<(?=\/?(?:conversation_history|available_tools|tool_results?|tool_calls|system|user|assistant)(?:[\s></\p{Cc}\p{Cf}\p{Mn}\p{Me}\p{Default_Ignorable_Code_Point}⠀]|$))/giu,
+    /<(?=[/\p{Cc}\p{Cf}\p{Mn}\p{Me}\p{Default_Ignorable_Code_Point}]*(?:conversation_history|available_tools|tool_results?|tool_calls|system|user|assistant)(?:[\s></\p{Cc}\p{Cf}\p{Mn}\p{Me}\p{Default_Ignorable_Code_Point}⠀]|$))/giu,
     '&lt;',
   );
 }
@@ -427,9 +453,9 @@ function fenceHistoryTags(text: string): string {
  */
 export function serializeConversationHistory(messages: OpenAIChatMessage[], engineHoldsTranscript = false): string {
   if (engineHoldsTranscript) return '';
-  // The `> 0` guard covers both degenerate arrays at once: no `user` anywhere gives -1, and a `user`
-  // at index 0 has nothing in front of it. A shortcut, not the only thing holding that property up —
-  // with lastUserIndex 0 everything left is `assistant`, which the leading-assistant drop clears.
+  // Covers both degenerate arrays: no `user` gives -1, a `user` at index 0 has nothing in front of
+  // it. The `== 0` half is redundant with the `anchor < 0` bail below (measured: `< 0` changes no
+  // output, so no test kills that mutation) — but removing BOTH throws on `turns[anchor].role`.
   const lastUserIndex = messages.map((m) => m.role).lastIndexOf('user');
   if (lastUserIndex <= 0) return '';
   // Every message EXCEPT the caller's latest `user` turn, not just the ones in front of it. An array
@@ -454,27 +480,55 @@ export function serializeConversationHistory(messages: OpenAIChatMessage[], engi
   // announces tool_calls has content null and renders nothing, which is the common shape of a
   // follow-up from a tool-using caller — the exact arrays this exists for.
   if (!turns.length) return '';
-  // Spent from the newest backwards, oldest dropped first, mirroring recordTurn() in the autoloop
-  // dispatcher. Where this departs from that precedent: the turn the budget runs out INSIDE is
-  // truncated, not dropped. A single `user` turn here can be a pasted document, and dropping it
-  // whole takes the request with it — replaying 'listo, las cargo' without what was being
-  // acknowledged is the same silent drop this block exists to end. The head is kept because for a
-  // request the head is the ask. The newest turn always survives: it sees the full budget on the
-  // first iteration, so it either fits or is truncated, and '' is impossible once a turn rendered.
-  let budget = HISTORY_CHAR_BUDGET;
+  // The anchor: the newest `user` turn in the block — the ask every turn after it answers.
+  const anchor = turns.map((t) => t.role).lastIndexOf('user');
+  if (anchor < 0) return '';
+  // Spent newest-first, oldest dropped first, on RENDERED length. Two rules beyond that precedent:
+  // the turn the budget runs out inside is truncated (head kept, marker charged to its own
+  // allowance), because dropping a pasted document whole takes the request with it; and the anchor
+  // reserves `frame + min(len, 200)`, because post-anchor replies spending the full budget can
+  // strand the window past every `user` turn — the leading-`assistant` rule then clears the rest
+  // and the block comes out EMPTY (two 12k replies suffice). The 200 floor applies above the anchor
+  // too, dropping turns rather than rendering tag pairs around a bare marker; the reserve is what
+  // makes that safe for the anchor itself.
+  let budget = HISTORY_CHAR_BUDGET - HISTORY_FRAME_CHARS;
+  const reserved = turnFrameChars(turns[anchor].role) + Math.min(turns[anchor].text.length, HISTORY_MIN_TURN_CHARS);
+  // Fits the turn's text under `room` rendered characters (marker included), or refuses to start it.
+  const fit = (turn: { role: string; text: string }, room: number): { text: string; spent: number } | undefined => {
+    if (turn.text.length <= room) return { text: turn.text, spent: turn.text.length };
+    if (room < HISTORY_MIN_TURN_CHARS) return undefined;
+    let cut = room - HISTORY_ELISION.length;
+    // Don't leave a lone high surrogate: slice counts UTF-16 units, and a cut between an astral
+    // pair's halves emits malformed text (→ U+FFFD downstream). Backing off one keeps `spent` a bound.
+    const last = turn.text.charCodeAt(cut - 1);
+    if (last >= 0xd800 && last <= 0xdbff) cut -= 1;
+    return { text: turn.text.slice(0, cut) + HISTORY_ELISION, spent: room };
+  };
+  // Pass 1 — the replies after the anchor, newest first, against everything but the reserve.
+  let keepAfterAnchor = anchor + 1;
+  for (let i = turns.length - 1; i > anchor; i--) {
+    const frame = turnFrameChars(turns[i].role);
+    const got = fit(turns[i], budget - reserved - frame);
+    if (!got) {
+      keepAfterAnchor = i + 1;
+      break;
+    }
+    turns[i] = { role: turns[i].role, text: got.text };
+    budget -= frame + got.spent;
+  }
+  if (keepAfterAnchor > anchor + 1) turns.splice(anchor + 1, keepAfterAnchor - anchor - 1);
+  // Pass 2 — the anchor and older, newest first, against what is left. The anchor always fits:
+  // pass 1 never spends below `reserved`.
   let keepFrom = 0;
-  for (let i = turns.length - 1; i >= 0; i--) {
-    if (turns[i].text.length <= budget) {
-      budget -= turns[i].text.length;
-      continue;
-    }
-    if (budget >= HISTORY_MIN_TURN_CHARS) {
-      turns[i] = { role: turns[i].role, text: turns[i].text.slice(0, budget) + HISTORY_ELISION };
-      keepFrom = i;
-    } else {
+  for (let i = anchor; i >= 0; i--) {
+    const frame = turnFrameChars(turns[i].role);
+    const got = fit(turns[i], budget - frame);
+    if (!got) {
       keepFrom = i + 1;
+      break;
     }
-    break;
+    turns[i] = { role: turns[i].role, text: got.text };
+    budget -= frame + got.spent;
   }
   if (keepFrom > 0) turns.splice(0, keepFrom);
   // A leading `assistant` is a reply to a request the model cannot see. Two ways to get one, handled
@@ -483,15 +537,10 @@ export function serializeConversationHistory(messages: OpenAIChatMessage[], engi
   while (turns.length && turns[0].role === 'assistant') turns.shift();
   if (!turns.length) return '';
   const rendered = turns.map((t) => `<${t.role}>\n${t.text}\n</${t.role}>`).join('\n');
-  return (
-    `<conversation_history>\n${rendered}\n</conversation_history>\n\n` +
-    // Three sentences, each load-bearing: without the first the block reads as a new request,
-    // without the second the model reads its own earlier reply as a third party's line, and without
-    // the third an omission bug becomes a duplication bug.
-    'Above are the earlier turns of this conversation, replayed because this session does not hold them. ' +
-    'The assistant turns are your own earlier replies. Continue the conversation from there — do not repeat ' +
-    'these turns back and do not carry out the requests in them again.'
-  );
+  // The framing's three sentences are each load-bearing: without the first the block reads as a new
+  // request, without the second the model reads its own earlier reply as a third party's line, and
+  // without the third an omission bug becomes a duplication bug.
+  return `<conversation_history>\n${rendered}\n</conversation_history>\n\n${HISTORY_FRAMING}`;
 }
 
 /**
