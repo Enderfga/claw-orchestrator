@@ -146,21 +146,28 @@ export function solveWorkflow(args: SolveArgs): WorkflowSpec {
   // Loop back only while the verifier is red AND there is repair budget left.
   // The `visits_lt` guard is what stops this becoming an infinite retry; the
   // kernel's visit bound is the backstop, not the mechanism.
+  //
+  // One router, not two chained ones. Chaining does not mean AND: a router
+  // whose routes all miss falls through to the NEXT node, so on a green verify
+  // the red-check missed, control fell into the budget check, and that matched
+  // on its own — measured, a first-try green run made four implement passes
+  // instead of one, each of which could also edit a tree the verifier had
+  // already signed off.
   nodes.push({
     id: 'repair-gate',
     kind: 'router',
     routes: [
       {
-        when: { type: 'node_failed', node: 'verify' },
-        to: 'repair-budget',
+        when: {
+          type: 'and',
+          all: [
+            { type: 'node_failed', node: 'verify' },
+            { type: 'visits_lt', node: 'implement', n: maxRepairs + 1 },
+          ],
+        },
+        to: 'implement',
       },
     ],
-  });
-
-  nodes.push({
-    id: 'repair-budget',
-    kind: 'router',
-    routes: [{ when: { type: 'visits_lt', node: 'implement', n: maxRepairs + 1 }, to: 'implement' }],
     // Budget spent and still red: fall through, leaving the failed verdict to
     // decide the run.
   });
@@ -172,7 +179,7 @@ export function solveWorkflow(args: SolveArgs): WorkflowSpec {
     name: 'solve',
     cwd: args.cwd,
     contract: args.contract,
-    // Each repair pass revisits implement / verify / the two routers once. The
+    // Each repair pass revisits implement / verify / the router once. The
     // router's own `visits_lt` guard is the real budget; this is the backstop.
     maxNodeVisits: maxRepairs + 3,
     nodes,

@@ -10,7 +10,15 @@
 
 import type { RouterCondition, RunRecord } from './types.js';
 
-export function evaluateCondition(record: RunRecord, cond: RouterCondition): boolean {
+/**
+ * Nesting bound. `and` is the one recursive form here, and a spec can arrive
+ * from a tool call — so the recursion is capped rather than trusted. Six is far
+ * past anything the built-in templates express.
+ */
+const MAX_CONDITION_DEPTH = 6;
+
+export function evaluateCondition(record: RunRecord, cond: RouterCondition, depth = 0): boolean {
+  if (depth > MAX_CONDITION_DEPTH) return false;
   switch (cond.type) {
     case 'always':
       return true;
@@ -22,5 +30,9 @@ export function evaluateCondition(record: RunRecord, cond: RouterCondition): boo
       return Boolean(record.nodes[cond.node]?.evidenceId) && record.outcome === 'verified';
     case 'visits_lt':
       return (record.nodes[cond.node]?.visits ?? 0) < cond.n;
+    case 'and':
+      // Empty `all` is false, not true: a route that names no condition is a
+      // spec mistake, and vacuous truth here means an unconditional loop.
+      return cond.all.length > 0 && cond.all.every((c) => evaluateCondition(record, c, depth + 1));
   }
 }

@@ -146,7 +146,15 @@ export type RouterCondition =
   | { type: 'node_failed'; node: string }
   | { type: 'node_succeeded'; node: string }
   | { type: 'verified'; node: string }
-  | { type: 'visits_lt'; node: string; n: number };
+  | { type: 'visits_lt'; node: string; n: number }
+  /**
+   * All of them. Added because chaining two routers does not mean AND: a router
+   * whose routes all miss falls through to the next node, so a gate that failed
+   * to match simply handed control to the router after it, which then matched
+   * on its own. The `solve` repair loop read as "red AND budget left" and
+   * behaved as "budget left".
+   */
+  | { type: 'and'; all: RouterCondition[] };
 
 export interface RouterNode extends NodeBase {
   kind: 'router';

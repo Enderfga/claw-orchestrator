@@ -52,8 +52,10 @@ export async function executeVerifierNode(node: NodeSpec, ctx: NodeContext): Pro
     return { ok: true, output: 'no acceptance contract declared — nothing verified' };
   }
 
-  const attempt = ctx.record.nodes[spec.id]?.attempts ?? 1;
-  const evidenceId = makeEvidenceId(spec.id, attempt);
+  // Both counters: `attempts` restarts at 1 on every fresh visit, so on its own
+  // it names the same bundle on every pass through a repair loop.
+  const nodeRecord = ctx.record.nodes[spec.id];
+  const evidenceId = makeEvidenceId(spec.id, nodeRecord?.visits ?? 1, nodeRecord?.attempts ?? 1);
   const dir = runDir(ctx.runId);
   const cwd = spec.cwd || ctx.cwd;
 
