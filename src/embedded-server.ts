@@ -55,17 +55,45 @@ function autoloopErrorStatus(error: unknown): number {
  * dashboard session into remote code execution, so the network surface refuses
  * it outright. Built-in engines (the actual ask in #72) stay fully selectable.
  */
-const CUSTOM_ENGINE_BODY_KEYS = ['planner_custom_engine', 'coder_custom_engine', 'reviewer_custom_engine'] as const;
+//
+// Matched by SHAPE, not by an allowlist of known keys, and applied to every
+// request body in `route()` rather than to the handful of routes that were
+// remembered. The list form covered `planner_/coder_/reviewer_custom_engine`
+// and missed `customEngine` — the camelCase spelling `session_start` accepts —
+// so `/session/start` handed the object straight to `startSession()`, which
+// dispatches it to `PersistentCustomSession` and spawns `bin`. A per-route
+// guard is only ever as good as the memory of whoever adds the next route.
+const CUSTOM_ENGINE_KEY = /custom_?engines?$/i;
+const MAX_SCAN_DEPTH = 12;
 
-function rejectCustomEngineOverHttp(body: unknown): string | null {
-  if (typeof body !== 'object' || body === null) return null;
-  const record = body as Record<string, unknown>;
-  for (const key of CUSTOM_ENGINE_BODY_KEYS) {
-    if (record[key] !== undefined && record[key] !== null) {
-      return `${key} is not accepted over HTTP: a custom engine names an executable to spawn, so it may only be configured by a local caller (MCP tool / SessionManager API). Use a built-in engine here.`;
+/**
+ * Deep-scan a request body for any custom-engine payload, returning the
+ * offending key path. Bodies here are small JSON documents (`MAX_BODY_SIZE`
+ * bounds them) and the depth cap stops a pathological nesting from costing
+ * more than the parse already did.
+ */
+function findCustomEngineKey(value: unknown, depth = 0, trail = ''): string | null {
+  if (depth > MAX_SCAN_DEPTH || typeof value !== 'object' || value === null) return null;
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i++) {
+      const hit = findCustomEngineKey(value[i], depth + 1, `${trail}[${i}]`);
+      if (hit) return hit;
     }
+    return null;
+  }
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    const path = trail ? `${trail}.${key}` : key;
+    if (CUSTOM_ENGINE_KEY.test(key) && child !== undefined && child !== null) return path;
+    const hit = findCustomEngineKey(child, depth + 1, path);
+    if (hit) return hit;
   }
   return null;
+}
+
+function rejectCustomEngineOverHttp(body: unknown): string | null {
+  const key = findCustomEngineKey(body);
+  if (!key) return null;
+  return `${key} is not accepted over HTTP: a custom engine names an executable to spawn, so it may only be configured by a local caller (MCP tool / SessionManager API). Use a built-in engine here.`;
 }
 
 export class EmbeddedServer {
@@ -392,6 +420,13 @@ export class EmbeddedServer {
         res.writeHead(status, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(data));
       };
+
+      // Every body, before any route sees it. See rejectCustomEngineOverHttp.
+      const customEngineRejection = rejectCustomEngineOverHttp(body);
+      if (customEngineRejection) {
+        json(400, { ok: false, error: customEngineRejection });
+        return;
+      }
 
       // ─── Session Routes ──────────────────────────────────────────
 
@@ -895,11 +930,6 @@ export class EmbeddedServer {
       // `auto-{timestamp}-{4-byte-hex}`. Power users wanting a meaningful id
       // (e.g. "ml-refactor-v2") can pass run_id explicitly.
       if (path === '/autoloop/new') {
-        const customEngineRejection = rejectCustomEngineOverHttp(body);
-        if (customEngineRejection) {
-          json(400, { ok: false, error: customEngineRejection });
-          return;
-        }
         const input = body as {
           workspace?: string;
           run_id?: string;
@@ -1201,11 +1231,6 @@ export class EmbeddedServer {
       const v2ResumeMatch = path.match(/^\/autoloop\/([^/]+)\/resume$/);
       if (v2ResumeMatch) {
         const id = v2ResumeMatch[1];
-        const resumeRejection = rejectCustomEngineOverHttp(body);
-        if (resumeRejection) {
-          json(400, { ok: false, error: resumeRejection });
-          return;
-        }
         try {
           // Custom-engine configs still never cross the wire. What crosses is a
           // *name* the server resolves from its own environment

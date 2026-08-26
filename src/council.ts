@@ -70,6 +70,42 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // ─── Git Utilities ──────────────────────────────────────────────────────────
 
+/**
+ * The worktrees this council created, as git itself reports them.
+ *
+ * Both callers used to select with `wtPath.includes('council')`, which is a
+ * substring test against an absolute path — so a user's own worktree at
+ * `~/council-notes` matched while council's real one at `.worktrees/agent-A`
+ * did not. On the cleanup path that meant `git worktree remove --force` ran on
+ * the user's uncommitted work and never on ours (measured on a scratch repo).
+ * `setupWorktrees` only ever creates `{projectDir}/.worktrees/{agent}`, so
+ * containment under that directory is the actual predicate.
+ *
+ * `--porcelain` because the human-readable format is whitespace-separated and
+ * `split(/\s+/)[0]` truncates any path containing a space.
+ */
+export async function councilWorktreePaths(projectDir: string): Promise<string[]> {
+  const listed = await spawnAsync('git', ['-C', projectDir, 'worktree', 'list', '--porcelain'], {
+    timeout: GIT_CMD_TIMEOUT_MS,
+  }).catch(() => ({ stdout: '', stderr: '' }));
+  // `git worktree list` reports real paths, so a projectDir reached through a
+  // symlink (every macOS temp dir is one) would never match a textual prefix.
+  const real = (p: string): string => {
+    try {
+      return fs.realpathSync(p);
+    } catch {
+      return path.resolve(p);
+    }
+  };
+  const self = real(projectDir);
+  const root = path.join(self, '.worktrees') + path.sep;
+  return listed.stdout
+    .split('\n')
+    .filter((l) => l.startsWith('worktree '))
+    .map((l) => real(l.slice('worktree '.length).trim()))
+    .filter((p) => p && p !== self && (p + path.sep).startsWith(root));
+}
+
 function spawnAsync(
   cmd: string,
   args: string[],
@@ -828,16 +864,7 @@ export class Council extends EventEmitter {
       .catch(() => [] as string[]);
 
     // Gather worktrees
-    const worktrees = await spawnAsync('git', ['-C', dir, 'worktree', 'list', '--porcelain'], {
-      timeout: GIT_CMD_TIMEOUT_MS,
-    })
-      .then((r) => {
-        const lines = r.stdout.split('\n');
-        return lines.filter((l) => l.startsWith('worktree ')).map((l) => l.replace('worktree ', '').trim());
-      })
-      .catch(() => [] as string[]);
-    // Filter to only council worktrees (not the main worktree)
-    const councilWorktrees = worktrees.filter((w) => w.includes('council') || w.includes('.worktrees'));
+    const councilWorktrees = await councilWorktreePaths(dir);
 
     // Check plan.md
     const planPath = path.join(dir, 'plan.md');
@@ -950,22 +977,18 @@ export class Council extends EventEmitter {
 
     // Remove council worktrees
     if (options.removeWorktrees) {
-      const wtListResult = await spawnAsync('git', ['-C', projectDir, 'worktree', 'list'], {
-        timeout: GIT_CMD_TIMEOUT_MS,
-      }).catch(() => ({
-        stdout: '',
-        stderr: '',
-      }));
-      for (const line of wtListResult.stdout.split('\n')) {
-        const wtPath = line.split(/\s+/)[0];
-        if (wtPath && wtPath.includes('council')) {
-          // Safety: never remove the project dir itself
-          if (path.resolve(wtPath) === path.resolve(projectDir)) continue;
-          await spawnAsync('git', ['-C', projectDir, 'worktree', 'remove', '--force', wtPath], {
-            timeout: WORKTREE_CMD_TIMEOUT_MS,
-          }).catch((err) => this.logger.error(`Failed to remove worktree ${wtPath}:`, err.message));
-          result.worktreesRemoved.push(wtPath);
-        }
+      for (const wtPath of await councilWorktreePaths(projectDir)) {
+        const removed = await spawnAsync('git', ['-C', projectDir, 'worktree', 'remove', '--force', wtPath], {
+          timeout: WORKTREE_CMD_TIMEOUT_MS,
+        })
+          .then(() => true)
+          .catch((err) => {
+            this.logger.error(`Failed to remove worktree ${wtPath}:`, err.message);
+            return false;
+          });
+        // Only what was actually removed: the old code pushed unconditionally,
+        // so a failed remove still reported the path as cleaned up.
+        if (removed) result.worktreesRemoved.push(wtPath);
       }
       // Also remove .worktrees directory if it exists
       const dotWorktrees = path.join(projectDir, '.worktrees');

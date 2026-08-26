@@ -3,6 +3,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import * as path from 'node:path';
 import {
   resolveSessionKey,
   sessionNameFromKey,
@@ -371,6 +372,34 @@ describe('sessionNameFromKey', () => {
   it('prefixes with openai-', () => {
     expect(sessionNameFromKey('abc')).toBe('openai-abc');
     expect(sessionNameFromKey('default')).toBe('openai-default');
+  });
+
+  // The name becomes a directory: handleChatCompletion builds
+  // `os.tmpdir()/openclaw-compat-<name>`, mkdirs it recursively, and starts the
+  // session there under bypassPermissions. The key is whatever the caller put in
+  // `x-session-id` or `user`. Measured before the fix: the path resolved to
+  // `/var/folders/xy/etc/newdir` — outside the temp dir entirely.
+  it('cannot carry a path out of the directory it names', () => {
+    const os = { tmpdir: () => '/tmp' };
+    for (const evil of ['../../../../etc/newdir', '../..', 'a/b', 'a\\b', '..', '.', 'x/../../../y', 'nul\u0000byte']) {
+      const name = sessionNameFromKey(evil);
+      const dir = path.join(os.tmpdir(), `openclaw-compat-${name}`);
+      expect(path.dirname(dir)).toBe(os.tmpdir());
+      expect(name).not.toContain('/');
+      expect(name).not.toContain('..');
+    }
+  });
+
+  it('leaves an ordinary key byte-for-byte alone', () => {
+    // Sanitising every key would rename every existing caller's session, so the
+    // negative case is half the contract.
+    for (const ok of ['abc', 'default', 'sys-0123456789ab', 'user_42', 'a.b-c']) {
+      expect(sessionNameFromKey(ok)).toBe(`openai-${ok}`);
+    }
+  });
+
+  it('keeps distinct unsafe keys distinct', () => {
+    expect(sessionNameFromKey('a/b')).not.toBe(sessionNameFromKey('a/c'));
   });
 });
 

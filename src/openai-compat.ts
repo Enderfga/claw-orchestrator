@@ -210,8 +210,30 @@ export function resolveSessionKey(body: OpenAIChatCompletionRequest, headers: ht
 }
 
 /** Build the full session name from a key */
+/**
+ * A session key reaches us verbatim from the caller — the `x-session-id` header
+ * or the `user` field — and the name derived from it becomes a DIRECTORY name:
+ * `handleChatCompletion` builds `os.tmpdir()/openclaw-compat-<name>` and calls
+ * `mkdirSync(..., {recursive: true})`, then starts the session there under
+ * `permissionMode: 'bypassPermissions'`. A key carrying path separators
+ * therefore both creates a directory anywhere the process can write and points
+ * a permissionless agent at it — measured: `x-session-id: ../../../../etc/x`
+ * resolved outside the temp dir entirely.
+ *
+ * Keys that are already safe pass through unchanged, so a caller using an
+ * ordinary id keeps the session name it has always had. Anything else is
+ * replaced by a hash of itself rather than escaped, which keeps distinct keys
+ * distinct without having to reason about what a filesystem does with the
+ * leftovers.
+ */
+const SAFE_SESSION_KEY = /^[A-Za-z0-9._-]{1,64}$/;
+
 export function sessionNameFromKey(key: string): string {
-  return `${OPENAI_COMPAT_SESSION_PREFIX}${key}`;
+  const safe =
+    SAFE_SESSION_KEY.test(key) && !key.includes('..')
+      ? key
+      : `k-${createHash('sha1').update(key).digest('hex').slice(0, 16)}`;
+  return `${OPENAI_COMPAT_SESSION_PREFIX}${safe}`;
 }
 
 // ─── Function Calling Support ────────────────────────────────────────────────

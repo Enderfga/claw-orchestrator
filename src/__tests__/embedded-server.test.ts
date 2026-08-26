@@ -285,6 +285,77 @@ describe('EmbeddedServer', () => {
     });
   });
 
+  // ── The network surface must not be able to name a binary to spawn.
+  //
+  //    `rejectCustomEngineOverHttp` was wired into /autoloop/new and
+  //    /autoloop/<id>/resume and matched three snake_case keys. `/session/start`
+  //    had no guard at all and `session_start` spells the field `customEngine`,
+  //    so the object reached `startSession()` verbatim (measured: HTTP 200, the
+  //    full `{bin, args.extra}` handed over) and from there
+  //    `PersistentCustomSession` spawns `bin`. The guard is now shape-matched
+  //    and runs on every body in `route()`, so the next route added cannot
+  //    reintroduce it by being forgotten.
+  describe('custom engine over HTTP', () => {
+    it('refuses a customEngine body on /session/start without reaching startSession', async () => {
+      await server.start();
+
+      const res = await request(port, '/session/start', {
+        method: 'POST',
+        body: {
+          name: 'pwned',
+          cwd: '/tmp',
+          engine: 'custom',
+          customEngine: { name: 'x', bin: '/bin/sh', args: { extra: ['-c', 'touch /tmp/proof'] } },
+        },
+      });
+
+      expect(res.status).toBe(400);
+      expect(String((res.body as { error?: string }).error)).toContain('customEngine');
+      // The point of the assertion: refusing after the spawn would be no refusal.
+      expect(manager.startSession).not.toHaveBeenCalled();
+    });
+
+    it('refuses a nested custom engine, wherever in the body it sits', async () => {
+      await server.start();
+
+      const res = await request(port, '/session/start', {
+        method: 'POST',
+        body: { name: 'n', agents: [{ name: 'a' }, { name: 'b', customEngine: { bin: '/bin/sh' } }] },
+      });
+
+      expect(res.status).toBe(400);
+      expect(String((res.body as { error?: string }).error)).toContain('agents[1].customEngine');
+      expect(manager.startSession).not.toHaveBeenCalled();
+    });
+
+    it('still refuses the snake_case autoloop spellings', async () => {
+      await server.start();
+
+      for (const key of ['planner_custom_engine', 'coder_custom_engine', 'reviewer_custom_engine']) {
+        const res = await request(port, '/autoloop/new', {
+          method: 'POST',
+          body: { goal: 'g', [key]: { bin: '/bin/sh' } },
+        });
+        expect(res.status).toBe(400);
+        expect(String((res.body as { error?: string }).error)).toContain(key);
+      }
+    });
+
+    it('leaves an ordinary body alone', async () => {
+      await server.start();
+
+      // Guarding every body means a false positive would break every route, so
+      // the negative case is the other half of the assertion.
+      const res = await request(port, '/session/start', {
+        method: 'POST',
+        body: { name: 'ok', cwd: '/tmp', engine: 'codex', model: 'gpt-5.1-codex' },
+      });
+
+      expect(res.status).toBe(200);
+      expect(manager.startSession).toHaveBeenCalled();
+    });
+  });
+
   describe('rate limiting', () => {
     it('allows requests within rate limit', async () => {
       process.env.OPENCLAW_RATE_LIMIT = '5';
