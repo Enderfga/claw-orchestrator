@@ -47,9 +47,20 @@ export function evidenceDir(runDir: string, evidenceId: string): string {
   return path.join(evidenceRoot(runDir), evidenceId);
 }
 
-/** `<node>-<attempt>` — stable, sortable, and readable in a ledger row. */
-export function makeEvidenceId(node: string, attempt: number): string {
-  return `${node.replace(/[^\w.-]/g, '_')}-${String(attempt).padStart(2, '0')}`;
+/**
+ * `<node>-v<visit>-<attempt>` — stable, sortable, and readable in a ledger row.
+ *
+ * The visit is part of the id because the attempt alone is not unique across a
+ * loop. `attempts` is the per-visit retry counter and restarts at 1 on every
+ * fresh visit, so in the `solve` repair loop every pass through the verifier
+ * produced `verify-01` and `writeEvidence` overwrote the previous bundle.json,
+ * diff.patch and check logs — while both `evidence` events and the record's
+ * `evidenceId` collapsed onto the one string. The final verdict stayed correct;
+ * the history of what was wrong and what fixed it did not survive.
+ */
+export function makeEvidenceId(node: string, visit: number, attempt: number): string {
+  const n = (x: number): string => String(x).padStart(2, '0');
+  return `${node.replace(/[^\w.-]/g, '_')}-v${n(visit)}-${n(attempt)}`;
 }
 
 export interface WriteEvidenceArgs {

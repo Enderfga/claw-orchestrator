@@ -3,6 +3,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import * as path from 'node:path';
 import {
   resolveSessionKey,
   sessionNameFromKey,
@@ -371,6 +372,34 @@ describe('sessionNameFromKey', () => {
   it('prefixes with openai-', () => {
     expect(sessionNameFromKey('abc')).toBe('openai-abc');
     expect(sessionNameFromKey('default')).toBe('openai-default');
+  });
+
+  // The name becomes a directory: handleChatCompletion builds
+  // `os.tmpdir()/openclaw-compat-<name>`, mkdirs it recursively, and starts the
+  // session there under bypassPermissions. The key is whatever the caller put in
+  // `x-session-id` or `user`. Measured before the fix: the path resolved to
+  // `/var/folders/xy/etc/newdir` — outside the temp dir entirely.
+  it('cannot carry a path out of the directory it names', () => {
+    const os = { tmpdir: () => '/tmp' };
+    for (const evil of ['../../../../etc/newdir', '../..', 'a/b', 'a\\b', '..', '.', 'x/../../../y', 'nul\u0000byte']) {
+      const name = sessionNameFromKey(evil);
+      const dir = path.join(os.tmpdir(), `openclaw-compat-${name}`);
+      expect(path.dirname(dir)).toBe(os.tmpdir());
+      expect(name).not.toContain('/');
+      expect(name).not.toContain('..');
+    }
+  });
+
+  it('leaves an ordinary key byte-for-byte alone', () => {
+    // Sanitising every key would rename every existing caller's session, so the
+    // negative case is half the contract.
+    for (const ok of ['abc', 'default', 'sys-0123456789ab', 'user_42', 'a.b-c']) {
+      expect(sessionNameFromKey(ok)).toBe(`openai-${ok}`);
+    }
+  });
+
+  it('keeps distinct unsafe keys distinct', () => {
+    expect(sessionNameFromKey('a/b')).not.toBe(sessionNameFromKey('a/c'));
   });
 });
 
@@ -1639,5 +1668,136 @@ describe('extractUserMessage — the duplicate-once trade', () => {
     const live = extractUserMessage(noAssistantEver, {}, true).userMessage;
     expect(live).toContain('ROUND-ZERO');
     expect(live).toContain('ROUND-ONE');
+  });
+});
+
+// ── A changed tool schema must not land in a session baked with the old one.
+//
+//    On the Claude engine the schemas go into the session's system prompt at
+//    create time and are deliberately not re-injected per turn, so the session
+//    key is the only thing that can notice a change. It hashed the tool name
+//    and the first 64 characters of the description — not the parameters.
+describe('resolveSessionKey — tool schema fingerprint', () => {
+  const withTool = (parameters: unknown) => ({
+    messages: [
+      { role: 'system' as const, content: 'be helpful' },
+      { role: 'user' as const, content: 'hi' },
+    ],
+    model: 'claude-sonnet-4-5',
+    tools: [
+      {
+        type: 'function' as const,
+        function: { name: 'issue_invoice', description: 'Issue an invoice', parameters },
+      },
+    ],
+  });
+
+  it('separates sessions when a parameter schema changes', () => {
+    const before = resolveSessionKey(withTool({ type: 'object', properties: { id: { type: 'string' } } }), {});
+    const after = resolveSessionKey(
+      withTool({ type: 'object', properties: { id: { type: 'number' } }, required: ['id'] }),
+      {},
+    );
+    expect(before).not.toBe(after);
+  });
+
+  it('does not separate them for a re-serialised but identical schema', () => {
+    // Key order is not a schema change; splitting on it would start a new
+    // session on every request from a client that serialises differently.
+    const a = resolveSessionKey(withTool({ type: 'object', properties: { id: { type: 'string' } } }), {});
+    const b = resolveSessionKey(withTool({ properties: { id: { type: 'string' } }, type: 'object' }), {});
+    expect(a).toBe(b);
+  });
+});
+
+// ── An engine with no delta channel must still say something.
+//
+//    `sendMessage` reports the whole answer as its return value AND streams it
+//    through `onChunk` for engines that have one. opencode, agy, the per-send
+//    codex/cursor wrappers and one-shot custom engines never call it — and this
+//    path emitted the role chunk and the stop chunk with nothing in between:
+//    a 200 with an empty reply.
+describe('handleChatCompletion — streaming an engine that does not emit deltas', () => {
+  function recordingRes() {
+    const written: string[] = [];
+    const listeners = new Map<string, () => void>();
+    return {
+      written,
+      res: {
+        writeHead: () => {},
+        setHeader: () => {},
+        end: () => {},
+        write: (s: string) => {
+          written.push(s);
+          return true;
+        },
+        on: (event: string, fn: () => void) => {
+          listeners.set(event, fn);
+        },
+      } as unknown as Parameters<typeof handleChatCompletion>[3],
+    };
+  }
+
+  const contentOf = (written: string[]): string =>
+    written
+      .filter((w) => w.startsWith('data: '))
+      .map((w) => w.slice('data: '.length).trim())
+      .filter((w) => w !== '[DONE]')
+      .map((w) => {
+        try {
+          return (JSON.parse(w) as { choices?: Array<{ delta?: { content?: string } }> }).choices?.[0]?.delta?.content;
+        } catch {
+          return undefined;
+        }
+      })
+      .filter(Boolean)
+      .join('');
+
+  it('emits the returned output when nothing streamed', async () => {
+    const manager = {
+      startSession: async (c: Record<string, unknown>) => ({ name: c.name as string }),
+      sendMessage: async () => ({ output: 'the whole answer', events: [] }),
+      stopSession: async () => {},
+      listSessions: () => [],
+      getStatus: () => ({ stats: { tokensIn: 1, tokensOut: 1, contextPercent: 1 } }),
+      compactSession: async () => ({}),
+    };
+    const { res, written } = recordingRes();
+
+    await handleChatCompletion(
+      manager as never,
+      { model: 'opencode/x', stream: true, messages: [{ role: 'user', content: 'hi' }] },
+      {},
+      res,
+    );
+
+    expect(contentOf(written)).toBe('the whole answer');
+  });
+
+  it('does not double it for an engine that does stream', async () => {
+    // The counter is the whole point: without it the fallback would append the
+    // full answer after the deltas that already carried it.
+    const manager = {
+      startSession: async (c: Record<string, unknown>) => ({ name: c.name as string }),
+      sendMessage: async (_n: string, _m: string, opts?: { onChunk?: (s: string) => void }) => {
+        opts?.onChunk?.('the whole ');
+        opts?.onChunk?.('answer');
+        return { output: 'the whole answer', events: [] };
+      },
+      stopSession: async () => {},
+      listSessions: () => [],
+      getStatus: () => ({ stats: { tokensIn: 1, tokensOut: 1, contextPercent: 1 } }),
+      compactSession: async () => ({}),
+    };
+    const { res, written } = recordingRes();
+
+    await handleChatCompletion(
+      manager as never,
+      { model: 'claude-sonnet-4-5', stream: true, messages: [{ role: 'user', content: 'hi' }] },
+      {},
+      res,
+    );
+
+    expect(contentOf(written)).toBe('the whole answer');
   });
 });

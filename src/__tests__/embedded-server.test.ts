@@ -8,7 +8,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach, afterAll } from 'vitest';
 import * as http from 'node:http';
 import * as net from 'node:net';
-import { EmbeddedServer } from '../embedded-server.js';
+import { EmbeddedServer, __sseSenderForTest as sseSenderForTest } from '../embedded-server.js';
 import type { SessionManager } from '../session-manager.js';
 import { useIsolatedHome } from './helpers/isolate-home.js';
 
@@ -282,6 +282,122 @@ describe('EmbeddedServer', () => {
 
       const res = await request(port, '/session/list', { method: 'POST', body: {} });
       expect(res.status).toBe(200);
+    });
+  });
+
+  // ── The network surface must not be able to name a binary to spawn.
+  //
+  //    `rejectCustomEngineOverHttp` was wired into /autoloop/new and
+  //    /autoloop/<id>/resume and matched three snake_case keys. `/session/start`
+  //    had no guard at all and `session_start` spells the field `customEngine`,
+  //    so the object reached `startSession()` verbatim (measured: HTTP 200, the
+  //    full `{bin, args.extra}` handed over) and from there
+  //    `PersistentCustomSession` spawns `bin`. The guard is now shape-matched
+  //    and runs on every body in `route()`, so the next route added cannot
+  //    reintroduce it by being forgotten.
+  describe('custom engine over HTTP', () => {
+    it('refuses a customEngine body on /session/start without reaching startSession', async () => {
+      await server.start();
+
+      const res = await request(port, '/session/start', {
+        method: 'POST',
+        body: {
+          name: 'pwned',
+          cwd: '/tmp',
+          engine: 'custom',
+          customEngine: { name: 'x', bin: '/bin/sh', args: { extra: ['-c', 'touch /tmp/proof'] } },
+        },
+      });
+
+      expect(res.status).toBe(400);
+      expect(String((res.body as { error?: string }).error)).toContain('customEngine');
+      // The point of the assertion: refusing after the spawn would be no refusal.
+      expect(manager.startSession).not.toHaveBeenCalled();
+    });
+
+    it('refuses a nested custom engine, wherever in the body it sits', async () => {
+      await server.start();
+
+      const res = await request(port, '/session/start', {
+        method: 'POST',
+        body: { name: 'n', agents: [{ name: 'a' }, { name: 'b', customEngine: { bin: '/bin/sh' } }] },
+      });
+
+      expect(res.status).toBe(400);
+      expect(String((res.body as { error?: string }).error)).toContain('agents[1].customEngine');
+      expect(manager.startSession).not.toHaveBeenCalled();
+    });
+
+    it('still refuses the snake_case autoloop spellings', async () => {
+      await server.start();
+
+      for (const key of ['planner_custom_engine', 'coder_custom_engine', 'reviewer_custom_engine']) {
+        const res = await request(port, '/autoloop/new', {
+          method: 'POST',
+          body: { goal: 'g', [key]: { bin: '/bin/sh' } },
+        });
+        expect(res.status).toBe(400);
+        expect(String((res.body as { error?: string }).error)).toContain(key);
+      }
+    });
+
+    it('leaves an ordinary body alone', async () => {
+      await server.start();
+
+      // Guarding every body means a false positive would break every route, so
+      // the negative case is the other half of the assertion.
+      const res = await request(port, '/session/start', {
+        method: 'POST',
+        body: { name: 'ok', cwd: '/tmp', engine: 'codex', model: 'gpt-5.1-codex' },
+      });
+
+      expect(res.status).toBe(200);
+      expect(manager.startSession).toHaveBeenCalled();
+    });
+  });
+
+  // ── An SSE event that fires after the client hangs up must not throw.
+  //
+  //    Every one of these endpoints writes from an EventEmitter callback, and an
+  //    event can land between the socket closing and the `close` handler
+  //    detaching the listener. `res.write` then throws
+  //    ERR_STREAM_WRITE_AFTER_END inside the emitter callback, where nothing
+  //    catches it. Only the autoloop handler was guarded.
+  describe('SSE after the client disconnects', () => {
+    it('swallows a write to a response that has already ended', async () => {
+      await server.start();
+
+      // Reach in for the guarded sender the routes use, and drive it against a
+      // response that is already finished — which is what the emitter callback
+      // does when it fires one tick too late.
+      const res = new http.ServerResponse({ method: 'GET', url: '/x' } as never);
+      const chunks: string[] = [];
+      res.write = ((c: string) => {
+        chunks.push(c);
+        return true;
+      }) as never;
+      const send = sseSenderForTest(res);
+      send('hello', { a: 1 });
+      expect(chunks.length).toBe(2);
+
+      // Now the socket goes away.
+      res.emit('close');
+      expect(() => send('after', { a: 2 })).not.toThrow();
+      expect(chunks.length).toBe(2);
+    });
+
+    it('stops after a write throws rather than throwing again on the next event', () => {
+      const res = new http.ServerResponse({ method: 'GET', url: '/x' } as never);
+      let calls = 0;
+      res.write = (() => {
+        calls++;
+        throw new Error('write after end');
+      }) as never;
+      const send = sseSenderForTest(res);
+
+      expect(() => send('one', {})).not.toThrow();
+      expect(() => send('two', {})).not.toThrow();
+      expect(calls).toBe(1);
     });
   });
 

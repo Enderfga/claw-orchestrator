@@ -120,6 +120,12 @@ saying so, so the choice is a session config option instead — which also suits
 `session/cancel` settles the in-flight prompt as `cancelled` immediately, then tears
 the underlying session down and recreates it.
 
+A cancel with **nothing in flight does nothing**. The teardown drops the engine's
+native conversation id — codex, codex-app, agy, cursor and opencode all capture
+theirs mid-turn — so running it on an idle session would fork the history
+silently: the client keeps the same ACP session id while the next prompt opens a
+fresh engine thread.
+
 The session layer has **no mid-turn cancel** — `stopSession()` is the only lever and
 it destroys the session rather than pausing the turn. So the ACP turn returns
 promptly while the engine subprocess may take a moment longer to die, and any

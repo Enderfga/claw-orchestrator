@@ -62,14 +62,14 @@ export function getAnthropicBaseUrl(): string {
     if (fs.existsSync(configPath)) {
       const raw = fs.readFileSync(configPath, 'utf8');
       const cfg = JSON.parse(raw) as { providers?: Record<string, { baseUrl?: string }> };
-      const providers = cfg?.providers;
-      if (providers && typeof providers === 'object') {
-        for (const [, p] of Object.entries(providers)) {
-          if (p?.baseUrl) {
-            _cachedBaseUrl = p.baseUrl;
-            return _cachedBaseUrl;
-          }
-        }
+      // The `anthropic` provider by name, not whichever key happens to come
+      // first. Iterating the whole map sent Anthropic passthrough — with
+      // `x-api-key: $ANTHROPIC_API_KEY` and the full prompt body — to any other
+      // provider's baseUrl that was listed above it.
+      const baseUrl = cfg?.providers?.anthropic?.baseUrl;
+      if (baseUrl) {
+        _cachedBaseUrl = baseUrl;
+        return _cachedBaseUrl;
       }
     }
   } catch (err) {
@@ -256,6 +256,19 @@ async function forwardToAnthropic(
   const baseUrl = getAnthropicBaseUrl();
   if (isStream) {
     const resp = await fetch(`${baseUrl}/v1/messages`, fetchInit);
+    // Before the SSE headers go out, because after them there is no status left
+    // to send. Without this a 401/429/500 reached the caller as HTTP 200 with a
+    // JSON body an SSE parser reads as an empty stream — indistinguishable from
+    // a model that said nothing. Same guard the other three paths in this file
+    // already apply.
+    if (!resp.ok) {
+      const detail = await resp.text().catch(() => '');
+      res.status(resp.status).json({
+        type: 'error',
+        error: { type: 'upstream_error', message: detail || `upstream returned ${resp.status}` },
+      });
+      return true;
+    }
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.flushHeaders?.();

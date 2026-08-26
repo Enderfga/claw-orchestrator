@@ -55,18 +55,77 @@ function autoloopErrorStatus(error: unknown): number {
  * dashboard session into remote code execution, so the network surface refuses
  * it outright. Built-in engines (the actual ask in #72) stay fully selectable.
  */
-const CUSTOM_ENGINE_BODY_KEYS = ['planner_custom_engine', 'coder_custom_engine', 'reviewer_custom_engine'] as const;
+//
+// Matched by SHAPE, not by an allowlist of known keys, and applied to every
+// request body in `route()` rather than to the handful of routes that were
+// remembered. The list form covered `planner_/coder_/reviewer_custom_engine`
+// and missed `customEngine` — the camelCase spelling `session_start` accepts —
+// so `/session/start` handed the object straight to `startSession()`, which
+// dispatches it to `PersistentCustomSession` and spawns `bin`. A per-route
+// guard is only ever as good as the memory of whoever adds the next route.
+const CUSTOM_ENGINE_KEY = /custom_?engines?$/i;
+const MAX_SCAN_DEPTH = 12;
 
-function rejectCustomEngineOverHttp(body: unknown): string | null {
-  if (typeof body !== 'object' || body === null) return null;
-  const record = body as Record<string, unknown>;
-  for (const key of CUSTOM_ENGINE_BODY_KEYS) {
-    if (record[key] !== undefined && record[key] !== null) {
-      return `${key} is not accepted over HTTP: a custom engine names an executable to spawn, so it may only be configured by a local caller (MCP tool / SessionManager API). Use a built-in engine here.`;
+/**
+ * Deep-scan a request body for any custom-engine payload, returning the
+ * offending key path. Bodies here are small JSON documents (`MAX_BODY_SIZE`
+ * bounds them) and the depth cap stops a pathological nesting from costing
+ * more than the parse already did.
+ */
+function findCustomEngineKey(value: unknown, depth = 0, trail = ''): string | null {
+  if (depth > MAX_SCAN_DEPTH || typeof value !== 'object' || value === null) return null;
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i++) {
+      const hit = findCustomEngineKey(value[i], depth + 1, `${trail}[${i}]`);
+      if (hit) return hit;
     }
+    return null;
+  }
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    const path = trail ? `${trail}.${key}` : key;
+    if (CUSTOM_ENGINE_KEY.test(key) && child !== undefined && child !== null) return path;
+    const hit = findCustomEngineKey(child, depth + 1, path);
+    if (hit) return hit;
   }
   return null;
 }
+
+function rejectCustomEngineOverHttp(body: unknown): string | null {
+  const key = findCustomEngineKey(body);
+  if (!key) return null;
+  return `${key} is not accepted over HTTP: a custom engine names an executable to spawn, so it may only be configured by a local caller (MCP tool / SessionManager API). Use a built-in engine here.`;
+}
+
+/**
+ * A guarded SSE writer.
+ *
+ * Every one of these endpoints writes from an EventEmitter callback, and an
+ * event can fire between the client closing the socket and the `close` handler
+ * detaching the listener. Writing then throws ERR_STREAM_WRITE_AFTER_END inside
+ * the emitter callback, where nothing catches it. The autoloop handler was
+ * hardened for exactly this and the other three were not, so the guard lives in
+ * one place now rather than in each closure that remembers to have it.
+ */
+function sseSender(res: http.ServerResponse): (event: string, data: unknown) => void {
+  let closed = false;
+  res.on('close', () => {
+    closed = true;
+  });
+  return (event: string, data: unknown): void => {
+    if (closed || res.writableEnded || !res.writable) return;
+    try {
+      res.write(`event: ${event}\n`);
+      res.write(`data: ${JSON.stringify(data)}\n\n`);
+    } catch {
+      // Connection broke mid-write; stop sending. The route's own `close`
+      // handler detaches listeners and ends the response.
+      closed = true;
+    }
+  };
+}
+
+/** Test seam: the guard is invisible from outside, and an unguarded write throws where nothing catches it. */
+export const __sseSenderForTest = sseSender;
 
 export class EmbeddedServer {
   private server: http.Server | null = null;
@@ -392,6 +451,13 @@ export class EmbeddedServer {
         res.writeHead(status, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(data));
       };
+
+      // Every body, before any route sees it. See rejectCustomEngineOverHttp.
+      const customEngineRejection = rejectCustomEngineOverHttp(body);
+      if (customEngineRejection) {
+        json(400, { ok: false, error: customEngineRejection });
+        return;
+      }
 
       // ─── Session Routes ──────────────────────────────────────────
 
@@ -786,10 +852,7 @@ export class EmbeddedServer {
             'Cache-Control': 'no-cache',
             Connection: 'keep-alive',
           });
-          const send = (event: string, data: unknown): void => {
-            res.write(`event: ${event}\n`);
-            res.write(`data: ${JSON.stringify(data)}\n\n`);
-          };
+          const send = sseSender(res);
           const snapshot = this.manager.workflowList({ limit: 1000 }).find((r) => r.runId === runId);
           if (snapshot) send('snapshot', snapshot);
           const unsubscribe = this.manager.onWorkflowEvent((e) => {
@@ -857,10 +920,7 @@ export class EmbeddedServer {
           'Cache-Control': 'no-cache',
           Connection: 'keep-alive',
         });
-        const send = (event: string, data: unknown): void => {
-          res.write(`event: ${event}\n`);
-          res.write(`data: ${JSON.stringify(data)}\n\n`);
-        };
+        const send = sseSender(res);
         // Replay current session so the dashboard renders immediately.
         const snap = council.getSession();
         if (snap) send('snapshot', snap);
@@ -895,11 +955,6 @@ export class EmbeddedServer {
       // `auto-{timestamp}-{4-byte-hex}`. Power users wanting a meaningful id
       // (e.g. "ml-refactor-v2") can pass run_id explicitly.
       if (path === '/autoloop/new') {
-        const customEngineRejection = rejectCustomEngineOverHttp(body);
-        if (customEngineRejection) {
-          json(400, { ok: false, error: customEngineRejection });
-          return;
-        }
         const input = body as {
           workspace?: string;
           run_id?: string;
@@ -1049,21 +1104,7 @@ export class EmbeddedServer {
           'Cache-Control': 'no-cache',
           Connection: 'keep-alive',
         });
-        let sseClosed = false;
-        const send = (event: string, data: unknown): void => {
-          // A runner/dispatcher event can fire after the client disconnects or
-          // after cleanup() has ended the response. Writing then throws
-          // ERR_STREAM_WRITE_AFTER_END inside an emitter callback (unhandled).
-          if (sseClosed || res.writableEnded || !res.writable) return;
-          try {
-            res.write(`event: ${event}\n`);
-            res.write(`data: ${JSON.stringify(data)}\n\n`);
-          } catch {
-            // Connection broke mid-write; stop sending. res 'close' fires
-            // cleanup() to detach listeners and end the response.
-            sseClosed = true;
-          }
-        };
+        const send = sseSender(res);
         send('snapshot', { state: ctx.runner.state });
 
         const onMessage = (env: unknown): void => send('message', env);
@@ -1081,7 +1122,9 @@ export class EmbeddedServer {
         const onReviewerReply = (text: unknown): void => send('reviewer_reply', { text });
         const onCompact = (e: unknown): void => send('compact', e);
         const cleanup = (): void => {
-          sseClosed = true;
+          // sseSender stops writing on its own `close` listener; this just
+          // detaches the emitters so a long-lived run stops feeding a dead
+          // response.
           ctx.runner.off('message', onMessage);
           ctx.runner.off('state', onState);
           ctx.runner.off('push', onPush);
@@ -1201,11 +1244,6 @@ export class EmbeddedServer {
       const v2ResumeMatch = path.match(/^\/autoloop\/([^/]+)\/resume$/);
       if (v2ResumeMatch) {
         const id = v2ResumeMatch[1];
-        const resumeRejection = rejectCustomEngineOverHttp(body);
-        if (resumeRejection) {
-          json(400, { ok: false, error: resumeRejection });
-          return;
-        }
         try {
           // Custom-engine configs still never cross the wire. What crosses is a
           // *name* the server resolves from its own environment
@@ -1241,15 +1279,12 @@ export class EmbeddedServer {
           'Cache-Control': 'no-cache',
           Connection: 'keep-alive',
         });
+        const sendUa = sseSender(res);
         let unsub: (() => void) | null = null;
         try {
-          unsub = ua.subscribe(runId, (ev: unknown) => {
-            res.write(`event: ultraapp\n`);
-            res.write(`data: ${JSON.stringify(ev)}\n\n`);
-          });
+          unsub = ua.subscribe(runId, (ev: unknown) => sendUa('ultraapp', ev));
         } catch (e) {
-          res.write(`event: error\n`);
-          res.write(`data: ${JSON.stringify({ message: (e as Error).message })}\n\n`);
+          sendUa('error', { message: (e as Error).message });
           res.end();
           return;
         }

@@ -92,7 +92,10 @@ used to miss every new file while `git add -A` committed them anyway.
 
 ## Evidence bundles
 
-Every verifier attempt writes a directory under the run:
+Every verifier attempt writes a directory under the run, named
+`<node>-v<visit>-<attempt>`. Both counters are in the id because the attempt
+counter is per-visit and restarts at 1 each time a loop comes back round — so a
+repair loop keeps every pass rather than overwriting the last one:
 
 ```
 ~/.claw-orchestrator/wf/<runId>/evidence/<evidenceId>/

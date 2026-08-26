@@ -26,6 +26,10 @@ function makeManager(
       sent.push({ name, message });
       const agent = name.split('-').pop()!;
       if (opts.fail?.has(agent)) throw new Error(`boom:${agent}`);
+      // A turn-level failure is REPORTED, not thrown — see SessionManager.
+      if (opts.returnsError?.has(agent)) {
+        return { output: `upstream said no (${agent})`, error: `turn failed: ${agent}`, events: [] } as never;
+      }
       return { output: opts.outputs?.[agent] ?? `out:${agent}`, events: [] } as never;
     }),
     stopSession: vi.fn(async (name: string) => {
@@ -170,5 +174,45 @@ describe('per-agent ok', () => {
       expect.any(String),
       expect.objectContaining({ nodeKind: 'fanout' }),
     );
+  });
+});
+
+// ── A synthesis turn that fails cleanly must not be published as the answer.
+//
+//    `sendMessage` returns `{error}` for auth loss, an invalid model, or
+//    rate-limit exhaustion — it does not throw — so the catch never ran, the
+//    error text landed in `session.synthesis`, `synthesisError` stayed
+//    undefined and status went to 'done'. A caller checking `synthesisError`
+//    (the field's documented purpose) read the error text as the merged answer.
+describe('Fanout — synthesis turn reports a returned error', () => {
+  it('sets synthesisError and publishes no synthesis when the turn fails', async () => {
+    const { manager } = makeManager({ outputs: { a: 'A', b: 'B' }, returnsError: new Set(['synthesis']) });
+    const fan = new Fanout(
+      baseConfig(
+        [
+          { name: 'a', engine: 'claude' },
+          { name: 'b', engine: 'codex' },
+        ],
+        { synthesize: true },
+      ),
+      manager,
+    );
+
+    const session = await fan.run();
+
+    expect(session.synthesisError).toBe('turn failed: synthesis');
+    expect(session.synthesis).toBeUndefined();
+    // The agents themselves succeeded; only the merge failed.
+    expect(session.results.every((r) => r.ok)).toBe(true);
+  });
+
+  it('still publishes a synthesis when the turn succeeds', async () => {
+    const { manager } = makeManager({ outputs: { a: 'A', b: 'B', synthesis: 'MERGED' } });
+    const fan = new Fanout(baseConfig([{ name: 'a' }, { name: 'b' }], { synthesize: true }), manager);
+
+    const session = await fan.run();
+
+    expect(session.synthesis).toBe('MERGED');
+    expect(session.synthesisError).toBeUndefined();
   });
 });

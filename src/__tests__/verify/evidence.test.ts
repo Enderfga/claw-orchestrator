@@ -170,8 +170,8 @@ describe('reading back', () => {
   });
 
   it('makes sortable ids', () => {
-    expect(makeEvidenceId('verify', 1)).toBe('verify-01');
-    expect(makeEvidenceId('my node/x', 12)).toBe('my_node_x-12');
+    expect(makeEvidenceId('verify', 1, 1)).toBe('verify-v01-01');
+    expect(makeEvidenceId('my node/x', 3, 12)).toBe('my_node_x-v03-12');
   });
 });
 

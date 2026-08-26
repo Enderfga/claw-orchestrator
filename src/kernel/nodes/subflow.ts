@@ -21,10 +21,28 @@ export function makeSubflowExecutor(kernel: RunKernel, resolve?: WorkflowResolve
       return { ok: false, error: `unknown workflow '${String(spec.workflow)}'` };
     }
 
-    const record = await kernel.start(child, { cwd: ctx.cwd });
+    // Secrets travel with the child. They are the custom-engine configs the
+    // spec deliberately cannot carry, so a child that does not get them starts
+    // its agents on a different engine than the parent was told to use — and
+    // `kernel/nodes/council.ts` reads them straight out of `ctx.secrets`.
+    const record = await kernel.start(child, { cwd: ctx.cwd, secrets: ctx.secrets });
     // Recorded now, not with the result: a parent cancelled while the child is
     // still running has to be able to find it.
     ctx.setChild(record.runId);
+    // `kernel.start` awaits internally, and `cancel(parent)` walks the parent's
+    // nodes looking for a `childRunId` that does not exist until the line
+    // above. A cancel that landed in that window returned true having stopped
+    // nothing, and this child then ran to completion — spending budget and
+    // writing to the shared cwd after the parent was cancelled. The flag is
+    // already set by then, so re-check it here rather than widen the window.
+    if (ctx.signal.aborted) {
+      kernel.cancel(record.runId);
+      return {
+        childRunId: record.runId,
+        ok: false,
+        error: 'cancelled',
+      };
+    }
     ctx.emit({
       ts: new Date().toISOString(),
       type: 'log',

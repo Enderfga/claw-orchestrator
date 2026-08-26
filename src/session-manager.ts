@@ -190,8 +190,9 @@ import {
   type UltraplanResult,
   type UltrareviewResult,
   overrideModelPricing,
+  ENGINE_BINARY_NAMES,
 } from './types.js';
-import { resolveAlias, isClaudeModel } from './models.js';
+import { resolveAlias, isClaudeModel, lookupModel } from './models.js';
 import { isAgyConversationId } from './agy-conversation.js';
 import { Council } from './council.js';
 import { Fanout, type FanoutConfig, type FanoutSession, type FanoutAgentSpec } from './fanout.js';
@@ -357,6 +358,8 @@ export class SessionManager {
   private _debouncedSave: () => void;
   private _proxyServer: http.Server | null = null;
   private _proxyPort: number | null = null;
+  /** In-flight proxy startup, so concurrent callers share one server. */
+  private _proxyStartPromise: Promise<number | null> | null = null;
   private _activePids = new Map<string, number>();
   private _circuitBreaker = new CircuitBreaker();
   private _inbox = new InboxManager();
@@ -480,9 +483,13 @@ export class SessionManager {
     }
 
     // Auto-resume: if we have a persisted claudeSessionId for this name, inject it.
-    // Skip when config.skipPersistence is set (e.g. openai-compat bridge sessions
-    // that must NOT resume stale CLI state from a previous server run).
-    const skipPersist = !!(config as Record<string, unknown>).skipPersistence;
+    // Skip when the caller asked for no persistence — either spelling. This read
+    // used to be `skipPersistence` alone, through a cast, and that field is set
+    // only by in-process callers (openai-compat bridge, ACP adapter); everything
+    // that arrives over the CLI (`--skip-persistence`) or the MCP tool spells it
+    // `noSessionPersistence`, so those sessions were written to the registry and
+    // auto-resumed on the next start under the same name.
+    const skipPersist = !!(config.skipPersistence || config.noSessionPersistence);
     const persisted = skipPersist ? undefined : this.persistedSessions.get(name);
     // Unified: only use resumeSessionId (claudeResumeId is an internal alias, not exposed)
     const resumeId = config.resumeSessionId ?? persisted?.claudeSessionId;
@@ -1131,10 +1138,14 @@ export class SessionManager {
       throw new Error(`Session '${name}' has no claude session ID — cannot resume after restart`);
     }
 
-    // Validate model — must be a known alias or contain a recognisable pattern
+    // Validate against the registry, not against a frozen prefix list. The list
+    // was ['claude-','gemini-','gpt-','anthropic/','google/','openai/'] and the
+    // registry has since grown grok-4.6, composer-*, o3, o4-mini and
+    // codex-mini-latest — every one of which `_createSession` can dispatch and
+    // this guard rejected. A provider-qualified string stays accepted because
+    // the error message below offers it.
     const resolvedModel = this._resolveModel(model, managed.config.modelOverrides);
-    const knownPatterns = ['claude-', 'gemini-', 'gpt-', 'anthropic/', 'google/', 'openai/'];
-    const looksValid = knownPatterns.some((p) => resolvedModel.includes(p));
+    const looksValid = !!lookupModel(resolvedModel) || resolvedModel.includes('/');
     if (!looksValid) {
       throw new Error(
         `Unknown model '${model}' (resolved: '${resolvedModel}'). Use a known alias (opus, sonnet, haiku, gemini-pro, etc.) or a full provider/model string.`,
@@ -1922,7 +1933,21 @@ export class SessionManager {
    */
   private async _ensureProxyServer(): Promise<number | null> {
     if (this._proxyPort) return this._proxyPort;
+    // The port is only assigned inside listen()'s callback, several awaits
+    // later, so a bare null-check is not an idempotency guard: council and
+    // fanout start their agents with Promise.all under distinct names, and
+    // `_pendingSessions` only serialises per name. Two callers each bound their
+    // own server; the last one to call back won `_proxyServer`, and shutdown()
+    // closed only that one. Memoised the same way `startSession` memoises
+    // `_pendingSessions`.
+    if (this._proxyStartPromise) return this._proxyStartPromise;
+    this._proxyStartPromise = this._startProxyServer().finally(() => {
+      this._proxyStartPromise = null;
+    });
+    return this._proxyStartPromise;
+  }
 
+  private async _startProxyServer(): Promise<number | null> {
     // Auto-detect gateway config
     const gwConfig = this._readGatewayConfig();
     const gatewayUrl = process.env.GATEWAY_URL || gwConfig?.url;
@@ -2082,13 +2107,12 @@ export class SessionManager {
     // so a hyphenated lookalike ('vim claude-notes.md', 'ssh-agent') can never
     // match, while the real binary ('claude', '/usr/local/bin/claude',
     // 'node /x/claude/cli.js') still does. \b alone treated '-' as a boundary.
+    // Built from ENGINE_BINARY_NAMES rather than restated here: this list had
+    // fallen a binary behind (no `grok`), and the failure is silent — an orphan
+    // that matches nothing is logged as "alive but not a known CLI" and left
+    // running for the life of the machine.
     const knownPatterns = [
-      /(?:^|[/\s])claude(?:[\s/]|$)/, // claude CLI
-      /(?:^|[/\s])codex(?:[\s/]|$)/, // codex CLI
-      /(?:^|[/\s])gemini(?:[\s/]|$)/, // gemini CLI
-      /(?:^|[/\s])agy(?:[\s/]|$)/, // agy CLI (Google Antigravity)
-      /(?:^|[/\s])cursor-agent(?:[\s/]|$)/, // cursor-agent CLI
-      /(?:^|[/\s])opencode(?:[\s/]|$)/, // opencode CLI (sst/opencode)
+      ...ENGINE_BINARY_NAMES.map((bin) => new RegExp(`(?:^|[/\\s])${bin}(?:[\\s/]|$)`)),
       /(?:^|\/)agent(?:[\s/]|$)/, // 'agent' only as executable/after a slash (not ssh-agent)
     ];
     try {
@@ -3293,6 +3317,7 @@ export class SessionManager {
   private _cleanupIdleSessions(): void {
     const ttlMs = this.pluginConfig.sessionTtlMinutes * 60_000;
     const now = Date.now();
+    let pidsChanged = false;
     for (const [name, managed] of this.sessions) {
       if (now - managed.lastActivity > ttlMs) {
         this.logger.info(`Cleaning up idle in-memory session: ${name}`);
@@ -3302,11 +3327,20 @@ export class SessionManager {
           // Best-effort — session may already be dead; must not block TTL cleanup
         }
         this.sessions.delete(name);
+        // The child is gone, so its PID must go too — `stopSession` does this
+        // and the TTL path did not, so `_activePids` only ever grew and the
+        // next `_savePids()` rewrote those dead PIDs to disk under the current
+        // owner. After an unclean exit `_cleanupOrphanedPids()` reads them back
+        // and probes each one; a PID the OS has since recycled to a
+        // coding-CLI-shaped process gets killed.
+        this._activePids.delete(name);
+        pidsChanged = true;
         // NOTE: do NOT delete from persistedSessions — idle cleanup is
         // in-memory only. Persisted entries survive for PERSIST_DISK_TTL_MS
         // (7 days) so the session can be resumed after a gateway restart.
       }
     }
+    if (pidsChanged) this._savePids();
     // Prune disk entries that exceeded the longer disk TTL
     let pruned = false;
     for (const [name, entry] of this.persistedSessions) {

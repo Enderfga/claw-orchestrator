@@ -221,7 +221,12 @@ export function replayRun(runId: string, spec: WorkflowSpec): RunRecord | undefi
         n.state = e.state;
         if (e.attempt !== undefined) n.attempts = e.attempt;
         if (e.state === 'running') {
-          n.visits++;
+          // A visit, not an attempt. `_run` commits the visit counter with no
+          // event, while `_runWithRetry` emits a `running` event per RETRY — so
+          // counting every one of them replayed a single visit with K retries
+          // as K visits, and a resume from a lost run.json could then trip the
+          // visit bound on its first turn.
+          if (e.attempt === undefined || e.attempt === 1) n.visits++;
           n.startedAt = e.ts;
         }
         if (e.state === 'succeeded' || e.state === 'failed' || e.state === 'skipped') n.endedAt = e.ts;

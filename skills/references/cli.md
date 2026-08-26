@@ -82,7 +82,7 @@ clawo session-start [name] [options]
 | `--json-schema <schema>`                         | JSON Schema for structured output                                                                  |
 | `--mcp-config <paths>`                           | MCP config files (comma-separated)                                                                 |
 | `--settings <path>`                              | Settings.json path                                                                                 |
-| `--skip-persistence`                             | Disable session persistence                                                                        |
+| `--skip-persistence`                             | Do not save the session — neither the engine's transcript nor the resume registry                  |
 | `--betas <headers>`                              | Beta headers (comma-separated)                                                                     |
 | `--enable-agent-teams`                           | Enable agent teams                                                                                 |
 | `--include-hook-events`                          | Stream hook lifecycle events (PreToolUse/PostToolUse)                                              |

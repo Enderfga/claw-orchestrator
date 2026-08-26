@@ -166,6 +166,17 @@ export function buildSessionSystemPrompt(
   return callerSystemPrompt ? `${systemWithTools}\n\n${callerSystemPrompt}` : systemWithTools;
 }
 
+/**
+ * JSON with object keys in a fixed order, so a schema that only got
+ * re-serialised does not read as a different schema.
+ */
+function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null';
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${stableStringify(v)}`).join(',')}}`;
+}
+
 export function resolveSessionKey(body: OpenAIChatCompletionRequest, headers: http.IncomingHttpHeaders): string {
   const headerKey = headers['x-session-id'];
   if (typeof headerKey === 'string' && headerKey.trim()) return headerKey.trim();
@@ -193,7 +204,13 @@ export function resolveSessionKey(body: OpenAIChatCompletionRequest, headers: ht
           const fn = t?.function;
           if (!fn?.name) return '';
           const descPrefix = (typeof fn.description === 'string' ? fn.description : '').slice(0, 64);
-          return `${fn.name}:${descPrefix}`;
+          // The parameter schema belongs in the fingerprint too. On the Claude
+          // engine the schemas are baked into the session's system prompt at
+          // create time and deliberately not re-injected per turn, so a caller
+          // that changes a tool's parameters while keeping its name and
+          // description resolved to the same session — and kept getting
+          // tool_calls shaped like the schema it had replaced.
+          return `${fn.name}:${descPrefix}:${stableStringify(fn.parameters)}`;
         })
         .filter(Boolean)
         .join('|');
@@ -210,8 +227,30 @@ export function resolveSessionKey(body: OpenAIChatCompletionRequest, headers: ht
 }
 
 /** Build the full session name from a key */
+/**
+ * A session key reaches us verbatim from the caller — the `x-session-id` header
+ * or the `user` field — and the name derived from it becomes a DIRECTORY name:
+ * `handleChatCompletion` builds `os.tmpdir()/openclaw-compat-<name>` and calls
+ * `mkdirSync(..., {recursive: true})`, then starts the session there under
+ * `permissionMode: 'bypassPermissions'`. A key carrying path separators
+ * therefore both creates a directory anywhere the process can write and points
+ * a permissionless agent at it — measured: `x-session-id: ../../../../etc/x`
+ * resolved outside the temp dir entirely.
+ *
+ * Keys that are already safe pass through unchanged, so a caller using an
+ * ordinary id keeps the session name it has always had. Anything else is
+ * replaced by a hash of itself rather than escaped, which keeps distinct keys
+ * distinct without having to reason about what a filesystem does with the
+ * leftovers.
+ */
+const SAFE_SESSION_KEY = /^[A-Za-z0-9._-]{1,64}$/;
+
 export function sessionNameFromKey(key: string): string {
-  return `${OPENAI_COMPAT_SESSION_PREFIX}${key}`;
+  const safe =
+    SAFE_SESSION_KEY.test(key) && !key.includes('..')
+      ? key
+      : `k-${createHash('sha1').update(key).digest('hex').slice(0, 16)}`;
+  return `${OPENAI_COMPAT_SESSION_PREFIX}${safe}`;
 }
 
 // ─── Function Calling Support ────────────────────────────────────────────────
@@ -1033,6 +1072,14 @@ async function handleStreaming(
   // When tools are present, buffer the full response to parse for tool_calls.
   // Without tools, stream text chunks directly for low latency.
   let bufferedText = '';
+  // `sendMessage` reports the whole answer as its return value AND streams it
+  // through `onChunk` for engines that have a delta channel. Engines without one
+  // — opencode, agy, the per-send codex/cursor wrappers, one-shot custom engines
+  // — never call it, and this path then emitted the role chunk and the stop
+  // chunk with the reply nowhere in between: an empty 200. Counting what
+  // streamed is what lets the fallback below fire without doubling the answer
+  // for engines that do stream. Same shape as the ACP adapter's.
+  let streamedChars = 0;
 
   try {
     reportStatus('thinking', 'Processing request...');
@@ -1042,6 +1089,7 @@ async function handleStreaming(
           bufferedText += chunk;
           // Send keepalive comments during buffering to prevent timeouts
         } else {
+          streamedChars += chunk.length;
           writeSSE(JSON.stringify(formatCompletionChunk(completionId, model, { content: chunk }, null)));
         }
       },
@@ -1122,7 +1170,11 @@ async function handleStreaming(
         writeSSE(JSON.stringify(finalChunk));
       }
     } else {
-      // No tools — standard finish
+      // No tools — standard finish. An engine with no delta channel gets its
+      // answer emitted here, once, because nothing streamed it.
+      if (streamedChars === 0 && result.output) {
+        writeSSE(JSON.stringify(formatCompletionChunk(completionId, model, { content: result.output }, null)));
+      }
       const finalChunk = formatCompletionChunk(completionId, model, {}, 'stop');
       if (usage) finalChunk.usage = usage;
       writeSSE(JSON.stringify(finalChunk));

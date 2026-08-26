@@ -160,7 +160,7 @@ program
   .option('-d, --cwd <dir>', 'Working directory')
   .option(
     '-e, --engine <engine>',
-    'Engine: claude (default), codex, codex-app, gemini, agy, cursor, opencode, or custom',
+    'Engine: claude (default), codex, codex-app, gemini, agy, cursor, grok, opencode, or custom',
   )
   .option('-m, --model <model>', 'Model to use')
   .option('--permission-mode <mode>', 'Permission mode', 'acceptEdits')
@@ -571,9 +571,11 @@ program
       const r = await api(`/workflow/${encodeURIComponent(runId)}/state`);
       if (!r.ok) return fail(r);
       if (opts.json) return console.log(JSON.stringify(r.run, null, 2));
-      const run = r.run as Record<string, never>;
-      console.log(`${run.runId}  ${run.workflow}  ${run.state} / ${run.outcome}`);
-      if (run.error) console.log(`error: ${run.error}`);
+      // `Record<string, never>` typed every access as the bottom type, which is
+      // assignable to anything — `run.workflw` would have compiled too.
+      const run = r.run as Record<string, unknown>;
+      console.log(`${String(run.runId)}  ${String(run.workflow)}  ${String(run.state)} / ${String(run.outcome)}`);
+      if (run.error) console.log(`error: ${String(run.error)}`);
       for (const node of Object.values(run.nodes as Record<string, Record<string, string>>)) {
         console.log(`  ${String(node.id).padEnd(18)} ${String(node.kind).padEnd(11)} ${node.state}`);
       }

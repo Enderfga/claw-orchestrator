@@ -70,6 +70,42 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // ─── Git Utilities ──────────────────────────────────────────────────────────
 
+/**
+ * The worktrees this council created, as git itself reports them.
+ *
+ * Both callers used to select with `wtPath.includes('council')`, which is a
+ * substring test against an absolute path — so a user's own worktree at
+ * `~/council-notes` matched while council's real one at `.worktrees/agent-A`
+ * did not. On the cleanup path that meant `git worktree remove --force` ran on
+ * the user's uncommitted work and never on ours (measured on a scratch repo).
+ * `setupWorktrees` only ever creates `{projectDir}/.worktrees/{agent}`, so
+ * containment under that directory is the actual predicate.
+ *
+ * `--porcelain` because the human-readable format is whitespace-separated and
+ * `split(/\s+/)[0]` truncates any path containing a space.
+ */
+export async function councilWorktreePaths(projectDir: string): Promise<string[]> {
+  const listed = await spawnAsync('git', ['-C', projectDir, 'worktree', 'list', '--porcelain'], {
+    timeout: GIT_CMD_TIMEOUT_MS,
+  }).catch(() => ({ stdout: '', stderr: '' }));
+  // `git worktree list` reports real paths, so a projectDir reached through a
+  // symlink (every macOS temp dir is one) would never match a textual prefix.
+  const real = (p: string): string => {
+    try {
+      return fs.realpathSync(p);
+    } catch {
+      return path.resolve(p);
+    }
+  };
+  const self = real(projectDir);
+  const root = path.join(self, '.worktrees') + path.sep;
+  return listed.stdout
+    .split('\n')
+    .filter((l) => l.startsWith('worktree '))
+    .map((l) => real(l.slice('worktree '.length).trim()))
+    .filter((p) => p && p !== self && (p + path.sep).startsWith(root));
+}
+
 function spawnAsync(
   cmd: string,
   args: string[],
@@ -443,11 +479,20 @@ export class Council extends EventEmitter {
     }
     this._activeSessions.clear();
     // Discard the run's worktrees — an aborted run has nothing to review.
-    if (this._worktreeMap.size > 0) {
-      const map = new Map(this._worktreeMap);
-      this._worktreeMap.clear();
-      void cleanupCreatedWorktrees(map, this.config.projectDir, this.logger);
-    }
+    // Best-effort here: abort() is synchronous, and run() cleans up again on
+    // its way out for the case where this fired before setup had finished.
+    void this._discardWorktrees();
+  }
+
+  /**
+   * Remove the worktrees this run created, once. Clearing the map before the
+   * await is what makes a second caller a no-op rather than a double remove.
+   */
+  private async _discardWorktrees(): Promise<void> {
+    if (this._worktreeMap.size === 0) return;
+    const map = new Map(this._worktreeMap);
+    this._worktreeMap.clear();
+    await cleanupCreatedWorktrees(map, this.config.projectDir, this.logger).catch(() => {});
   }
 
   private emitEvent(event: Omit<CouncilEvent, 'timestamp'>) {
@@ -706,6 +751,15 @@ export class Council extends EventEmitter {
 
       if (this._aborted) {
         session.status = 'error';
+        // An abort that lands while setupWorktrees is still running finds an
+        // empty `_worktreeMap` — it is not assigned until setup returns — so
+        // abort() skips its own cleanup, setup then completes and creates every
+        // worktree, and this loop breaks on the next line without throwing.
+        // The catch below is the only other place cleanup runs, and a normal
+        // return never reaches it. Cleaning here covers both that race and the
+        // ordinary break-on-abort; if abort() already cleaned up, the map is
+        // empty and this is a no-op.
+        await this._discardWorktrees();
       } else if (session.status === 'running') {
         session.status = 'max_rounds';
         this.logger.info(`Max rounds (${this.config.maxRounds}) reached`);
@@ -724,11 +778,7 @@ export class Council extends EventEmitter {
       this.emitEvent({ type: 'error', sessionId: session.id, error: (err as Error).message });
       // The run failed — there is nothing to review, so don't orphan the
       // worktrees on disk. (Successful runs keep them for the accept flow.)
-      if (this._worktreeMap.size > 0) {
-        const map = new Map(this._worktreeMap);
-        this._worktreeMap.clear();
-        await cleanupCreatedWorktrees(map, this.config.projectDir, this.logger).catch(() => {});
-      }
+      await this._discardWorktrees();
       throw err;
     }
   }
@@ -828,16 +878,7 @@ export class Council extends EventEmitter {
       .catch(() => [] as string[]);
 
     // Gather worktrees
-    const worktrees = await spawnAsync('git', ['-C', dir, 'worktree', 'list', '--porcelain'], {
-      timeout: GIT_CMD_TIMEOUT_MS,
-    })
-      .then((r) => {
-        const lines = r.stdout.split('\n');
-        return lines.filter((l) => l.startsWith('worktree ')).map((l) => l.replace('worktree ', '').trim());
-      })
-      .catch(() => [] as string[]);
-    // Filter to only council worktrees (not the main worktree)
-    const councilWorktrees = worktrees.filter((w) => w.includes('council') || w.includes('.worktrees'));
+    const councilWorktrees = await councilWorktreePaths(dir);
 
     // Check plan.md
     const planPath = path.join(dir, 'plan.md');
@@ -950,22 +991,18 @@ export class Council extends EventEmitter {
 
     // Remove council worktrees
     if (options.removeWorktrees) {
-      const wtListResult = await spawnAsync('git', ['-C', projectDir, 'worktree', 'list'], {
-        timeout: GIT_CMD_TIMEOUT_MS,
-      }).catch(() => ({
-        stdout: '',
-        stderr: '',
-      }));
-      for (const line of wtListResult.stdout.split('\n')) {
-        const wtPath = line.split(/\s+/)[0];
-        if (wtPath && wtPath.includes('council')) {
-          // Safety: never remove the project dir itself
-          if (path.resolve(wtPath) === path.resolve(projectDir)) continue;
-          await spawnAsync('git', ['-C', projectDir, 'worktree', 'remove', '--force', wtPath], {
-            timeout: WORKTREE_CMD_TIMEOUT_MS,
-          }).catch((err) => this.logger.error(`Failed to remove worktree ${wtPath}:`, err.message));
-          result.worktreesRemoved.push(wtPath);
-        }
+      for (const wtPath of await councilWorktreePaths(projectDir)) {
+        const removed = await spawnAsync('git', ['-C', projectDir, 'worktree', 'remove', '--force', wtPath], {
+          timeout: WORKTREE_CMD_TIMEOUT_MS,
+        })
+          .then(() => true)
+          .catch((err) => {
+            this.logger.error(`Failed to remove worktree ${wtPath}:`, err.message);
+            return false;
+          });
+        // Only what was actually removed: the old code pushed unconditionally,
+        // so a failed remove still reported the path as cleaned up.
+        if (removed) result.worktreesRemoved.push(wtPath);
       }
       // Also remove .worktrees directory if it exists
       const dotWorktrees = path.join(projectDir, '.worktrees');

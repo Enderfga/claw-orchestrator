@@ -248,6 +248,17 @@ export class Fanout {
         timeout: this.config.agentTimeoutMs ?? DEFAULT_AGENT_TIMEOUT_MS,
         parentRunId: this.session.id,
       });
+      // `sendMessage` reports a turn-level failure (auth loss mid-turn, invalid
+      // model, rate-limit exhaustion) by RETURNING `{error}`, not by throwing —
+      // so the catch below never saw those and `result.output` (the error text,
+      // or '') was written to `session.synthesis` while `synthesisError` stayed
+      // undefined and status went to 'done'. `_runAgent`, one method up in this
+      // same file, already reads `result.error`; this is the same contract.
+      if (result.error) {
+        this.session.synthesisError = result.error;
+        this.logger?.error?.(`Fanout synthesis failed: ${result.error}`);
+        return undefined;
+      }
       return result.output;
     } catch (err) {
       const msg = (err as Error).message;

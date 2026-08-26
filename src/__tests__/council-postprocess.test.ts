@@ -11,7 +11,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { execSync } from 'node:child_process';
-import { Council, getDefaultCouncilConfig } from '../council.js';
+import { Council, getDefaultCouncilConfig, councilWorktreePaths } from '../council.js';
 import type { CouncilConfig, CouncilSession } from '../types.js';
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
@@ -288,5 +288,118 @@ describe('Council post-processing', () => {
       const log = execSync('git log --oneline -1', { cwd: dir, encoding: 'utf-8' });
       expect(log).toContain('council(reject)');
     });
+  });
+});
+
+// ── Which worktrees count as "ours".
+//
+//    Both callers selected with `wtPath.includes('council')` — a substring test
+//    against an absolute path. Measured on a scratch repo: a user worktree at
+//    `<root>/council-notes` matched and council's own `.worktrees/agent-A` did
+//    not, so the cleanup path ran `git worktree remove --force` on the user's
+//    uncommitted work and never on council's. setupWorktrees only ever creates
+//    `{projectDir}/.worktrees/{agent}`, so containment is the real predicate.
+describe('councilWorktreePaths', () => {
+  let root: string;
+  let repo: string;
+
+  beforeEach(() => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), 'council-wt-'));
+    repo = path.join(root, 'myapp');
+    fs.mkdirSync(repo);
+    execSync('git init -b main', { cwd: repo, stdio: 'pipe' });
+    execSync('git config user.email "test@test.com"', { cwd: repo, stdio: 'pipe' });
+    execSync('git config user.name "Test"', { cwd: repo, stdio: 'pipe' });
+    fs.writeFileSync(path.join(repo, 'a.txt'), 'hi\n');
+    execSync('git add -A && git commit -m init', { cwd: repo, stdio: 'pipe' });
+  });
+
+  afterEach(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it("selects council's own worktrees and not a user worktree that merely says 'council'", async () => {
+    execSync(`git worktree add -q "${path.join(root, 'council-notes')}" -b my-notes`, { cwd: repo, stdio: 'pipe' });
+    execSync('git worktree add -q .worktrees/agent-A -b council/agent-A', { cwd: repo, stdio: 'pipe' });
+
+    const found = await councilWorktreePaths(repo);
+
+    expect(found).toEqual([fs.realpathSync(path.join(repo, '.worktrees', 'agent-A'))]);
+    expect(found.some((p) => p.includes('council-notes'))).toBe(false);
+  });
+
+  it('never returns the project dir itself', async () => {
+    const found = await councilWorktreePaths(repo);
+    expect(found).not.toContain(fs.realpathSync(repo));
+    expect(found).toEqual([]);
+  });
+
+  it('keeps a worktree whose path contains a space', async () => {
+    // `git worktree list` without --porcelain is whitespace-separated, so the
+    // old `split(/\s+/)[0]` truncated these to their first segment.
+    const spaced = path.join(root, 'My Project');
+    fs.mkdirSync(spaced);
+    const repo2 = path.join(spaced, 'app');
+    fs.mkdirSync(repo2);
+    execSync('git init -b main', { cwd: repo2, stdio: 'pipe' });
+    execSync('git config user.email "t@t.com"', { cwd: repo2, stdio: 'pipe' });
+    execSync('git config user.name "T"', { cwd: repo2, stdio: 'pipe' });
+    fs.writeFileSync(path.join(repo2, 'a.txt'), 'hi\n');
+    execSync('git add -A && git commit -m init', { cwd: repo2, stdio: 'pipe' });
+    execSync('git worktree add -q .worktrees/agent-A -b council/agent-A', { cwd: repo2, stdio: 'pipe' });
+
+    const found = await councilWorktreePaths(repo2);
+
+    expect(found).toEqual([fs.realpathSync(path.join(repo2, '.worktrees', 'agent-A'))]);
+  });
+});
+
+// ── An abort must not leave the run's worktrees on disk.
+//
+//    abort() gates cleanup on `_worktreeMap.size > 0`, but the map is not
+//    assigned until setupWorktrees() returns — several git subprocesses later.
+//    An abort inside that window found an empty map, skipped cleanup, and then
+//    the round loop broke on `_aborted` and run() returned NORMALLY, so the
+//    catch block (the only other place cleanup ran) never fired.
+describe('Council.abort — worktree cleanup', () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = createTempRepo();
+  });
+
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  const liveWorktrees = (): string[] =>
+    execSync('git worktree list --porcelain', { cwd: dir, stdio: 'pipe' })
+      .toString()
+      .split('\n')
+      .filter((l) => l.startsWith('worktree '))
+      .map((l) => l.slice('worktree '.length).trim())
+      .filter((p) => p !== fs.realpathSync(dir));
+
+  it('removes them when the abort lands while setup is still running', async () => {
+    const config: CouncilConfig = {
+      ...getDefaultCouncilConfig(dir),
+      maxRounds: 1,
+    };
+    const council = new Council(config, mockManager as Parameters<(typeof Council)['prototype']['constructor']>[1]);
+
+    // Not awaited: abort() lands synchronously, inside setupWorktrees' first
+    // git subprocess — the exact window the map is empty in.
+    const running = council.run('do the thing');
+    council.abort();
+    await running.catch(() => undefined);
+
+    // No worktree left registered with git, and no agent directory left on
+    // disk. (The empty `.worktrees` parent may remain — it holds nothing, and
+    // the branches survive on purpose: they carry whatever the agents committed
+    // before the abort, which is the recoverable part.)
+    expect(liveWorktrees()).toEqual([]);
+    const wtRoot = path.join(dir, '.worktrees');
+    const leftovers = fs.existsSync(wtRoot) ? fs.readdirSync(wtRoot) : [];
+    expect(leftovers).toEqual([]);
   });
 });

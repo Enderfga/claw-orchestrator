@@ -152,7 +152,9 @@ Returns a structured report:
 
 Cleans up all council scaffolding:
 
-- Removes all `council/*` worktrees and `.worktrees/` directory
+- Removes the worktrees under `{projectDir}/.worktrees/`, and that directory —
+  selection is by containment, so a worktree of yours that merely has `council`
+  somewhere in its path is never touched
 - Deletes all `council/*` branches
 - Removes `plan.md` and `reviews/` directory
 - Sets council status to `accepted`

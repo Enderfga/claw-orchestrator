@@ -146,7 +146,15 @@ export type RouterCondition =
   | { type: 'node_failed'; node: string }
   | { type: 'node_succeeded'; node: string }
   | { type: 'verified'; node: string }
-  | { type: 'visits_lt'; node: string; n: number };
+  | { type: 'visits_lt'; node: string; n: number }
+  /**
+   * All of them. Added because chaining two routers does not mean AND: a router
+   * whose routes all miss falls through to the next node, so a gate that failed
+   * to match simply handed control to the router after it, which then matched
+   * on its own. The `solve` repair loop read as "red AND budget left" and
+   * behaved as "budget left".
+   */
+  | { type: 'and'; all: RouterCondition[] };
 
 export interface RouterNode extends NodeBase {
   kind: 'router';
@@ -304,7 +312,14 @@ export interface RunRecord {
    * at that moment. Compared against the tree when the run ends, so evidence
    * overtaken by later edits cannot keep standing as `verified`.
    */
-  verdict?: { node: string; evidenceId: string; treeFingerprint?: string; sideEffectSeq: number };
+  verdict?: {
+    node: string;
+    evidenceId: string;
+    treeFingerprint?: string;
+    /** Where that digest was taken — a verifier may declare its own cwd. */
+    fingerprintCwd?: string;
+    sideEffectSeq: number;
+  };
   /**
    * Count of completed nodes that can touch the workspace (`agent`, `fanout`,
    * `council`, `subflow`). Compared against the value stored on the verdict, so

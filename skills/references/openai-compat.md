@@ -32,7 +32,19 @@ The hash fallback exists because the previous behavior collapsed every unkeyed c
 
 The model is mixed into the hash so that two callers with the same system prompt but different requested models (e.g. one wants `claude-opus-4-6`, another wants `claude-sonnet-4-6`) don't collide and silently get responses from the wrong model.
 
-The full plugin-side session name is `openai-<key>`.
+The full plugin-side session name is `openai-<key>`. The key becomes a directory
+name — the bridge starts each session in `os.tmpdir()/openclaw-compat-<name>` —
+so a key that is not already `[A-Za-z0-9._-]` is replaced by a hash of itself.
+A caller using an ordinary id keeps the session name it has always had; one
+sending path separators no longer chooses where the session runs.
+
+The tool list is fingerprinted into the hash fallback by name, a description
+prefix, and the **parameter schema** (with object keys normalised, so a
+re-serialised identical schema still resolves to the same session). On the
+Claude engine the schemas are baked into the session's system prompt at create
+time and deliberately not re-injected per turn, so the key is the only thing
+that can notice a schema change — without it, a caller that edited a tool's
+parameters kept getting `tool_calls` shaped like the schema it had replaced.
 
 ## Operator modes
 

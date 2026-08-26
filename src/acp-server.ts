@@ -449,10 +449,18 @@ export function createAcpAgent(manager: SessionManagerLike, options: AcpAgentOpt
       // A parked council owns the turn until it is accepted or rejected: any
       // other prompt would start a second run over the same worktrees.
       const command = parseSlashCommand(message);
-      if (state.parkedCouncilId) {
-        const decided = await resolveParkedCouncil(manager, state, command, say, emit);
-        if (decided) return { stopReason: 'end_turn' as const };
-      } else if (command && command.name.startsWith('council_')) {
+      const parked = await resolveParkedCouncil(manager, state, command, say, emit);
+      if (parked === 'blocked') {
+        // A parked council owns the turn: falling through here started a second
+        // `councilStart` over the worktrees and branches the parked one holds.
+        await say(
+          'A council result is waiting on you. Run `/council_accept` to merge the winning worktree, ' +
+            'or `/council_reject [reason]` to discard it. Nothing else can run until then.',
+        );
+        return { stopReason: 'end_turn' as const };
+      }
+      if (parked === 'decided') return { stopReason: 'end_turn' as const };
+      if (command && command.name.startsWith('council_')) {
         throw acp.RequestError.invalidParams('No council is awaiting a decision.');
       }
 
@@ -550,24 +558,41 @@ export function createAcpAgent(manager: SessionManagerLike, options: AcpAgentOpt
     .onNotification('session/cancel', (ctx) => {
       const state = sessions.get(ctx.params.sessionId);
       if (!state) return;
-      state.cancelInFlight?.();
-      // Best-effort teardown. `stopSession` is the only lever the session layer
-      // offers, and it destroys the session rather than pausing the turn, so the
-      // session is recreated lazily on the next prompt.
-      void manager
-        .stopSession(state.name)
-        .then(() =>
-          manager.startSession({
-            name: state.name,
-            cwd: state.cwd,
-            engine: state.engine,
-            model: state.model,
-            permissionMode: state.permissionMode,
-            skipPersistence: true,
-          }),
-        )
-        .catch((err) => log?.warn(`cancel teardown failed for ${state.name}: ${String(err)}`));
+      cancelAcpTurn(manager, state, log);
     });
+}
+
+/**
+ * Cancel the turn this ACP session has in flight, if it has one.
+ *
+ * Returns whether anything was torn down. The guard is the point: the teardown
+ * destroys and recreates the underlying session, which drops the engine's
+ * native conversation id — codex, codex-app, agy, cursor and opencode all
+ * capture theirs mid-turn — so running it on an idle session silently forked
+ * the history. The client kept the same ACP sessionId while the next prompt
+ * opened a fresh engine thread, with nothing to say so.
+ */
+export function cancelAcpTurn(manager: SessionManagerLike, state: AcpSessionState, log?: Logger): boolean {
+  const cancelInFlight = state.cancelInFlight;
+  if (!cancelInFlight) return false;
+  cancelInFlight();
+  // Best-effort teardown. `stopSession` is the only lever the session layer
+  // offers, and it destroys the session rather than pausing the turn, so the
+  // session is recreated lazily on the next prompt.
+  void manager
+    .stopSession(state.name)
+    .then(() =>
+      manager.startSession({
+        name: state.name,
+        cwd: state.cwd,
+        engine: state.engine,
+        model: state.model,
+        permissionMode: state.permissionMode,
+        skipPersistence: true,
+      }),
+    )
+    .catch((err) => log?.warn(`cancel teardown failed for ${state.name}: ${String(err)}`));
+  return true;
 }
 
 // ─── Orchestration modes ────────────────────────────────────────────────────
@@ -792,15 +817,27 @@ async function runPollingMode(
  *
  * Returns true when the prompt was a decision and the turn is finished.
  */
+/**
+ * What a prompt did to a parked council: nothing was parked, the prompt decided
+ * it, or one is parked and the prompt was not a decision — which is a stop, not
+ * a pass-through.
+ */
+export type ParkedCouncilOutcome = 'none' | 'decided' | 'blocked';
+
 export async function resolveParkedCouncil(
   manager: SessionManagerLike,
   state: AcpSessionState,
   command: { name: string; rest: string } | null,
   say: Say,
   emit: Emit,
-): Promise<boolean> {
+): Promise<ParkedCouncilOutcome> {
   const id = state.parkedCouncilId;
-  if (!id || !command) return false;
+  // Three outcomes, not two. `false` used to mean both "no council is parked"
+  // and "one is, but this prompt is not a decision", and the caller read both as
+  // "carry on" — which in council mode started a second run over the worktrees
+  // the parked one still holds.
+  if (!id) return 'none';
+  if (!command) return 'blocked';
 
   if (command.name === 'council_accept') {
     await manager.councilAccept?.(id);
@@ -809,7 +846,7 @@ export async function resolveParkedCouncil(
     await manager.councilReject?.(id, command.rest || 'rejected via ACP');
     await say('Council result rejected and its worktrees discarded.');
   } else {
-    return false;
+    return 'blocked';
   }
 
   state.parkedCouncilId = undefined;
@@ -817,7 +854,7 @@ export async function resolveParkedCouncil(
   // them while the run was parked, and an empty list would leave the client with
   // no way to reach any mode again.
   await emit({ sessionUpdate: 'available_commands_update', availableCommands: ACP_MODE_COMMANDS });
-  return true;
+  return 'decided';
 }
 
 /**

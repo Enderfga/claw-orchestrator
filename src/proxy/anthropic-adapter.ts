@@ -400,6 +400,7 @@ export async function* convertStreamOpenAIToAnthropic(
   });
 
   let textBlockOpen = true;
+  let textBlockIndex = 0;
   let lastToolIndex = 0; // anthropic index (0 = text, 1+ = tools)
   let currentToolCallId: string | null = null;
   let finishReason: string | null = null;
@@ -436,13 +437,30 @@ export async function* convertStreamOpenAIToAnthropic(
     // Text delta
     const textContent = delta.content as string | undefined;
     if (textContent) {
-      if (textBlockOpen) {
-        yield sseEvent('content_block_delta', {
-          type: 'content_block_delta',
-          index: 0,
-          delta: { type: 'text_delta', text: textContent },
+      // Text after a tool call is legal Anthropic content (`text → tool_use →
+      // text` is one valid turn, and Gemini through the OpenAI-compat endpoint
+      // emits it). `textBlockOpen` was set false when the first tool block
+      // opened and never set back, so everything the model said afterwards was
+      // dropped by this guard. Open a fresh text block instead.
+      if (!textBlockOpen) {
+        if (currentToolCallId) {
+          yield sseEvent('content_block_stop', { type: 'content_block_stop', index: lastToolIndex });
+          currentToolCallId = null;
+        }
+        lastToolIndex++;
+        textBlockIndex = lastToolIndex;
+        textBlockOpen = true;
+        yield sseEvent('content_block_start', {
+          type: 'content_block_start',
+          index: textBlockIndex,
+          content_block: { type: 'text', text: '' },
         });
       }
+      yield sseEvent('content_block_delta', {
+        type: 'content_block_delta',
+        index: textBlockIndex,
+        delta: { type: 'text_delta', text: textContent },
+      });
     }
 
     // Tool calls
@@ -456,7 +474,7 @@ export async function* convertStreamOpenAIToAnthropic(
         if (tcId && tcId !== currentToolCallId) {
           // Close text block if still open
           if (textBlockOpen) {
-            yield sseEvent('content_block_stop', { type: 'content_block_stop', index: 0 });
+            yield sseEvent('content_block_stop', { type: 'content_block_stop', index: textBlockIndex });
             textBlockOpen = false;
           }
           // Close previous tool block
@@ -492,11 +510,12 @@ export async function* convertStreamOpenAIToAnthropic(
     }
   }
 
-  // Close remaining blocks
-  if (currentToolCallId) {
+  // Close whichever block is still open. Both cannot be: opening either one
+  // closes the other.
+  if (textBlockOpen) {
+    yield sseEvent('content_block_stop', { type: 'content_block_stop', index: textBlockIndex });
+  } else if (currentToolCallId) {
     yield sseEvent('content_block_stop', { type: 'content_block_stop', index: lastToolIndex });
-  } else if (textBlockOpen) {
-    yield sseEvent('content_block_stop', { type: 'content_block_stop', index: 0 });
   }
 
   // Stop reason

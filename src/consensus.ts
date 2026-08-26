@@ -10,13 +10,29 @@ export function stripConsensusTags(text: string): string {
   return text.replace(/\[\s*CONSENSUS\s*[:：]\s*(?:YES|NO)\s*\]/gi, '').trim();
 }
 
+/**
+ * The strict tag agents are asked for, and the loose spellings we accept anyway.
+ *
+ * One list, because two readers of it drifted: `hasConsensusMarker` restated
+ * three of the five and so answered false for `**consensus**: yes`,
+ * `CONSENSUS=YES` and `[CONSENSUS]: YES` — votes `parseConsensusWithSource`
+ * reads perfectly well. A short reply carrying one of those tripped council's
+ * follow-up gate and spent up to two extra 60s turns asking for a vote it had
+ * already parsed.
+ */
+const CONSENSUS_STRICT = /\[\s*CONSENSUS\s*[:：]\s*(YES|NO)\s*\]/gi;
+const CONSENSUS_VARIANTS = [
+  /consensus[:\s]+(yes|no)/gi,
+  /\*\*consensus\*\*[:\s]+(yes|no)/gi,
+  /CONSENSUS=(YES|NO)/gi,
+  /共识投票[:：\s]+(YES|NO)/gi,
+  /\[CONSENSUS\][:\s]+(YES|NO)/gi,
+];
+
 /** Check whether text contains any consensus vote marker */
 export function hasConsensusMarker(text: string): boolean {
-  return (
-    /\[\s*CONSENSUS\s*[:：]\s*(?:YES|NO)\s*\]/i.test(text) ||
-    /consensus[:\s]+(yes|no)/i.test(text) ||
-    /共识投票[:：\s]+(YES|NO)/i.test(text)
-  );
+  // `test` on a /g regex advances lastIndex, so match instead of test.
+  return [CONSENSUS_STRICT, ...CONSENSUS_VARIANTS].some((re) => text.match(re) !== null);
 }
 
 /**
@@ -39,20 +55,13 @@ export function parseConsensus(content: string): boolean {
  */
 export function parseConsensusWithSource(content: string): { vote: boolean; source: 'strict' | 'variant' | 'none' } {
   // Strict format (supports Chinese colon) — take the LAST match
-  const strictMatches = [...content.matchAll(/\[\s*CONSENSUS\s*[:：]\s*(YES|NO)\s*\]/gi)];
+  const strictMatches = [...content.matchAll(CONSENSUS_STRICT)];
   if (strictMatches.length > 0) {
     return { vote: strictMatches[strictMatches.length - 1][1].toUpperCase() === 'YES', source: 'strict' };
   }
 
   // Fallback: common variants — also take the last match
-  const variantPatterns = [
-    /consensus[:\s]+(yes|no)/gi,
-    /\*\*consensus\*\*[:\s]+(yes|no)/gi,
-    /CONSENSUS=(YES|NO)/gi,
-    /共识投票[:：\s]+(YES|NO)/gi,
-    /\[CONSENSUS\][:\s]+(YES|NO)/gi,
-  ];
-  for (const pattern of variantPatterns) {
+  for (const pattern of CONSENSUS_VARIANTS) {
     const matches = [...content.matchAll(pattern)];
     if (matches.length > 0) {
       return { vote: matches[matches.length - 1][1].toUpperCase() === 'YES', source: 'variant' };

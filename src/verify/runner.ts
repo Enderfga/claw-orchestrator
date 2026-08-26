@@ -61,6 +61,9 @@ export interface ContractRunResult {
 
 const TAIL_LINES = 200;
 
+/** How often an in-flight HTTP check re-checks the run's cancellation flag. */
+const CANCEL_POLL_MS = 100;
+
 // ─── Individual check kinds ─────────────────────────────────────────────────
 
 async function runCommandCheck(
@@ -102,21 +105,44 @@ async function runHttpCheck(
 
   while (Date.now() - startedAt < timeoutMs) {
     if (ctx.signal?.aborted) break;
+    // The while-guard is only re-read between iterations, so it cannot bound a
+    // fetch that never returns. Without a signal on the request, a server that
+    // accepts the connection and never sends headers parked this loop until
+    // undici's default 300s headersTimeout — a declared `timeoutMs: 30000`
+    // became an effective ten minutes, and `ctx.signal` going true in the
+    // meantime had no observer either. Each request now carries the same
+    // deadline the loop does, and the run's cancellation preempts it.
+    const controller = new AbortController();
+    const remaining = Math.max(0, timeoutMs - (Date.now() - startedAt));
+    const deadline = setTimeout(() => controller.abort(new Error(`deadline after ${timeoutMs}ms`)), remaining);
+    const cancelPoll = ctx.signal
+      ? setInterval(() => {
+          if (ctx.signal?.aborted) controller.abort(new Error('cancelled'));
+        }, CANCEL_POLL_MS)
+      : undefined;
     try {
-      const res = await doFetch(spec.url);
+      const res = await doFetch(spec.url, { signal: controller.signal });
       if (res.status === expect) {
         return { passed: true, durationMs: Date.now() - startedAt, detail: `GET ${spec.url} → ${res.status}` };
       }
       lastDetail = `GET ${spec.url} → ${res.status}, expected ${expect}`;
     } catch (e) {
       lastDetail = `GET ${spec.url} → ${(e as Error).message}`;
+    } finally {
+      clearTimeout(deadline);
+      if (cancelPoll) clearInterval(cancelPoll);
     }
+    if (ctx.signal?.aborted) break;
     await new Promise((r) => setTimeout(r, intervalMs));
   }
+  // Report the time actually spent, not the budget. These two disagreed
+  // whenever the budget was not honoured, which was exactly when a reader
+  // needed to know.
+  const durationMs = Date.now() - startedAt;
   return {
     passed: false,
-    durationMs: Date.now() - startedAt,
-    detail: `${lastDetail} (gave up after ${timeoutMs}ms)`,
+    durationMs,
+    detail: `${lastDetail} (gave up after ${durationMs}ms, budget ${timeoutMs}ms)`,
     timedOut: true,
   };
 }

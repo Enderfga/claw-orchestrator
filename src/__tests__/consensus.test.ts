@@ -95,3 +95,50 @@ describe('parseConsensusWithSource', () => {
     expect(parseConsensusWithSource('I have not finished reviewing')).toEqual({ vote: false, source: 'none' });
   });
 });
+
+// ── The two readers of the vote formats must agree.
+//
+//    `hasConsensusMarker` restated three of the five variant patterns, so a
+//    short reply voting as `**consensus**: yes` / `CONSENSUS=YES` /
+//    `[CONSENSUS]: YES` answered false — and council's follow-up gate then
+//    spent up to two extra 60s turns asking for a vote it had already parsed.
+describe('hasConsensusMarker agrees with parseConsensusWithSource', () => {
+  const votes = [
+    '[CONSENSUS: YES]',
+    '[CONSENSUS: NO]',
+    '[CONSENSUS：YES]',
+    'consensus: yes',
+    'consensus no',
+    '**consensus**: yes',
+    'CONSENSUS=YES',
+    'CONSENSUS=NO',
+    '[CONSENSUS]: YES',
+    '共识投票: YES',
+    'Done. **consensus**: no',
+  ];
+
+  it('finds a marker for every format the parser reads a vote from', () => {
+    for (const text of votes) {
+      expect(parseConsensusWithSource(text).source).not.toBe('none');
+      expect(hasConsensusMarker(text)).toBe(true);
+    }
+  });
+
+  it('finds none where the parser reads none', () => {
+    for (const text of ['no vote here', 'we reached agreement', 'the consensus of the group was unclear']) {
+      if (parseConsensusWithSource(text).source === 'none') {
+        expect(hasConsensusMarker(text)).toBe(false);
+      }
+    }
+  });
+
+  it('is stable across repeated calls', () => {
+    // The patterns are module-level and global; a reader that advanced
+    // lastIndex would answer differently the second time.
+    for (const text of votes) {
+      expect(hasConsensusMarker(text)).toBe(true);
+      expect(hasConsensusMarker(text)).toBe(true);
+      expect(parseConsensusWithSource(text).source).toBe(parseConsensusWithSource(text).source);
+    }
+  });
+});

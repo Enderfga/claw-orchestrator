@@ -6,6 +6,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'node:fs';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { runChecks, runContract, type ExecFn } from '../../verify/runner.js';
@@ -218,4 +219,48 @@ describe('injectable exec seam', () => {
     expect(r.passed).toBe(true);
     expect(calls).toEqual(['npm test']);
   });
+});
+
+// ── An HTTP check must not outlive its own timeout.
+//
+//    `timeoutMs` was enforced only by the while-guard, which is re-read between
+//    iterations — so a server that accepts the connection and never sends
+//    headers parked the loop inside one fetch until undici's default 300s
+//    headersTimeout. A declared 30s became an effective ten minutes, and the
+//    detail string still claimed the declared budget had been honoured.
+describe('http checks — a server that accepts and never answers', () => {
+  let server: net.Server;
+  let port: number;
+  const held: net.Socket[] = [];
+
+  beforeEach(async () => {
+    server = net.createServer((sock) => {
+      held.push(sock); // accept, read nothing, write nothing
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    port = (server.address() as net.AddressInfo).port;
+  });
+
+  afterEach(async () => {
+    for (const s of held) s.destroy();
+    held.length = 0;
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+
+  it('gives up at its declared timeout, not at the transport default', async () => {
+    const c = normalizeContract({
+      checks: [{ type: 'http', url: `http://127.0.0.1:${port}/health`, timeoutMs: 600, intervalMs: 50 }],
+    })!;
+
+    const startedAt = Date.now();
+    const [r] = await runChecks(c, ctx());
+    const elapsed = Date.now() - startedAt;
+
+    expect(r.passed).toBe(false);
+    expect(r.timedOut).toBe(true);
+    // Generous, but two orders of magnitude below the 300s this used to take.
+    expect(elapsed).toBeLessThan(4000);
+    // And the detail reports the time actually spent.
+    expect(r.detail).toMatch(/gave up after \d+ms, budget 600ms/);
+  }, 10_000);
 });
