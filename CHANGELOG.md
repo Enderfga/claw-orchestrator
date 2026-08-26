@@ -5,6 +5,118 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+An external multi-agent review of the 6.0.2 tree reported 33 findings across the
+run kernel, the HTTP/ACP/OpenAI surfaces and the session manager. Each was
+reproduced against the built code before being changed, and each fix is
+mutation-checked — reverting the predicate reddens its own tests and no others.
+
+**Inputs that reached further than they should**
+
+- `/session/start` accepted a custom engine from the request body. The guard
+  that refuses one covered `/autoloop/new` and `/autoloop/<id>/resume` and
+  matched three snake_case keys, while `session_start` spells the field
+  `customEngine` — so the object reached `startSession()` verbatim and from
+  there `PersistentCustomSession` spawns `bin`. The guard now matches by shape
+  and runs on every request body, so a route added later cannot reintroduce it.
+- An openai-compat session key became a directory name unsanitised. The
+  `x-session-id` header is taken verbatim and the handler builds
+  `os.tmpdir()/openclaw-compat-<name>`, mkdirs it recursively and starts the
+  session there under `bypassPermissions`; a key carrying `../` resolved outside
+  the temp directory entirely. Keys that are already filesystem-safe pass
+  through unchanged.
+- A cross-session message body could forge a second envelope, carrying any
+  `from` it liked — which is what the recipient uses to attribute the sender.
+  Only the bracket of a cross-session tag is escaped, so code in a message is
+  untouched.
+- `getAnthropicBaseUrl()` returned the first `baseUrl` in `openclaw.json`
+  rather than the `anthropic` one, sending Anthropic passthrough — the
+  `x-api-key` header and the whole prompt body — to another provider's host.
+
+**Work done twice, or on the wrong thing**
+
+- The `solve` template repaired runs that were already green. Its two chained
+  routers read as "loop while verify is red AND budget remains", but a router
+  whose routes all miss falls through to the next node, so the budget check
+  matched on its own: a first-try green run made four implement/review/verify
+  cycles instead of one. Router conditions gained `and`, and the two routers
+  are now one.
+- Council selected worktrees to force-remove by testing whether the path
+  contained the string `council`, which matched a user's own worktree at
+  `~/council-notes` and missed council's at `.worktrees/agent-A`. Selection is
+  containment under `{projectDir}/.worktrees/`; `git worktree list` gained
+  `--porcelain`, so a path with a space is no longer truncated.
+- An abort that landed while `setupWorktrees` was still running left every
+  worktree on disk, because cleanup was gated on a map that is not populated
+  until setup returns.
+- A subflow could outlive the cancel meant to stop it, and started without the
+  parent's secrets.
+- The verdict-staleness check re-measured the tree at the run's cwd while the
+  verifier had measured at its own, so a verifier declaring `cwd` had its
+  passing verdict compared against an unrelated tree.
+- Evidence bundles collided across repair passes: the id was keyed on the
+  per-visit retry counter, which restarts at 1 on every visit, so each pass
+  overwrote the previous bundle. Ids carry the visit now.
+- `session/cancel` tore the session down whether or not a turn was in flight,
+  dropping the engine's native conversation id and forking the history.
+- A parked council did not block ordinary follow-up prompts, so a second
+  council started over the worktrees the parked one still held.
+
+**Answers that were wrong, or missing**
+
+- Fanout published a failed synthesis turn as the answer: `sendMessage` reports
+  a turn-level failure by returning `{error}`, not by throwing, so the catch
+  never ran and `synthesisError` stayed undefined.
+- Broadcast reported `delivered`/`queued` as each other's negation, which
+  cannot encode a broadcast that did both.
+- Streaming dropped the reply for engines with no delta channel (opencode,
+  agy, the per-send codex/cursor wrappers, one-shot custom engines): the role
+  chunk and the stop chunk went out with nothing between them.
+- The streaming branch of the Anthropic passthrough piped the upstream body
+  without checking `resp.ok`, so a 401/429/500 arrived as HTTP 200 with SSE
+  headers — an empty stream to any SSE parser.
+- Text a model emitted after a tool call was discarded, though
+  `text → tool_use → text` is one valid Anthropic turn.
+- An HTTP check could outlive its declared timeout by two orders of magnitude:
+  the deadline was enforced only between poll iterations and the request
+  carried no signal, so a server that never sends headers parked it until the
+  transport default.
+- `noSessionPersistence` reached the engine but not this orchestrator's own
+  session registry, so `session-start x --skip-persistence` twice reattached to
+  the first conversation.
+- The openai-compat session fingerprint hashed a tool's name and description
+  but not its parameters, so a changed schema landed on the session holding the
+  old one.
+- `switchModel` validated against a frozen prefix list and rejected `grok-4.6`,
+  `composer-*`, `o3`, `o4-mini` and `codex-mini-latest`.
+- The orphan reaper's list of CLI binaries was missing `grok`, so an orphaned
+  grok CLI was never cleaned up; TTL cleanup did not forget the PID it stopped,
+  leaving dead PIDs on disk for that reaper to probe.
+- `_ensureProxyServer` checked its port synchronously and assigned it several
+  awaits later, so concurrent starts each bound a server and only the last was
+  closed on shutdown.
+- `hasConsensusMarker` knew three of the five vote formats the parser reads.
+- `replayRun` counted a retry as a visit; `_absorb` replaced a node's artifact
+  list rather than merging; the truncation notice cited an unsanitised path;
+  `SIDE_EFFECT_KINDS` listed four of the ten node kinds; the run state stayed
+  `verifying` after a mid-chain verifier; three SSE endpoints wrote to the
+  response with no disconnect guard; and `workflow show` cast its response as
+  `Record<string, never>`.
+
+### Changed
+
+- Router conditions accept `{ type: 'and', all: [...] }`. Closed and
+  depth-capped like the rest of the vocabulary — see
+  `skills/references/workflow.md`.
+- Evidence bundle ids are `<node>-v<visit>-<attempt>`, so a repair loop keeps
+  every pass.
+- `noSessionPersistence` now also keeps the session out of this orchestrator's
+  resume registry, which is what "do not save session to disk" was always
+  documented to mean.
+
 ## [6.0.2] - 2026-08-24
 
 ### Fixed

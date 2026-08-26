@@ -33,7 +33,7 @@ Start a persistent coding session with full CLI flag support.
 | `mcpConfig`                          | string \| string[]                                                                            | MCP server config file(s)                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | `settings`                           | string                                                                                        | Settings.json path or inline JSON                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `ultracode`                          | boolean                                                                                       | Claude only. Enable "ultracode" / dynamic workflows — Claude plans a JS orchestration script per substantive task and fans out to subagents. Injected as the `ultracode:true` settings key (merged into `settings`), **not** a `--effort` value (the CLI rejects `--effort ultracode`).                                                                                                                                                                                       |
-| `noSessionPersistence`               | boolean                                                                                       | Do not save session to disk                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `noSessionPersistence`               | boolean                                                                                       | Do not save session to disk — both the engine's own transcript and this orchestrator's resume registry, so a later start under the same name does not reattach                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `betas`                              | string \| string[]                                                                            | Custom beta headers                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `enableAgentTeams`                   | boolean                                                                                       | Enable experimental agent teams                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `enableAutoMode`                     | boolean                                                                                       | Enable auto permission mode                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
@@ -559,11 +559,19 @@ Start a chat-mode autoloop. Planner starts immediately; Coder + Reviewer start o
 
 > **Custom engines are local-only.** A `CustomEngineConfig` names an executable to
 > spawn plus its argv and env, so it may only be supplied by a caller that already
-> runs on the host (this MCP tool, or the `SessionManager` API). The HTTP API
-> (`POST /autoloop/new`, `POST /autoloop/<id>/resume`) rejects a `*_custom_engine`
-> body field with a 400 — the embedded server is often reverse-tunnelled and its
-> token is a monitoring credential, not permission to choose what binary runs.
-> Built-in engines are fully selectable over HTTP.
+> runs on the host (this MCP tool, or the `SessionManager` API). **Every** HTTP
+> request body is checked, on every route, and one carrying a custom-engine
+> object at any depth — `customEngine`, `*_custom_engine`, `agentCustomEngines` —
+> is rejected with a 400 naming the offending key path. The embedded server is
+> often reverse-tunnelled and its token is a monitoring credential, not
+> permission to choose what binary runs. Built-in engines stay fully selectable
+> over HTTP.
+>
+> The check used to be wired into two autoloop routes and to match three
+> snake_case names; `POST /session/start` had no guard and `session_start` spells
+> the field `customEngine`, so it went straight through. Matching by shape at the
+> one place every body passes is what stops the next route from inheriting the
+> same gap.
 >
 > **Resuming one is done by reference.** Refusing the config over HTTP left a real
 > gap: a custom-engine run that crashed could not be brought back by any remote

@@ -210,7 +210,7 @@ add failure modes (partial joins, orphaned branches) that nothing here exercises
 
 A spec can arrive from a tool call, which means it can arrive from an agent. If
 routing accepted a JS expression, the kernel would be an arbitrary code execution
-surface. Five closed forms are evaluated and nothing else:
+surface. These closed forms are evaluated and nothing else:
 
 ```jsonc
 { "type": "always" }
@@ -218,7 +218,14 @@ surface. Five closed forms are evaluated and nothing else:
 { "type": "node_succeeded", "node": "verify" }
 { "type": "verified",       "node": "verify" }
 { "type": "visits_lt",      "node": "implement", "n": 4 }
+{ "type": "and",            "all": [ /* … */ ] }
 ```
+
+`and` is the only recursive one, and nesting is capped at six deep. Use it rather
+than chaining two routers: **a router whose routes all miss falls through to the
+next node**, so a gate that failed to match simply hands control to the router
+after it, which then matches on its own. Chaining reads as AND and behaves as
+"whatever the last router says".
 
 `maxNodeVisits` (default 50) bounds every loop as a backstop. Use `visits_lt` for
 the actual budget — the backstop failing a run is a bug report, not a feature.
@@ -247,12 +254,18 @@ the actual budget — the backstop failing a run is a bug report, not a feature.
     {
       "id": "repair-gate",
       "kind": "router",
-      "routes": [{ "when": { "type": "node_failed", "node": "verify" }, "to": "repair-budget" }],
-    },
-    {
-      "id": "repair-budget",
-      "kind": "router",
-      "routes": [{ "when": { "type": "visits_lt", "node": "implement", "n": 4 }, "to": "implement" }],
+      "routes": [
+        {
+          "when": {
+            "type": "and",
+            "all": [
+              { "type": "node_failed", "node": "verify" },
+              { "type": "visits_lt", "node": "implement", "n": 4 },
+            ],
+          },
+          "to": "implement",
+        },
+      ],
     },
   ],
 }
