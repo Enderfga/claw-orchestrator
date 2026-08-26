@@ -51,6 +51,18 @@ export const ENGINE_TYPES = [
 export type EngineType = (typeof ENGINE_TYPES)[number];
 
 /**
+ * The executables the built-in engines actually spawn — the defaults in each
+ * `persistent-*-session.ts` (`CODEX_BIN || 'codex'` and friends). Not derivable
+ * from ENGINE_TYPES: `codex-app` runs the `codex` binary and `cursor` runs
+ * `cursor-agent`. `custom` names its own and so cannot appear here.
+ *
+ * Kept as one list because orphan reaping matches a live process against it, and
+ * a name missing from that match is a CLI that survives a crash forever: `grok`
+ * was added as an engine without being added there.
+ */
+export const ENGINE_BINARY_NAMES = ['claude', 'codex', 'gemini', 'agy', 'cursor-agent', 'grok', 'opencode'] as const;
+
+/**
  * Does this engine carry conversation across sends on its own?
  *
  * claude keeps one subprocess alive. The one-shot engines each resume their own

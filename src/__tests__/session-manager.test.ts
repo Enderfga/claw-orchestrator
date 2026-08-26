@@ -319,6 +319,73 @@ describe('SessionManager', () => {
       );
     });
 
+    // ── TTL cleanup must forget the PID it stopped.
+    //
+    //    `stopSession` deletes from `_activePids` and saves; the TTL path did
+    //    not, so the map only ever grew and the next save rewrote dead PIDs to
+    //    disk under the current owner. After an unclean exit those come back as
+    //    orphan candidates and get probed — and a PID the OS has recycled to a
+    //    coding-CLI-shaped process is killed.
+    it('idle cleanup forgets the PID along with the session', async () => {
+      await mgr.startSession({ name: 'idle-one', cwd: '/tmp' });
+      const internals = mgr as unknown as {
+        _activePids: Map<string, number>;
+        sessions: Map<string, { lastActivity: number }>;
+        _cleanupIdleSessions(): void;
+      };
+      internals._activePids.set('idle-one', 424242);
+      internals.sessions.get('idle-one')!.lastActivity = 0; // long past the TTL
+
+      internals._cleanupIdleSessions();
+
+      expect(internals.sessions.has('idle-one')).toBe(false);
+      expect(internals._activePids.has('idle-one')).toBe(false);
+    });
+
+    it('idle cleanup leaves a live session and its PID alone', async () => {
+      await mgr.startSession({ name: 'busy-one', cwd: '/tmp' });
+      const internals = mgr as unknown as {
+        _activePids: Map<string, number>;
+        sessions: Map<string, unknown>;
+        _cleanupIdleSessions(): void;
+      };
+      internals._activePids.set('busy-one', 424243);
+
+      internals._cleanupIdleSessions();
+
+      expect(internals.sessions.has('busy-one')).toBe(true);
+      expect(internals._activePids.get('busy-one')).toBe(424243);
+    });
+
+    // ── One proxy server, however many sessions start at once.
+    //
+    //    The `if (this._proxyPort)` guard is checked synchronously but the port
+    //    is assigned inside listen()'s callback, several awaits later. Council
+    //    and fanout start their agents with Promise.all under distinct names,
+    //    and `_pendingSessions` only serialises per name — so two callers each
+    //    bound a server and shutdown() closed only the last one.
+    it('shares one proxy startup between concurrent callers', async () => {
+      const internals = mgr as unknown as {
+        _ensureProxyServer(): Promise<number | null>;
+        _startProxyServer(): Promise<number | null>;
+      };
+      let starts = 0;
+      internals._startProxyServer = async () => {
+        starts++;
+        await new Promise((r) => setTimeout(r, 20));
+        return 4242;
+      };
+
+      const ports = await Promise.all([
+        internals._ensureProxyServer(),
+        internals._ensureProxyServer(),
+        internals._ensureProxyServer(),
+      ]);
+
+      expect(starts).toBe(1);
+      expect(ports).toEqual([4242, 4242, 4242]);
+    });
+
     it('startSession returns existing session without re-creating', async () => {
       const info1 = await mgr.startSession({ name: 'dup', cwd: '/tmp' });
       const info2 = await mgr.startSession({ name: 'dup', cwd: '/other' });
@@ -1229,6 +1296,27 @@ describe('SessionManager', () => {
       managed.claudeSessionId = undefined;
 
       await expect(mgr.switchModel('no-id', 'sonnet')).rejects.toThrow('has no claude session ID');
+    });
+
+    // ── The guard checks the registry, not a frozen prefix list.
+    //
+    //    It was ['claude-','gemini-','gpt-','anthropic/','google/','openai/'],
+    //    which rejects every model the registry has gained since — each of
+    //    which `_createSession` can dispatch.
+    it('accepts every model the registry actually knows', async () => {
+      for (const model of ['grok-4.6', 'grok', 'composer-2', 'o3', 'o4-mini', 'codex-mini-latest']) {
+        const name = `switch-${model}`;
+        await mgr.startSession({ name, cwd: '/tmp' });
+        lastMock().setBusy(false);
+        await expect(mgr.switchModel(name, model)).resolves.toBeDefined();
+        await mgr.stopSession(name); // the fixture caps concurrent sessions at 5
+      }
+    });
+
+    it('still accepts a provider-qualified string, which the error message offers', async () => {
+      await mgr.startSession({ name: 'switch-qualified', cwd: '/tmp' });
+      lastMock().setBusy(false);
+      await expect(mgr.switchModel('switch-qualified', 'someprovider/some-model')).resolves.toBeDefined();
     });
 
     it('rejects unknown model that does not match known patterns', async () => {
