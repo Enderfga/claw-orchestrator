@@ -19,6 +19,7 @@ import { RunKernel } from '../../kernel/engine.js';
 import { registerDefaultExecutors } from '../../kernel/nodes/index.js';
 import { createAndAcquire, deleteRunDir, isValidRunId, listRunIds, loadRun, runDir } from '../../kernel/store.js';
 import { exec } from '../../kernel/exec.js';
+import { execSync } from 'node:child_process';
 import type { WorkflowSpec } from '../../kernel/types.js';
 
 let tmp: string;
@@ -255,4 +256,120 @@ describe('subflow', () => {
     expect(childId).toBeTruthy();
     expect(loadRun(childId!)?.workflow).toBe('child');
   });
+
+  // ── A cancel that lands while the child is starting must still reach it.
+  //
+  //    `cancel(parent)` walks the parent's nodes for a `childRunId`, and that
+  //    is only recorded after `kernel.start(child)` returns — several awaits
+  //    later. A cancel inside that window returned true having stopped nothing,
+  //    and the child then ran to completion, spending budget and writing to the
+  //    shared cwd after the parent had been cancelled.
+  it('does not let a child escape a cancel that arrived while it was starting', async () => {
+    const kernel = registerDefaultExecutors(new RunKernel({ nodeTimeoutMs: 8000 }));
+    let childAgentRuns = 0;
+    kernel.setExecutor('agent', async (node) => {
+      if (node.id === 'c') {
+        childAgentRuns++;
+        await new Promise((r) => setTimeout(r, 200));
+      }
+      return { ok: true };
+    });
+
+    const child: WorkflowSpec = { name: 'child', nodes: [{ id: 'c', kind: 'agent', prompt: 'x' }] };
+    const rec = await kernel.start({
+      name: 'parent',
+      nodes: [{ id: 'sub', kind: 'subflow', workflow: child }],
+    });
+    // Cancel immediately: the parent is inside the subflow executor's
+    // `kernel.start(child)` await, before setChild has run.
+    kernel.cancel(rec.runId);
+    const done = await kernel.wait(rec.runId);
+
+    const childId = done!.nodes.sub.childRunId;
+    expect(childId).toBeTruthy();
+    const childRecord = loadRun(childId!);
+    expect(childRecord?.state).not.toBe('completed');
+    expect(childAgentRuns).toBeLessThanOrEqual(1);
+  });
+
+  it('hands the parent secrets down to the child', async () => {
+    // Secrets are the custom-engine configs the spec deliberately cannot carry;
+    // a child that does not get them runs its agents on a different engine than
+    // the caller configured.
+    const kernel = registerDefaultExecutors(new RunKernel({ nodeTimeoutMs: 8000 }));
+    const seen: Array<Record<string, unknown>> = [];
+    kernel.setExecutor('agent', async (_node, ctx) => {
+      seen.push(ctx.secrets);
+      return { ok: true };
+    });
+    const child: WorkflowSpec = { name: 'child', nodes: [{ id: 'c', kind: 'agent', prompt: 'x' }] };
+    const rec = await kernel.start(
+      { name: 'parent', nodes: [{ id: 'sub', kind: 'subflow', workflow: child }] },
+      { secrets: { agentCustomEngines: { a: { bin: '/x' } } } },
+    );
+    await kernel.wait(rec.runId);
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatchObject({ agentCustomEngines: { a: { bin: '/x' } } });
+  });
+});
+
+// ── The staleness check must re-measure the tree the verdict was taken at.
+//
+//    `_verdictWentStale` recomputed the fingerprint at the RUN's cwd, while the
+//    verifier had taken it at `spec.cwd || ctx.cwd`. A verifier that declares
+//    its own cwd — the ultraapp build node does — therefore had its passing
+//    verdict compared against an unrelated tree: downgraded to `unverified` for
+//    no reason, or matched by accident and blind to a real edit.
+describe('verdict staleness across a verifier with its own cwd', () => {
+  const repo = (dir: string): string => {
+    fs.mkdirSync(dir, { recursive: true });
+    execSync('git init -q -b main', { cwd: dir, stdio: 'pipe' });
+    execSync('git config user.email t@t.com', { cwd: dir, stdio: 'pipe' });
+    execSync('git config user.name T', { cwd: dir, stdio: 'pipe' });
+    fs.writeFileSync(path.join(dir, 'seed.txt'), 'seed\n');
+    execSync('git add -A && git commit -qm init', { cwd: dir, stdio: 'pipe' });
+    return dir;
+  };
+
+  const run = async (touch: 'run-tree' | 'verifier-tree') => {
+    const runCwd = repo(path.join(tmp, 'proj'));
+    const verifyCwd = repo(path.join(tmp, 'elsewhere'));
+    const kernel = registerDefaultExecutors(new RunKernel({ nodeTimeoutMs: 20_000 }));
+    kernel.setExecutor('agent', async () => {
+      const target = touch === 'run-tree' ? runCwd : verifyCwd;
+      fs.writeFileSync(path.join(target, 'after.txt'), 'edited\n');
+      return { ok: true };
+    });
+
+    const started = await kernel.start({
+      name: 'staleness',
+      cwd: runCwd,
+      nodes: [
+        {
+          id: 'check',
+          kind: 'verifier',
+          cwd: verifyCwd,
+          contract: { checks: [{ spec: { type: 'command', cmd: 'true' }, required: true }] },
+        },
+        { id: 'after', kind: 'agent', prompt: 'touch something' },
+      ],
+    });
+    return (await kernel.wait(started.runId))!;
+  };
+
+  it('keeps the verdict when only the run tree moved', async () => {
+    const done = await run('run-tree');
+    expect(done.nodes.check.state).toBe('succeeded');
+    expect(done.outcome).toBe('verified');
+    expect(done.outcomeReason).toBeUndefined();
+  }, 30_000);
+
+  it('drops it when the tree the checks ran against moved', async () => {
+    // The other half: measuring the right tree has to still catch a real edit.
+    const done = await run('verifier-tree');
+    expect(done.nodes.check.state).toBe('succeeded');
+    expect(done.outcome).toBe('unverified');
+    expect(done.outcomeReason).toMatch(/changed afterwards/);
+  }, 30_000);
 });

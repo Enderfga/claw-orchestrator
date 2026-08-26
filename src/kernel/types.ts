@@ -312,7 +312,14 @@ export interface RunRecord {
    * at that moment. Compared against the tree when the run ends, so evidence
    * overtaken by later edits cannot keep standing as `verified`.
    */
-  verdict?: { node: string; evidenceId: string; treeFingerprint?: string; sideEffectSeq: number };
+  verdict?: {
+    node: string;
+    evidenceId: string;
+    treeFingerprint?: string;
+    /** Where that digest was taken — a verifier may declare its own cwd. */
+    fingerprintCwd?: string;
+    sideEffectSeq: number;
+  };
   /**
    * Count of completed nodes that can touch the workspace (`agent`, `fanout`,
    * `council`, `subflow`). Compared against the value stored on the verdict, so

@@ -104,6 +104,12 @@ export interface NodeResult {
   passed?: boolean;
   /** Verifier nodes only: the tree digest at the moment the checks finished. */
   treeFingerprint?: string;
+  /**
+   * Verifier nodes only: the directory that digest was taken at. A verifier may
+   * declare its own `cwd`, and re-measuring at the run's cwd compares two
+   * unrelated trees.
+   */
+  fingerprintCwd?: string;
   /** human_gate nodes: park the run until a human answers. */
   awaitHuman?: boolean;
   costUsd?: number;
@@ -1152,6 +1158,7 @@ export class RunKernel extends EventEmitter {
             node: nodeId,
             evidenceId: result.evidenceId,
             treeFingerprint: result.treeFingerprint,
+            fingerprintCwd: result.fingerprintCwd,
             sideEffectSeq: draft.sideEffectSeq ?? 0,
           };
         }
@@ -1232,12 +1239,18 @@ export class RunKernel extends EventEmitter {
     // not depend on git: a contract that passed in a plain directory passed.
     if ((record.sideEffectSeq ?? 0) === record.verdict.sideEffectSeq) return undefined;
 
+    // Re-measure the tree the verdict was taken at, which is not always the
+    // run's. A `verifier` node may declare its own `cwd` — the ultraapp build
+    // node does — and comparing a subdirectory's digest against the project
+    // root's is a comparison of two unrelated trees: it downgrades a passing
+    // verdict for no reason, or matches by accident and misses a real edit.
+    const cwd = record.verdict.fingerprintCwd ?? record.cwd;
     const before = record.verdict.treeFingerprint;
-    const after = await treeFingerprint(record.cwd);
+    const after = await treeFingerprint(cwd);
     if (before !== undefined && after !== undefined && before === after) return undefined;
 
     return before === undefined || after === undefined
-      ? `evidence ${record.verdict.evidenceId} passed, but nodes ran afterwards and ${record.cwd} is not a git repository, so we cannot tell whether it still describes the tree`
+      ? `evidence ${record.verdict.evidenceId} passed, but nodes ran afterwards and ${cwd} is not a git repository, so we cannot tell whether it still describes the tree`
       : `evidence ${record.verdict.evidenceId} passed, but the working tree changed afterwards — the verdict describes an earlier state`;
   }
 }

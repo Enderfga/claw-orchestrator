@@ -90,6 +90,9 @@ export async function executeVerifierNode(node: NodeSpec, ctx: NodeContext): Pro
     passed,
     evidenceId: bundle.evidenceId,
     treeFingerprint: bundle.treeFingerprint,
+    // The digest above was taken here, which is `spec.cwd` when the node
+    // declares one — not necessarily the run's cwd.
+    fingerprintCwd: cwd,
     // How many fix-on-red rounds it took, checkpointed with the node so a
     // caller can report it without re-reading the evidence bundle.
     data: { rounds, checks: results.length },
