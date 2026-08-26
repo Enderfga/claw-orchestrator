@@ -41,6 +41,12 @@ interface CodexTurnCompleted {
   usage?: {
     input_tokens?: number;
     cached_input_tokens?: number;
+    /**
+     * Prompt tokens written into the cache this turn. Deliberately not added to
+     * anything: codex counts it inside `input_tokens`, the same way it counts
+     * `cached_input_tokens`, so charging for it again would double-bill.
+     */
+    cache_write_input_tokens?: number;
     output_tokens?: number;
     reasoning_output_tokens?: number;
   };
@@ -105,6 +111,12 @@ export class PersistentCodexSession extends BaseOneShotSession {
       enginePrefix: 'codex',
       defaultModel: 'gpt-5.5',
       supportsCachedTokens: true,
+      // Verified against codex 0.149.1's own rollout record: for the same turn
+      // `total_token_usage` reads `{input_tokens: 19699, cached_input_tokens:
+      // 11008, output_tokens: 5, total_tokens: 19704}` — 19699 + 5, so the
+      // cached reads are already inside `input_tokens` and must be subtracted
+      // out before the rest bills at the full rate.
+      inputIncludesCachedTokens: true,
       engineDisplayName: 'Codex',
     });
     if (config.resumeSessionId && !/^codex-\d+-/.test(config.resumeSessionId)) {
@@ -228,23 +240,45 @@ export class PersistentCodexSession extends BaseOneShotSession {
     // the first turn. (`-c` and `--model` ARE accepted on resume, verified
     // against `codex exec resume --help` on 0.137.)
     if (!isResume && this.options.codexProfile) args.push('--profile', this.options.codexProfile);
+    // `--ephemeral` is codex's counterpart to Claude Code's
+    // `--no-session-persistence`, so the engine-agnostic option finally means
+    // something here. Accepted by both `exec` and `exec resume`.
+    if (this.options.noSessionPersistence) args.push('--ephemeral');
+    // Opt-in isolation from `$CODEX_HOME/config.toml`. That file is the user's,
+    // not the orchestrator's: a `model = …` line in it silently decides which
+    // model an orchestrated run uses and which one we then price it as. Auth
+    // still resolves from CODEX_HOME, so this does not log the session out.
+    if (this.options.ignoreUserConfig) args.push('--ignore-user-config');
+    // Extra writable roots. Rejected by `exec resume` (like --sandbox/-C), and
+    // the resumed thread keeps the roots the first turn opened.
+    if (!isResume && this.options.addDir?.length) {
+      for (const dir of this.options.addDir) args.push('--add-dir', dir);
+    }
     args.push(message);
     return args;
   }
 
   /**
    * Map the engine-agnostic `effort` to Codex's reasoning-effort config override
-   * (`-c model_reasoning_effort=<level>`). Codex accepts minimal|low|medium|high|xhigh;
-   * we map `max`→`xhigh` (Codex has no `max`) and ignore `auto` / `ultracode`
-   * (ultracode is a Claude-only setting). `-c` is a global override accepted on
-   * both `exec` and `exec resume`.
+   * (`-c model_reasoning_effort=<level>`), which both `exec` and `exec resume`
+   * accept. `auto` and `ultracode` are ignored — `auto` means "leave it to the
+   * engine", and `ultracode` is a Claude-only setting, not an effort level.
    */
   private _reasoningEffortArgs(): string[] {
     const e = this.options.effort;
     if (!e || e === 'auto') return [];
-    const map: Record<string, string> = { low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'xhigh' };
-    const level = map[e];
-    return level ? ['-c', `model_reasoning_effort=${level}`] : [];
+    // codex 0.149's ladder is none|minimal|low|medium|high|xhigh|max|ultra, and
+    // its release notes call out `max` and `ultra` as selectable levels. Every
+    // level in our union now has a same-named counterpart, so this is a
+    // passthrough. It used to fold `max` down to `xhigh`, which was correct
+    // when `max` did not exist and is a silent downgrade now.
+    //
+    // `-c` values are not validated at parse time — codex prints
+    // `reasoning effort: <whatever>` and sends it — so an unknown level fails
+    // at the API, not at spawn. That is why the ladder is listed rather than
+    // guessed.
+    const known: ReadonlySet<string> = new Set(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
+    return known.has(e) ? ['-c', `model_reasoning_effort=${e}`] : [];
   }
 
   /**

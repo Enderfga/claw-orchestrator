@@ -81,7 +81,7 @@ session_stop({ name: 'myproject' });
 | `engine`         | `claude` (default), `codex`, `agy`, `cursor`, `opencode`                                                        |
 | `model`          | Model name or alias (`fable`, `opus`, `sonnet`, `haiku`, `gpt-5.5`, `agy-pro`, `composer-2`)                    |
 | `permissionMode` | `acceptEdits`, `auto`, `plan`, `bypassPermissions`, `manual`, `dontAsk` (`default` = legacy alias for `manual`) |
-| `effort`         | `low`, `medium`, `high`, `xhigh`, `max`, `auto` (`xhigh` is Opus 4.7-only, between `high` and `max`)            |
+| `effort`         | `low`, `medium`, `high`, `xhigh`, `max`, `ultra`, `auto` (each engine clamps to its own ceiling)                |
 | `maxBudgetUsd`   | Cost limit in USD                                                                                               |
 | `allowedTools`   | List of allowed tool names                                                                                      |
 

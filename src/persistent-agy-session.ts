@@ -132,9 +132,10 @@ export class PersistentAgySession extends BaseOneShotSession {
     // default model.
     // agy 1.1.5+ exposes reasoning variants through --effort. Its accepted
     // values are narrower than the engine-agnostic EffortLevel union: only
-    // low|medium|high are valid. Preserve the caller's intent by clamping the
-    // two higher aliases to agy's ceiling. A per-turn override wins over the
-    // session default, matching session_send's documented contract.
+    // low|medium|high are valid (agy 1.1.21 lists them in its own rejection).
+    // Preserve the caller's intent by clamping everything above that to agy's
+    // ceiling. A per-turn override wins over the session default, matching
+    // session_send's documented contract.
     //
     // Current agy also requires an effort when --model is an unsuffixed base
     // slug, so the provider-specific meaning of auto is high in that case. A
@@ -145,7 +146,7 @@ export class PersistentAgySession extends BaseOneShotSession {
     let model = configuredModel ? this.resolveModel(configuredModel.replace(/^agy\//, '')) : undefined;
     const requestedEffort = turnEffort ?? this.options.effort;
     const explicitEffort =
-      requestedEffort === 'max' || requestedEffort === 'xhigh'
+      requestedEffort === 'max' || requestedEffort === 'xhigh' || requestedEffort === 'ultra'
         ? 'high'
         : requestedEffort === 'auto'
           ? undefined

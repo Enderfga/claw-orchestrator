@@ -120,6 +120,11 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
       defaultModel: 'claude-sonnet-4-6',
       defaultModelDisplay: 'opencode-default',
       supportsCachedTokens: true,
+      // `tokens.total` is input + output + cache.read + cache.write, so
+      // `tokens.input` holds only the uncached remainder. On a resumed turn
+      // that remainder is tiny next to the cached part (58 vs 26240), which is
+      // exactly where subtracting one from the other goes wrong.
+      inputIncludesCachedTokens: false,
       engineDisplayName: 'OpenCode',
     });
     // Process-level resume: a persisted id comes back as the raw OpenCode id,
@@ -168,6 +173,15 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
     if (this.options.model && this.options.model.includes('/')) {
       args.push('--model', this.options.model);
     }
+
+    // `--variant` is opencode's reasoning-effort knob ("provider-specific
+    // reasoning effort, e.g., high, max, minimal"). Before this the engine
+    // received no effort at all and every caller's setting was dropped on the
+    // floor. opencode does not validate the value — an unknown one runs the
+    // turn at the provider's default rather than failing — so the level a
+    // provider does not offer degrades instead of erroring.
+    const effort = options.effort ?? this.options.effort;
+    if (effort && effort !== 'auto') args.push('--variant', effort);
 
     const timeout = options.timeout || 300_000;
 
@@ -398,9 +412,15 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
           | { input?: number; output?: number; cache?: { read?: number; write?: number } }
           | undefined;
         if (tokens) {
+          const cacheRead = tokens.cache?.read || 0;
+          const cacheWrite = tokens.cache?.write || 0;
           this._stats.tokensIn += tokens.input || 0;
           this._stats.tokensOut += tokens.output || 0;
-          if (tokens.cache?.read) this._stats.cachedTokens += tokens.cache.read;
+          this._stats.cachedTokens += cacheRead;
+          this._stats.cacheCreationTokens += cacheWrite;
+          // `tokens.input` is only the uncached remainder, so the context this
+          // turn actually filled is the whole input side.
+          this._reportTurnInputTokens((tokens.input || 0) + cacheRead + cacheWrite);
           this._updateCost();
           state.gotUsage = true;
         }

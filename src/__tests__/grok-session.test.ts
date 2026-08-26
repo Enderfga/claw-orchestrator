@@ -91,13 +91,61 @@ describe('PersistentGrokSession — flags', () => {
     expect(spawnArgs()[spawnArgs().indexOf('--permission-mode') + 1]).toBe('default');
   });
 
-  it.each(['max', 'xhigh'] as const)("clamps %s effort to grok's ceiling", async (effort) => {
+  it.each(['max', 'ultra'] as const)("clamps %s effort to grok's ceiling", async (effort) => {
     const s = new PersistentGrokSession({ name: 't', cwd: '/tmp', permissionMode: 'bypassPermissions', effort });
     await s.start();
     const p = s.send('hi', { waitForComplete: true });
     setTimeout(() => reply(OK_RESULT), 5);
     await p;
-    expect(spawnArgs()[spawnArgs().indexOf('--effort') + 1]).toBe('high');
+    expect(spawnArgs()[spawnArgs().indexOf('--effort') + 1]).toBe('xhigh');
+  });
+
+  // grok 1.0.5 takes xhigh natively — clamping it to `high` silently spent a
+  // tier of the caller's request.
+  it('passes xhigh through rather than clamping it', async () => {
+    const s = new PersistentGrokSession({
+      name: 't',
+      cwd: '/tmp',
+      permissionMode: 'bypassPermissions',
+      effort: 'xhigh',
+    });
+    await s.start();
+    const p = s.send('hi', { waitForComplete: true });
+    setTimeout(() => reply(OK_RESULT), 5);
+    await p;
+    expect(spawnArgs()[spawnArgs().indexOf('--effort') + 1]).toBe('xhigh');
+  });
+
+  // grok's `total_tokens` is input + output + cache reads + cache writes, so
+  // `input_tokens` is only the uncached remainder and must not have the cached
+  // part subtracted back out of it.
+  it('measures context against the whole prompt, not the uncached remainder', async () => {
+    const s = new PersistentGrokSession({ name: 't', cwd: '/tmp', permissionMode: 'bypassPermissions' });
+    await s.start();
+    const p = s.send('hi', { waitForComplete: true });
+    setTimeout(
+      () =>
+        reply({
+          text: 'ok',
+          usage: {
+            input_tokens: 19_393,
+            output_tokens: 17,
+            cache_read_input_tokens: 230_590,
+            cache_creation_input_tokens: 0,
+          },
+          total_cost_usd: 0.0442,
+        }),
+      5,
+    );
+    await p;
+
+    const stats = s.getStats();
+    expect(stats.tokensIn).toBe(19_393);
+    expect(stats.cachedTokens).toBe(230_590);
+    // 249,983 of grok-4.6's 500K window. `input_tokens` alone would say 4%.
+    expect(stats.contextPercent).toBe(50);
+    // Spend still comes from the engine, untouched by the registry.
+    expect(stats.costUsd).toBeCloseTo(0.0442, 10);
   });
 
   it('omits --effort for auto', async () => {

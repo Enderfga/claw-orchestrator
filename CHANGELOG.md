@@ -5,6 +5,72 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.1.0] - 2026-08-27
+
+Engine sweep: Claude Code 2.1.237 → 2.1.246, Codex 0.148.0 → 0.149.1, Antigravity 1.1.15 → 1.1.21,
+OpenCode 1.18.18 → 1.18.23, Grok Build unchanged at 1.0.5. Each engine ran a live turn at its new
+version, and the ACP stdio entry point was smoke-tested alongside them. Chasing what the CLIs now
+report turned up four ways this project was measuring their turns wrong.
+
+### Fixed
+
+- **Every Claude turn's tokens were counted twice.** The CLI reports one turn's usage on the
+  streaming `message_delta` and again on the terminal `result`, and both were added to the running
+  totals. Measured against 2.1.246 on a live turn: the engine reported `in=2 / out=4 /
+  cache_read=47371` and `getStats()` returned `4 / 8 / 94742`. A turn's usage is now folded in once —
+  streamed deltas apply provisionally so a long turn still moves, and the authoritative `result`
+  replaces rather than repeats them. A turn spanning several assistant messages (one per tool round)
+  keeps every message, since each carries its own delta series.
+- **Cost estimates left out cache writes, which is most of what a cached turn pays for.** The formula
+  priced input, cached reads and output, and nothing else. On a turn with 31,435 one-hour cache
+  writes the CLI reported `$0.322428` while the formula produced `$0.016` — a 20x under-report, on
+  the figure `maxBudgetUsd` gates against. Claude sessions now take the engine's own
+  `total_cost_usd`, which is cache-aware; it is a session running total rather than a per-turn
+  figure, so spend advances by the difference between turns and picks up again from zero when a
+  resume replaces the CLI process. Proxy sessions keep the estimate, because there the CLI prices
+  another provider's tokens as Opus. The estimate itself, still used when no engine figure arrives,
+  now prices cache writes from the 5-minute / 1-hour split the engine reports.
+- **Subtracting cached reads out of input tokens is only correct on one engine.** `codex` counts
+  cached reads inside `input_tokens` (`total 19704 = input 19699 + output 5`); `grok`, `opencode` and
+  `claude` report them alongside it (`total 30034 = input 19393 + output 17 + read 10624`). Doing the
+  subtraction on the latter removes tokens that were never there and prices them at the cached rate.
+  It failed silently and without bound: after two opencode turns the running cached total exceeds the
+  running input total, the `Math.max(0, …)` clamp reaches zero, and the whole session's input bills
+  at the cached rate. Engines now declare which convention they follow.
+- **`contextPercent` read a nearly-full context as empty.** It was computed from `input_tokens`,
+  which on a resumed conversation excludes the history — that arrives as cached reads. A Claude turn
+  carrying a 47k prompt reported 2 input tokens and the metric read 0%; `onContextHigh` could
+  likewise never fire. It is now the whole prompt (input + cached reads + cache writes) over the
+  window the engine reports for the model it actually ran (`modelUsage[*].contextWindow`), with the
+  registry as fallback — the same thing the codex-app session already did. A one-shot engine with no
+  model set also measures against its own default model's window instead of the registry's catch-all
+  200K, which reported a half-full grok session as full.
+- **Reasoning effort was being clamped to levels the engines had outgrown.** `max` folded to `xhigh`
+  on Codex, which now has a real `max` and an `ultra` above it; `xhigh` folded to `high` on Grok,
+  which accepts `xhigh` natively. Both cost callers a tier they had asked for. All three Codex levels
+  were exercised against 0.149.1 and completed turns.
+- **OpenCode ignored `effort` entirely.** Its knob is `--variant`, which the wrapper never passed, so
+  every caller's setting was dropped. OpenCode does not validate the value: a level its provider does
+  not offer runs at the default rather than failing.
+- **Model registry drift.** `gemini-3.7-flash` and `gemini-3.6-flash` — both offered by agy 1.1.21,
+  3.7 being the newest tier — were unregistered and fell through to the family default: Sonnet rates
+  and a 200K window against a real 1M. `gemini-3.5-flash` was priced at `$0.5/$3` against a list rate
+  of `$1.50/$9.00`. `gpt-5.2`, still selectable in Codex, was unregistered (real window 400K,
+  `$1.75/$14`).
+
+### Added
+
+- `ultra` reasoning effort, reachable on Codex. Every engine clamps to its own ceiling rather than
+  dropping the field: Claude Code stops at `max`, Grok at `xhigh`, Antigravity at `high`.
+- `noSessionPersistence` now means something on Codex, which gained `--ephemeral`. It had reached
+  only Claude Code before.
+- `ignoreUserConfig` (Codex): run without loading `$CODEX_HOME/config.toml`, so an orchestrated run
+  is decided by what the caller passed rather than by the machine's own Codex config — notably a
+  `model = …` line in it, which otherwise picks the model while the ledger records the engine
+  default. Auth still resolves from `CODEX_HOME`.
+- `addDir` reaches Codex as `--add-dir`, on the first turn only; `exec resume` rejects it and the
+  resumed thread keeps the roots it opened with.
+
 ## [6.0.4] - 2026-08-26
 
 ### Fixed

@@ -723,8 +723,8 @@ describe('PersistentAgySession', () => {
 
       const cost = session.getCost();
       expect(cost.model).toBe('gemini-3.5-flash');
-      expect(cost.pricing.inputPer1M).toBe(0.5);
-      expect(cost.pricing.outputPer1M).toBe(3);
+      expect(cost.pricing.inputPer1M).toBe(1.5);
+      expect(cost.pricing.outputPer1M).toBe(9);
     });
   });
 
