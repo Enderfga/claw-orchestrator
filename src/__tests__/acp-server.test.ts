@@ -19,6 +19,7 @@ import {
   flattenPromptContent,
   parseSlashCommand,
   resolveParkedCouncil,
+  cancelAcpTurn,
   ACP_MODE_COMMANDS,
 } from '../acp-server.js';
 
@@ -167,7 +168,7 @@ describe('resolveParkedCouncil', () => {
       async (u) => void emitted.push(u),
     );
 
-    expect(done).toBe(true);
+    expect(done).toBe('decided');
     expect(calls).toEqual(['accept:council-1']);
     expect(state.parkedCouncilId).toBeUndefined();
     // Restored, not cleared — an empty list would strand the client with no way
@@ -198,9 +199,13 @@ describe('resolveParkedCouncil', () => {
     expect(state.parkedCouncilId).toBeUndefined();
   });
 
-  // An ordinary prompt while parked must not be swallowed as a decision — the
-  // caller falls through and reports that a decision is still outstanding.
-  it('leaves the park intact for a non-council command', async () => {
+  // ── Three outcomes, because two of them are not each other's negation.
+  //
+  //    `false` used to mean both "no council is parked" and "one is, but this
+  //    prompt is not a decision". The caller read both as "carry on", so an
+  //    ordinary follow-up message in council mode started a SECOND councilStart
+  //    over the worktrees and branches the parked run still held.
+  it('blocks a non-council command and leaves the park intact', async () => {
     const state = parkedState();
     const done = await resolveParkedCouncil(
       {} as Parameters<typeof resolveParkedCouncil>[0],
@@ -209,8 +214,35 @@ describe('resolveParkedCouncil', () => {
       async () => {},
       async () => {},
     );
-    expect(done).toBe(false);
+    expect(done).toBe('blocked');
     expect(state.parkedCouncilId).toBe('council-1');
+  });
+
+  it('blocks a plain-text prompt, which carries no command at all', async () => {
+    // This is the shape an ordinary follow-up message takes, and the one that
+    // reached councilStart a second time.
+    const state = parkedState();
+    const done = await resolveParkedCouncil(
+      {} as Parameters<typeof resolveParkedCouncil>[0],
+      state,
+      null,
+      async () => {},
+      async () => {},
+    );
+    expect(done).toBe('blocked');
+    expect(state.parkedCouncilId).toBe('council-1');
+  });
+
+  it('reports none when nothing is parked, so an ordinary turn proceeds', async () => {
+    const state = { ...parkedState(), parkedCouncilId: undefined };
+    const done = await resolveParkedCouncil(
+      {} as Parameters<typeof resolveParkedCouncil>[0],
+      state,
+      null,
+      async () => {},
+      async () => {},
+    );
+    expect(done).toBe('none');
   });
 });
 
@@ -227,5 +259,61 @@ describe('ACP_MODE_COMMANDS', () => {
     for (const cmd of ACP_MODE_COMMANDS) {
       expect(parseSlashCommand(`/${cmd.name} do the thing`)).toEqual({ name: cmd.name, rest: 'do the thing' });
     }
+  });
+});
+
+// ── A cancel with nothing in flight must not destroy the session.
+//
+//    The teardown stops and recreates the underlying session, which drops the
+//    engine's native conversation id (codex, codex-app, agy, cursor and
+//    opencode capture theirs mid-turn). Running it on an idle session forked
+//    the history silently: same ACP sessionId to the client, fresh engine
+//    thread on the next prompt.
+describe('cancelAcpTurn', () => {
+  const idleState = () =>
+    ({
+      name: 'acp-x',
+      cwd: '/tmp',
+      model: 'claude-sonnet-4-6',
+      engine: 'claude',
+      permissionMode: 'plan',
+      modeId: 'single',
+    }) as Parameters<typeof cancelAcpTurn>[1];
+
+  const spyManager = () => {
+    const calls: string[] = [];
+    return {
+      calls,
+      manager: {
+        stopSession: async (n: string) => void calls.push(`stop:${n}`),
+        startSession: async (c: { name?: string }) => {
+          calls.push(`start:${c.name}`);
+          return { name: c.name } as never;
+        },
+      } as unknown as Parameters<typeof cancelAcpTurn>[0],
+    };
+  };
+
+  it('does nothing when no turn is in flight', () => {
+    const { manager, calls } = spyManager();
+    const state = idleState();
+
+    expect(cancelAcpTurn(manager, state)).toBe(false);
+    expect(calls).toEqual([]);
+  });
+
+  it('cancels and tears down when a turn IS in flight', async () => {
+    // The other half: guarding everything would break cancel entirely.
+    const { manager, calls } = spyManager();
+    const state = idleState();
+    let cancelled = false;
+    state.cancelInFlight = () => {
+      cancelled = true;
+    };
+
+    expect(cancelAcpTurn(manager, state)).toBe(true);
+    expect(cancelled).toBe(true);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(calls).toEqual(['stop:acp-x', 'start:acp-x']);
   });
 });

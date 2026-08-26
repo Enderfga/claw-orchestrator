@@ -96,6 +96,37 @@ function rejectCustomEngineOverHttp(body: unknown): string | null {
   return `${key} is not accepted over HTTP: a custom engine names an executable to spawn, so it may only be configured by a local caller (MCP tool / SessionManager API). Use a built-in engine here.`;
 }
 
+/**
+ * A guarded SSE writer.
+ *
+ * Every one of these endpoints writes from an EventEmitter callback, and an
+ * event can fire between the client closing the socket and the `close` handler
+ * detaching the listener. Writing then throws ERR_STREAM_WRITE_AFTER_END inside
+ * the emitter callback, where nothing catches it. The autoloop handler was
+ * hardened for exactly this and the other three were not, so the guard lives in
+ * one place now rather than in each closure that remembers to have it.
+ */
+function sseSender(res: http.ServerResponse): (event: string, data: unknown) => void {
+  let closed = false;
+  res.on('close', () => {
+    closed = true;
+  });
+  return (event: string, data: unknown): void => {
+    if (closed || res.writableEnded || !res.writable) return;
+    try {
+      res.write(`event: ${event}\n`);
+      res.write(`data: ${JSON.stringify(data)}\n\n`);
+    } catch {
+      // Connection broke mid-write; stop sending. The route's own `close`
+      // handler detaches listeners and ends the response.
+      closed = true;
+    }
+  };
+}
+
+/** Test seam: the guard is invisible from outside, and an unguarded write throws where nothing catches it. */
+export const __sseSenderForTest = sseSender;
+
 export class EmbeddedServer {
   private server: http.Server | null = null;
   private manager: SessionManager;
@@ -821,10 +852,7 @@ export class EmbeddedServer {
             'Cache-Control': 'no-cache',
             Connection: 'keep-alive',
           });
-          const send = (event: string, data: unknown): void => {
-            res.write(`event: ${event}\n`);
-            res.write(`data: ${JSON.stringify(data)}\n\n`);
-          };
+          const send = sseSender(res);
           const snapshot = this.manager.workflowList({ limit: 1000 }).find((r) => r.runId === runId);
           if (snapshot) send('snapshot', snapshot);
           const unsubscribe = this.manager.onWorkflowEvent((e) => {
@@ -892,10 +920,7 @@ export class EmbeddedServer {
           'Cache-Control': 'no-cache',
           Connection: 'keep-alive',
         });
-        const send = (event: string, data: unknown): void => {
-          res.write(`event: ${event}\n`);
-          res.write(`data: ${JSON.stringify(data)}\n\n`);
-        };
+        const send = sseSender(res);
         // Replay current session so the dashboard renders immediately.
         const snap = council.getSession();
         if (snap) send('snapshot', snap);
@@ -1079,21 +1104,7 @@ export class EmbeddedServer {
           'Cache-Control': 'no-cache',
           Connection: 'keep-alive',
         });
-        let sseClosed = false;
-        const send = (event: string, data: unknown): void => {
-          // A runner/dispatcher event can fire after the client disconnects or
-          // after cleanup() has ended the response. Writing then throws
-          // ERR_STREAM_WRITE_AFTER_END inside an emitter callback (unhandled).
-          if (sseClosed || res.writableEnded || !res.writable) return;
-          try {
-            res.write(`event: ${event}\n`);
-            res.write(`data: ${JSON.stringify(data)}\n\n`);
-          } catch {
-            // Connection broke mid-write; stop sending. res 'close' fires
-            // cleanup() to detach listeners and end the response.
-            sseClosed = true;
-          }
-        };
+        const send = sseSender(res);
         send('snapshot', { state: ctx.runner.state });
 
         const onMessage = (env: unknown): void => send('message', env);
@@ -1111,7 +1122,9 @@ export class EmbeddedServer {
         const onReviewerReply = (text: unknown): void => send('reviewer_reply', { text });
         const onCompact = (e: unknown): void => send('compact', e);
         const cleanup = (): void => {
-          sseClosed = true;
+          // sseSender stops writing on its own `close` listener; this just
+          // detaches the emitters so a long-lived run stops feeding a dead
+          // response.
           ctx.runner.off('message', onMessage);
           ctx.runner.off('state', onState);
           ctx.runner.off('push', onPush);
@@ -1266,15 +1279,12 @@ export class EmbeddedServer {
           'Cache-Control': 'no-cache',
           Connection: 'keep-alive',
         });
+        const sendUa = sseSender(res);
         let unsub: (() => void) | null = null;
         try {
-          unsub = ua.subscribe(runId, (ev: unknown) => {
-            res.write(`event: ultraapp\n`);
-            res.write(`data: ${JSON.stringify(ev)}\n\n`);
-          });
+          unsub = ua.subscribe(runId, (ev: unknown) => sendUa('ultraapp', ev));
         } catch (e) {
-          res.write(`event: error\n`);
-          res.write(`data: ${JSON.stringify({ message: (e as Error).message })}\n\n`);
+          sendUa('error', { message: (e as Error).message });
           res.end();
           return;
         }

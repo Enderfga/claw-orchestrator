@@ -8,6 +8,7 @@ import {
   isClaudeModel,
   convertAnthropicToOpenAI,
   convertOpenAIToAnthropic,
+  convertStreamOpenAIToAnthropic,
   type AnthropicRequest,
   type OpenAIResponse,
 } from '../proxy/anthropic-adapter.js';
@@ -297,5 +298,90 @@ describe('convertOpenAIToAnthropic', () => {
     const result = convertOpenAIToAnthropic(resp, 'gpt-4o');
     expect(result.content).toHaveLength(1);
     expect(result.content[0]).toEqual({ type: 'text', text: '' });
+  });
+});
+
+// ── `text → tool_use → text` is one valid Anthropic turn.
+//
+//    `textBlockOpen` was set false when the first tool block opened and never
+//    set back, so the `if (textBlockOpen)` guard silently discarded everything
+//    the model said after a tool call. Gemini through the OpenAI-compat
+//    endpoint — which this file explicitly targets — emits that shape.
+describe('convertStreamOpenAIToAnthropic — interleaved text and tool calls', () => {
+  async function* lines(...chunks: unknown[]): AsyncGenerator<string> {
+    for (const c of chunks) yield `data: ${JSON.stringify(c)}`;
+    yield 'data: [DONE]';
+  }
+
+  const collect = async (gen: AsyncGenerator<string>) => {
+    const events: Array<{ event: string; data: Record<string, unknown> }> = [];
+    for await (const raw of gen) {
+      const [evLine, dataLine] = raw.trim().split('\n');
+      events.push({
+        event: evLine.replace('event: ', ''),
+        data: JSON.parse(dataLine.replace('data: ', '')) as Record<string, unknown>,
+      });
+    }
+    return events;
+  };
+
+  it('keeps the text a model emits after a tool call', async () => {
+    const events = await collect(
+      convertStreamOpenAIToAnthropic(
+        lines(
+          { choices: [{ delta: { content: 'let me look' } }] },
+          {
+            choices: [{ delta: { tool_calls: [{ id: 'c1', function: { name: 'search', arguments: '{"q":"x"}' } }] } }],
+          },
+          { choices: [{ delta: { content: 'here is what I found' } }] },
+        ),
+        'claude-sonnet-4-6',
+      ),
+    );
+
+    const text = events
+      .filter((e) => e.event === 'content_block_delta')
+      .map((e) => e.data.delta as { type: string; text?: string })
+      .filter((d) => d.type === 'text_delta')
+      .map((d) => d.text)
+      .join('');
+
+    expect(text).toBe('let me lookhere is what I found');
+  });
+
+  it('gives the trailing text its own block, after the tool block closes', async () => {
+    const events = await collect(
+      convertStreamOpenAIToAnthropic(
+        lines(
+          { choices: [{ delta: { content: 'first' } }] },
+          { choices: [{ delta: { tool_calls: [{ id: 'c1', function: { name: 'f', arguments: '{}' } }] } }] },
+          { choices: [{ delta: { content: 'second' } }] },
+        ),
+        'claude-sonnet-4-6',
+      ),
+    );
+
+    const shape = events.filter((e) => e.event.startsWith('content_block')).map((e) => `${e.event}:${e.data.index}`);
+
+    // text(0) … tool(1) … text(2), each opened and closed exactly once.
+    expect(shape).toEqual([
+      'content_block_start:0',
+      'content_block_delta:0',
+      'content_block_stop:0',
+      'content_block_start:1',
+      'content_block_delta:1',
+      'content_block_stop:1',
+      'content_block_start:2',
+      'content_block_delta:2',
+      'content_block_stop:2',
+    ]);
+  });
+
+  it('leaves a plain text turn exactly as it was', async () => {
+    const events = await collect(
+      convertStreamOpenAIToAnthropic(lines({ choices: [{ delta: { content: 'hello' } }] }), 'claude-sonnet-4-6'),
+    );
+    const shape = events.filter((e) => e.event.startsWith('content_block')).map((e) => `${e.event}:${e.data.index}`);
+    expect(shape).toEqual(['content_block_start:0', 'content_block_delta:0', 'content_block_stop:0']);
   });
 });
