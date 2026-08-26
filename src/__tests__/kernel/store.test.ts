@@ -179,6 +179,36 @@ describe('crash recovery', () => {
     expect(replayed.nodes.a.visits).toBe(1);
   });
 
+  // ── A retry is not a visit.
+  //
+  //    `_run` commits the visit counter with no event; `_runWithRetry` emits a
+  //    `running` event per ATTEMPT. Counting every one of them replayed a single
+  //    visit with K retries as K visits, so a resume from a lost run.json could
+  //    trip the visit bound on its first turn while the real count was 1.
+  it('counts one visit however many attempts it took', () => {
+    createRunDir('r1', spec);
+    appendEvent('r1', { ts: 't0', type: 'run_created', runId: 'r1', workflow: 'demo' });
+    appendEvent('r1', { ts: 't1', type: 'node_state', node: 'a', state: 'running', attempt: 1 });
+    appendEvent('r1', { ts: 't2', type: 'node_state', node: 'a', state: 'running', attempt: 2 });
+    appendEvent('r1', { ts: 't3', type: 'node_state', node: 'a', state: 'running', attempt: 3 });
+    appendEvent('r1', { ts: 't4', type: 'node_state', node: 'a', state: 'succeeded' });
+
+    const replayed = replayRun('r1', spec)!;
+    expect(replayed.nodes.a.visits).toBe(1);
+    expect(replayed.nodes.a.attempts).toBe(3);
+  });
+
+  it('counts a genuine revisit, which is what the bound is for', () => {
+    createRunDir('r1', spec);
+    appendEvent('r1', { ts: 't0', type: 'run_created', runId: 'r1', workflow: 'demo' });
+    appendEvent('r1', { ts: 't1', type: 'node_state', node: 'a', state: 'running', attempt: 1 });
+    appendEvent('r1', { ts: 't2', type: 'node_state', node: 'a', state: 'failed' });
+    appendEvent('r1', { ts: 't3', type: 'node_state', node: 'a', state: 'running', attempt: 1 });
+    appendEvent('r1', { ts: 't4', type: 'node_state', node: 'a', state: 'succeeded' });
+
+    expect(replayRun('r1', spec)!.nodes.a.visits).toBe(2);
+  });
+
   it('falls back to a replay when run.json is half-written', () => {
     createRunDir('r1', spec);
     appendEvent('r1', { ts: 't0', type: 'run_created', runId: 'r1', workflow: 'demo' });

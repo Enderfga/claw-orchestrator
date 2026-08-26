@@ -947,6 +947,15 @@ export class RunKernel extends EventEmitter {
 
       const result = await this._runWithRetry(handle, spec);
       if (txn.finished) return txn.record;
+      // Back to `running` once the checks are done: `verifying` was only ever
+      // set on the way in, and a verifier that sits mid-chain (the solve repair
+      // loop puts routers and another implement pass after it) left the record
+      // saying `verifying` for the rest of the run. `_finish` stamps the right
+      // terminal state either way, but every observer in between read the wrong
+      // one. Same shape as the restore in `_park`.
+      if (spec.kind === 'verifier' && !handle.signal.aborted && txn.record.state === 'verifying') {
+        this._setRunState(handle, 'running');
+      }
 
       // Cancel wins regardless of what the node returned. A runner that never
       // looked at the signal and reported success anyway used to carry the run
@@ -1088,7 +1097,23 @@ export class RunKernel extends EventEmitter {
   }
 
   /** Node kinds that can change the workspace. Routers and gates cannot. */
-  private static readonly SIDE_EFFECT_KINDS: readonly NodeKind[] = ['agent', 'fanout', 'council', 'subflow'];
+  /**
+   * Node kinds that can move the workspace. `sideEffectSeq` counts them, and
+   * `_verdictWentStale` uses "nothing ran since" as a git-free early exit — so a
+   * kind missing here lets a verdict stand over a tree it no longer describes.
+   * `ultraapp_synth` writes an entire codebase and `ultraapp_deploy` writes
+   * local build artifacts; the built-in template happens not to place either
+   * after a verdict, but nothing stops a composed workflow from doing so.
+   */
+  private static readonly SIDE_EFFECT_KINDS: readonly NodeKind[] = [
+    'agent',
+    'fanout',
+    'council',
+    'subflow',
+    'autoloop',
+    'ultraapp_synth',
+    'ultraapp_deploy',
+  ];
 
   /**
    * Fold a node's result into the run — output, artifacts, cost, votes, verdict
@@ -1116,8 +1141,10 @@ export class RunKernel extends EventEmitter {
       if (result.output.length > OUTPUT_PREVIEW_CHARS) {
         outputArtifact = nodeArtifactPath(txn.guard.runId, nodeId, 'output.txt');
         artifacts.push({ nodeId, name: 'output.txt', body: result.output });
-        preview =
-          result.output.slice(0, OUTPUT_PREVIEW_CHARS) + `\n…[truncated — full text in nodes/${nodeId}/output.txt]`;
+        // The path as it exists, not as the id was spelled: `nodeArtifactPath`
+        // sanitises the node id, so a node called `build (web)` writes to
+        // `build__web_/output.txt` and the raw interpolation pointed at nothing.
+        preview = result.output.slice(0, OUTPUT_PREVIEW_CHARS) + `\n…[truncated — full text in ${outputArtifact}]`;
       } else {
         preview = result.output;
       }
@@ -1141,8 +1168,18 @@ export class RunKernel extends EventEmitter {
           draft.sideEffectSeq = (draft.sideEffectSeq ?? 0) + 1;
         }
         if (preview !== undefined) node.output = preview;
-        if (outputArtifact) node.artifacts = [...new Set([...(node.artifacts ?? []), outputArtifact])];
-        if (result.artifacts?.length) node.artifacts = result.artifacts;
+        // Merged, not replaced. A node that both spills a long output and
+        // returns its own artifacts had the spill dropped from the index by the
+        // second assignment, while the file itself landed in the same commit.
+        if (outputArtifact || result.artifacts?.length) {
+          node.artifacts = [
+            ...new Set([
+              ...(node.artifacts ?? []),
+              ...(outputArtifact ? [outputArtifact] : []),
+              ...(result.artifacts ?? []),
+            ]),
+          ];
+        }
         if (result.data !== undefined) node.data = result.data;
         if (result.childRunId) node.childRunId = result.childRunId;
         if (typeof result.costUsd === 'number') draft.costUsd = (draft.costUsd ?? 0) + result.costUsd;

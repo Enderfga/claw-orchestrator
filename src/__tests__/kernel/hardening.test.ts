@@ -373,3 +373,75 @@ describe('verdict staleness across a verifier with its own cwd', () => {
     expect(done.outcomeReason).toMatch(/changed afterwards/);
   }, 30_000);
 });
+
+// ── Five smaller kernel defects, each with the thing that went wrong asserted.
+describe('kernel bookkeeping', () => {
+  it("keeps both the spilled output and a node's own artifacts", async () => {
+    const kernel = registerDefaultExecutors(new RunKernel({ nodeTimeoutMs: 8000 }));
+    kernel.setExecutor('agent', async () => ({
+      ok: true,
+      output: 'x'.repeat(20_000), // past OUTPUT_PREVIEW_CHARS, so it spills
+      artifacts: ['nodes/big/custom.bin'],
+    }));
+
+    const rec = await kernel.start({ name: 'p', nodes: [{ id: 'big', kind: 'agent', prompt: 'go' }] });
+    const done = await kernel.wait(rec.runId);
+
+    const artifacts = done!.nodes.big.artifacts ?? [];
+    expect(artifacts).toContain('nodes/big/custom.bin');
+    expect(artifacts.some((a) => a.endsWith('output.txt'))).toBe(true);
+  });
+
+  it('points the truncation notice at the path the file is actually written to', async () => {
+    // Node ids are sanitised on the way to disk, so the raw id is the wrong path.
+    const kernel = registerDefaultExecutors(new RunKernel({ nodeTimeoutMs: 8000 }));
+    kernel.setExecutor('agent', async () => ({ ok: true, output: 'y'.repeat(20_000) }));
+
+    const rec = await kernel.start({ name: 'p', nodes: [{ id: 'build (web)', kind: 'agent', prompt: 'go' }] });
+    const done = await kernel.wait(rec.runId);
+
+    const cited = /full text in (\S+)\]/.exec(done!.nodes['build (web)'].output ?? '')?.[1];
+    expect(cited).toBeTruthy();
+    expect(fs.existsSync(path.join(runDir(rec.runId), cited!))).toBe(true);
+  });
+
+  it('counts every workspace-mutating kind, not just the four it started with', async () => {
+    // `sideEffectSeq` is the git-free early exit in the staleness check: a kind
+    // missing from it lets a verdict stand over a tree it no longer describes.
+    // `ultraapp_synth` writes an entire codebase.
+    const kernel = registerDefaultExecutors(new RunKernel({ nodeTimeoutMs: 8000 }));
+    kernel.setExecutor('ultraapp_synth', async () => ({ ok: true, output: 'wrote an app' }));
+    kernel.setExecutor('agent', async () => ({ ok: true }));
+
+    const rec = await kernel.start({
+      name: 'p',
+      nodes: [
+        { id: 'a', kind: 'agent', prompt: 'go' },
+        { id: 'synth', kind: 'ultraapp_synth', prompt: 'build it' } as never,
+      ],
+    });
+    const done = await kernel.wait(rec.runId);
+
+    expect(done!.sideEffectSeq).toBe(2);
+  });
+
+  it('leaves the run state at running once the verifier is done', async () => {
+    const kernel = registerDefaultExecutors(new RunKernel({ nodeTimeoutMs: 8000 }));
+    const states: string[] = [];
+    kernel.setExecutor('agent', async (_node, ctx) => {
+      states.push(ctx.record.state);
+      return { ok: true };
+    });
+    const rec = await kernel.start({
+      name: 'p',
+      nodes: [
+        { id: 'check', kind: 'verifier', contract: { checks: [{ spec: { type: 'command', cmd: 'true' } }] } },
+        { id: 'after', kind: 'agent', prompt: 'go' },
+      ],
+    });
+    await kernel.wait(rec.runId);
+
+    // The agent that runs after the verifier must not observe `verifying`.
+    expect(states).toEqual(['running']);
+  }, 20_000);
+});
