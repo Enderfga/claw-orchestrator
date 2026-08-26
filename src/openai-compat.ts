@@ -166,6 +166,17 @@ export function buildSessionSystemPrompt(
   return callerSystemPrompt ? `${systemWithTools}\n\n${callerSystemPrompt}` : systemWithTools;
 }
 
+/**
+ * JSON with object keys in a fixed order, so a schema that only got
+ * re-serialised does not read as a different schema.
+ */
+function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null';
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${stableStringify(v)}`).join(',')}}`;
+}
+
 export function resolveSessionKey(body: OpenAIChatCompletionRequest, headers: http.IncomingHttpHeaders): string {
   const headerKey = headers['x-session-id'];
   if (typeof headerKey === 'string' && headerKey.trim()) return headerKey.trim();
@@ -193,7 +204,13 @@ export function resolveSessionKey(body: OpenAIChatCompletionRequest, headers: ht
           const fn = t?.function;
           if (!fn?.name) return '';
           const descPrefix = (typeof fn.description === 'string' ? fn.description : '').slice(0, 64);
-          return `${fn.name}:${descPrefix}`;
+          // The parameter schema belongs in the fingerprint too. On the Claude
+          // engine the schemas are baked into the session's system prompt at
+          // create time and deliberately not re-injected per turn, so a caller
+          // that changes a tool's parameters while keeping its name and
+          // description resolved to the same session — and kept getting
+          // tool_calls shaped like the schema it had replaced.
+          return `${fn.name}:${descPrefix}:${stableStringify(fn.parameters)}`;
         })
         .filter(Boolean)
         .join('|');
@@ -1055,6 +1072,14 @@ async function handleStreaming(
   // When tools are present, buffer the full response to parse for tool_calls.
   // Without tools, stream text chunks directly for low latency.
   let bufferedText = '';
+  // `sendMessage` reports the whole answer as its return value AND streams it
+  // through `onChunk` for engines that have a delta channel. Engines without one
+  // — opencode, agy, the per-send codex/cursor wrappers, one-shot custom engines
+  // — never call it, and this path then emitted the role chunk and the stop
+  // chunk with the reply nowhere in between: an empty 200. Counting what
+  // streamed is what lets the fallback below fire without doubling the answer
+  // for engines that do stream. Same shape as the ACP adapter's.
+  let streamedChars = 0;
 
   try {
     reportStatus('thinking', 'Processing request...');
@@ -1064,6 +1089,7 @@ async function handleStreaming(
           bufferedText += chunk;
           // Send keepalive comments during buffering to prevent timeouts
         } else {
+          streamedChars += chunk.length;
           writeSSE(JSON.stringify(formatCompletionChunk(completionId, model, { content: chunk }, null)));
         }
       },
@@ -1144,7 +1170,11 @@ async function handleStreaming(
         writeSSE(JSON.stringify(finalChunk));
       }
     } else {
-      // No tools — standard finish
+      // No tools — standard finish. An engine with no delta channel gets its
+      // answer emitted here, once, because nothing streamed it.
+      if (streamedChars === 0 && result.output) {
+        writeSSE(JSON.stringify(formatCompletionChunk(completionId, model, { content: result.output }, null)));
+      }
       const finalChunk = formatCompletionChunk(completionId, model, {}, 'stop');
       if (usage) finalChunk.usage = usage;
       writeSSE(JSON.stringify(finalChunk));

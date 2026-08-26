@@ -7,12 +7,18 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import {
   createProxyHandler,
   getAnthropicBaseUrl,
   _resetAnthropicBaseUrlCache,
   type ProxyEnv,
 } from '../proxy/handler.js';
+import { useIsolatedHome } from './helpers/isolate-home.js';
+
+useIsolatedHome();
 
 describe('getAnthropicBaseUrl (3-layer fallback)', () => {
   const savedEnv = process.env.ANTHROPIC_BASE_URL;
@@ -36,6 +42,44 @@ describe('getAnthropicBaseUrl (3-layer fallback)', () => {
     expect(getAnthropicBaseUrl()).toBe('https://first.test'); // cached
     _resetAnthropicBaseUrlCache();
     expect(getAnthropicBaseUrl()).toBe('https://second.test'); // re-read after reset
+  });
+
+  // ── Layer 2 must read the anthropic provider, by name.
+  //
+  //    It iterated every provider and returned the first baseUrl it found, so a
+  //    config listing any other provider above `anthropic` sent Anthropic
+  //    passthrough — `x-api-key: $ANTHROPIC_API_KEY` and the whole prompt body
+  //    — to that provider's host instead.
+  it('Layer 2: reads the anthropic provider, not whichever key comes first', () => {
+    delete process.env.ANTHROPIC_BASE_URL;
+    const dir = path.join(os.homedir(), '.openclaw');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, 'openclaw.json'),
+      JSON.stringify({
+        providers: {
+          openai: { baseUrl: 'https://someone-elses-proxy.test' },
+          anthropic: { baseUrl: 'https://anthropic.test' },
+        },
+      }),
+    );
+    _resetAnthropicBaseUrlCache();
+
+    expect(getAnthropicBaseUrl()).toBe('https://anthropic.test');
+  });
+
+  it('Layer 2: falls through to the default when no anthropic provider is configured', () => {
+    delete process.env.ANTHROPIC_BASE_URL;
+    const dir = path.join(os.homedir(), '.openclaw');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, 'openclaw.json'),
+      JSON.stringify({ providers: { openai: { baseUrl: 'https://someone-elses-proxy.test' } } }),
+    );
+    _resetAnthropicBaseUrlCache();
+
+    expect(getAnthropicBaseUrl()).not.toBe('https://someone-elses-proxy.test');
+    expect(getAnthropicBaseUrl()).toMatch(/anthropic/);
   });
 
   it('returns a valid https URL when no env var is set (config or default layer)', () => {
@@ -268,6 +312,40 @@ describe('createProxyHandler', () => {
       // fetchWithRetry retries on 429
       expect(mockFetch).toHaveBeenCalledTimes(2);
       expect(res.statusCode).toBe(200);
+    });
+
+    // ── A streaming error must not arrive as an empty success.
+    //
+    //    The streaming branch piped the body without checking `resp.ok`, so a
+    //    401/429/500 reached the caller as HTTP 200 with SSE headers and a JSON
+    //    error body — which an SSE parser reads as a stream that said nothing.
+    //    The three sibling paths in this file already guarded it.
+    it('reports an upstream error on the streaming path instead of an empty stream', async () => {
+      mockFetch.mockResolvedValueOnce(
+        new Response(JSON.stringify({ type: 'error', error: { type: 'authentication_error' } }), { status: 401 }),
+      );
+
+      const req = makeReq({ body: makeAnthropicBody('claude-sonnet-4-6', true) });
+      const res = makeRes();
+      await handler(req as never, res as never);
+
+      expect(res.statusCode).toBe(401);
+      expect(res.headers['Content-Type']).not.toBe('text/event-stream');
+    });
+
+    it('still streams a successful upstream response', async () => {
+      mockFetch.mockResolvedValueOnce(
+        new Response('event: message_start\ndata: {}\n\n', {
+          status: 200,
+          headers: { 'Content-Type': 'text/event-stream' },
+        }),
+      );
+
+      const req = makeReq({ body: makeAnthropicBody('claude-sonnet-4-6', true) });
+      const res = makeRes();
+      await handler(req as never, res as never);
+
+      expect(res.headers['Content-Type']).toBe('text/event-stream');
     });
 
     it('passes through upstream error status', async () => {
