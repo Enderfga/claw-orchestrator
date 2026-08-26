@@ -480,9 +480,13 @@ export class SessionManager {
     }
 
     // Auto-resume: if we have a persisted claudeSessionId for this name, inject it.
-    // Skip when config.skipPersistence is set (e.g. openai-compat bridge sessions
-    // that must NOT resume stale CLI state from a previous server run).
-    const skipPersist = !!(config as Record<string, unknown>).skipPersistence;
+    // Skip when the caller asked for no persistence — either spelling. This read
+    // used to be `skipPersistence` alone, through a cast, and that field is set
+    // only by in-process callers (openai-compat bridge, ACP adapter); everything
+    // that arrives over the CLI (`--skip-persistence`) or the MCP tool spells it
+    // `noSessionPersistence`, so those sessions were written to the registry and
+    // auto-resumed on the next start under the same name.
+    const skipPersist = !!(config.skipPersistence || config.noSessionPersistence);
     const persisted = skipPersist ? undefined : this.persistedSessions.get(name);
     // Unified: only use resumeSessionId (claudeResumeId is an internal alias, not exposed)
     const resumeId = config.resumeSessionId ?? persisted?.claudeSessionId;

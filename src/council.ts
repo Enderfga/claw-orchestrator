@@ -479,11 +479,20 @@ export class Council extends EventEmitter {
     }
     this._activeSessions.clear();
     // Discard the run's worktrees — an aborted run has nothing to review.
-    if (this._worktreeMap.size > 0) {
-      const map = new Map(this._worktreeMap);
-      this._worktreeMap.clear();
-      void cleanupCreatedWorktrees(map, this.config.projectDir, this.logger);
-    }
+    // Best-effort here: abort() is synchronous, and run() cleans up again on
+    // its way out for the case where this fired before setup had finished.
+    void this._discardWorktrees();
+  }
+
+  /**
+   * Remove the worktrees this run created, once. Clearing the map before the
+   * await is what makes a second caller a no-op rather than a double remove.
+   */
+  private async _discardWorktrees(): Promise<void> {
+    if (this._worktreeMap.size === 0) return;
+    const map = new Map(this._worktreeMap);
+    this._worktreeMap.clear();
+    await cleanupCreatedWorktrees(map, this.config.projectDir, this.logger).catch(() => {});
   }
 
   private emitEvent(event: Omit<CouncilEvent, 'timestamp'>) {
@@ -742,6 +751,15 @@ export class Council extends EventEmitter {
 
       if (this._aborted) {
         session.status = 'error';
+        // An abort that lands while setupWorktrees is still running finds an
+        // empty `_worktreeMap` — it is not assigned until setup returns — so
+        // abort() skips its own cleanup, setup then completes and creates every
+        // worktree, and this loop breaks on the next line without throwing.
+        // The catch below is the only other place cleanup runs, and a normal
+        // return never reaches it. Cleaning here covers both that race and the
+        // ordinary break-on-abort; if abort() already cleaned up, the map is
+        // empty and this is a no-op.
+        await this._discardWorktrees();
       } else if (session.status === 'running') {
         session.status = 'max_rounds';
         this.logger.info(`Max rounds (${this.config.maxRounds}) reached`);
@@ -760,11 +778,7 @@ export class Council extends EventEmitter {
       this.emitEvent({ type: 'error', sessionId: session.id, error: (err as Error).message });
       // The run failed — there is nothing to review, so don't orphan the
       // worktrees on disk. (Successful runs keep them for the accept flow.)
-      if (this._worktreeMap.size > 0) {
-        const map = new Map(this._worktreeMap);
-        this._worktreeMap.clear();
-        await cleanupCreatedWorktrees(map, this.config.projectDir, this.logger).catch(() => {});
-      }
+      await this._discardWorktrees();
       throw err;
     }
   }

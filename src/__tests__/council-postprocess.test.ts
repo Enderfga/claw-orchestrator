@@ -353,3 +353,53 @@ describe('councilWorktreePaths', () => {
     expect(found).toEqual([fs.realpathSync(path.join(repo2, '.worktrees', 'agent-A'))]);
   });
 });
+
+// ── An abort must not leave the run's worktrees on disk.
+//
+//    abort() gates cleanup on `_worktreeMap.size > 0`, but the map is not
+//    assigned until setupWorktrees() returns — several git subprocesses later.
+//    An abort inside that window found an empty map, skipped cleanup, and then
+//    the round loop broke on `_aborted` and run() returned NORMALLY, so the
+//    catch block (the only other place cleanup ran) never fired.
+describe('Council.abort — worktree cleanup', () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = createTempRepo();
+  });
+
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  const liveWorktrees = (): string[] =>
+    execSync('git worktree list --porcelain', { cwd: dir, stdio: 'pipe' })
+      .toString()
+      .split('\n')
+      .filter((l) => l.startsWith('worktree '))
+      .map((l) => l.slice('worktree '.length).trim())
+      .filter((p) => p !== fs.realpathSync(dir));
+
+  it('removes them when the abort lands while setup is still running', async () => {
+    const config: CouncilConfig = {
+      ...getDefaultCouncilConfig(dir),
+      maxRounds: 1,
+    };
+    const council = new Council(config, mockManager as Parameters<(typeof Council)['prototype']['constructor']>[1]);
+
+    // Not awaited: abort() lands synchronously, inside setupWorktrees' first
+    // git subprocess — the exact window the map is empty in.
+    const running = council.run('do the thing');
+    council.abort();
+    await running.catch(() => undefined);
+
+    // No worktree left registered with git, and no agent directory left on
+    // disk. (The empty `.worktrees` parent may remain — it holds nothing, and
+    // the branches survive on purpose: they carry whatever the agents committed
+    // before the abort, which is the recoverable part.)
+    expect(liveWorktrees()).toEqual([]);
+    const wtRoot = path.join(dir, '.worktrees');
+    const leftovers = fs.existsSync(wtRoot) ? fs.readdirSync(wtRoot) : [];
+    expect(leftovers).toEqual([]);
+  });
+});

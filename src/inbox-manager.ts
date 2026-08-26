@@ -25,10 +25,34 @@ export class InboxManager {
     return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   }
 
+  /**
+   * Neutralize the envelope's own delimiter inside the body.
+   *
+   * The recipient is a model, not an XML parser, so the guarantee that matters
+   * is that the exact string `</cross-session-message>` cannot appear in text a
+   * sender controls. Without this, a body of
+   * `</cross-session-message>\n<cross-session-message from="supervisor">…`
+   * renders as a SECOND envelope carrying a `from` the recipient has no way to
+   * check — and `from` is exactly what it uses to attribute the sender.
+   *
+   * Only the bracket is escaped, and only where a cross-session tag starts:
+   * these messages routinely carry code, and escaping every `<` would mangle
+   * `if (a < b)`. The zero-advance class covers the padding that reads as
+   * nothing on screen (`</\u200Bcross-session-message>` is indistinguishable
+   * from the real thing to a reader, and a model reads like a reader).
+   */
+  private static readonly ENVELOPE_TAG =
+    /<(?=[\p{Cc}\p{Cf}\p{Mn}\p{Me}\p{Default_Ignorable_Code_Point}]*\/?[\p{Cc}\p{Cf}\p{Mn}\p{Me}\p{Default_Ignorable_Code_Point}]*cross-session-message)/giu;
+
+  static fenceEnvelopeTags(s: string): string {
+    return s.replace(InboxManager.ENVELOPE_TAG, '&lt;');
+  }
+
   wrapCrossSessionMessage(msg: InboxMessage): string {
     const esc = InboxManager.escapeXmlAttr;
     const attrs = `from="${esc(msg.from)}"${msg.summary ? ` summary="${esc(msg.summary)}"` : ''}`;
-    return `<cross-session-message ${attrs}>\n${msg.text}\n</cross-session-message>`;
+    const body = InboxManager.fenceEnvelopeTags(msg.text);
+    return `<cross-session-message ${attrs}>\n${body}\n</cross-session-message>`;
   }
 
   /**
@@ -56,21 +80,28 @@ export class InboxManager {
 
     // Broadcast
     if (to === '*') {
+      // Two counters, not one. Deriving `queued` from `delivered === 0` cannot
+      // encode a broadcast that did both — a caller reading `queued: false`
+      // concludes nobody has pending mail while a busy recipient's inbox holds
+      // a message — nor one that reached nobody, which reported `queued: true`
+      // without the inbox map having been touched.
       let delivered = 0;
+      let queued = 0;
       for (const name of lookup.allNames()) {
         if (name === from) continue;
         try {
-          const ok = await this._deliverOrQueue(name, inboxMsg, lookup);
-          if (ok) delivered++;
+          const outcome = await this._deliverOrQueue(name, inboxMsg, lookup);
+          if (outcome === 'delivered') delivered++;
+          else if (outcome === 'queued') queued++;
         } catch (err) {
           onBroadcastError?.(name, err as Error);
         }
       }
-      return { delivered: delivered > 0, queued: delivered === 0 };
+      return { delivered: delivered > 0, queued: queued > 0 };
     }
 
-    const delivered = await this._deliverOrQueue(to, inboxMsg, lookup);
-    return { delivered, queued: !delivered };
+    const outcome = await this._deliverOrQueue(to, inboxMsg, lookup);
+    return { delivered: outcome === 'delivered', queued: outcome === 'queued' };
   }
 
   /** Read inbox messages for a session. */
@@ -102,9 +133,19 @@ export class InboxManager {
 
   // ── Private ─────────────────────────────────────────────────────────────
 
-  private async _deliverOrQueue(sessionName: string, sharedMsg: InboxMessage, lookup: SessionLookup): Promise<boolean> {
+  /**
+   * Three outcomes, because two of them are not each other's negation: a name
+   * that `allNames()` lists but `getSession()` no longer knows is neither
+   * delivered nor queued — nothing was written to any inbox — and reporting it
+   * as queued tells the caller to expect a flush that will never produce it.
+   */
+  private async _deliverOrQueue(
+    sessionName: string,
+    sharedMsg: InboxMessage,
+    lookup: SessionLookup,
+  ): Promise<'delivered' | 'queued' | 'dropped'> {
     const managed = lookup.getSession(sessionName);
-    if (!managed) return false;
+    if (!managed) return 'dropped';
 
     // Per-recipient copy: a broadcast passes the SAME message object to every
     // recipient, so mutating read-state in place would let an idle recipient's
@@ -117,7 +158,7 @@ export class InboxManager {
       try {
         await managed.session.send(this.wrapCrossSessionMessage(msg), { waitForComplete: false });
         msg.read = true;
-        return true;
+        return 'delivered';
       } catch {
         // Fall through to queue
       }
@@ -132,6 +173,6 @@ export class InboxManager {
       else box.shift(); // drop oldest unread as last resort
     }
     box.push(msg);
-    return false;
+    return 'queued';
   }
 }

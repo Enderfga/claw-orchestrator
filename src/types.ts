@@ -272,7 +272,24 @@ export interface SessionConfig {
    * Claude writes a JS orchestration script per substantive task and fans out to subagents.
    */
   ultracode?: boolean;
+  /**
+   * Do not save this session to disk.
+   *
+   * Two stores, one switch: the engine's own transcript (Claude Code gets
+   * `--no-session-persistence`; other CLIs have no equivalent flag) AND this
+   * orchestrator's session registry, which is what auto-resume reads. Setting
+   * only the first left the session in `~/.openclaw/claude-sessions.json`, so a
+   * later `session-start` under the same name silently reattached to the
+   * conversation the caller had asked not to keep.
+   */
   noSessionPersistence?: boolean;
+  /**
+   * Internal spelling of the registry half, for callers that create ephemeral
+   * sessions programmatically (the openai-compat bridge, the ACP adapter) and
+   * must not pass an engine flag that some CLI forks do not accept. Declared
+   * here so the check does not have to read it through a cast.
+   */
+  skipPersistence?: boolean;
   betas?: string | string[];
   enableAgentTeams?: boolean;
   // CLI 2.1.111 features

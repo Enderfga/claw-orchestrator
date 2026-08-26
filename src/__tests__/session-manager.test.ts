@@ -298,6 +298,27 @@ describe('SessionManager', () => {
       expect(lastMock().startCalled).toBe(1);
     });
 
+    // ── "Do not save session to disk" means both stores.
+    //
+    //    The flag reached the engine (Claude Code's --no-session-persistence)
+    //    but not this orchestrator's own registry, which is what auto-resume
+    //    reads — so `clawo session-start x --skip-persistence` twice silently
+    //    reattached to the first conversation.
+    it('noSessionPersistence keeps the session out of the resume registry', async () => {
+      await mgr.startSession({ name: 'ephemeral', cwd: '/tmp', noSessionPersistence: true });
+      expect((mgr as unknown as { persistedSessions: Map<string, unknown> }).persistedSessions.has('ephemeral')).toBe(
+        false,
+      );
+    });
+
+    it('still registers an ordinary session', async () => {
+      // Half the contract: skipping everything would be just as wrong.
+      await mgr.startSession({ name: 'ordinary', cwd: '/tmp' });
+      expect((mgr as unknown as { persistedSessions: Map<string, unknown> }).persistedSessions.has('ordinary')).toBe(
+        true,
+      );
+    });
+
     it('startSession returns existing session without re-creating', async () => {
       const info1 = await mgr.startSession({ name: 'dup', cwd: '/tmp' });
       const info2 = await mgr.startSession({ name: 'dup', cwd: '/other' });
