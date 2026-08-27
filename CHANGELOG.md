@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.1.1] - 2026-08-27
+
+Both defects surfaced while connecting `clawo-mcp` to an MCP host for the first time.
+
+### Fixed
+
+- **The commands in `package.json#bin` were not executable.** `tsc` writes 0644 and the build never
+  restored the bit. A published install hides this — npm sets the mode itself when it links a bin —
+  but a `npm link` checkout points straight at these files, so after a build the commands sit on
+  PATH and refuse to run with "permission denied", while `command -v` reports them as missing
+  because it only considers executables. `clawo` had therefore only ever worked when invoked as
+  `node $(which clawo)`, and `clawo-mcp` / `clawo-acp` could not be run at all. `scripts/postbuild.mjs`
+  now marks all three executable.
+- **The MCP server reported the wrong version to every host.** It read
+  `process.env.npm_package_version`, which npm sets only for a process npm itself started; an MCP
+  host spawns the binary directly, so the variable was never present and the hard-coded fallback —
+  `3.7.0`, the version current when that line was written — was what got sent every time. It now
+  reads the package manifest, the way `bin/cli.ts` already did.
+
+### Fixed (test harness)
+
+- **A lock holder spawned by the test suite could outlive the run that made it.** `holdLock` waits
+  on a release marker the test writes, and that was its only way out, so a run that crashed, timed
+  out, or was interrupted left the child process holding memory and a lock file until reboot. Two
+  calls in that file had also been written against older signatures and neither failed: one passed
+  a duration where an options object was expected, leaving the marker path undefined and the child
+  waiting on `existsSync(undefined)` — false forever; the other dropped a required owner id, so the
+  takeover a test describes went in under `undefined`. The holder now also exits on an absolute
+  deadline or when its parent goes away, and an unusable marker path throws at the call rather than
+  leaking silently. `tsconfig.test.json` plus `npm run typecheck:tests` closes the blind spot that
+  hid both calls — tests are excluded from the build so that they stay out of `dist/`, which also
+  meant nothing type-checked them. It is a diagnostic, not a CI gate; its header explains why.
+
 ## [6.1.0] - 2026-08-27
 
 Engine sweep: Claude Code 2.1.237 → 2.1.246, Codex 0.148.0 → 0.149.1, Antigravity 1.1.15 → 1.1.21,
