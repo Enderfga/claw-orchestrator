@@ -1,0 +1,26 @@
+{
+  // Type-checks the test suite, which tsconfig.json excludes so that tests stay
+  // out of dist/. Nothing had ever checked them, and two calls written against
+  // signatures that had since changed were living in that gap:
+  //
+  //   holdLock(path, 900)          — an options object was expected, so
+  //                                  `releaseOn` was undefined and the child
+  //                                  process it spawns never exited. One orphan
+  //                                  per run, 31 of them over four days.
+  //   acquireLease(runId)          — takes two arguments; the claim went in
+  //                                  under an undefined owner id.
+  //
+  // Both are fixed. This config is a diagnostic, NOT a CI gate: run it and it
+  // still reports ~70 pre-existing errors, nearly all of them deliberate
+  // looseness in test doubles (a `FakeSession` implementing `Partial<ISession>`
+  // with narrower signatures, config literals omitting required fields). Making
+  // it green is a real piece of work and a separate one. Until then, run it
+  // after changing a test helper's signature and read the errors it adds.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "types": ["node", "vitest/globals"]
+  },
+  "include": ["src/**/*", "bin/**/*"],
+  "exclude": ["node_modules", "dist"]
+}
