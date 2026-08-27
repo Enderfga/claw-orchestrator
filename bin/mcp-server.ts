@@ -22,6 +22,8 @@
  *                            control-plane (port 18796) which is dead weight
  *                            for MCP-only deployments.
  */
+import { createRequire } from 'node:module';
+
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
@@ -136,7 +138,25 @@ if (allowed && tools.length === 0) {
   log.warn(`CLAWO_MCP_TOOLS filter matched 0 tools. Captured: ${captured.map((t) => t.name).join(', ')}`);
 }
 
-const PKG_VERSION = process.env.npm_package_version ?? '3.7.0';
+/**
+ * The version reported to the MCP host.
+ *
+ * `npm_package_version` is only set for a process npm itself started, and an MCP
+ * host spawns this binary directly — so that variable is never present here and
+ * the literal fallback was what every host had been told since it was written.
+ * Read the package's own manifest instead, the way `bin/cli.ts` does.
+ */
+function pkgVersion(): string {
+  try {
+    // From dist/bin/mcp-server.js, package.json sits two levels up.
+    const pkg = createRequire(import.meta.url)('../../package.json') as { version?: string };
+    return pkg.version || '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
+}
+
+const PKG_VERSION = pkgVersion();
 
 const server = new Server({ name: 'claw-orchestrator', version: PKG_VERSION }, { capabilities: { tools: {} } });
 
