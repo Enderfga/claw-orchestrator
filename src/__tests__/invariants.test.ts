@@ -152,6 +152,12 @@ function runFiles(runId: string): string[] {
 }
 
 /**
+ * Absolute lifetime for a spawned lock holder. Every test that uses one finishes
+ * far inside this; it exists only so a holder cannot outlive the run that made it.
+ */
+const HOLD_LOCK_MAX_MS = 30_000;
+
+/**
  * Hold a lock file from a real other process.
  *
  * Coordinated rather than timed, and both halves matter. `ready` resolves only once the
@@ -169,12 +175,38 @@ function holdLock(
   ready: Promise<void>;
   exited: Promise<void>;
 } {
+  // Checked here rather than left to the type system, because this file is not
+  // type-checked by the build and a call written against an older signature
+  // reached this line with `opts.releaseOn` undefined. `JSON.stringify(undefined)`
+  // returns undefined, which interpolates as the bare token `undefined`, so the
+  // child ran `existsSync(undefined)` — false forever, on a loop with nothing to
+  // stop it. A wrong call must fail this test, not quietly outlive it.
+  if (typeof opts?.releaseOn !== 'string' || !opts.releaseOn) {
+    throw new TypeError(`holdLock: releaseOn must be a non-empty path, got ${JSON.stringify(opts?.releaseOn)}`);
+  }
   const src = `
     const fs = await import('node:fs');
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const parentPid = ${process.pid};
+    const deadline = Date.now() + ${HOLD_LOCK_MAX_MS};
+    // Three ways out, not one. Waiting only on the release marker means a test
+    // that crashes, times out, or is interrupted never writes it, and this
+    // process holds the lock and its memory until the machine is rebooted —
+    // which is how 31 of them accumulated over four days. The parent check is
+    // what covers an abrupt kill; the deadline covers everything else.
+    const parentAlive = () => {
+      try {
+        process.kill(parentPid, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    };
     fs.writeFileSync(${JSON.stringify(lockPath)}, '');
     console.log('HELD');
-    while (!fs.existsSync(${JSON.stringify(opts.releaseOn)})) await sleep(2);
+    while (!fs.existsSync(${JSON.stringify(opts.releaseOn)}) && Date.now() < deadline && parentAlive()) {
+      await sleep(2);
+    }
     await sleep(${opts.graceMs ?? 0});
     fs.rmSync(${JSON.stringify(lockPath)}, { force: true });
   `;
@@ -589,7 +621,12 @@ describe('crash recovery', () => {
       renewedAt: new Date().toISOString(),
     });
     expect(leaseIsStale(readLease(rec.runId))).toBe(true);
-    expect(() => acquireLease(rec.runId)).not.toThrow();
+    // The owner id is what makes this a takeover rather than a re-entry, and it
+    // was missing: `acquireLease` takes two arguments and this call passed one,
+    // so the claim went in under `undefined` and the assertion held for a
+    // reason the test does not describe.
+    expect(() => acquireLease(rec.runId, 'the-successor')).not.toThrow();
+    expect(readLease(rec.runId)?.ownerId).toBe('the-successor');
   });
 });
 
@@ -1519,15 +1556,22 @@ describe('races that need real processes', () => {
           owner: { ownerId: 'the-new-owner', pid: process.pid, renewedAt: new Date().toISOString() },
         }),
       );
-      const holder = holdLock(`${statePath}.lock`, 900);
-      await new Promise((r) => setTimeout(r, 60));
+      // Written against the helper's older signature — a hold duration in ms —
+      // which left `releaseOn` undefined and the holder looping forever. The
+      // `await holder` below compounded it: `holdLock` returns a pair of
+      // promises, not a promise, so awaiting the object resolved at once and
+      // the test finished green while the child it spawned stayed behind.
+      const release = path.join(dir, 'release-stale-owner');
+      const holder = holdLock(`${statePath}.lock`, { releaseOn: release });
+      await holder.ready;
 
       await expect(q.enqueue('stale-work')).rejects.toThrow(/locked by another process/);
       expect(seen).toEqual([]);
       const disk = JSON.parse(fs.readFileSync(statePath, 'utf8'));
       expect(disk.owner.ownerId).toBe('the-new-owner');
       expect(disk.pending).toEqual(['theirs']);
-      await holder;
+      fs.writeFileSync(release, '');
+      await holder.exited;
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
@@ -1633,4 +1677,38 @@ describe('races that need real processes', () => {
     // The rightful owner can still remove it.
     expect(kernel.delete('contested-id', { expectTag: 'start-2' })).toBe(true);
   }, 30_000);
+});
+
+// ─── The harness does not outlive the run ───────────────────────────────────
+
+describe('a spawned lock holder cannot become an orphan', () => {
+  // Two calls in this file were written against older signatures and neither
+  // failed: `holdLock(path, 900)` left `releaseOn` undefined, and the child then
+  // waited on `existsSync(undefined)` — false forever, on a loop with no other
+  // way out. It held ~62 MB and the lock file, once per run, until the machine
+  // was rebooted. Tests are not type-checked (see tsconfig.test.json), so the
+  // only thing that can catch a call like that is the helper itself.
+  it('refuses a call that would leave it waiting on nothing', () => {
+    const lock = path.join(wfDir, 'guard.lock');
+    // The shape the stale call actually had.
+    expect(() => holdLock(lock, 900 as unknown as { releaseOn: string })).toThrow(/releaseOn/);
+    expect(() => holdLock(lock, { releaseOn: '' })).toThrow(/releaseOn/);
+    expect(fs.existsSync(lock)).toBe(false);
+  });
+
+  it('exits on its own when the release signal never comes', async () => {
+    // Nothing writes this marker: the holder has to end itself. A test that
+    // crashes or is interrupted leaves exactly this state behind, which is the
+    // case a release-marker-only wait can never recover from.
+    const holder = holdLock(path.join(wfDir, 'deadline.lock'), {
+      releaseOn: path.join(wfDir, 'marker-that-is-never-written'),
+    });
+    await holder.ready;
+    await expect(
+      Promise.race([
+        holder.exited.then(() => 'exited'),
+        new Promise((r) => setTimeout(() => r('still running'), HOLD_LOCK_MAX_MS + 5_000)),
+      ]),
+    ).resolves.toBe('exited');
+  }, 60_000);
 });

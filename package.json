@@ -33,6 +33,7 @@
     "test:coverage": "vitest run --coverage",
     "lint": "eslint src/ bin/",
     "lint:fix": "eslint src/ bin/ --fix",
+    "typecheck:tests": "tsc -p tsconfig.test.json",
     "format": "prettier --write 'src/**/*.ts' 'bin/**/*.ts'",
     "format:check": "prettier --check 'src/**/*.ts' 'bin/**/*.ts'",
     "prepublishOnly": "npm run build"
