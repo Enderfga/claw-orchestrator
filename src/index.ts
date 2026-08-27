@@ -235,7 +235,7 @@ const plugin = {
             type: 'string',
             enum: ['acceptEdits', 'bypassPermissions', 'default', 'manual', 'dontAsk', 'plan', 'auto'],
           },
-          effort: { type: 'string', enum: ['low', 'medium', 'high', 'xhigh', 'max', 'auto'] },
+          effort: { type: 'string', enum: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra', 'auto'] },
           allowedTools: {
             type: 'array',
             maxItems: 200,
@@ -382,7 +382,7 @@ const plugin = {
           message: { type: 'string', description: 'Message to send' },
           effort: {
             type: 'string',
-            enum: ['low', 'medium', 'high', 'xhigh', 'max'],
+            enum: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
             description: 'Effort for this message',
           },
           plan: { type: 'boolean', description: 'Enable plan mode' },
@@ -1533,7 +1533,7 @@ const plugin = {
                 customEngine: { type: 'object', description: 'Custom engine config (when engine="custom")' },
                 effort: {
                   type: 'string',
-                  enum: ['low', 'medium', 'high', 'xhigh', 'max', 'auto'],
+                  enum: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra', 'auto'],
                   description: 'Per-agent reasoning effort.',
                 },
                 ultracode: {

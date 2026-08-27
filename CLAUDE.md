@@ -26,12 +26,12 @@ support. Key source files:
 | `src/consensus.ts`                   | Consensus voting parser for council                                                                                                                                                                                                          |
 | `src/kernel/types.ts`                | One state vocabulary — `RunState`, `RunOutcome`, `WorkflowSpec`, node specs                                                                                                                                                                  |
 | `src/kernel/engine.ts`               | The run kernel — checkpointed execution, resume, retry, timeout, cancel, steer                                                                                                                                                               |
-| `src/kernel/store.ts`                | Durable run store (`~/.claw-orchestrator/wf/<runId>/`) — guards, leases, and the one storage transaction                                                                                                                                      |
+| `src/kernel/store.ts`                | Durable run store (`~/.claw-orchestrator/wf/<runId>/`) — guards, leases, and the one storage transaction                                                                                                                                     |
 | `src/kernel/file-lock.ts`            | The one exclusive file lock, shared by the run store and the ultraapp build queue                                                                                                                                                            |
 | `src/kernel/exec.ts`                 | The single child-process wrapper — non-throwing, timeout kills the process group, output capped                                                                                                                                              |
 | `src/kernel/agent-step.ts`           | The single start→send→stop lifecycle; success reads `turnsSucceeded`                                                                                                                                                                         |
 | `src/kernel/nodes/`                  | One executor per node kind; thin wrappers over the existing engines                                                                                                                                                                          |
-| `src/kernel/templates/`              | Built-in workflows (`solve`, `council`, `fanout`, `ultraapp`)                                                                                                                                                                                            |
+| `src/kernel/templates/`              | Built-in workflows (`solve`, `council`, `fanout`, `ultraapp`)                                                                                                                                                                                |
 | `src/verify/contract.ts`             | `AcceptanceContract` + `CheckSpec`, and the normalizer that keeps agent-authored contracts out                                                                                                                                               |
 | `src/verify/runner.ts`               | Runs the checks — the generalisation of ultraapp's `fix-on-failure`                                                                                                                                                                          |
 | `src/verify/baseline.ts`             | Base-commit capture and change sets that include created files                                                                                                                                                                               |
@@ -203,13 +203,13 @@ npm view @enderfga/claw-orchestrator version   # should equal X.Y.Z
 
 Current tested versions (update on each release):
 
-| Engine      | CLI        | Tested Version | Invocation                                                                                                                                          |
-| ----------- | ---------- | -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Claude      | `claude`   | 2.1.237        | Persistent subprocess, `--output-format stream-json`                                                                                                |
-| Codex       | `codex`    | 0.148.0        | `codex exec --sandbox workspace-write --skip-git-repo-check --json -C <dir>` (or `codex app-server --listen stdio://` for /goal)                    |
-| Antigravity | `agy`      | 1.1.15         | `agy -p <msg> --log-file <tmp> [--conversation <id>] --dangerously-skip-permissions/--sandbox --print-timeout <n>s`                                 |
-| Grok        | `grok`     | 1.0.5          | `grok -p <msg> --output-format json --cwd <dir> [--resume <id>] [--permission-mode M] [--effort E]` (read-only refused pending an adversarial pass) |
-| OpenCode    | `opencode` | 1.18.18        | `opencode run <msg> --format json [--model provider/model]` (read-only sessions add `--agent clawo-readonly` + `OPENCODE_CONFIG_CONTENT`)           |
+| Engine      | CLI        | Tested Version | Invocation                                                                                                                                                        |
+| ----------- | ---------- | -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Claude      | `claude`   | 2.1.246        | Persistent subprocess, `--output-format stream-json`                                                                                                              |
+| Codex       | `codex`    | 0.149.1        | `codex exec --sandbox workspace-write --skip-git-repo-check --json -C <dir> [--ephemeral] [--ignore-user-config] [--add-dir D]` (or `codex app-server` for /goal) |
+| Antigravity | `agy`      | 1.1.21         | `agy -p <msg> --output-format stream-json --log-file <tmp> [--conversation <id>] --dangerously-skip-permissions/--sandbox --print-timeout <n>s`                   |
+| Grok        | `grok`     | 1.0.5          | `grok -p <msg> --output-format json --cwd <dir> [--resume <id>] [--permission-mode M] [--effort E]` (read-only refused pending an adversarial pass)               |
+| OpenCode    | `opencode` | 1.18.23        | `opencode run <msg> --format json [--model provider/model] [--variant E]` (read-only sessions add `--agent clawo-readonly` + `OPENCODE_CONFIG_CONTENT`)           |
 
 **Important:** When CLI vendors change flags or output format, update the corresponding `persistent-*-session.ts` and re-run integration tests.
 

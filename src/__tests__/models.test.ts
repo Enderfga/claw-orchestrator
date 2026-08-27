@@ -420,3 +420,38 @@ describe('getModelPricing fallback warning', () => {
     warnSpy.mockRestore();
   });
 });
+
+// Every one of these was found unregistered or mispriced by a sweep, and none
+// of them failed loudly first: an unregistered id falls through to the family
+// default, so it quietly gets Sonnet's rates and a 200K window.
+describe('registry covers what the engines actually offer', () => {
+  it('registers every Flash tier agy lists, not just the default one', () => {
+    for (const id of ['gemini-3.7-flash', 'gemini-3.6-flash', 'gemini-3.5-flash']) {
+      const m = lookupModel(id);
+      expect(m, `${id} is unregistered`).toBeDefined();
+      expect(m!.engine).toBe('agy');
+      expect(m!.contextWindow).toBe(1_000_000);
+      expect(getContextWindow(id)).toBe(1_000_000);
+    }
+  });
+
+  it('prices the Flash tiers at their own list rates', () => {
+    // Reverse assertion: 3.5 Flash is NOT $0.5/$3 — that figure was carried
+    // over from an earlier generation and under-reported every turn 3x.
+    expect(getModelPricing('gemini-3.5-flash')).toMatchObject({ input: 1.5, output: 9 });
+    expect(getModelPricing('gemini-3.7-flash')).toMatchObject({ input: 0.75, output: 3.75 });
+    expect(getModelPricing('gemini-3.6-flash')).toMatchObject({ input: 0.75, output: 3.75 });
+  });
+
+  it('registers gpt-5.2 with its own window rather than the family default', () => {
+    expect(getContextWindow('gpt-5.2')).toBe(400_000);
+    expect(getModelPricing('gpt-5.2')).toMatchObject({ input: 1.75, output: 14, cached: 0.175 });
+    expect(resolveEngineAndModel('gpt-5.2')).toEqual({ engine: 'codex', model: 'gpt-5.2' });
+  });
+
+  it('does not silently price an unregistered id as a Flash tier', () => {
+    // Guard against a blanket find-and-replace: 200K is the fallback window, so
+    // a registered model must never be reachable only through it.
+    expect(getContextWindow('gemini-9.9-flash')).toBe(200_000);
+  });
+});

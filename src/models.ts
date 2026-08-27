@@ -205,6 +205,19 @@ const MODELS: ModelDef[] = [
     contextWindow: 1_050_000,
   },
 
+  // ── OpenAI GPT-5.2 ────────────────────────────────────────────────────
+  // Previous-generation frontier model, still selectable in the Codex model
+  // list. Registered so `--model gpt-5.2` is priced as itself rather than
+  // falling through to the family default, which put it at a 200K window
+  // (against a real 400K) and Sonnet rates.
+  {
+    id: 'gpt-5.2',
+    engine: 'codex',
+    provider: 'openai',
+    pricing: { input: 1.75, output: 14, cached: 0.175 },
+    contextWindow: 400_000,
+  },
+
   // ── OpenAI GPT-5.4 ────────────────────────────────────────────────────
   {
     id: 'gpt-5.4',
@@ -278,7 +291,7 @@ const MODELS: ModelDef[] = [
   // `result` event when it carries usage and fall back to estimateTokens()
   // otherwise; the run ledger flags which of the two a turn used.
   //
-  // Slugs verified against agy 1.1.13 (`agy models`), which lists ONLY
+  // Slugs verified against agy 1.1.21 (`agy models`), which lists ONLY
   // effort-qualified names (gemini-3.7-flash-high, gemini-3.1-pro-low, …).
   // The base slugs registered below are the halves agy composes with
   // `--effort`, which PersistentAgySession always supplies — passing a base
@@ -286,11 +299,36 @@ const MODELS: ModelDef[] = [
   // uniform: gemini-3.1-pro has low/high only. agy also proxies Claude/GPT-OSS
   // models and accepts qualified slugs directly; both pass through unregistered
   // and price at their family default.
+  //
+  // Every Flash tier agy offers is registered, not just the one this engine
+  // defaults to. An unregistered tier does not fail — it falls through to the
+  // family default, which meant `gemini-3.7-flash` (the newest, and what a
+  // caller naming a model is most likely to ask for) was measured against a
+  // 200K window instead of 1M and priced at Sonnet rates.
+  //
+  // Prices are the Gemini API paid-tier list rates for the same models. The two
+  // newest Flash tiers are $0.75/$3.75 today and are scheduled to double on
+  // 2027-01-01; the scheduled number is deliberately NOT priced, because a
+  // future rate is not what a turn run today costs.
+  {
+    id: 'gemini-3.7-flash',
+    engine: 'agy',
+    provider: 'google',
+    pricing: { input: 0.75, output: 3.75 },
+    contextWindow: 1_000_000,
+  },
+  {
+    id: 'gemini-3.6-flash',
+    engine: 'agy',
+    provider: 'google',
+    pricing: { input: 0.75, output: 3.75 },
+    contextWindow: 1_000_000,
+  },
   {
     id: 'gemini-3.5-flash',
     engine: 'agy',
     provider: 'google',
-    pricing: { input: 0.5, output: 3 },
+    pricing: { input: 1.5, output: 9 },
     aliases: ['agy-flash'],
     contextWindow: 1_000_000,
   },

@@ -40,6 +40,29 @@ export interface OneShotEngineConfig {
   defaultModelDisplay?: string;
   /** Whether this engine tracks cached token pricing (Codex=false, Gemini/Cursor=true) */
   supportsCachedTokens: boolean;
+  /**
+   * Whether the engine's reported input-token count already contains the cached
+   * reads it reports separately.
+   *
+   * This decides whether the cost math may subtract one from the other, and the
+   * two answers are not interchangeable. Verified by checking each engine's own
+   * arithmetic against the `total` it reports for the same turn:
+   *
+   *   codex     total 19704 = input 19699 + output 5              → inclusive
+   *   grok      total 30034 = input 19393 + output 17 + read 10624 → exclusive
+   *   opencode  total 26315 = input 58    + output 17 + read 26240 → exclusive
+   *
+   * Subtracting on an exclusive engine removes tokens that were never in
+   * `input` and prices them at the cached rate instead. It fails silently and
+   * without bound: after two opencode turns the running cached total exceeds
+   * the running input total, `Math.max(0, …)` clamps to zero, and the whole
+   * session's input bills at the cached rate.
+   *
+   * Defaults to `true`, which is the behaviour every engine had before the flag
+   * existed, so an engine that has not been measured keeps its old numbers
+   * rather than silently switching to new ones.
+   */
+  inputIncludesCachedTokens?: boolean;
   /** Human-readable engine name for compact() no-op message */
   engineDisplayName: string;
 }
@@ -74,6 +97,13 @@ export abstract class BaseOneShotSession extends EventEmitter implements ISessio
     tokensIn: 0,
     tokensOut: 0,
     cachedTokens: 0,
+    /**
+     * Prompt tokens written into the cache, on engines whose `tokensIn`
+     * excludes them. Priced at the plain input rate — a floor, not the exact
+     * figure, since a provider that charges a cache-write premium is not
+     * modelled here. Left at zero on engines whose input already contains them.
+     */
+    cacheCreationTokens: 0,
     costUsd: 0,
     lastActivity: null as string | null,
     /** Set by _markTurnEstimated() when this turn fell back to estimateTokens(). */
@@ -200,7 +230,12 @@ export abstract class BaseOneShotSession extends EventEmitter implements ISessio
    * model's published maximum. Return 0 to disable the metric.
    */
   protected _effectiveContextWindow(): number {
-    return getContextWindow(this.options.resolvedModel || this.options.model || '');
+    // Falls back to the engine's own default model, not to the registry's
+    // catch-all 200K: a session that named no model still runs on something,
+    // and that something is what `_getModelPricing()` already bills it as.
+    // Measuring a grok session against 200K while pricing it as grok-4.6 (500K)
+    // reported a half-full context as full.
+    return getContextWindow(this.options.resolvedModel || this.options.model || this.engineCfg.defaultModel);
   }
 
   /**
@@ -292,7 +327,7 @@ export abstract class BaseOneShotSession extends EventEmitter implements ISessio
 
     if (this.engineCfg.supportsCachedTokens) {
       const cachedPrice = pricing.cached ?? 0;
-      const nonCachedIn = Math.max(0, this._stats.tokensIn - this._stats.cachedTokens);
+      const nonCachedIn = this._fullRateInputTokens();
       return {
         model: displayModel,
         tokensIn: this._stats.tokensIn,
@@ -396,18 +431,32 @@ export abstract class BaseOneShotSession extends EventEmitter implements ISessio
     if (this._history.length > MAX_HISTORY_ITEMS) this._history.shift();
   }
 
+  /**
+   * Input tokens that bill at the full rate — everything in `tokensIn` that is
+   * not a cached read, plus the cache writes an exclusive engine reports apart
+   * from `tokensIn`. See `inputIncludesCachedTokens` for why the subtraction is
+   * conditional.
+   */
+  private _fullRateInputTokens(): number {
+    const base =
+      this.engineCfg.inputIncludesCachedTokens === false
+        ? this._stats.tokensIn
+        : Math.max(0, this._stats.tokensIn - this._stats.cachedTokens);
+    return base + this._stats.cacheCreationTokens;
+  }
+
   protected _updateCost(): void {
     const pricing = this._getModelPricing();
     if (this.engineCfg.supportsCachedTokens) {
       const cachedPrice = pricing.cached ?? 0;
-      const nonCachedIn = Math.max(0, this._stats.tokensIn - this._stats.cachedTokens);
       this._stats.costUsd =
-        (nonCachedIn / 1_000_000) * pricing.input +
+        (this._fullRateInputTokens() / 1_000_000) * pricing.input +
         (this._stats.cachedTokens / 1_000_000) * cachedPrice +
         (this._stats.tokensOut / 1_000_000) * pricing.output;
     } else {
       this._stats.costUsd =
-        (this._stats.tokensIn / 1_000_000) * pricing.input + (this._stats.tokensOut / 1_000_000) * pricing.output;
+        ((this._stats.tokensIn + this._stats.cacheCreationTokens) / 1_000_000) * pricing.input +
+        (this._stats.tokensOut / 1_000_000) * pricing.output;
     }
   }
 }

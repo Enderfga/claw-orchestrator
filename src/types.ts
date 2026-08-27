@@ -33,7 +33,12 @@ export const MODEL_ALIASES: Record<string, string> = getAliases();
 // bypassPermissions, manual, dontAsk, plan"), verified against 2.1.206.
 export type PermissionMode = 'acceptEdits' | 'bypassPermissions' | 'default' | 'manual' | 'dontAsk' | 'plan' | 'auto';
 
-export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'auto';
+// Engines do not share one ladder, so a level is requested here and clamped by
+// whichever wrapper receives it. Claude Code takes low|medium|high|xhigh|max,
+// Codex adds `ultra` above `max`, Grok stops at `xhigh`, Antigravity at `high`,
+// and OpenCode forwards the level to its provider without validating it. Each
+// wrapper documents its own clamp; none of them silently drops the field.
+export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra' | 'auto';
 
 // ─── Engine ─────────────────────────────────────────────────────────────────
 
@@ -380,6 +385,15 @@ export interface SessionConfig {
    * permissions on the Codex side.
    */
   codexProfile?: string;
+  /**
+   * Codex only. Run without loading `$CODEX_HOME/config.toml`
+   * (`codex exec --ignore-user-config`), so an orchestrated run is decided by
+   * what the caller passed rather than by whatever the machine's own Codex
+   * config happens to say. Notably `model = …` in that file changes which model
+   * a session with no explicit model actually uses, while the ledger still
+   * records this engine's default. Auth continues to resolve from CODEX_HOME.
+   */
+  ignoreUserConfig?: boolean;
   /** Custom engine configuration — required when engine is 'custom' */
   customEngine?: CustomEngineConfig;
 }

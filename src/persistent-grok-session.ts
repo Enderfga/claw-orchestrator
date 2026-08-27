@@ -42,6 +42,7 @@ interface GrokJsonResult {
     input_tokens?: number;
     output_tokens?: number;
     cache_read_input_tokens?: number;
+    cache_creation_input_tokens?: number;
   };
   total_cost_usd?: number;
   modelUsage?: Record<string, unknown>;
@@ -58,6 +59,12 @@ export class PersistentGrokSession extends BaseOneShotSession {
       defaultModel: 'grok-4.6',
       defaultModelDisplay: 'grok-4.6',
       supportsCachedTokens: true,
+      // grok reports `total_tokens` as input + output + cache reads + cache
+      // writes (30034 = 19393 + 17 + 10624 + 0 on a resumed turn), and its own
+      // `total_cost_usd` for that turn decomposes the same way: 19393 at the
+      // full input rate plus 10624 at the cached rate. `input_tokens` therefore
+      // excludes the cached reads and must not have them subtracted out.
+      inputIncludesCachedTokens: false,
       engineDisplayName: 'Grok Build',
     });
     // Same shape cursor and opencode use: the real id is surfaced through
@@ -90,8 +97,10 @@ export class PersistentGrokSession extends BaseOneShotSession {
 
     const effort = options.effort ?? this.options.effort;
     if (effort && effort !== 'auto') {
-      // grok takes low|medium|high; the two higher aliases in our union clamp.
-      args.push('--effort', effort === 'max' || effort === 'xhigh' ? 'high' : effort);
+      // grok 1.0.5 takes low|medium|high|xhigh — it names the invalid ones in
+      // its own rejection message. Only the two levels above its ceiling clamp;
+      // `xhigh` used to clamp too and was silently costing callers a tier.
+      args.push('--effort', effort === 'max' || effort === 'ultra' ? 'xhigh' : effort);
     }
 
     if (this.options.maxTurns) args.push('--max-turns', String(this.options.maxTurns));
@@ -193,10 +202,16 @@ export class PersistentGrokSession extends BaseOneShotSession {
         const usage = parsed?.usage;
         if (usage) {
           // Per-turn values (see the file header), so accumulate.
+          const cacheRead = usage.cache_read_input_tokens ?? 0;
+          const cacheWrite = usage.cache_creation_input_tokens ?? 0;
           this._stats.tokensIn += usage.input_tokens ?? 0;
           this._stats.tokensOut += usage.output_tokens ?? 0;
-          this._stats.cachedTokens += usage.cache_read_input_tokens ?? 0;
-          this._reportTurnInputTokens(usage.input_tokens ?? 0);
+          this._stats.cachedTokens += cacheRead;
+          this._stats.cacheCreationTokens += cacheWrite;
+          // The prompt is every input-side token, not just the uncached
+          // remainder: on a resumed turn `input_tokens` is the small tail and
+          // the cached reads are most of the context that has to fit.
+          this._reportTurnInputTokens((usage.input_tokens ?? 0) + cacheRead + cacheWrite);
         }
         // Engine-reported spend, not a registry lookup — see the file header.
         if (typeof parsed?.total_cost_usd === 'number' && Number.isFinite(parsed.total_cost_usd)) {

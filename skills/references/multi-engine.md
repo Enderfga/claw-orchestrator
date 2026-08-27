@@ -62,7 +62,8 @@ Wraps the `codex exec` subcommand. Each `send()` spawns a new process. Tested wi
 - Real `usage` from the `turn.completed` JSON event (input, output, cached, reasoning tokens). **These are cumulative over the thread, not per turn** — three identical turns on 0.147.0 report `input_tokens` 13,856 → 27,727 → 41,613, each matching `total_token_usage` in that thread's rollout exactly. They are assigned to the session totals, never added; subtracting consecutive values recovers the turn's own prompt
 - `contextPercent` is that per-turn prompt (which, for a thread-resuming engine, is the live context occupancy) over **codex's own limit**, harvested from the thread's rollout file (`model_context_window`, 258,400 on 0.147.0). The model registry holds the published window — 1,050,000 for gpt-5.x — which codex does not honour, so measuring against it reads ~4x low. Resuming a thread also seeds the token baseline from the rollout, so the first send does not mistake the whole thread history for one prompt. All of this is best-effort: an unreadable or `--ephemeral` thread falls back to the registry window
 - `item.completed` parsing distinguishes `reasoning` / `todo_list` (logged, not counted) from real tool items (`command_execution`, `file_change`, `mcp_tool_call`, `web_search`, which increment `toolCalls`; a non-zero `command_execution.exit_code` increments `toolErrors`)
-- Reasoning effort: the engine-agnostic `effort` maps to `-c model_reasoning_effort=<level>` (`max`→`xhigh`; `auto`/`ultracode` omitted)
+- Reasoning effort: the engine-agnostic `effort` maps to `-c model_reasoning_effort=<level>` and passes straight through. Codex 0.149's ladder runs `low|medium|high|xhigh|max|ultra` — it is the only engine here that reaches `ultra`, and all three top levels were exercised against 0.149.1. `auto` and `ultracode` are omitted. Note `-c` values are not validated at spawn: codex prints `reasoning effort: <whatever>` and sends it, so an unknown level fails at the API rather than at the command line
+- `noSessionPersistence` → `--ephemeral` (accepted by `exec` and `exec resume`); `ignoreUserConfig` → `--ignore-user-config`, which stops `$CODEX_HOME/config.toml` from deciding an orchestrated run's model behind the caller's back (auth still resolves from `CODEX_HOME`); `addDir` → `--add-dir` on the first turn only, since `exec resume` rejects it and the resumed thread keeps the roots it opened with
 - `codexProfile` → `--profile <name>` (named config profile from `~/.codex/config.toml`)
 - Per-session continuity: the `thread_id` from the first turn's `thread.started` event is captured and reused via `codex exec resume <id>` for subsequent sends, so the model sees prior turns
 - `sandboxMode` maps to `--sandbox <mode>` on the first turn. **A resumed thread does not inherit it**, and `codex exec resume` rejects `--sandbox`, so the policy is restated as `-c sandbox_mode="<mode>"` on every resume. Without that, a `read-only` session goes writable from its second turn onward — verified against 0.146.0, where such a session wrote to disk on turn 2 on every attempt. Re-probed on 0.147.0 (direct write, shell redirect and delegate-to-subagent, each on a resumed turn): no writes
@@ -128,8 +129,8 @@ in print mode. Verified against `agy` **1.1.13**.
   externally via `resumeSessionId` (bare UUID only); read it back from
   `getStats().agyConversationId`.
 - **Reasoning effort**: session `effort` and per-turn `session_send` overrides map
-  to `--effort`. agy accepts `low`, `medium`, and `high`; engine-wide `max` and
-  `xhigh` clamp to `high`. agy 1.1.13 requires an effort with unsuffixed base
+  to `--effort`. agy accepts `low`, `medium`, and `high`; everything above that
+  (`xhigh`, `max`, `ultra`) clamps to `high`. agy 1.1.21 requires an effort with unsuffixed base
   slugs such as `gemini-3.7-flash`, so `auto` resolves those to `high`; a model
   already ending in `-low`, `-medium`, or `-high` keeps that qualified effort.
   Per-turn overrides also work with qualified slugs: the adapter removes a
@@ -197,7 +198,8 @@ prints a single JSON object and exits. Verified against `grok` **1.0.5**.
   because the same-looking field on codex is a running total.
 - Permission modes pass straight through: grok's `--permission-mode` takes the same vocabulary we
   use. The one exception is our `manual`, which grok spells `default`.
-- Reasoning effort maps to `--effort`; grok accepts `low|medium|high`, so `max` and `xhigh` clamp.
+- Reasoning effort maps to `--effort`; grok 1.0.5 accepts `low|medium|high|xhigh` (it names the set in
+  its own rejection message), so only `max` and `ultra` clamp — to `xhigh`.
 - **`sandboxMode: 'read-only'` is refused, not approximated.** grok has `--permission-mode plan` and
   `--deny` rules, but plan mode alone is model-cooperative — the shape that let an adversarial
   prompt write through Cursor's plan mode — and the deny rules have not been through the
@@ -261,7 +263,8 @@ Wraps the [sst/opencode](https://github.com/sst/opencode) CLI with `run --format
 - NDJSON event stream with envelope `{ type, timestamp, sessionID, ... }`
 - Event types: `text`, `reasoning`, `tool_use`, `step_start`, `step_finish`, `error`
 - `text` and `tool_use` are **cumulative snapshots** keyed by `part.id` / `part.callID`; the wrapper diffs them to produce streaming deltas for `onText` callbacks and counts each tool invocation once
-- Real token counts from `step_finish.part.tokens.{input,output,cache.read}`
+- Real token counts from `step_finish.part.tokens.{input,output,cache.{read,write}}`. **`input` is the uncached remainder only** — opencode's own `total` is `input + output + cache.read + cache.write` — so the cached part is billed on top of it, not carved out of it, and `contextPercent` is measured against the whole input side. On a resumed turn the remainder is tiny next to the cached part (58 against 26,240), which is what makes the distinction matter
+- Reasoning effort maps to `--variant`, opencode's provider-specific effort knob. opencode does not validate the value: a level the provider does not offer runs the turn at its default rather than failing
 - The wrapper closes the subprocess's stdin immediately after spawn (opencode otherwise reads stdin and blocks on EOF, hanging the call)
 - Provider-agnostic: opencode's `--model` expects `provider/model` form (e.g. `anthropic/claude-sonnet-4`). The wrapper passes `--model` through only when the value contains a `/`; otherwise opencode's own default applies
 - `sandboxMode: 'read-only'` spawns a generated `clawo-readonly` agent (`--agent clawo-readonly` plus an `OPENCODE_CONFIG_CONTENT` env var defining it) that denies `edit` / `bash` / `external_directory` / `webfetch` / **`task`** at the permission level and additionally removes those tools outright via the agent's `tools` map. It deliberately does **not** use OpenCode's built-in `plan` agent: that is a user-overridable preset whose compiled rules start with `{"permission":"*","action":"allow"}` and deny neither `bash` nor `edit`, so a "read-only" session could still author files through a shell heredoc. **`task` is the load-bearing denial**: denying only the write tools leaves the delegation path open, and the agent will hand the write to a subagent that runs under the default writable agent — asked to delegate, a session denied only `edit`/`bash`/`external_directory` wrote to disk on every attempt. Verify this config only with adversarial writes, and include prompts that ask the agent to delegate; `opencode agent list` renders compiled permission rules that look identical for a safe and an unsafe agent, and a probe that only asks for a direct write passes even when the delegation path is wide open

@@ -593,6 +593,86 @@ describe('PersistentClaudeSession', () => {
     });
   });
 
+  // Regression: the CLI reports one turn's usage twice — once on the streaming
+  // `message_delta`, once on the terminal `result` — and both used to be added.
+  // Measured against claude 2.1.246 on a live turn: the engine reported
+  // in=2 / out=4 / cache_read=47371 and getStats() came back 4 / 8 / 94742.
+  describe('turn usage is counted once', () => {
+    beforeEach(async () => {
+      const startPromise = session.start();
+      emitInitEvent(mockProc);
+      await startPromise;
+    });
+
+    const emit = (obj: unknown) => mockProc.stdout.emit('data', Buffer.from(JSON.stringify(obj) + '\n'));
+
+    it('does not double-count when the delta and the result report the same turn', () => {
+      const usage = { input_tokens: 2, output_tokens: 4, cache_read_input_tokens: 47_371 };
+      emit({ type: 'stream_event', event: { type: 'message_start' } });
+      emit({ type: 'stream_event', event: { type: 'message_delta', usage } });
+      emit({ type: 'result', usage });
+
+      expect(session.stats.tokensIn).toBe(2);
+      expect(session.stats.tokensOut).toBe(4);
+      expect(session.stats.cachedTokens).toBe(47_371);
+    });
+
+    it('keeps every message of a multi-message turn, without counting any twice', () => {
+      // Two assistant messages (one tool round), then the turn total.
+      emit({ type: 'stream_event', event: { type: 'message_start' } });
+      emit({
+        type: 'stream_event',
+        event: { type: 'message_delta', usage: { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 100 } },
+      });
+      emit({ type: 'stream_event', event: { type: 'message_start' } });
+      emit({
+        type: 'stream_event',
+        event: { type: 'message_delta', usage: { input_tokens: 7, output_tokens: 3, cache_read_input_tokens: 120 } },
+      });
+      emit({
+        type: 'result',
+        usage: { input_tokens: 17, output_tokens: 8, cache_read_input_tokens: 220 },
+      });
+
+      expect(session.stats.tokensIn).toBe(17);
+      expect(session.stats.tokensOut).toBe(8);
+      expect(session.stats.cachedTokens).toBe(220);
+    });
+
+    it("takes the engine's spend figure and treats it as a running total", () => {
+      // `total_cost_usd` is the session total, not the turn's: two turns on one
+      // process read 0.02377 then 0.047559. Accumulating them would bill 0.0713.
+      emit({ type: 'result', usage: { input_tokens: 2, output_tokens: 3 }, total_cost_usd: 0.02377 });
+      expect(session.stats.costUsd).toBeCloseTo(0.02377, 10);
+
+      emit({ type: 'result', usage: { input_tokens: 2, output_tokens: 3 }, total_cost_usd: 0.047559 });
+      expect(session.stats.costUsd).toBeCloseTo(0.047559, 10);
+    });
+
+    it('resumes accumulating when the CLI process restarts its own counter', () => {
+      emit({ type: 'result', usage: { input_tokens: 2, output_tokens: 3 }, total_cost_usd: 0.05 });
+      // A resume spawns a fresh CLI, whose running total starts over.
+      emit({ type: 'result', usage: { input_tokens: 2, output_tokens: 3 }, total_cost_usd: 0.01 });
+      expect(session.stats.costUsd).toBeCloseTo(0.06, 10);
+    });
+
+    it('prices cache writes when the engine reports no cost of its own', () => {
+      // 1-hour cache writes bill at 2x input. Leaving them out is what made the
+      // estimate read $0.016 on a turn the engine priced at $0.322428.
+      emit({
+        type: 'result',
+        usage: {
+          input_tokens: 0,
+          output_tokens: 0,
+          cache_creation_input_tokens: 1_000_000,
+          cache_creation: { ephemeral_1h_input_tokens: 1_000_000, ephemeral_5m_input_tokens: 0 },
+        },
+      });
+      // claude-sonnet-4-6 fallback pricing: input 3/Mtok, so 1M at 2x = 6.
+      expect(session.stats.costUsd).toBeCloseTo(6, 6);
+    });
+  });
+
   describe('_updateCost', () => {
     beforeEach(async () => {
       const startPromise = session.start();
@@ -623,11 +703,16 @@ describe('PersistentClaudeSession', () => {
       mockProc.stdout.emit('data', Buffer.from(JSON.stringify(deltaEvent) + '\n'));
       const costWithCache = session.stats.costUsd;
 
-      // Reset and do without cache
+      // Start a fresh message, so the next delta is a new series rather than a
+      // continuation of the previous one.
       session.stats.tokensIn = 0;
       session.stats.tokensOut = 0;
       session.stats.cachedTokens = 0;
       session.stats.costUsd = 0;
+      mockProc.stdout.emit(
+        'data',
+        Buffer.from(JSON.stringify({ type: 'stream_event', event: { type: 'message_start' } }) + '\n'),
+      );
 
       const deltaEvent2 = {
         type: 'stream_event',
@@ -643,6 +728,12 @@ describe('PersistentClaudeSession', () => {
       // Both should be >= 0
       expect(costWithCache).toBeGreaterThanOrEqual(0);
       expect(costWithoutCache).toBeGreaterThanOrEqual(0);
+      // The API's `input_tokens` excludes cached reads, so the two turns are
+      // not the same prompt: one carries 1500 tokens, the other 1000. Cached
+      // reads therefore ADD to the bill instead of being carved out of it —
+      // subtracting them out was what let a cached session bill at nothing.
+      const cachedRate = 0.3 / 1_000_000; // claude-sonnet-4-6 fallback pricing
+      expect(costWithCache).toBeCloseTo(costWithoutCache + 500 * cachedRate, 10);
     });
   });
 
@@ -772,12 +863,21 @@ describe('PersistentClaudeSession', () => {
       expect(status.contextPercent).toBeLessThanOrEqual(100);
     });
 
-    it('contextPercent scales with token usage', () => {
-      // Inject some tokens
-      session.stats.tokensIn = 100_000;
-      session.stats.tokensOut = 50_000;
-      const status = session.getStats();
-      expect(status.contextPercent).toBeGreaterThan(0);
+    it("contextPercent measures the last turn's prompt, not the session total", () => {
+      // `input_tokens` alone is not the prompt: on a resumed conversation the
+      // history arrives as cached reads, and summing the session's input and
+      // output instead reported 0% for a full context.
+      mockProc.stdout.emit(
+        'data',
+        Buffer.from(
+          JSON.stringify({
+            type: 'result',
+            usage: { input_tokens: 2, output_tokens: 4, cache_read_input_tokens: 400_000 },
+            modelUsage: { 'claude-opus-5': { contextWindow: 1_000_000 } },
+          }) + '\n',
+        ),
+      );
+      expect(session.getStats().contextPercent).toBe(40);
     });
   });
 

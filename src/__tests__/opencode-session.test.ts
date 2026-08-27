@@ -83,6 +83,105 @@ describe('PersistentOpencodeSession', () => {
     });
   });
 
+  describe('reasoning effort', () => {
+    // `--variant` is opencode's effort knob. Before this the engine got nothing
+    // and every caller's `effort` was silently discarded.
+    it('forwards effort as --variant', async () => {
+      const session = new PersistentOpencodeSession({
+        name: 'test',
+        cwd: '/tmp',
+        permissionMode: 'bypassPermissions',
+        effort: 'high',
+      });
+      await session.start();
+      const sendPromise = session.send('hi', { waitForComplete: true });
+      setTimeout(() => closeProc(mockProc, 0), 10);
+      await sendPromise;
+
+      const spawnArgs = mockSpawn.mock.calls[0][1] as string[];
+      expect(spawnArgs[spawnArgs.indexOf('--variant') + 1]).toBe('high');
+    });
+
+    it('omits --variant for auto', async () => {
+      const session = new PersistentOpencodeSession({
+        name: 'test',
+        cwd: '/tmp',
+        permissionMode: 'bypassPermissions',
+        effort: 'auto',
+      });
+      await session.start();
+      const sendPromise = session.send('hi', { waitForComplete: true });
+      setTimeout(() => closeProc(mockProc, 0), 10);
+      await sendPromise;
+
+      expect(mockSpawn.mock.calls[0][1] as string[]).not.toContain('--variant');
+    });
+  });
+
+  describe('token accounting', () => {
+    // `tokens.input` is only the uncached remainder: opencode's own arithmetic
+    // is total = input + output + cache.read + cache.write (26315 = 58 + 17 +
+    // 26240 + 0 on a resumed turn). Subtracting the cached part back out of it
+    // is what made a cached session bill at nothing.
+    it('bills the full input side rather than subtracting cached reads out of it', async () => {
+      const session = new PersistentOpencodeSession({
+        name: 'test',
+        cwd: '/tmp',
+        permissionMode: 'bypassPermissions',
+        model: 'anthropic/claude-sonnet-4-6',
+      });
+      await session.start();
+      const sendPromise = session.send('hi', { waitForComplete: true });
+      setTimeout(() => {
+        feedLines(mockProc, [
+          envelope('step_finish', {
+            part: {
+              type: 'step-finish',
+              tokens: { total: 26_315, input: 58, output: 17, reasoning: 0, cache: { write: 0, read: 26_240 } },
+            },
+          }),
+        ]);
+        closeProc(mockProc, 0);
+      }, 10);
+      await sendPromise;
+
+      const cost = session.getCost();
+      expect(cost.tokensIn).toBe(58);
+      expect(cost.cachedTokens).toBe(26_240);
+      // claude-sonnet-4-6: input 3, cached 0.3, output 15 per Mtok.
+      const expected = (58 * 3 + 26_240 * 0.3 + 17 * 15) / 1_000_000;
+      expect(cost.totalUsd).toBeCloseTo(expected, 10);
+      // The clamp used to swallow the whole input side; it must not be free.
+      expect(cost.breakdown.inputCost).toBeGreaterThan(0);
+    });
+
+    it('measures context against the whole prompt, not the uncached remainder', async () => {
+      const session = new PersistentOpencodeSession({
+        name: 'test',
+        cwd: '/tmp',
+        permissionMode: 'bypassPermissions',
+        model: 'anthropic/claude-sonnet-4-6',
+      });
+      await session.start();
+      const sendPromise = session.send('hi', { waitForComplete: true });
+      setTimeout(() => {
+        feedLines(mockProc, [
+          envelope('step_finish', {
+            part: {
+              type: 'step-finish',
+              tokens: { total: 500_017, input: 17, output: 0, cache: { write: 0, read: 500_000 } },
+            },
+          }),
+        ]);
+        closeProc(mockProc, 0);
+      }, 10);
+      await sendPromise;
+
+      // 500,017 of a 1M window. Reading `input` alone would have said 0%.
+      expect(session.getStats().contextPercent).toBe(50);
+    });
+  });
+
   describe('spawn flags', () => {
     it('uses run --format json', async () => {
       const session = new PersistentOpencodeSession({

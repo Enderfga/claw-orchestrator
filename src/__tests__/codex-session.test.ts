@@ -200,7 +200,7 @@ describe('PersistentCodexSession', () => {
     session.stop();
   });
 
-  it('maps effort to `-c model_reasoning_effort` (max → xhigh)', async () => {
+  it('passes effort straight through to `-c model_reasoning_effort` (max stays max)', async () => {
     const session = new PersistentCodexSession({ name: 'test', cwd: '/tmp', effort: 'max' });
     await session.start();
     const p = session.send('hi', { waitForComplete: true });
@@ -210,7 +210,80 @@ describe('PersistentCodexSession', () => {
     const argv = mockSpawn.mock.calls[0][1] as string[];
     const ci = argv.indexOf('-c');
     expect(ci).toBeGreaterThanOrEqual(0);
-    expect(argv[ci + 1]).toBe('model_reasoning_effort=xhigh');
+    expect(argv[ci + 1]).toBe('model_reasoning_effort=max');
+    session.stop();
+  });
+
+  // codex 0.149 added `ultra` above `max`. Folding either down loses a tier the
+  // engine really offers — both levels were exercised against 0.149.1 and
+  // completed a turn rather than erroring.
+  it('reaches codex-only effort levels above max', async () => {
+    const session = new PersistentCodexSession({ name: 'test', cwd: '/tmp', effort: 'ultra' });
+    await session.start();
+    const p = session.send('hi', { waitForComplete: true });
+    setTimeout(() => runTurn(mockProc, 'thread-ultra'), 10);
+    await p;
+
+    const argv = mockSpawn.mock.calls[0][1] as string[];
+    expect(argv[argv.indexOf('-c') + 1]).toBe('model_reasoning_effort=ultra');
+    session.stop();
+  });
+
+  // `noSessionPersistence` used to reach only Claude Code. Codex's counterpart
+  // is `--ephemeral`, which both `exec` and `exec resume` accept.
+  it('honours noSessionPersistence with --ephemeral', async () => {
+    const session = new PersistentCodexSession({ name: 'test', cwd: '/tmp', noSessionPersistence: true });
+    await session.start();
+    const p = session.send('hi', { waitForComplete: true });
+    setTimeout(() => runTurn(mockProc, 'thread-eph'), 10);
+    await p;
+
+    expect(mockSpawn.mock.calls[0][1] as string[]).toContain('--ephemeral');
+    session.stop();
+  });
+
+  it('passes --ignore-user-config only when asked', async () => {
+    const off = new PersistentCodexSession({ name: 'test', cwd: '/tmp' });
+    await off.start();
+    const p1 = off.send('hi', { waitForComplete: true });
+    setTimeout(() => runTurn(mockProc, 'thread-cfg-off'), 10);
+    await p1;
+    expect(mockSpawn.mock.calls[0][1] as string[]).not.toContain('--ignore-user-config');
+    off.stop();
+
+    const proc2 = createMockProcess();
+    mockSpawn.mockReturnValue(proc2);
+    const on = new PersistentCodexSession({ name: 'test', cwd: '/tmp', ignoreUserConfig: true });
+    await on.start();
+    const p2 = on.send('hi', { waitForComplete: true });
+    setTimeout(() => runTurn(proc2, 'thread-cfg-on'), 10);
+    await p2;
+    expect(mockSpawn.mock.calls[1][1] as string[]).toContain('--ignore-user-config');
+    on.stop();
+  });
+
+  // `--add-dir` is accepted by `exec` and rejected by `exec resume`, so it goes
+  // on the first turn only — the resumed thread keeps the roots it opened with.
+  it('passes extra writable roots on the first turn only', async () => {
+    const session = new PersistentCodexSession({ name: 'test', cwd: '/tmp', addDir: ['/srv/a', '/srv/b'] });
+    await session.start();
+    const p1 = session.send('first', { waitForComplete: true });
+    setTimeout(() => runTurn(mockProc, 'thread-dirs'), 10);
+    await p1;
+
+    const proc2 = createMockProcess();
+    mockSpawn.mockReturnValue(proc2);
+    const p2 = session.send('second', { waitForComplete: true });
+    setTimeout(() => runTurn(proc2, 'thread-dirs'), 10);
+    await p2;
+
+    const args1 = mockSpawn.mock.calls[0][1] as string[];
+    const args2 = mockSpawn.mock.calls[1][1] as string[];
+    expect(args1.filter((a) => a === '--add-dir')).toHaveLength(2);
+    expect(args1).toContain('/srv/a');
+    expect(args1).toContain('/srv/b');
+    expect(args2).toContain('resume');
+    expect(args2).not.toContain('--add-dir');
     session.stop();
   });
 
