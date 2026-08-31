@@ -105,23 +105,68 @@ export class PersistentGrokSession extends BaseOneShotSession {
 
     if (this.options.maxTurns) args.push('--max-turns', String(this.options.maxTurns));
     if (this.options.systemPrompt) args.push('--system-prompt-override', this.options.systemPrompt);
+    // grok appends `--rules` to its system prompt, which is what our
+    // engine-agnostic `appendSystemPrompt` means — distinct from the override
+    // above, which replaces it.
+    if (this.options.appendSystemPrompt) args.push('--rules', this.options.appendSystemPrompt);
+
+    // Tool control. `--tools` is an allowlist of built-ins and
+    // `--disallowed-tools` a denylist; grok validates neither, so a name that
+    // does not exist is silently ignored rather than rejected.
+    if (this.options.allowedTools?.length) args.push('--tools', this.options.allowedTools.join(','));
+    if (this.options.disallowedTools?.length) {
+      args.push('--disallowed-tools', this.options.disallowedTools.join(','));
+    }
+
+    // Structured output. grok's `--json-schema` takes the schema inline, the
+    // same shape our engine-agnostic option carries, and implies the JSON
+    // output format we already ask for.
+    if (this.options.jsonSchema) args.push('--json-schema', this.options.jsonSchema);
+
+    if (this.options.agent) args.push('--agent', this.options.agent);
+    if (this.options.agents) {
+      const json = typeof this.options.agents === 'string' ? this.options.agents : JSON.stringify(this.options.agents);
+      args.push('--agents', json);
+    }
+
+    if (this.options.dangerouslySkipPermissions) args.push('--always-approve');
+
+    // `--session-id` names a NEW conversation, so it is only valid on a first
+    // turn — or on a resumed one that is being forked, which is what grok's own
+    // help says and what `--fork-session` is for.
+    if (this.options.forkSession && this.grokSessionId) args.push('--fork-session');
+    if (this.options.customSessionId && (!this.grokSessionId || this.options.forkSession)) {
+      args.push('--session-id', this.options.customSessionId);
+    }
 
     return args;
   }
 
   protected _run(message: string, options: SessionSendOptions): Promise<TurnResult> {
-    // Read-only is refused rather than approximated. grok exposes --permission-mode
-    // plan and --deny rules, but plan mode alone is model-cooperative — the same
-    // shape that let an adversarial prompt write through Cursor's plan mode — and
-    // the deny rules have not been put through the write × shell × subagent ×
-    // resumed-turn matrix this project requires before a read-only claim. Failing
-    // loudly beats a session that believes it cannot write and can.
+    // Read-only is refused rather than approximated, and as of 1.0.13 that is a
+    // measured decision rather than a cautious one.
+    //
+    // The obvious construction is a `--tools` allowlist of read-only built-ins
+    // (`read_file,list_dir,grep`) plus `--permission-mode plan`. Run against
+    // 1.0.13 it holds for a direct write and for a shell write — and loses to
+    // the third prompt in the matrix: asked to delegate, the session spawned a
+    // subagent and the file appeared. The subagent does not inherit the parent's
+    // tool restriction, which is the same load-bearing hole found in OpenCode,
+    // where denying the write tools without denying `task` left the delegation
+    // path wide open.
+    //
+    // grok 1.0.13 also ships `--no-subagents`, which is the obvious next probe.
+    // It is deliberately NOT wired up yet: the run that would have confirmed it
+    // hit this account's free-tier usage limit, and a probe that fails for lack
+    // of quota writes no file either — reading that as a pass is how an unproven
+    // boundary gets shipped. Prove it on an account with quota, with the full
+    // write x shell x subagent x resumed-turn matrix, before changing this.
     if (this.options.sandboxMode === 'read-only') {
       return Promise.reject(
         new Error(
-          'Grok sessions do not support sandboxMode: read-only yet — its enforcement has not been ' +
-            'adversarially verified, and this engine will not claim a boundary it has not proven. ' +
-            'Use a different engine for read-only work.',
+          'Grok sessions do not support sandboxMode: read-only yet — a tool allowlist plus plan mode ' +
+            'was measured against 1.0.13 and a delegated subagent still wrote to disk. This engine ' +
+            'will not claim a boundary it has not proven. Use a different engine for read-only work.',
         ),
       );
     }

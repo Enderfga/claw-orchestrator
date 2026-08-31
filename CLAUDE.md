@@ -203,13 +203,13 @@ npm view @enderfga/claw-orchestrator version   # should equal X.Y.Z
 
 Current tested versions (update on each release):
 
-| Engine      | CLI        | Tested Version | Invocation                                                                                                                                                        |
-| ----------- | ---------- | -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Claude      | `claude`   | 2.1.246        | Persistent subprocess, `--output-format stream-json`                                                                                                              |
-| Codex       | `codex`    | 0.149.1        | `codex exec --sandbox workspace-write --skip-git-repo-check --json -C <dir> [--ephemeral] [--ignore-user-config] [--add-dir D]` (or `codex app-server` for /goal) |
-| Antigravity | `agy`      | 1.1.21         | `agy -p <msg> --output-format stream-json --log-file <tmp> [--conversation <id>] --dangerously-skip-permissions/--sandbox --print-timeout <n>s`                   |
-| Grok        | `grok`     | 1.0.5          | `grok -p <msg> --output-format json --cwd <dir> [--resume <id>] [--permission-mode M] [--effort E]` (read-only refused pending an adversarial pass)               |
-| OpenCode    | `opencode` | 1.18.23        | `opencode run <msg> --format json [--model provider/model] [--variant E]` (read-only sessions add `--agent clawo-readonly` + `OPENCODE_CONFIG_CONTENT`)           |
+| Engine      | CLI        | Tested Version | Invocation                                                                                                                                                                                                                           |
+| ----------- | ---------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Claude      | `claude`   | 2.1.251        | Persistent subprocess, `--output-format stream-json`                                                                                                                                                                                 |
+| Codex       | `codex`    | 0.151.0        | `codex exec --sandbox workspace-write --skip-git-repo-check --json -C <dir> [--ephemeral] [--ignore-user-config] [--add-dir D]` (or `codex app-server` for /goal)                                                                    |
+| Antigravity | `agy`      | 1.1.22         | `agy -p <msg> --output-format stream-json --log-file <tmp> [--conversation <id>] --dangerously-skip-permissions/--sandbox --print-timeout <n>s`                                                                                      |
+| Grok        | `grok`     | 1.0.13         | `grok -p <msg> --output-format json --cwd <dir> [--resume <id>] [--permission-mode M] [--effort E] [--tools/--disallowed-tools] [--json-schema] [--rules]` (read-only refused: a delegated subagent writes through a tool allowlist) |
+| OpenCode    | `opencode` | 1.18.25        | `opencode run <msg> --format json [--model provider/model] [--variant E]` (read-only sessions add `--agent clawo-readonly` + `OPENCODE_CONFIG_CONTENT`)                                                                              |
 
 **Important:** When CLI vendors change flags or output format, update the corresponding `persistent-*-session.ts` and re-run integration tests.
 
