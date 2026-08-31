@@ -394,6 +394,21 @@ export interface SessionConfig {
    * records this engine's default. Auth continues to resolve from CODEX_HOME.
    */
   ignoreUserConfig?: boolean;
+  /**
+   * Claude Code only. Restricted mode (`--restricted`): the CLI removes the
+   * built-in tools that run commands or code — Bash, PowerShell, the REPL — plus
+   * WebFetch unless `tools` names them, and ignores user, project and local
+   * settings files.
+   *
+   * Deliberately separate from `sandboxMode: 'read-only'` rather than folded
+   * into it. Read-only maps to plan mode, which holds on its own: measured
+   * against 2.1.251, a plan-mode session refused a direct write, a shell write
+   * and a delegated subagent write. What `--restricted` adds is that the shell
+   * is not merely refused but absent — worth having on an untrusted prompt, and
+   * not something to switch on behind a caller's back, because dropping their
+   * settings files also drops their CLAUDE.md and hooks.
+   */
+  restricted?: boolean;
   /** Custom engine configuration — required when engine is 'custom' */
   customEngine?: CustomEngineConfig;
 }

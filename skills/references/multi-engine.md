@@ -36,6 +36,11 @@ Default engine. Long-running subprocess with streaming JSON I/O. Tested with Cla
 - Full cost tracking from API usage data
 - Cross-session peer messaging (`crossSessionInbound`): sets this session's policy for messages sent from other Claude Code sessions on the same machine — `accept` delivers straight in, `hold` waits for a human to approve it in that session's terminal, `refuse` rejects it. There is no CLI flag for this; it is a settings key, delivered through the `--settings` merge. Worth setting explicitly for orchestrated sessions: with no value the CLI decides from the two sides' permission modes and holds when they differ, and an orchestrated session (`bypassPermissions` / `acceptEdits`) versus a human terminal (prompting) is exactly that case — so the message parks waiting for approval in a terminal nobody is watching. Sessions started by the orchestrator do register as addressable peers and do receive messages (verified against 2.1.232 by sending to a live one and getting a reply). Note that a user-level `~/.claude/settings.json` value may take precedence over the per-session one; only the `accept` path has been confirmed end-to-end here.
 - Hook lifecycle events (`includeHookEvents`), subagent output forwarding (`forwardSubagentText`), permission delegation (`permissionPromptTool`), prompt cache optimization (`bare` + `excludeDynamicSystemPromptSections` + `enablePromptCaching1H`), debug control, `--from-pr` resume, and MCP channel subscriptions
+- `restricted` → `--restricted` (CLI 2.1.249+): removes the command- and code-running tools and
+  `WebFetch` from the session, and ignores user/project/local settings files. Not folded into
+  `sandboxMode: 'read-only'`, which maps to plan mode — measured against 2.1.251, plan mode alone
+  refused a direct write, a shell write and a delegated subagent write, so this is defence in depth
+  rather than a fix, and switching it on implicitly would silently drop the caller's CLAUDE.md
 - Fork subagent (`forkSubagent`), tool search (`enableToolSearch`), OpenTelemetry logging toggles (`otelLogUserPrompts`, `otelLogRawApiBodies`), `xhigh` effort tier (Opus 4.7), and `stats.pluginErrors` capture — see [CLI 2.1.121 options in SKILL.md](../SKILL.md) and [tools.md](./tools.md)
 
 > **Behavior changes from upstream Claude CLI 2.1.121** (worth knowing if you set permission rules):
@@ -198,13 +203,26 @@ prints a single JSON object and exits. Verified against `grok` **1.0.5**.
   because the same-looking field on codex is a running total.
 - Permission modes pass straight through: grok's `--permission-mode` takes the same vocabulary we
   use. The one exception is our `manual`, which grok spells `default`.
-- Reasoning effort maps to `--effort`; grok 1.0.5 accepts `low|medium|high|xhigh` (it names the set in
+- Reasoning effort maps to `--effort`; grok 1.0.13 accepts `low|medium|high|xhigh` (it names the set in
   its own rejection message), so only `max` and `ultra` clamp — to `xhigh`.
-- **`sandboxMode: 'read-only'` is refused, not approximated.** grok has `--permission-mode plan` and
-  `--deny` rules, but plan mode alone is model-cooperative — the shape that let an adversarial
-  prompt write through Cursor's plan mode — and the deny rules have not been through the
-  write × shell × subagent × resumed-turn matrix this project requires before claiming a boundary.
-  A read-only grok session throws rather than running writable under a read-only label.
+- Session options that reach grok since 1.0.13: `appendSystemPrompt` → `--rules` (appends, unlike
+  `systemPrompt` → `--system-prompt-override`, which replaces), `allowedTools` → `--tools`,
+  `disallowedTools` → `--disallowed-tools`, `jsonSchema` → `--json-schema` (inline, and it implies the
+  JSON output format already asked for), `agent` → `--agent`, `agents` → `--agents`,
+  `dangerouslySkipPermissions` → `--always-approve`, `customSessionId` → `--session-id`, `forkSession`
+  → `--fork-session`. **grok validates neither tool list**: a name that does not exist is ignored
+  rather than rejected, so a typo in a denylist leaves the tool enabled. Prefer an allowlist.
+- `-p` is now the short form of `--single`, not `--print`. The short form is what this wrapper passes,
+  so the 1.0.5 → 1.0.13 rename is invisible here; a call written against the long name is not.
+- **`sandboxMode: 'read-only'` is refused, not approximated — and against 1.0.13 that is measured.**
+  The obvious construction is a `--tools` allowlist of read-only built-ins plus `--permission-mode
+plan`. It refuses a direct write and a shell write, then loses to the third prompt in the matrix:
+  asked to delegate, the session spawns a subagent and the file appears. The subagent does not
+  inherit the parent's tool restriction — the same load-bearing hole found in OpenCode, where
+  denying the write tools without denying `task` left the delegation path open. grok also ships
+  `--no-subagents`, the obvious next probe, deliberately not wired: the run that would have
+  confirmed it hit the account's free-tier limit, and a probe that fails for lack of quota writes no
+  file either. A read-only grok session throws rather than running writable under a read-only label.
 - Binary: `grok` (set `GROK_BIN` to override). Not `agent`: xAI's installer claims that name too,
   and so did Cursor's.
 - Requires Grok Build: see `x.ai/cli`.

@@ -148,6 +148,92 @@ describe('PersistentGrokSession — flags', () => {
     expect(stats.costUsd).toBeCloseTo(0.0442, 10);
   });
 
+  // grok 1.0.13 grew a programmatic surface for options this project already
+  // had. Every one of these was being dropped on the floor before: the caller
+  // set it, the wrapper never passed it, and nothing said so.
+  it('forwards the session options grok can now accept', async () => {
+    const s = new PersistentGrokSession({
+      name: 't',
+      cwd: '/tmp',
+      permissionMode: 'bypassPermissions',
+      appendSystemPrompt: 'extra rules',
+      allowedTools: ['read_file', 'grep'],
+      disallowedTools: ['write'],
+      jsonSchema: '{"type":"object"}',
+      agent: 'reviewer',
+      dangerouslySkipPermissions: true,
+      customSessionId: '11111111-2222-3333-4444-555555555555',
+    });
+    await s.start();
+    const p = s.send('hi', { waitForComplete: true });
+    setTimeout(() => reply(OK_RESULT), 5);
+    await p;
+
+    const a = spawnArgs();
+    expect(a[a.indexOf('--rules') + 1]).toBe('extra rules');
+    expect(a[a.indexOf('--tools') + 1]).toBe('read_file,grep');
+    expect(a[a.indexOf('--disallowed-tools') + 1]).toBe('write');
+    expect(a[a.indexOf('--json-schema') + 1]).toBe('{"type":"object"}');
+    expect(a[a.indexOf('--agent') + 1]).toBe('reviewer');
+    expect(a).toContain('--always-approve');
+    expect(a[a.indexOf('--session-id') + 1]).toBe('11111111-2222-3333-4444-555555555555');
+  });
+
+  // `--session-id` names a NEW conversation. Passing it alongside a resume is
+  // rejected by grok unless the resume is also a fork, so it is withheld there.
+  it('withholds --session-id on a plain resume', async () => {
+    const s = new PersistentGrokSession({
+      name: 't',
+      cwd: '/tmp',
+      permissionMode: 'bypassPermissions',
+      resumeSessionId: 'grok-live-01a04318-209b-7fa1-aff0-c65a8c2ea23e',
+      customSessionId: '11111111-2222-3333-4444-555555555555',
+    });
+    await s.start();
+    const p = s.send('hi', { waitForComplete: true });
+    setTimeout(() => reply(OK_RESULT), 5);
+    await p;
+
+    const a = spawnArgs();
+    expect(a).toContain('--resume');
+    expect(a).not.toContain('--session-id');
+    expect(a).not.toContain('--fork-session');
+  });
+
+  it('names the forked session when a resume is forked', async () => {
+    const s = new PersistentGrokSession({
+      name: 't',
+      cwd: '/tmp',
+      permissionMode: 'bypassPermissions',
+      resumeSessionId: 'grok-live-01a04318-209b-7fa1-aff0-c65a8c2ea23e',
+      forkSession: true,
+      customSessionId: '11111111-2222-3333-4444-555555555555',
+    });
+    await s.start();
+    const p = s.send('hi', { waitForComplete: true });
+    setTimeout(() => reply(OK_RESULT), 5);
+    await p;
+
+    const a = spawnArgs();
+    expect(a).toContain('--fork-session');
+    expect(a[a.indexOf('--session-id') + 1]).toBe('11111111-2222-3333-4444-555555555555');
+  });
+
+  // Measured against 1.0.13: a `--tools` allowlist of read-only built-ins plus
+  // plan mode refused a direct write and a shell write, then lost to the third
+  // prompt — the session spawned a subagent and the file appeared. Until that
+  // is closed and proven, read-only stays refused rather than approximated.
+  it('refuses read-only, and says what was measured', async () => {
+    const s = new PersistentGrokSession({
+      name: 't',
+      cwd: '/tmp',
+      permissionMode: 'bypassPermissions',
+      sandboxMode: 'read-only',
+    });
+    await s.start();
+    await expect(s.send('hi', { waitForComplete: true })).rejects.toThrow(/subagent still wrote to disk/);
+  });
+
   it('omits --effort for auto', async () => {
     const s = new PersistentGrokSession({
       name: 't',

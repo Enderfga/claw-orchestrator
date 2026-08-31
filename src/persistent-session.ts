@@ -268,6 +268,10 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
       args.push('--effort', this.options.effort === 'ultra' ? 'max' : this.options.effort);
     }
 
+    // Restricted mode. Structural rather than cooperative: the command-running
+    // tools are removed from the session instead of being denied on request.
+    if (this.options.restricted) args.push('--restricted');
+
     // Auto mode
     if (this.options.enableAutoMode || this.options.permissionMode === 'auto') args.push('--enable-auto-mode');
 

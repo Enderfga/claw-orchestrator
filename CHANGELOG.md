@@ -5,6 +5,49 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.2.0] - 2026-08-31
+
+Weekly engine sweep: Claude Code 2.1.246 → 2.1.251, Codex 0.149.1 → 0.151.0, Antigravity 1.1.21 →
+1.1.22, Grok Build 1.0.5 → 1.0.13, OpenCode 1.18.23 → 1.18.25. Each ran a live turn at its new
+version, and the ACP and MCP entry points were smoke-tested alongside them.
+
+No registry drift this week — the first time in several. Today was also the last day of the window
+Sonnet 5's $2/$10 was announced under, and Anthropic's pricing page now states that price is standard
+and the scheduled increase will not happen, which is what this project already had.
+
+### Added
+
+- **Grok now receives the session options it has been ignoring.** 1.0.13 grew a programmatic surface
+  for nine options this project already had, every one of which the wrapper was dropping on the
+  floor: `appendSystemPrompt` → `--rules`, `allowedTools` → `--tools`, `disallowedTools` →
+  `--disallowed-tools`, `jsonSchema` → `--json-schema`, `agent` → `--agent`, `agents` → `--agents`,
+  `dangerouslySkipPermissions` → `--always-approve`, `customSessionId` → `--session-id`, and
+  `forkSession` → `--fork-session`. `--session-id` names a new conversation, so it is withheld on a
+  plain resume and passed on a forked one, which is the only combination grok accepts. Note that grok
+  validates neither tool list: a name that does not exist is ignored rather than rejected, so a typo
+  in a denylist silently leaves the tool enabled.
+- **`restricted` (Claude Code).** Maps to `--restricted`, added in CLI 2.1.249: the command- and
+  code-running tools and `WebFetch` are removed from the session rather than denied on request. It is
+  deliberately not folded into `sandboxMode: 'read-only'` — measured against 2.1.251, plan mode alone
+  already refused a direct write, a shell write and a delegated subagent write, and `--restricted`
+  also drops the caller's user, project and local settings files, taking their CLAUDE.md and hooks
+  with them. That is not something to switch on behind a caller's back.
+
+### Changed
+
+- **Grok's read-only refusal is now a measured finding rather than a cautious one.** The obvious
+  construction — a `--tools` allowlist of read-only built-ins plus `--permission-mode plan` — refuses
+  a direct write and a shell write against 1.0.13, then loses to the third prompt in the matrix:
+  asked to delegate, the session spawned a subagent and the file appeared. The subagent does not
+  inherit the parent's tool restriction, which is the same load-bearing hole found in OpenCode, where
+  denying the write tools without denying `task` left the delegation path open. grok ships
+  `--no-subagents` and that is the obvious next probe; it is not wired up, because the run that would
+  have confirmed it hit the account's free-tier usage limit, and a probe that fails for lack of quota
+  writes no file either. Reading that as a pass is how an unproven boundary ships. The thrown error
+  now names what was measured.
+- `-p` is the short form of grok's `--single` since 1.0.13, renamed from `--print`. This wrapper
+  passes the short form, so the rename is invisible here.
+
 ## [6.1.1] - 2026-08-27
 
 Both defects surfaced while connecting `clawo-mcp` to an MCP host for the first time.
