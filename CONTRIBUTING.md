@@ -64,6 +64,67 @@ changes behaviour updates the matching reference file in the same PR:
 Also update `README.md` if the change moves the feature overview, the engine compatibility
 table, or the source tree.
 
+## Contributing an engine
+
+Engines sit in one of three tiers, and the line between them is verification —
+not code quality, and not how good the model is.
+
+| Tier          | Who maintains it | What this project claims                                                                                              |
+| ------------- | ---------------- | --------------------------------------------------------------------------------------------------------------------- |
+| **core**      | Maintainers      | Wrapped in `src/persistent-*-session.ts`, exercised with a live turn every week, pinned to a version someone here ran |
+| **community** | You              | The schema is validated and the preset is shipped. Whether it runs is *your* dated, attributable claim                |
+| **legacy**    | —                | Still wired, no longer tracked                                                                                        |
+
+Core requires that a maintainer can obtain and run the binary, because that tier
+promises a weekly live exercise and a tested version pin. Most interesting CLIs
+are gated behind credentials this project does not hold, which is what the
+community tier is for.
+
+### Which shape is yours?
+
+**A — preset only.** Your CLI already speaks something `CustomEngineConfig` can
+describe: a print/non-interactive flag, text or JSON on stdout, optionally a
+resume flag. Your contribution is one JSON file in `configs/engines/`. No code.
+
+**B — adapter in your package, preset here.** Your CLI speaks its own wire
+protocol. Write the translation as a binary in *your own* npm package and point
+the preset's `bin` at it. Keeping it there is what lets this project ship the
+preset without owning a protocol it cannot test; `@enderfga/dsh-clawo` is the
+existing example of that split.
+
+Do not open a PR that puts protocol translation for an untestable engine into
+`src/`. It will be declined for the reason above, not for its quality.
+
+### The smoke record
+
+A preset is accepted on a falsifiable claim, so `provenance` must carry one.
+Run this against your engine and link the captured output:
+
+```bash
+# 1. two turns, to prove the session actually carries context
+clawo session start --name preset-smoke --engine custom --custom-engine ./my-preset.json
+clawo session send --name preset-smoke "Remember the number 4173. Reply with just OK."
+clawo session send --name preset-smoke "What number did I ask you to remember?"   # must answer 4173
+clawo session stop --name preset-smoke
+
+# 2. the version you ran it against
+my-engine --version
+```
+
+Paste both into a gist and put its URL in `provenance.smokeUrl`, the engine
+version in `provenance.verifiedAgainst`, and the date in `provenance.verifiedOn`.
+
+Nobody here will reproduce that run — that is the honest position, not a
+loophole. It is dated, attributed and checkable by anyone who does hold the
+credentials, which is what makes it worth more than an assurance.
+
+### What CI checks
+
+Schema only, because schema is all that can be checked without your engine's
+credentials: id shape and filename match, tier, a complete provenance block with
+an ISO date, and an `engine` block with a non-absolute `bin`. A preset that
+passes CI has not been shown to work.
+
 ## Issue Guidelines
 
 - Search existing issues before opening a new one

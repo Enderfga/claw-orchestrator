@@ -409,8 +409,15 @@ export interface SessionConfig {
    * settings files also drops their CLAUDE.md and hooks.
    */
   restricted?: boolean;
-  /** Custom engine configuration — required when engine is 'custom' */
-  customEngine?: CustomEngineConfig;
+  /**
+   * Custom engine configuration — required when engine is 'custom'.
+   *
+   * Either an inline config, or the id of a bundled community preset from
+   * `configs/engines/`. The preset form exists so a third-party CLI can be
+   * described once and shipped, rather than re-typed by every caller; see
+   * `src/engine-presets.ts` for what a preset promises and what it does not.
+   */
+  customEngine?: CustomEngineConfig | string;
 }
 
 // ─── Session Stats ───────────────────────────────────────────────────────────

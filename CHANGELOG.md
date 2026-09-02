@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.3.0] - 2026-09-02
+
+### Added
+
+- **A contribution path for third-party engines.** `customEngine` now accepts the id of a preset
+  bundled in `configs/engines/` as well as an inline config, so a third-party CLI can be described
+  once and shipped rather than retyped by every caller.
+
+  Engines sit in three tiers, and the line between them is verification, not code quality. **Core**
+  engines are wrapped in this repo, exercised with a live turn every week, and pinned to a version
+  someone here actually ran — which requires that a maintainer can obtain and run the binary.
+  **Community** presets are shipped as data: the schema is validated here, and whether the engine
+  runs is its maintainer's claim, against a named version, on a named date. **Legacy** engines stay
+  wired and untracked.
+
+  The middle tier is deliberately not gated on a maintainer running it. Most of the CLIs worth
+  supporting are behind credentials this project does not hold, so that bar would keep the tier
+  permanently empty — and an empty tier is indistinguishable from never having done the work.
+  Requiring an attributable, dated, falsifiable attestation keeps the door open without anyone here
+  claiming to have tested what they have not. CI enforces the parts that can be checked without the
+  engine's credentials, and a preset that passes CI has not been shown to work.
+
+  A preset never carries protocol translation. A CLI that speaks its own wire format needs an
+  adapter binary in its author's own package, with the preset pointing `bin` at it — the split
+  `@enderfga/dsh-clawo` already uses. Keeping the translation out of this repo is what makes a
+  preset shippable without owning a protocol that cannot be tested here.
+
+  A preset id is refused over HTTP exactly as an inline config is: naming a shipped description is
+  tamer than arbitrary argv, but it is still a remote caller causing a process to spawn.
+
+  See [CONTRIBUTING.md](CONTRIBUTING.md#contributing-an-engine) for the two contribution shapes and
+  the smoke script that produces the attestation.
+
 ## [6.2.1] - 2026-09-02
 
 Claude Code 2.1.251 → 2.1.258, Codex 0.151.0 → 0.152.1, OpenCode 1.18.25 → 1.18.26; Antigravity and

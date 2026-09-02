@@ -166,6 +166,7 @@ import { PersistentGrokSession } from './persistent-grok-session.js';
 import { PersistentOpencodeSession } from './persistent-opencode-session.js';
 import { PersistentAgySession } from './persistent-agy-session.js';
 import { PersistentCustomSession } from './persistent-custom-session.js';
+import { resolveCustomEngine } from './engine-presets.js';
 import {
   type SessionConfig,
   type SessionInfo,
@@ -2292,6 +2293,13 @@ export class SessionManager {
   }
 
   private _createSession(engine: EngineType, config: SessionConfig): ISession {
+    // A `customEngine` given as a preset id is expanded here, once, so every
+    // consumer downstream sees a config object rather than having to know both
+    // shapes. An unknown id throws instead of falling through to the default
+    // engine, which would silently run something the caller did not ask for.
+    if (typeof config.customEngine === 'string') {
+      config = { ...config, customEngine: resolveCustomEngine(config.customEngine) };
+    }
     switch (engine) {
       case 'gemini':
         return new PersistentGeminiSession(config, process.env.GEMINI_BIN);
