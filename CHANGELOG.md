@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.2.1] - 2026-09-02
+
+Claude Code 2.1.251 → 2.1.258, Codex 0.151.0 → 0.152.1, OpenCode 1.18.25 → 1.18.26; Antigravity and
+Grok Build unchanged. Exactly one item across all of it is AI-facing — the rest is TUI, settings,
+auto-mode and gateway behaviour. Codex's `exec` flag set and model list are byte-identical across the
+bump, OpenCode's `run` flags likewise, and both ran a live turn at their new version.
+
+### Fixed
+
+- **Registered Claude Fable 5.1, and moved the `fable` alias onto it.** `claude-fable-5-1` is the new
+  default Fable model, and the CLI's own `fable` resolves to it — verified by reading
+  `modelUsage.canonicalModel` back from a real turn against 2.1.258 rather than taking the release
+  note's word for it. An alias left pointing at the previous generation is the drift that has hit
+  this registry once per generation (Opus 5, Sonnet 5) and never fails loudly; it just prices at the
+  wrong model. `claude-mythos-5-1` is registered alongside it, as Mythos is the same model under
+  limited availability.
+- **Priced 5.1's cache reads at their own rate.** Fable 5.1 and Mythos 5.1 read cache at **0.025x
+  base input** — $0.25 per Mtok against a $10 input price — where every other Claude model is 0.1x.
+  Copying Fable 5's $1, or deriving the number from the input rate, over-reports those two by 4x.
+  Cache *writes* keep the usual 1.25x / 2x multipliers, so only the read is exceptional. A test
+  asserts the exception together with the rule it breaks, so a blanket edit in either direction
+  fails.
+
 ## [6.2.0] - 2026-08-31
 
 Weekly engine sweep: Claude Code 2.1.246 → 2.1.251, Codex 0.149.1 → 0.151.0, Antigravity 1.1.21 →

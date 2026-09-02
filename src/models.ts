@@ -38,17 +38,44 @@ export interface ModelDef {
 
 const MODELS: ModelDef[] = [
   // ── Anthropic ──────────────────────────────────────────────────────────
-  // Fable 5 — first model of the Claude 5 family, a Mythos-class tier above
-  // Opus. $10/$50 per Mtok, cache read $1 (0.1× input), full 1M-token context
-  // at standard pricing (no long-context surcharge). Claude Mythos 5 is the
-  // same model at the same price but limited-availability (approved orgs
-  // only), so we register only Fable.
+  // The Fable tier sits above Opus: $10/$50 per Mtok and a full 1M-token
+  // context at standard pricing (no long-context surcharge). Mythos is the same
+  // model at the same price under limited availability, so each generation is
+  // registered in both spellings — an unregistered id does not fail, it prices
+  // at the family default.
+  //
+  // Cache reads are where the two generations differ, and 5.1 is the exception
+  // to a rule that holds everywhere else in this file: a cache hit is 0.1x base
+  // input on every Claude model EXCEPT Fable 5.1 and Mythos 5.1, which are
+  // 0.025x — $0.25 per Mtok against a $10 input price. Deriving it from the
+  // input rate would over-report those two by 4x. Cache *writes* keep the usual
+  // 1.25x / 2x multipliers, which is why only the read is stored here.
+  //
+  // The `fable` alias points at 5.1 because that is what the CLI's own `fable`
+  // resolves to — verified against 2.1.258 by reading `modelUsage.canonicalModel`
+  // back from a real turn, not inferred from the release note. (A Claude apps
+  // gateway session still resolves `fable` to Fable 5 while gateways catch up;
+  // that is the gateway's mapping, not this registry's.)
+  {
+    id: 'claude-fable-5-1',
+    engine: 'claude',
+    provider: 'anthropic',
+    pricing: { input: 10, output: 50, cached: 0.25 },
+    aliases: ['fable'],
+    contextWindow: 1_000_000,
+  },
+  {
+    id: 'claude-mythos-5-1',
+    engine: 'claude',
+    provider: 'anthropic',
+    pricing: { input: 10, output: 50, cached: 0.25 },
+    contextWindow: 1_000_000,
+  },
   {
     id: 'claude-fable-5',
     engine: 'claude',
     provider: 'anthropic',
     pricing: { input: 10, output: 50, cached: 1 },
-    aliases: ['fable'],
     contextWindow: 1_000_000,
   },
   // Opus pricing is flat across 4.6 through 5: input:5 / output:25 / cached:0.5,
@@ -98,9 +125,6 @@ const MODELS: ModelDef[] = [
   // scheduled change is not a fact until it happens.
   //
   // The `sonnet` alias points here so it tracks the CLI's own `sonnet` default.
-  // Mythos 5 shares Fable 5's specs and pricing exactly. Invitation-only
-  // (Project Glasswing), but it is a documented id a caller can pass, and an
-  // unregistered id silently prices at the family default instead.
   {
     id: 'claude-mythos-5',
     engine: 'claude',

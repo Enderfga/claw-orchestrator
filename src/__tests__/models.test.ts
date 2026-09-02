@@ -320,9 +320,35 @@ describe('claude-fable-5', () => {
     expect(m!.pricing.cached).toBe(1);
   });
 
-  it('resolves the `fable` alias to the claude engine', () => {
-    expect(resolveAlias('fable')).toBe('claude-fable-5');
-    expect(resolveEngineAndModel('fable')).toEqual({ engine: 'claude', model: 'claude-fable-5' });
+  it('no longer owns the `fable` alias, which tracks the CLI default', () => {
+    // The CLI's own `fable` resolves to 5.1 as of 2.1.258, read back from a real
+    // turn's `modelUsage.canonicalModel`. An alias left pointing at the previous
+    // generation is the drift that has bitten this registry repeatedly — it
+    // costs alias sessions at the wrong model's rates without failing.
+    expect(resolveAlias('fable')).toBe('claude-fable-5-1');
+    expect(resolveEngineAndModel('fable')).toEqual({ engine: 'claude', model: 'claude-fable-5-1' });
+    expect(lookupModel('claude-fable-5')!.aliases ?? []).not.toContain('fable');
+  });
+
+  it('prices 5.1 cache reads at the 0.025x exception, not the usual 0.1x', () => {
+    // Every other Claude model reads cache at 0.1x base input. Fable 5.1 and
+    // Mythos 5.1 are 0.025x — $0.25 against a $10 input price. Deriving the
+    // number from the input rate, or copying it from Fable 5, over-reports
+    // these two 4x.
+    for (const id of ['claude-fable-5-1', 'claude-mythos-5-1']) {
+      const m = lookupModel(id);
+      expect(m, `${id} is unregistered`).toBeDefined();
+      expect(m!.contextWindow).toBe(1_000_000);
+      expect(m!.pricing.input).toBe(10);
+      expect(m!.pricing.output).toBe(50);
+      expect(m!.pricing.cached).toBe(0.25);
+    }
+    // Reverse assertion: the 5 generation keeps $1, so a blanket edit fails here.
+    expect(lookupModel('claude-fable-5')!.pricing.cached).toBe(1);
+    expect(lookupModel('claude-mythos-5')!.pricing.cached).toBe(1);
+    // And the rule the exception is an exception to still holds elsewhere.
+    expect(lookupModel('claude-opus-5')!.pricing.cached).toBe(0.5);
+    expect(lookupModel('claude-sonnet-5')!.pricing.cached).toBe(0.2);
   });
 
   it('fable/mythos strings are detected as Anthropic in the heuristics', () => {
