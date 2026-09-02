@@ -36,6 +36,7 @@ import {
 } from './types.js';
 import { resolveAlias, estimateTokens, hasPricingOverride } from './models.js';
 import { buildSanitizer } from './sanitize.js';
+import { resolveCustomEngine } from './engine-presets.js';
 
 import {
   CONTEXT_HIGH_THRESHOLD,
@@ -119,7 +120,10 @@ export class PersistentCustomSession extends EventEmitter implements ISession {
     if (!config.customEngine) {
       throw new Error('CustomEngineConfig is required for custom engine sessions');
     }
-    this.engineConfig = config.customEngine;
+    // A preset id is expanded by SessionManager before it gets here. Resolving
+    // again is cheap and keeps this class usable on its own, in a test or by a
+    // caller that constructs it directly.
+    this.engineConfig = resolveCustomEngine(config.customEngine)!;
     this.engineBin = resolveBin(this.engineConfig);
     this.sanitize = buildSanitizer({
       extraPatterns: this.engineConfig.sanitizePatterns,

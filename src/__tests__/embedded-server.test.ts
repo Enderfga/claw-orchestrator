@@ -315,6 +315,25 @@ describe('EmbeddedServer', () => {
       expect(manager.startSession).not.toHaveBeenCalled();
     });
 
+    // Presets made `customEngine` accept a string as well as an object. A
+    // preset names a binary this project ships a description of, which is
+    // tamer than arbitrary argv — but it is still a remote caller causing a
+    // process to spawn, which is the thing this guard exists to stop. The
+    // guard matches on the key, so the string form is refused too; this
+    // asserts that rather than leaving it to be rediscovered.
+    it('refuses a customEngine given as a preset id, not just as a config', async () => {
+      await server.start();
+
+      const res = await request(port, '/session/start', {
+        method: 'POST',
+        body: { name: 'pwned', cwd: '/tmp', engine: 'custom', customEngine: 'some-preset' },
+      });
+
+      expect(res.status).toBe(400);
+      expect(String((res.body as { error?: string }).error)).toContain('customEngine');
+      expect(manager.startSession).not.toHaveBeenCalled();
+    });
+
     it('refuses a nested custom engine, wherever in the body it sits', async () => {
       await server.start();
 
