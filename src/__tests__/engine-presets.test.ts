@@ -40,7 +40,8 @@ describe('preset validation', () => {
   });
 
   it('rejects a preset with no provenance at all', () => {
-    const { provenance: _drop, ...bad } = VALID;
+    const bad: Record<string, unknown> = { ...VALID };
+    delete bad.provenance;
     expect(() => validatePreset(bad, 'x.json')).toThrow(/provenance/);
   });
 
