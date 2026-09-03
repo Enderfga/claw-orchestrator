@@ -192,7 +192,7 @@ For the full control protocol, registry/resume behavior, and ledger layout, see 
 | Session Ops       | `coding_session_status`, `session_grep`, `session_compact`, `session_update_tools`, `session_switch_model`                                        |
 | Inbox             | `session_send_to`, `session_inbox`, `session_deliver_inbox`                                                                                       |
 | Teams             | `coding_agents_list`, `team_list`, `team_send`                                                                                                    |
-| Codex             | `codex_resume`, `codex_review`, `codex_goal_*`, `codex_interrupt`, `codex_steer`, `codex_fork`, `codex_rollback`, `codex_models`, `codex_threads` |
+| Codex             | `codex_resume`, `codex_review`, `codex_goal_*`, `codex_interrupt`, `codex_steer`, `codex_fork`, `codex_rollback`, `codex_models`, `clawo_codex_threads` |
 | Claude CLI        | `claude_goal_*`, `claude_agents_list`, `plugin_details`                                                                                           |
 | Fan-out           | `fanout_start`, `fanout_status`, `fanout_abort`                                                                                                   |
 | Council           | `council_start`, `council_status`, `council_abort`, `council_inject`, `council_review`, `council_accept`, `council_reject`                        |
