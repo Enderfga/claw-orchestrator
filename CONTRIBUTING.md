@@ -100,16 +100,35 @@ Do not open a PR that puts protocol translation for an untestable engine into
 A preset is accepted on a falsifiable claim, so `provenance` must carry one.
 Run this against your engine and link the captured output:
 
+Drop your preset into `configs/engines/` in a checkout, build, and run:
+
 ```bash
+# 0. your preset has to be loadable before it can be smoked
+npm run build && clawo engines          # your id should be listed
+
 # 1. two turns, to prove the session actually carries context
-clawo session start --name preset-smoke --engine custom --custom-engine ./my-preset.json
-clawo session send --name preset-smoke "Remember the number 4173. Reply with just OK."
-clawo session send --name preset-smoke "What number did I ask you to remember?"   # must answer 4173
-clawo session stop --name preset-smoke
+clawo session-start preset-smoke -e custom --custom-engine <your-preset-id>
+clawo session-send preset-smoke "Remember the number 4173. Reply with just OK."
+clawo session-send preset-smoke "What number did I ask you to remember?"   # must answer 4173
+clawo session-stop preset-smoke
 
 # 2. the version you ran it against
 my-engine --version
 ```
+
+Smoke the **preset**, not an inline config. They are not the same evidence: a
+preset additionally has to load from disk, match its filename, and resolve by
+id, and those are the parts a preset can get wrong.
+
+A preset id is the only form of custom engine the CLI can pass, and that is on
+purpose. `clawo` reaches the session through the HTTP control plane, which
+refuses an inline `customEngine` object because such an object names an
+executable and its arguments — only a local caller (the MCP tool, or the
+`SessionManager` API in-process) may configure one of those. A preset id carries
+neither a binary nor argv; it selects one of the descriptions this package
+ships, which is the same class as naming a built-in engine. If you need to
+iterate on a draft before it is a file, use the MCP `session_start` tool with an
+inline `customEngine` — that path is local and accepts one.
 
 Paste both into a gist and put its URL in `provenance.smokeUrl`, the engine
 version in `provenance.verifiedAgainst`, and the date in `provenance.verifiedOn`.

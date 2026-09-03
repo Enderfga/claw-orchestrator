@@ -83,17 +83,27 @@ function findCustomEngineKey(value: unknown, depth = 0, trail = ''): string | nu
   }
   for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
     const path = trail ? `${trail}.${key}` : key;
-    if (CUSTOM_ENGINE_KEY.test(key) && child !== undefined && child !== null) return path;
+    // A string here is a preset id: it selects one of the descriptions this
+    // package ships and cannot introduce a binary or argv of its own. That is
+    // the same class as naming a built-in engine, which this surface already
+    // allows — and `engine: 'codex'` spawns an executable too, so "spawns
+    // something" was never the line. Arbitrary argv is.
+    if (CUSTOM_ENGINE_KEY.test(key) && isInlineCustomEngine(child)) return path;
     const hit = findCustomEngineKey(child, depth + 1, path);
     if (hit) return hit;
   }
   return null;
 }
 
+/** An inline config — the form that carries a binary and argv of its own. */
+function isInlineCustomEngine(value: unknown): boolean {
+  return typeof value === 'object' && value !== null;
+}
+
 function rejectCustomEngineOverHttp(body: unknown): string | null {
   const key = findCustomEngineKey(body);
   if (!key) return null;
-  return `${key} is not accepted over HTTP: a custom engine names an executable to spawn, so it may only be configured by a local caller (MCP tool / SessionManager API). Use a built-in engine here.`;
+  return `${key} may not be given as an inline config over HTTP: it names an executable and its arguments, so it is accepted only from a local caller (MCP tool / SessionManager API). Pass the id of a bundled engine preset instead, or use a built-in engine.`;
 }
 
 /**

@@ -263,7 +263,7 @@ describe('POST /autoloop/new', () => {
       expect(r.status).toBe(400);
       const payload = (await r.json()) as { ok: boolean; error: string };
       expect(payload.ok).toBe(false);
-      expect(payload.error).toContain('not accepted over HTTP');
+      expect(payload.error).toContain('may not be given as an inline config over HTTP');
       expect(manager.autoloopStart).not.toHaveBeenCalled();
     }
   });
@@ -513,7 +513,7 @@ describe('POST /autoloop/:id/resume + GET /autoloop/:id/chat_history', () => {
 
     expect(r.status).toBe(400);
     const payload = (await r.json()) as { ok: boolean; error: string };
-    expect(payload.error).toContain('not accepted over HTTP');
+    expect(payload.error).toContain('may not be given as an inline config over HTTP');
     expect(resumeSpy).not.toHaveBeenCalled();
   });
 

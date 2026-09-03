@@ -240,3 +240,21 @@ clawo runs --refuted      # only turns whose acceptance contract failed
 The table gains a `VERIFIED` column with three values: `yes`, `NO`, and `—` for
 "no contract was declared, so nothing checked it". See
 [`observability.md`](./observability.md).
+
+## `clawo engines`
+
+Lists the community engine presets bundled with the installed package, with each
+one's provenance — who attested it, against which engine version, on what date.
+Read locally rather than over HTTP, since it is a property of the package and has
+to work with no server running.
+
+```bash
+clawo engines
+clawo engines --json
+clawo session-start my-session -e custom --custom-engine <id>
+```
+
+A preset id is the only form of custom engine the CLI can pass: it reaches the
+session through the HTTP surface, which refuses inline configs because those name
+a binary and its arguments. See [multi-engine.md](./multi-engine.md) for the tiers
+and what a community preset does and does not claim.

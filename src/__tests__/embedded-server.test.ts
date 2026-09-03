@@ -315,23 +315,23 @@ describe('EmbeddedServer', () => {
       expect(manager.startSession).not.toHaveBeenCalled();
     });
 
-    // Presets made `customEngine` accept a string as well as an object. A
-    // preset names a binary this project ships a description of, which is
-    // tamer than arbitrary argv — but it is still a remote caller causing a
-    // process to spawn, which is the thing this guard exists to stop. The
-    // guard matches on the key, so the string form is refused too; this
-    // asserts that rather than leaving it to be rediscovered.
-    it('refuses a customEngine given as a preset id, not just as a config', async () => {
+    // Yesterday this asserted the opposite, and the reversal is deliberate.
+    // The guard's own reason is that a custom engine "names an executable to
+    // spawn" — but `engine: 'codex'` spawns one too and is allowed here, so
+    // spawning was never the line. Arbitrary argv is, and a preset id cannot
+    // carry any: it selects one of the descriptions this package ships. Keeping
+    // it refused would also leave `-e custom` unreachable from the CLI, which
+    // is how the first outside contributor discovered the path was dead.
+    it('accepts a customEngine given as a preset id', async () => {
       await server.start();
 
       const res = await request(port, '/session/start', {
         method: 'POST',
-        body: { name: 'pwned', cwd: '/tmp', engine: 'custom', customEngine: 'some-preset' },
+        body: { name: 'preset-ok', cwd: '/tmp', engine: 'custom', customEngine: 'zcode' },
       });
 
-      expect(res.status).toBe(400);
-      expect(String((res.body as { error?: string }).error)).toContain('customEngine');
-      expect(manager.startSession).not.toHaveBeenCalled();
+      expect(res.status).not.toBe(400);
+      expect(manager.startSession).toHaveBeenCalled();
     });
 
     it('refuses a nested custom engine, wherever in the body it sits', async () => {

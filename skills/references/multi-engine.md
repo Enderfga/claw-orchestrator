@@ -300,9 +300,13 @@ needs an adapter binary in its author's package, with the preset pointing `bin`
 at it — the split `@enderfga/dsh-clawo` already uses. That is what makes a preset
 something this project can ship without owning a protocol it cannot test.
 
-A preset id is refused over HTTP exactly as an inline config is. Naming a
-shipped description is tamer than arbitrary argv, but it is still a remote caller
-causing a process to spawn.
+Over HTTP — which includes the `clawo` CLI — a custom engine may be given **only**
+as a preset id. An inline config names a binary and its arguments and is refused
+there; a preset id cannot introduce either, so it is the same class as naming a
+built-in engine, and `engine: 'codex'` already spawns an executable over that
+surface. Presets are therefore the supported way to reach a custom engine from
+the CLI: `clawo engines` lists what is bundled, and
+`clawo session-start <name> -e custom --custom-engine <id>` starts one.
 
 Contribution steps and the smoke script: [CONTRIBUTING.md](../../CONTRIBUTING.md#contributing-an-engine).
 
