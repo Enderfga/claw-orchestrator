@@ -3014,6 +3014,8 @@ export class SessionManager {
     reviewerModel?: string;
     reviewerCustomEngine?: CustomEngineConfig;
     sendTimeoutMs?: number;
+    activityLeaseMs?: number;
+    autoloopHardTimeoutMs?: number;
     /** Internal restart marker: a failed timeout migration must not append a
      *  cleanup decision or purge the resumable session registry. Never stored. */
     _resumeTimeoutMigration?: boolean;
@@ -3104,6 +3106,8 @@ export class SessionManager {
       },
       dispatcher,
       sendTimeoutMs: opts.sendTimeoutMs,
+      activityLeaseMs: opts.activityLeaseMs,
+      autoloopHardTimeoutMs: opts.autoloopHardTimeoutMs,
     });
     runnerRef = runner;
     try {
@@ -3153,8 +3157,15 @@ export class SessionManager {
     reviewerModel?: string;
     reviewerCustomEngine?: CustomEngineConfig;
     sendTimeoutMs?: number;
+    activityLeaseMs?: number;
+    autoloopHardTimeoutMs?: number;
   }): Promise<{ runId: string; plannerSession: string; state: AutoloopState }> {
     // Fail before the run directory exists, so a rejected start leaves nothing.
+    validateAutoloopTimeoutConfig({
+      sendTimeoutMs: opts.sendTimeoutMs,
+      activityLeaseMs: opts.activityLeaseMs,
+      autoloopHardTimeoutMs: opts.autoloopHardTimeoutMs,
+    });
     validateAutoloopRole('planner', opts.plannerEngine, opts.plannerCustomEngine);
     validateAutoloopRole('coder', opts.coderEngine, opts.coderCustomEngine);
     validateAutoloopRole('reviewer', opts.reviewerEngine, opts.reviewerCustomEngine);

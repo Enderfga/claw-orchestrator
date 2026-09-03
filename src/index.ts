@@ -27,6 +27,7 @@ import { councilWorkflow, fanoutWorkflow, solveWorkflow, type SolveArgs } from '
 import { readEvents as readKernelEvents } from './kernel/store.js';
 import { resolveSecretRefs } from './kernel/secrets.js';
 import type { RunState, WorkflowSpec } from './kernel/types.js';
+import { AUTOLOOP_TIMEOUT_SCHEMA, validateAutoloopTimeoutConfig } from './autoloop/types.js';
 
 // ─── Standalone Export ───────────────────────────────────────────────────────
 
@@ -1891,11 +1892,30 @@ const plugin = {
             description: 'Default Reviewer model (default: sonnet for Claude; engine default otherwise)',
           },
           reviewer_custom_engine: CUSTOM_ENGINE_SCHEMA,
-          send_timeout_ms: { type: 'number', description: 'Per-message wall-clock cap (default 600000 = 10 min)' },
+          send_timeout_ms: {
+            ...AUTOLOOP_TIMEOUT_SCHEMA.sendTimeoutMs,
+            description: 'Per-agent send wall-clock cap in milliseconds (default 600000; inclusive range 5000–7200000)',
+          },
+          activity_lease_ms: {
+            ...AUTOLOOP_TIMEOUT_SCHEMA.activityLeaseMs,
+            description:
+              'Inactivity lease in milliseconds, renewed by qualified progress (default 1800000; inclusive range 60000–7200000)',
+          },
+          autoloop_hard_timeout_ms: {
+            ...AUTOLOOP_TIMEOUT_SCHEMA.autoloopHardTimeoutMs,
+            description:
+              'Absolute non-renewable run deadline in milliseconds (default 86400000; inclusive range 600000–259200000)',
+          },
         },
         required: ['run_id', 'workspace'],
       },
       execute: async (_id, args) => {
+        const timeoutConfig = {
+          sendTimeoutMs: args.send_timeout_ms as number | undefined,
+          activityLeaseMs: args.activity_lease_ms as number | undefined,
+          autoloopHardTimeoutMs: args.autoloop_hard_timeout_ms as number | undefined,
+        };
+        validateAutoloopTimeoutConfig(timeoutConfig);
         const result = await getManager().autoloopStart({
           runId: args.run_id as string,
           workspace: sanitizeCwd(args.workspace as string)!,
@@ -1908,7 +1928,7 @@ const plugin = {
           reviewerEngine: args.reviewer_engine as EngineType | undefined,
           reviewerModel: args.reviewer_model as string | undefined,
           reviewerCustomEngine: args.reviewer_custom_engine as CustomEngineConfig | undefined,
-          sendTimeoutMs: args.send_timeout_ms as number | undefined,
+          ...timeoutConfig,
         });
         return {
           ok: true,

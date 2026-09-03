@@ -15,6 +15,7 @@ import * as crypto from 'node:crypto';
 import { SessionManager } from './session-manager.js';
 import { sanitizeCwd, validateRegex } from './validation.js';
 import { resolveSecretRefs } from './kernel/secrets.js';
+import { validateAutoloopTimeoutConfig } from './autoloop/types.js';
 import type { EffortLevel, EngineType } from './types.js';
 import { handleChatCompletion } from './openai-compat.js';
 import { getModelList } from './models.js';
@@ -43,6 +44,12 @@ function autoloopErrorStatus(error: unknown): number {
   // only string values` both fell through to 500 — the opposite of the split
   // this helper exists to provide.
   if (/^(?:Planner|Coder|Reviewer) custom engine config\b/.test(message)) return 400;
+  if (/^(?:sendTimeoutMs|activityLeaseMs|autoloopHardTimeoutMs|pendingDispatchId)\b/.test(message)) return 400;
+  if (/^(?:allow_decrease|activity_lease_ms|autoloop_hard_timeout_ms) is not supported\b/.test(message)) return 400;
+  if (/^pending dispatch\b/.test(message)) return 400;
+  if (/^Autoloop run '.+' (?:has no pending dispatch|is not awaiting a recoverable send timeout)/.test(message)) {
+    return 400;
+  }
   return 500;
 }
 
@@ -974,7 +981,9 @@ export class EmbeddedServer {
           coder_model?: string;
           reviewer_engine?: EngineType;
           reviewer_model?: string;
-          send_timeout_ms?: number;
+          send_timeout_ms?: unknown;
+          activity_lease_ms?: unknown;
+          autoloop_hard_timeout_ms?: unknown;
         };
         const workspace = input.workspace;
         if (typeof workspace !== 'string' || !workspace.trim()) {
@@ -992,6 +1001,12 @@ export class EmbeddedServer {
             ? explicitId
             : `auto-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
         try {
+          const timeoutConfig = {
+            sendTimeoutMs: input.send_timeout_ms as number | undefined,
+            activityLeaseMs: input.activity_lease_ms as number | undefined,
+            autoloopHardTimeoutMs: input.autoloop_hard_timeout_ms as number | undefined,
+          };
+          validateAutoloopTimeoutConfig(timeoutConfig);
           const result = await this.manager.autoloopStart({
             runId,
             workspace: safeWorkspace,
@@ -1001,7 +1016,7 @@ export class EmbeddedServer {
             coderModel: input.coder_model,
             reviewerEngine: input.reviewer_engine,
             reviewerModel: input.reviewer_model,
-            sendTimeoutMs: input.send_timeout_ms,
+            ...timeoutConfig,
           });
           json(200, {
             ok: true,
@@ -1255,6 +1270,23 @@ export class EmbeddedServer {
       if (v2ResumeMatch) {
         const id = v2ResumeMatch[1];
         try {
+          for (const unsupported of ['allow_decrease', 'activity_lease_ms', 'autoloop_hard_timeout_ms']) {
+            if (Object.prototype.hasOwnProperty.call(body, unsupported)) {
+              throw new Error(`${unsupported} is not supported by Autoloop resume`);
+            }
+          }
+          const sendTimeoutMs = body.send_timeout_ms as number | undefined;
+          validateAutoloopTimeoutConfig({ sendTimeoutMs });
+          const pendingDispatchId = body.pending_dispatch_id as string | undefined;
+          if (
+            pendingDispatchId !== undefined &&
+            (typeof pendingDispatchId !== 'string' || pendingDispatchId.length === 0)
+          ) {
+            throw new Error('pendingDispatchId must be a non-empty string');
+          }
+          if (pendingDispatchId !== undefined && sendTimeoutMs === undefined) {
+            throw new Error('pendingDispatchId requires a sendTimeoutMs increase');
+          }
           // Custom-engine configs still never cross the wire. What crosses is a
           // *name* the server resolves from its own environment
           // (CLAWO_CUSTOM_ENGINE_<REF>), so a run whose roles used a custom
@@ -1265,7 +1297,10 @@ export class EmbeddedServer {
             coderCustomEngine: body.coderCustomEngineRef as string | undefined,
             reviewerCustomEngine: body.reviewerCustomEngineRef as string | undefined,
           });
-          const state = await this.manager.autoloopResume(id, refs as never);
+          const resumeOptions = refs as NonNullable<Parameters<SessionManager['autoloopResume']>[1]>;
+          if (sendTimeoutMs !== undefined) resumeOptions.sendTimeoutMs = sendTimeoutMs;
+          if (pendingDispatchId !== undefined) resumeOptions.pendingDispatchId = pendingDispatchId;
+          const state = await this.manager.autoloopResume(id, resumeOptions);
           json(200, { ok: true, state });
         } catch (err) {
           json(autoloopErrorStatus(err), { ok: false, error: (err as Error).message });
