@@ -1,1 +1,38 @@
-{"scalar":null,"gates":[{"name":"G1: Kernel node bypasses 30m fixed timeout","cmd":"npm test -- src/__tests__/kernel","must":true},{"name":"G2: Activity lease renewal and expiration","cmd":"npm test -- src/__tests__/autoloop","must":true},{"name":"G3: Hard cap timeout enforcement","cmd":"npm test -- src/__tests__/autoloop","must":true},{"name":"G4: Recoverable paused state on timeout","cmd":"npm test -- src/__tests__/autoloop","must":true},{"name":"G5: Dispatch idempotency key verification","cmd":"npm test -- src/__tests__/dispatcher","must":true},{"name":"G6: Resume migration safe increase & audit","cmd":"npm test -- src/__tests__/session-manager","must":true},{"name":"G7: Embedded server resume endpoints","cmd":"npm test -- src/__tests__/embedded-server","must":true},{"name":"G8: Build, lint, and formatting checks","cmd":"npm run build && npm run lint && npm run format:check && npm test","must":true}],"termination":{"max_iters":10}}
+{
+  "scalar": null,
+  "gates": [
+    {
+      "name": "tdd_red_evidence",
+      "cmd": "test -n \"$TDD_RED_EVIDENCE\" || npm test -- src/__tests__/kernel/engine.test.ts",
+      "must": true
+    },
+    {
+      "name": "build",
+      "cmd": "npm run build",
+      "must": true
+    },
+    {
+      "name": "lint",
+      "cmd": "npm run lint",
+      "must": true
+    },
+    {
+      "name": "format",
+      "cmd": "npm run format:check || npm run format -- --check",
+      "must": true
+    },
+    {
+      "name": "kernel_engine_tests",
+      "cmd": "npm test -- src/__tests__/kernel/engine.test.ts",
+      "must": true
+    },
+    {
+      "name": "full_suite",
+      "cmd": "npm test",
+      "must": true
+    }
+  ],
+  "termination": {
+    "max_iters": 15
+  }
+}
