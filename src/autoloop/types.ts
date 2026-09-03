@@ -2,7 +2,7 @@
  * Runner-level types for autoloop (three-agent architecture).
  */
 
-import type { AnyAutoloopMessage, PushChannel, PushLevel } from './messages.js';
+import type { AnyAutoloopMessage, PushChannel, PushLevel, SendTimeoutPayload } from './messages.js';
 
 export type AutoloopStatus = 'planning' | 'running' | 'paused' | 'terminated' | 'crashed';
 
@@ -21,6 +21,11 @@ export interface AutoloopState {
   push_log_count: number;
   /** Last reason set when status flips to terminated/crashed/paused. */
   status_reason: string | null;
+  /**
+   * The one logical agent dispatch awaiting an explicit resume decision.
+   * Optional for backward compatibility with state checkpointed before I3.
+   */
+  pending_dispatch?: SendTimeoutPayload | null;
   /**
    * Phase-error circuit breaker — incremented on every `phase_error` message,
    * cleared on each successful (non-error) `iter_done`. When it reaches

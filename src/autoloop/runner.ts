@@ -3,7 +3,7 @@
  *
  * Pure transport: validates messages, dispatches to agents, handles the
  * tiny set of runner-self-targeted messages (iter_artifacts, review_verdict,
- * pause/resume/terminate, push_user). No LLM logic lives here — that's the
+ * send_timeout, pause/resume/terminate, push_user). No LLM logic lives here — that's the
  * AgentDispatcher's job (S2-S4 will plug in real Claude sessions; S1 ships
  * with a mock dispatcher used by tests).
  *
@@ -61,6 +61,7 @@ const LEASE_RENEWING_ACTIVITY_SET = new Set<string>(LEASE_RENEWING_ACTIVITY_KIND
  * - 'state'      : (state: AutoloopState) — status / iter changes
  * - 'push'       : ({ level, summary, detail?, channel }) — fired before notifyUser
  * - 'iter_done'  : ({ iter, verdict, metric }) — Reviewer verdict committed
+ * - 'send_timeout': (payload: SendTimeoutPayload) — recoverable agent deadline
  * - 'timeout'    : (event: AutoloopTimeoutEvent) — lease or hard deadline expired
  * - 'terminated' : (reason: string) — final state, no more messages
  * - 'error'      : (err: Error) — routing or dispatcher errors
@@ -108,6 +109,7 @@ export class AutoloopRunner extends EventEmitter {
       ledger_dir: config.ledger_dir,
       push_log_count: 0,
       status_reason: null,
+      pending_dispatch: null,
       consecutive_phase_errors: 0,
       recent_phase_errors: [],
       metric_history: [],
@@ -206,7 +208,8 @@ export class AutoloopRunner extends EventEmitter {
       !this.lifecycleTimersStarted ||
       this.timeoutMonitoringStopped ||
       this.activityLeaseExpired ||
-      this.terminationStarted
+      this.terminationStarted ||
+      this.state.pending_dispatch
     ) {
       return;
     }
@@ -268,6 +271,7 @@ export class AutoloopRunner extends EventEmitter {
     this.terminationStarted = true;
     this.state.status = 'terminated';
     this.state.status_reason = reason;
+    this.state.pending_dispatch = null;
     this.queue.length = 0;
     this.pausedBuffer.length = 0;
     this.stop();
@@ -347,7 +351,7 @@ export class AutoloopRunner extends EventEmitter {
     // 'terminated' is the final state — once reached, no message of any kind is
     // processed (see events contract above). The terminate message itself still
     // runs because status only flips to 'terminated' while handling it.
-    if (this.state.status === 'terminated') return;
+    if (this.state.status === 'terminated' || this.state.status === 'crashed') return;
     this.emit('message', env);
 
     // Runner is the target for a small set of messages — handle them inline.
@@ -380,7 +384,10 @@ export class AutoloopRunner extends EventEmitter {
     const replies = await this.config.dispatcher.deliver(env);
     for (const r of replies) {
       validateMessage(r);
-      this.recordActivity('agent_progress');
+      // A dispatcher-generated deadline record is bookkeeping, not agent
+      // progress. Letting it renew the lease would make a timeout extend the
+      // run whose lack of progress caused it.
+      if (r.type !== 'send_timeout') this.recordActivity('agent_progress');
       this.queue.push(r);
     }
   }
@@ -479,6 +486,26 @@ export class AutoloopRunner extends EventEmitter {
         }
         return;
       }
+      case 'send_timeout': {
+        const pending = env.payload;
+        // The dispatcher coalesces duplicate delivery, but the runner also
+        // guards its public inbox so replaying the same structured outcome
+        // cannot emit a second timeout event or mutate state twice.
+        if (this.state.pending_dispatch?.dispatch_id === pending.dispatch_id) return;
+        // Awaiting an operator decision is a deliberate pause, not subsequent
+        // inactivity. Suspend only the renewable lease; the absolute hard
+        // deadline stays armed and remains terminal.
+        if (this.activityLeaseTimer) {
+          clearTimeout(this.activityLeaseTimer);
+          this.activityLeaseTimer = null;
+        }
+        this.state.status = 'paused';
+        this.state.status_reason = `awaiting_resume:send_timeout:${pending.agent}:${pending.dispatch_id}`;
+        this.state.pending_dispatch = { ...pending };
+        this.emit('state', this.state);
+        this.emit('send_timeout', this.state.pending_dispatch);
+        return;
+      }
       case 'pause': {
         this.state.status = 'paused';
         this.state.status_reason = env.payload.reason;
@@ -487,6 +514,10 @@ export class AutoloopRunner extends EventEmitter {
       }
       case 'resume': {
         if (this.state.status === 'paused') {
+          // I4 owns the explicit timeout-increase resume contract. Until that
+          // arrives, an ordinary resume envelope must not silently discard a
+          // pending send deadline and risk replaying its side effects.
+          if (this.state.pending_dispatch) return;
           this.state.status = 'running';
           this.state.status_reason = null;
           // Restore parked agent-bound messages at the queue head, preserving
