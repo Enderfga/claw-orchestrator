@@ -36,6 +36,7 @@ import { type AnyAutoloopMessage, Msg, type SendTimeoutPayload } from './message
 import {
   DEFAULT_SEND_TIMEOUT_MS,
   LEDGER_SCHEMA_VERSION,
+  validateAutoloopTimeoutConfig,
   type AgentDispatcher,
   type AutoloopRoleName,
   type AutoloopState,
@@ -95,6 +96,8 @@ export interface ClaudeAgentDispatcherConfig {
   reviewerCustomEngine?: CustomEngineConfig;
   /** Per-message wall-clock cap. Default 10 min. */
   sendTimeoutMs?: number;
+  /** Internal failure-atomic resume marker; never accepted from an agent. */
+  suppressFailedStartAudit?: boolean;
   /**
    * Optional acceptance contract. When present the Reviewer's `advance` is no
    * longer sufficient on its own: the contract runs against the workspace and a
@@ -268,11 +271,13 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
   }
 
   async shutdown(reason: string, opts: { purge?: boolean } = {}): Promise<void> {
-    this.appendDecisionLog({
-      kind: 'terminate',
-      actor: reason === 'phase_error_circuit' ? 'runner' : 'planner',
-      payload: { reason },
-    });
+    if (!(reason === 'start-failed' && this.config.suppressFailedStartAudit)) {
+      this.appendDecisionLog({
+        kind: 'terminate',
+        actor: reason === 'phase_error_circuit' ? 'runner' : 'planner',
+        payload: { reason },
+      });
+    }
     // Best-effort cleanup. Stopping a non-existent session is a no-op.
     // keepPersisted: true keeps the persistedSessions entry on disk so a
     // later /autoloop/<id>/resume can re-attach the Planner's Claude
@@ -294,6 +299,25 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
     const pending = this.deliverOnce(env, dispatchId);
     this.logicalDispatches.set(dispatchId, pending);
     return await pending;
+  }
+
+  /** Current per-agent deadline, including the backward-compatible default. */
+  get effectiveSendTimeoutMs(): number {
+    return this.config.sendTimeoutMs ?? DEFAULT_SEND_TIMEOUT_MS;
+  }
+
+  /**
+   * Apply an already-authorized timeout migration. This seam intentionally has
+   * no decrease mode: even an internal caller must supply a valid strict
+   * increase, while SessionManager owns persistence and dispatch matching.
+   */
+  increaseSendTimeoutMs(next: number): void {
+    validateAutoloopTimeoutConfig({ sendTimeoutMs: next });
+    const current = this.effectiveSendTimeoutMs;
+    if (next <= current) {
+      throw new Error(`sendTimeoutMs must be strictly greater than the current effective value ${current}`);
+    }
+    this.config.sendTimeoutMs = next;
   }
 
   private async deliverOnce(env: AnyAutoloopMessage, dispatchId: string): Promise<AnyAutoloopMessage[]> {

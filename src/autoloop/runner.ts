@@ -90,6 +90,10 @@ export class AutoloopRunner extends EventEmitter {
   private activityLeaseExpired = false;
   private terminationStarted = false;
   private terminationPromise: Promise<void> | null = null;
+  /** Timeout outcomes explicitly advanced by an operator resume. Retained so a
+   *  late/replayed result for the same logical dispatch cannot pause the run a
+   *  second time after it has already been resolved. */
+  private readonly resolvedTimedOutDispatches = new Set<string>();
   private readonly timeouts: ResolvedAutoloopTimeoutConfig;
   private readonly hardDeadlineAt: number;
 
@@ -314,6 +318,36 @@ export class AutoloopRunner extends EventEmitter {
     return this.send(Msg.chat(this.state.iter, { text }));
   }
 
+  /**
+   * Advance one exact recoverable send-timeout pause without replaying the
+   * logical dispatch that timed out. SessionManager validates and audits the
+   * timeout increase before calling this synchronous transition.
+   */
+  resumeTimedOutDispatch(dispatchId: string): boolean {
+    const pending = this.state.pending_dispatch;
+    if (
+      this.state.status !== 'paused' ||
+      !pending ||
+      pending.dispatch_id !== dispatchId ||
+      this.state.status_reason !== `awaiting_resume:send_timeout:${pending.agent}:${dispatchId}`
+    ) {
+      return false;
+    }
+
+    this.resolvedTimedOutDispatches.add(dispatchId);
+    this.state.pending_dispatch = null;
+    this.state.status = 'running';
+    this.state.status_reason = null;
+    this.recordActivity('lifecycle_transition');
+    this.restorePausedMessages();
+    this.emit('state', this.state);
+    // This entry point is called outside the normal queue drain. Resume only
+    // the messages parked *after* the timed-out dispatch; the timed-out message
+    // itself is deliberately never requeued.
+    void this.drain().catch((err) => this.emit('error', err));
+    return true;
+  }
+
   /** Mark subagents spawned (called by S3's spawn_subagents tool handler). */
   markSubagentsSpawned(): void {
     if (this.state.subagents_spawned) return;
@@ -488,6 +522,7 @@ export class AutoloopRunner extends EventEmitter {
       }
       case 'send_timeout': {
         const pending = env.payload;
+        if (this.resolvedTimedOutDispatches.has(pending.dispatch_id)) return;
         // The dispatcher coalesces duplicate delivery, but the runner also
         // guards its public inbox so replaying the same structured outcome
         // cannot emit a second timeout event or mutate state twice.
@@ -520,12 +555,7 @@ export class AutoloopRunner extends EventEmitter {
           if (this.state.pending_dispatch) return;
           this.state.status = 'running';
           this.state.status_reason = null;
-          // Restore parked agent-bound messages at the queue head, preserving
-          // arrival order so the loop continues from where pause caught it.
-          while (this.pausedBuffer.length > 0) {
-            const item = this.pausedBuffer.pop();
-            if (item) this.queue.unshift(item);
-          }
+          this.restorePausedMessages();
           this.emit('state', this.state);
         }
         return;
@@ -537,6 +567,14 @@ export class AutoloopRunner extends EventEmitter {
       default:
         // review_request / iter_done etc. arriving with to=runner is a routing bug.
         throw new AutoloopRoutingError(`Unexpected runner-targeted message type: ${env.type}`, env);
+    }
+  }
+
+  /** Restore parked agent-bound messages at the queue head in arrival order. */
+  private restorePausedMessages(): void {
+    while (this.pausedBuffer.length > 0) {
+      const item = this.pausedBuffer.pop();
+      if (item) this.queue.unshift(item);
     }
   }
 

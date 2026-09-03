@@ -200,8 +200,8 @@ import { Fanout, type FanoutConfig, type FanoutSession, type FanoutAgentSpec } f
 import { AutoloopRunner } from './autoloop/runner.js';
 import { ClaudeAgentDispatcher, type ClaudeAgentDispatcherConfig } from './autoloop/dispatcher.js';
 import type { AutoloopState, PushPolicy } from './autoloop/types.js';
-import { DEFAULT_PUSH_POLICY } from './autoloop/types.js';
-import { Msg as AutoloopMsg, type PushChannel, type PushLevel } from './autoloop/messages.js';
+import { DEFAULT_PUSH_POLICY, DEFAULT_SEND_TIMEOUT_MS, validateAutoloopTimeoutConfig } from './autoloop/types.js';
+import { Msg as AutoloopMsg, type PushChannel, type PushLevel, type SendTimeoutPayload } from './autoloop/messages.js';
 import { appendPushLog, notifyUserFallbackChain } from './autoloop/notify.js';
 import { UltraappManager } from './ultraapp/manager.js';
 import { UltraappStore, defaultStoreRoot } from './ultraapp/store.js';
@@ -281,6 +281,154 @@ type CodexAppSession = ISession & {
 // still written for humans to read; nothing parses them.
 
 type AutoloopRoleName = 'planner' | 'coder' | 'reviewer';
+
+interface SendTimeoutMigrationAuditRecord {
+  ts: string;
+  kind: 'timeout_migration';
+  actor: 'operator';
+  timestamp: string;
+  runId: string;
+  field: 'sendTimeoutMs';
+  oldValue: number;
+  newValue: number;
+  reason: 'recoverable_send_timeout_resume' | 'stored_run_resume';
+  pendingDispatchId?: string;
+}
+
+interface StoredAutoloopResumeContext {
+  effectiveSendTimeoutMs: number;
+  pendingDispatch: SendTimeoutPayload | null;
+}
+
+interface PreparedSendTimeoutMigrationAppend {
+  fd: number;
+  line: string;
+}
+
+function isSendTimeoutPayload(value: unknown): value is SendTimeoutPayload {
+  if (typeof value !== 'object' || value === null) return false;
+  const pending = value as Partial<SendTimeoutPayload>;
+  return (
+    pending.status === 'awaiting_resume' &&
+    typeof pending.dispatch_id === 'string' &&
+    pending.dispatch_id.length > 0 &&
+    (pending.agent === 'planner' || pending.agent === 'coder' || pending.agent === 'reviewer') &&
+    typeof pending.message_id === 'string' &&
+    typeof pending.message_type === 'string' &&
+    typeof pending.iter === 'number' &&
+    typeof pending.timeout_ms === 'number' &&
+    typeof pending.error === 'string'
+  );
+}
+
+/**
+ * Replay only timeout-resume audit rows. The original run spec remains the
+ * immutable starting point; each coherent append advances the effective value.
+ * Failing closed on a malformed migration prevents a corrupt audit tail from
+ * accidentally authorizing a timeout decrease after process reconstruction.
+ */
+function readStoredAutoloopResumeContext(
+  workspace: string,
+  runId: string,
+  originalSendTimeoutMs: unknown,
+): StoredAutoloopResumeContext {
+  validateAutoloopTimeoutConfig({ sendTimeoutMs: originalSendTimeoutMs as number | undefined });
+  let effectiveSendTimeoutMs = (originalSendTimeoutMs as number | undefined) ?? DEFAULT_SEND_TIMEOUT_MS;
+  let pendingDispatch: SendTimeoutPayload | null = null;
+  const auditPath = path.join(workspace, 'tasks', runId, 'decisions.jsonl');
+  if (!fs.existsSync(auditPath)) return { effectiveSendTimeoutMs, pendingDispatch };
+
+  const lines = fs.readFileSync(auditPath, 'utf8').split('\n');
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    let row: Record<string, unknown>;
+    try {
+      row = JSON.parse(line) as Record<string, unknown>;
+    } catch {
+      throw new Error(`Cannot safely resume Autoloop '${runId}': decisions.jsonl contains malformed JSON`);
+    }
+    if (row.kind === 'send_timeout' && isSendTimeoutPayload(row.payload)) {
+      pendingDispatch = row.payload;
+      continue;
+    }
+    if (row.kind === 'terminate') {
+      pendingDispatch = null;
+      continue;
+    }
+    if (row.kind !== 'timeout_migration' || row.runId !== runId || row.field !== 'sendTimeoutMs') continue;
+    const oldValue = row.oldValue;
+    const newValue = row.newValue;
+    try {
+      validateAutoloopTimeoutConfig({ sendTimeoutMs: oldValue as number });
+      validateAutoloopTimeoutConfig({ sendTimeoutMs: newValue as number });
+    } catch {
+      throw new Error(`Cannot safely resume Autoloop '${runId}': timeout migration audit is invalid`);
+    }
+    if (oldValue !== effectiveSendTimeoutMs || (newValue as number) <= (oldValue as number)) {
+      throw new Error(`Cannot safely resume Autoloop '${runId}': timeout migration audit chain is inconsistent`);
+    }
+    effectiveSendTimeoutMs = newValue as number;
+    if (row.pendingDispatchId === pendingDispatch?.dispatch_id) pendingDispatch = null;
+  }
+  return { effectiveSendTimeoutMs, pendingDispatch };
+}
+
+function validateSendTimeoutIncrease(value: unknown, current: number): asserts value is number {
+  validateAutoloopTimeoutConfig({ sendTimeoutMs: value as number });
+  if ((value as number) <= current) {
+    throw new Error(`sendTimeoutMs must be strictly greater than the current effective value ${current}`);
+  }
+}
+
+function encodeSendTimeoutMigration(
+  migration: Omit<SendTimeoutMigrationAuditRecord, 'ts' | 'timestamp' | 'kind' | 'actor'>,
+): string {
+  const timestamp = new Date().toISOString();
+  const record: SendTimeoutMigrationAuditRecord = {
+    ts: timestamp,
+    kind: 'timeout_migration',
+    actor: 'operator',
+    timestamp,
+    ...migration,
+  };
+  return `${JSON.stringify(record)}\n`;
+}
+
+function appendSendTimeoutMigration(
+  workspace: string,
+  migration: Omit<SendTimeoutMigrationAuditRecord, 'ts' | 'timestamp' | 'kind' | 'actor'>,
+): void {
+  const ledgerDir = path.join(workspace, 'tasks', migration.runId);
+  fs.mkdirSync(ledgerDir, { recursive: true });
+  fs.appendFileSync(path.join(ledgerDir, 'decisions.jsonl'), encodeSendTimeoutMigration(migration));
+}
+
+/**
+ * Hold an append-capable descriptor before a stored run is restarted. Opening
+ * it is the fallible permission/path part of the append; doing that first keeps
+ * an unavailable audit ledger from starting agents or changing kernel state.
+ * The descriptor stays open across startup so the eventual commit cannot be
+ * redirected by a path replacement.
+ */
+function prepareSendTimeoutMigrationAppend(
+  workspace: string,
+  migration: Omit<SendTimeoutMigrationAuditRecord, 'ts' | 'timestamp' | 'kind' | 'actor'>,
+): PreparedSendTimeoutMigrationAppend {
+  const ledgerDir = path.join(workspace, 'tasks', migration.runId);
+  fs.mkdirSync(ledgerDir, { recursive: true });
+  return {
+    fd: fs.openSync(path.join(ledgerDir, 'decisions.jsonl'), 'a'),
+    line: encodeSendTimeoutMigration(migration),
+  };
+}
+
+function commitPreparedSendTimeoutMigration(prepared: PreparedSendTimeoutMigrationAppend): void {
+  const expectedBytes = Buffer.byteLength(prepared.line);
+  const writtenBytes = fs.writeSync(prepared.fd, prepared.line, null, 'utf8');
+  if (writtenBytes !== expectedBytes) {
+    throw new Error(`Could not append the complete sendTimeoutMs migration audit record`);
+  }
+}
 
 function isStringRecord(value: unknown): value is Record<string, string> {
   return (
@@ -2866,6 +3014,11 @@ export class SessionManager {
     reviewerModel?: string;
     reviewerCustomEngine?: CustomEngineConfig;
     sendTimeoutMs?: number;
+    /** Internal restart marker: a failed timeout migration must not append a
+     *  cleanup decision or purge the resumable session registry. Never stored. */
+    _resumeTimeoutMigration?: boolean;
+    /** In-memory commit barrier for a prepared append-only migration record. */
+    _commitTimeoutMigration?: () => void;
   }): Promise<{
     runner: AutoloopRunner;
     dispatcher: ClaudeAgentDispatcher;
@@ -2906,6 +3059,7 @@ export class SessionManager {
       reviewerModel: opts.reviewerModel,
       reviewerCustomEngine: opts.reviewerCustomEngine,
       sendTimeoutMs: opts.sendTimeoutMs,
+      suppressFailedStartAudit: opts._resumeTimeoutMigration,
       logger: this.logger,
       pushPolicyRef: pushPolicy,
       onSpawnSubagents: async (args) => {
@@ -2949,13 +3103,21 @@ export class SessionManager {
         );
       },
       dispatcher,
+      sendTimeoutMs: opts.sendTimeoutMs,
     });
     runnerRef = runner;
     try {
       await runner.start();
+      // A reconstructed migration becomes externally visible only after its
+      // Planner is ready and its prepared audit append has committed. Keeping
+      // this inside the startup try makes an append failure follow the same
+      // cleanup path as any other failed resume.
+      opts._commitTimeoutMigration?.();
     } catch (err) {
       try {
-        await dispatcher.shutdown('start-failed', { purge: true });
+        await dispatcher.shutdown('start-failed', {
+          purge: !opts._resumeTimeoutMigration,
+        });
       } catch (cleanupErr) {
         this.logger.warn?.(`[autoloop/${runId}] cleanup after failed start failed: ${(cleanupErr as Error).message}`);
       }
@@ -3179,10 +3341,63 @@ export class SessionManager {
       plannerCustomEngine?: CustomEngineConfig;
       coderCustomEngine?: CustomEngineConfig;
       reviewerCustomEngine?: CustomEngineConfig;
+      /** Optional I4 migration. Omission preserves the historical resume path. */
+      sendTimeoutMs?: number;
+      /** Guards the exact I3 logical dispatch being advanced, when supplied. */
+      pendingDispatchId?: string;
     } = {},
   ): Promise<AutoloopState> {
-    const live = this.kernel.handle<AutoloopHandle>(runId, LEGACY_NODE);
-    if (live) return live.runner.state;
+    const hasTimeoutIncrease = opts.sendTimeoutMs !== undefined;
+    if (!hasTimeoutIncrease && opts.pendingDispatchId !== undefined) {
+      throw new Error('pendingDispatchId requires a sendTimeoutMs increase');
+    }
+    if (
+      opts.pendingDispatchId !== undefined &&
+      (typeof opts.pendingDispatchId !== 'string' || opts.pendingDispatchId.length === 0)
+    ) {
+      throw new Error('pendingDispatchId must be a non-empty string');
+    }
+
+    const live = this.kernel.handle<AutoloopHandle & { runner: AutoloopRunner; dispatcher: ClaudeAgentDispatcher }>(
+      runId,
+      LEGACY_NODE,
+    );
+    if (live) {
+      if (!hasTimeoutIncrease) return live.runner.state;
+
+      const pending = live.runner.state.pending_dispatch;
+      if (live.runner.state.status !== 'paused' || !pending) {
+        throw new Error(`Autoloop run '${runId}' is not awaiting a recoverable send timeout`);
+      }
+      if (opts.pendingDispatchId === undefined) {
+        throw new Error(`pendingDispatchId is required to resume timed-out dispatch '${pending.dispatch_id}'`);
+      }
+      const current = live.dispatcher.effectiveSendTimeoutMs;
+      validateSendTimeoutIncrease(opts.sendTimeoutMs, current);
+      if (opts.pendingDispatchId !== undefined && opts.pendingDispatchId !== pending.dispatch_id) {
+        throw new Error(
+          `pending dispatch '${opts.pendingDispatchId}' does not match current dispatch '${pending.dispatch_id}'`,
+        );
+      }
+
+      // The checks above and the three operations below are synchronous. Audit
+      // first, so an append failure leaves both the dispatcher and runner
+      // untouched; after that no asynchronous work can swap the pending id.
+      appendSendTimeoutMigration(live.runner.state.workspace, {
+        runId,
+        field: 'sendTimeoutMs',
+        oldValue: current,
+        newValue: opts.sendTimeoutMs,
+        reason: 'recoverable_send_timeout_resume',
+        pendingDispatchId: pending.dispatch_id,
+      });
+      live.dispatcher.increaseSendTimeoutMs(opts.sendTimeoutMs);
+      if (!live.runner.resumeTimedOutDispatch(pending.dispatch_id)) {
+        throw new Error(`Autoloop run '${runId}' pending dispatch changed during resume`);
+      }
+      this._autoloopPublishers.get(runId)?.();
+      return live.runner.state;
+    }
 
     const record = loadRun(runId);
     if (!record || record.workflow !== 'autoloop') throw new Error(`Autoloop run '${runId}' not found`);
@@ -3198,21 +3413,91 @@ export class SessionManager {
     validateAutoloopRole('coder', config.coderEngine as EngineType | undefined, opts.coderCustomEngine);
     validateAutoloopRole('reviewer', config.reviewerEngine as EngineType | undefined, opts.reviewerCustomEngine);
 
-    // Custom-engine configs are never persisted (they can carry secrets), so a
-    // resume must be given them again by the caller.
-    const resumed = await this._resumeAutoloopRun(runId, {
-      ...config,
-      plannerCustomEngine: opts.plannerCustomEngine,
-      coderCustomEngine: opts.coderCustomEngine,
-      reviewerCustomEngine: opts.reviewerCustomEngine,
-    } as Parameters<SessionManager['_bootAutoloop']>[0]);
-    return resumed;
+    const workspace = typeof config.workspace === 'string' ? config.workspace : record.cwd;
+    const storedContext = readStoredAutoloopResumeContext(workspace, runId, config.sendTimeoutMs);
+    const nodeState = (record.nodes[LEGACY_NODE]?.data as { state?: AutoloopState } | undefined)?.state;
+    const recordCarriesPending = nodeState
+      ? Object.prototype.hasOwnProperty.call(nodeState, 'pending_dispatch')
+      : false;
+    const pending = recordCarriesPending
+      ? isSendTimeoutPayload(nodeState?.pending_dispatch)
+        ? nodeState.pending_dispatch
+        : null
+      : storedContext.pendingDispatch;
+
+    if (hasTimeoutIncrease && pending && opts.pendingDispatchId === undefined) {
+      throw new Error(`pendingDispatchId is required to resume timed-out dispatch '${pending.dispatch_id}'`);
+    }
+    if (opts.pendingDispatchId !== undefined) {
+      if (!pending) {
+        throw new Error(`Autoloop run '${runId}' has no pending dispatch to match '${opts.pendingDispatchId}'`);
+      }
+      if (opts.pendingDispatchId !== pending.dispatch_id) {
+        throw new Error(
+          `pending dispatch '${opts.pendingDispatchId}' does not match stored dispatch '${pending.dispatch_id}'`,
+        );
+      }
+    }
+
+    const nextSendTimeoutMs = opts.sendTimeoutMs ?? storedContext.effectiveSendTimeoutMs;
+    if (hasTimeoutIncrease) validateSendTimeoutIncrease(nextSendTimeoutMs, storedContext.effectiveSendTimeoutMs);
+
+    const migration: Omit<SendTimeoutMigrationAuditRecord, 'ts' | 'timestamp' | 'kind' | 'actor'> | undefined =
+      hasTimeoutIncrease
+        ? {
+            runId,
+            field: 'sendTimeoutMs',
+            oldValue: storedContext.effectiveSendTimeoutMs,
+            newValue: nextSendTimeoutMs,
+            reason: pending ? 'recoverable_send_timeout_resume' : 'stored_run_resume',
+            ...(pending ? { pendingDispatchId: pending.dispatch_id } : {}),
+          }
+        : undefined;
+    const preparedMigration = migration ? prepareSendTimeoutMigrationAppend(workspace, migration) : undefined;
+    let migrationCommitted = false;
+    try {
+      // Custom-engine configs are never persisted (they can carry secrets), so
+      // a resume must be given them again by the caller.
+      return await this._resumeAutoloopRun(
+        runId,
+        {
+          ...config,
+          // Effective migrations are replayed from append-only audit rather
+          // than written back into the immutable original spec.
+          sendTimeoutMs: nextSendTimeoutMs,
+          plannerCustomEngine: opts.plannerCustomEngine,
+          coderCustomEngine: opts.coderCustomEngine,
+          reviewerCustomEngine: opts.reviewerCustomEngine,
+        } as Parameters<SessionManager['_bootAutoloop']>[0],
+        {
+          timeoutMigration: hasTimeoutIncrease,
+          commitTimeoutMigration: preparedMigration
+            ? () => {
+                if (migrationCommitted) return;
+                commitPreparedSendTimeoutMigration(preparedMigration);
+                migrationCommitted = true;
+              }
+            : undefined,
+        },
+      );
+    } finally {
+      if (preparedMigration) {
+        try {
+          fs.closeSync(preparedMigration.fd);
+        } catch (err) {
+          // Descriptor cleanup cannot retroactively turn a committed append
+          // and successful startup into a failed migration.
+          this.logger.warn?.(`[autoloop/${runId}] failed to close migration audit: ${(err as Error).message}`);
+        }
+      }
+    }
   }
 
   /** Re-attach a stored autoloop run: same run id, same spec, fresh engine. */
   private async _resumeAutoloopRun(
     runId: string,
     config: Parameters<SessionManager['_bootAutoloop']>[0],
+    opts: { timeoutMigration?: boolean; commitTimeoutMigration?: () => void } = {},
   ): Promise<AutoloopState> {
     const tag = `${runId}:${randomUUID()}`;
     const ready = new Promise<{ plannerSession: string; state: AutoloopState }>((resolve, reject) => {
@@ -3227,6 +3512,11 @@ export class SessionManager {
       plannerCustomEngine: config.plannerCustomEngine,
       coderCustomEngine: config.coderCustomEngine,
       reviewerCustomEngine: config.reviewerCustomEngine,
+      // Resume-only effective value. This travels in the in-memory bag so the
+      // immutable spec continues to describe the run's original configuration.
+      sendTimeoutMs: config.sendTimeoutMs,
+      _resumeTimeoutMigration: opts.timeoutMigration || undefined,
+      _commitTimeoutMigration: opts.commitTimeoutMigration,
     };
     try {
       // `restart: true` because an autoloop resume means "bring the loop back
