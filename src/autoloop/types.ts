@@ -40,6 +40,90 @@ export const MAX_METRIC_HISTORY = 20;
 /** Schema version stamped onto every ledger artifact (directive/eval/verdict.json). */
 export const LEDGER_SCHEMA_VERSION = 1;
 
+/** Default wall-clock cap for one Planner, Coder, or Reviewer message. */
+export const DEFAULT_SEND_TIMEOUT_MS = 600_000;
+/** Shortest supported wall-clock cap for one agent message. */
+export const MIN_SEND_TIMEOUT_MS = 5_000;
+/** Longest supported wall-clock cap for one agent message. */
+export const MAX_SEND_TIMEOUT_MS = 7_200_000;
+/** Default inactivity lease for an Autoloop run. */
+export const DEFAULT_ACTIVITY_LEASE_MS = 1_800_000;
+/** Shortest supported inactivity lease. */
+export const MIN_ACTIVITY_LEASE_MS = 60_000;
+/** Longest supported inactivity lease. */
+export const MAX_ACTIVITY_LEASE_MS = 7_200_000;
+/** Default absolute lifetime cap for an Autoloop run. */
+export const DEFAULT_AUTOLOOP_HARD_TIMEOUT_MS = 86_400_000;
+/** Shortest supported absolute lifetime cap. */
+export const MIN_AUTOLOOP_HARD_TIMEOUT_MS = 600_000;
+/** Longest supported absolute lifetime cap (72 hours). */
+export const MAX_AUTOLOOP_HARD_TIMEOUT_MS = 259_200_000;
+
+/** User-configurable Autoloop timeout values. Omitted values use the defaults above. */
+export interface AutoloopTimeoutConfig {
+  sendTimeoutMs?: number;
+  activityLeaseMs?: number;
+  autoloopHardTimeoutMs?: number;
+}
+
+/** Fully resolved timeout values used by the Autoloop runtime. */
+export type ResolvedAutoloopTimeoutConfig = Required<AutoloopTimeoutConfig>;
+
+export interface AutoloopTimeoutFieldSchema {
+  readonly type: 'number';
+  readonly default: number;
+  readonly minimum: number;
+  readonly maximum: number;
+}
+
+/** JSON-Schema-compatible metadata shared by runtime validation and later API schemas. */
+export const AUTOLOOP_TIMEOUT_SCHEMA = {
+  sendTimeoutMs: {
+    type: 'number',
+    default: DEFAULT_SEND_TIMEOUT_MS,
+    minimum: MIN_SEND_TIMEOUT_MS,
+    maximum: MAX_SEND_TIMEOUT_MS,
+  },
+  activityLeaseMs: {
+    type: 'number',
+    default: DEFAULT_ACTIVITY_LEASE_MS,
+    minimum: MIN_ACTIVITY_LEASE_MS,
+    maximum: MAX_ACTIVITY_LEASE_MS,
+  },
+  autoloopHardTimeoutMs: {
+    type: 'number',
+    default: DEFAULT_AUTOLOOP_HARD_TIMEOUT_MS,
+    minimum: MIN_AUTOLOOP_HARD_TIMEOUT_MS,
+    maximum: MAX_AUTOLOOP_HARD_TIMEOUT_MS,
+  },
+} as const satisfies Record<keyof ResolvedAutoloopTimeoutConfig, AutoloopTimeoutFieldSchema>;
+
+const AUTOLOOP_TIMEOUT_FIELDS = [
+  'sendTimeoutMs',
+  'activityLeaseMs',
+  'autoloopHardTimeoutMs',
+] as const satisfies readonly (keyof AutoloopTimeoutConfig)[];
+
+export function validateAutoloopTimeoutConfig(config: AutoloopTimeoutConfig): void {
+  for (const field of AUTOLOOP_TIMEOUT_FIELDS) {
+    const value = config[field];
+    if (value === undefined) continue;
+    const { minimum, maximum } = AUTOLOOP_TIMEOUT_SCHEMA[field];
+    if (typeof value !== 'number' || !Number.isFinite(value) || value < minimum || value > maximum) {
+      throw new Error(`${field} must be a finite number in the inclusive range [${minimum}, ${maximum}]`);
+    }
+  }
+}
+
+export function resolveAutoloopTimeoutConfig(config: AutoloopTimeoutConfig = {}): ResolvedAutoloopTimeoutConfig {
+  validateAutoloopTimeoutConfig(config);
+  return {
+    sendTimeoutMs: config.sendTimeoutMs ?? DEFAULT_SEND_TIMEOUT_MS,
+    activityLeaseMs: config.activityLeaseMs ?? DEFAULT_ACTIVITY_LEASE_MS,
+    autoloopHardTimeoutMs: config.autoloopHardTimeoutMs ?? DEFAULT_AUTOLOOP_HARD_TIMEOUT_MS,
+  };
+}
+
 export interface PushPolicyRule {
   silent?: boolean;
   level?: PushLevel;
@@ -87,7 +171,7 @@ export interface AgentDispatcher {
   shutdown?(reason: string): Promise<void>;
 }
 
-export interface AutoloopConfig {
+export interface AutoloopConfig extends AutoloopTimeoutConfig {
   run_id: string;
   workspace: string;
   ledger_dir: string;
