@@ -40,6 +40,11 @@ class MockSession extends EventEmitter implements ISession {
   compactCalls: string[] = [];
   /** Overrides the result event this session resolves with. */
   nextEvent?: Record<string, unknown>;
+  /** Test seam for exercising real SessionManager/dispatcher send outcomes. */
+  sendImplementation?: (
+    message: string | unknown[],
+    options?: SessionSendOptions,
+  ) => Promise<TurnResult | { requestId: number; sent: boolean }>;
   /** Overrides `turnsSucceeded`, to simulate a turn the engine did not count. */
   turnsSucceededOverride?: number;
 
@@ -86,6 +91,7 @@ class MockSession extends EventEmitter implements ISession {
     if (options?.waitForComplete === false) {
       return { requestId: 1, sent: true };
     }
+    if (this.sendImplementation) return await this.sendImplementation(message, options);
     return {
       text: `response to: ${typeof message === 'string' ? message : JSON.stringify(message)}`,
       event: this.nextEvent ?? { type: 'result', result: 'done' },
@@ -2041,6 +2047,200 @@ describe('SessionManager', () => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         expect(JSON.stringify((mgr.workflowStatus(runId).nodes.main.data as any).state.pending_dispatch)).toBe(
           before.pending,
+        );
+      });
+
+      describe('Autoloop timeout resilience integration', () => {
+        it('carries a genuine timed-out send through an atomic increase and a distinct later send', async () => {
+          const runId = 'timeout-integration-lifecycle';
+          const workspace = workspaceFor(runId);
+          await mgr.autoloopStart({
+            runId,
+            workspace,
+            sendTimeoutMs: 600_000,
+            activityLeaseMs: 60_000,
+            autoloopHardTimeoutMs: 86_400_000,
+          });
+          const handle = mgr.getAutoloop(runId)!;
+          const planner = mockSessions[0];
+          const auditPath = auditPathFor(workspace, runId);
+          const historyPath = path.join(workspace, 'tasks', runId, 'chat.jsonl');
+          const evidencePath = path.join(workspace, 'tasks', runId, 'iter', '0', 'verdict.json');
+          fs.mkdirSync(path.dirname(evidencePath), { recursive: true });
+          fs.writeFileSync(evidencePath, '{"decision":"historic-hold"}\n');
+          const originalSpec = fs.readFileSync(storedSpecPath(runId), 'utf8');
+          const evidenceBefore = fs.readFileSync(evidencePath, 'utf8');
+          const observedTimeouts: unknown[] = [];
+          handle.runner.on('send_timeout', (event) => observedTimeouts.push(event));
+
+          planner.sendImplementation = async () => {
+            planner.sendImplementation = undefined;
+            throw new Error('Timeout waiting for response');
+          };
+          await mgr.autoloopChat(runId, 'one logical send that reaches its deadline');
+
+          expect(planner.sendCalls).toHaveLength(1);
+          expect(planner.sendCalls[0].options?.timeout).toBe(600_000);
+          expect(observedTimeouts).toHaveLength(1);
+          expect(handle.runner.state).toMatchObject({
+            status: 'paused',
+            pending_dispatch: {
+              status: 'awaiting_resume',
+              agent: 'planner',
+              message_type: 'chat',
+              timeout_ms: 600_000,
+            },
+          });
+          const pending = handle.runner.state.pending_dispatch!;
+          expect(pending.dispatch_id).toMatch(/^dispatch_[a-f0-9]{64}$/);
+          expect(handle.runner.state.status_reason).toBe(`awaiting_resume:send_timeout:planner:${pending.dispatch_id}`);
+
+          // Even qualified progress cannot replace or conceal the unresolved
+          // dispatch identity. The renewable lease remains suspended here.
+          expect(handle.runner.recordActivity('agent_progress')).toBe(true);
+          expect(handle.runner.state).toMatchObject({
+            status: 'paused',
+            status_reason: `awaiting_resume:send_timeout:planner:${pending.dispatch_id}`,
+            pending_dispatch: pending,
+          });
+
+          const beforeResume = {
+            state: JSON.stringify(handle.runner.state),
+            timeout: handle.dispatcher.effectiveSendTimeoutMs,
+            sessions: mgr.listSessions().map((session) => session.name),
+            spec: fs.readFileSync(storedSpecPath(runId), 'utf8'),
+            audit: fs.readFileSync(auditPath, 'utf8'),
+            history: fs.readFileSync(historyPath, 'utf8'),
+            evidence: fs.readFileSync(evidencePath, 'utf8'),
+          };
+          const rejected: ResumeOverride[] = [
+            { sendTimeoutMs: 650_000, pendingDispatchId: 'dispatch_stale' },
+            { sendTimeoutMs: 600_000, pendingDispatchId: pending.dispatch_id },
+            { sendTimeoutMs: 599_999, pendingDispatchId: pending.dispatch_id },
+            { sendTimeoutMs: 7_200_001, pendingDispatchId: pending.dispatch_id },
+            { sendTimeoutMs: Number.NaN, pendingDispatchId: pending.dispatch_id },
+          ];
+          for (const override of rejected) {
+            await expect(resumeWithOverride(runId, override)).rejects.toThrow();
+            expect(JSON.stringify(handle.runner.state)).toBe(beforeResume.state);
+            expect(handle.dispatcher.effectiveSendTimeoutMs).toBe(beforeResume.timeout);
+            expect(mgr.listSessions().map((session) => session.name)).toEqual(beforeResume.sessions);
+            expect(fs.readFileSync(storedSpecPath(runId), 'utf8')).toBe(beforeResume.spec);
+            expect(fs.readFileSync(auditPath, 'utf8')).toBe(beforeResume.audit);
+            expect(fs.readFileSync(historyPath, 'utf8')).toBe(beforeResume.history);
+            expect(fs.readFileSync(evidencePath, 'utf8')).toBe(beforeResume.evidence);
+          }
+
+          await resumeWithOverride(runId, {
+            sendTimeoutMs: 700_000,
+            pendingDispatchId: pending.dispatch_id,
+          });
+          expect(handle.runner.state).toMatchObject({
+            status: 'running',
+            status_reason: null,
+            pending_dispatch: null,
+          });
+          expect(handle.dispatcher.effectiveSendTimeoutMs).toBe(700_000);
+          expect(planner.sendCalls).toHaveLength(1);
+          expect(fs.readFileSync(storedSpecPath(runId), 'utf8')).toBe(originalSpec);
+          expect(fs.readFileSync(historyPath, 'utf8')).toBe(beforeResume.history);
+          expect(fs.readFileSync(evidencePath, 'utf8')).toBe(evidenceBefore);
+
+          const auditAfterResume = fs.readFileSync(auditPath, 'utf8');
+          expect(auditAfterResume.startsWith(beforeResume.audit)).toBe(true);
+          const appendedRows = auditAfterResume
+            .slice(beforeResume.audit.length)
+            .trim()
+            .split('\n')
+            .map((line) => JSON.parse(line) as Record<string, unknown>);
+          expect(appendedRows).toMatchObject([
+            {
+              kind: 'timeout_migration',
+              runId,
+              field: 'sendTimeoutMs',
+              oldValue: 600_000,
+              newValue: 700_000,
+              reason: 'recoverable_send_timeout_resume',
+              pendingDispatchId: pending.dispatch_id,
+            },
+          ]);
+
+          await mgr.autoloopChat(runId, 'a later and distinct logical send');
+          expect(planner.sendCalls).toHaveLength(2);
+          expect(planner.sendCalls[1].options?.timeout).toBe(700_000);
+          expect(observedTimeouts).toHaveLength(1);
+          expect(fs.readFileSync(storedSpecPath(runId), 'utf8')).toBe(originalSpec);
+          expect(fs.readFileSync(evidencePath, 'utf8')).toBe(evidenceBefore);
+        });
+
+        it('keeps all three defaults when public start omits timeout configuration', async () => {
+          const runId = 'timeout-integration-defaults';
+          const workspace = workspaceFor(runId);
+          await mgr.autoloopStart({ runId, workspace });
+          const handle = mgr.getAutoloop(runId)!;
+          const runtime = handle.runner as unknown as {
+            timeouts: {
+              sendTimeoutMs: number;
+              activityLeaseMs: number;
+              autoloopHardTimeoutMs: number;
+            };
+          };
+
+          expect(runtime.timeouts).toEqual({
+            sendTimeoutMs: 600_000,
+            activityLeaseMs: 1_800_000,
+            autoloopHardTimeoutMs: 86_400_000,
+          });
+          await mgr.autoloopChat(runId, 'default timeout dispatch');
+          expect(mockSessions[0].sendCalls[0].options?.timeout).toBe(600_000);
+        });
+
+        it.each(['hard timeout', 'operator stop'] as const)(
+          'keeps %s terminal when an in-flight send reports its timeout late',
+          async (terminalCause) => {
+            const runId = `timeout-integration-${terminalCause.replace(' ', '-')}`;
+            const workspace = workspaceFor(runId);
+            await mgr.autoloopStart({
+              runId,
+              workspace,
+              sendTimeoutMs: 7_200_000,
+              activityLeaseMs: 7_200_000,
+              autoloopHardTimeoutMs: 600_000,
+            });
+            const handle = mgr.getAutoloop(runId)!;
+            const planner = mockSessions[0];
+            const observedTimeouts: unknown[] = [];
+            handle.runner.on('send_timeout', (event) => observedTimeouts.push(event));
+            let rejectSend!: (reason?: unknown) => void;
+            planner.sendImplementation = () =>
+              new Promise((_resolve, reject) => {
+                rejectSend = reject;
+              });
+
+            const chat = mgr.autoloopChat(runId, 'send still running at terminal transition');
+            await vi.waitFor(() => expect(planner.sendCalls).toHaveLength(1));
+
+            if (terminalCause === 'hard timeout') {
+              // Qualified progress can renew the lease, but cannot move the
+              // absolute deadline anchored at run construction.
+              await vi.advanceTimersByTimeAsync(300_000);
+              expect(handle.runner.recordActivity('agent_progress')).toBe(true);
+              await vi.advanceTimersByTimeAsync(300_000);
+            } else {
+              await mgr.autoloopStop(runId, 'operator-stop-during-send');
+            }
+
+            rejectSend(new Error('Timeout waiting for response'));
+            await chat;
+
+            expect(handle.runner.state).toMatchObject({
+              status: 'terminated',
+              status_reason: terminalCause === 'hard timeout' ? 'hard_timeout_exceeded' : 'operator-stop-during-send',
+              pending_dispatch: null,
+            });
+            expect(observedTimeouts).toHaveLength(0);
+            expect(planner.sendCalls).toHaveLength(1);
+          },
         );
       });
     });
