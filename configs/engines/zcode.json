@@ -1,0 +1,30 @@
+{
+  "id": "zcode",
+  "tier": "community",
+  "description": "ZCode app-server support through the community-maintained Claw adapter.",
+  "provenance": {
+    "maintainer": "bwndlct",
+    "verifiedAgainst": "ZCode 0.16.5",
+    "verifiedOn": "2026-09-03",
+    "sourceUrl": "https://github.com/bwndlct/zcode-claw-adapter",
+    "smokeUrl": "https://gist.github.com/bwndlct/e57e719ff43db87c7b0f80622d3f15f0"
+  },
+  "engine": {
+    "name": "zcode",
+    "bin": "zcode-claw-adapter",
+    "binEnv": "ZCODE_CLAW_ADAPTER_BIN",
+    "persistent": true,
+    "contextWindow": 200000,
+    "args": {
+      "resume": "--resume",
+      "model": "--model",
+      "permissionMode": "--mode"
+    },
+    "permissionModes": {
+      "plan": "plan",
+      "default": "build",
+      "acceptEdits": "edit",
+      "bypassPermissions": "yolo"
+    }
+  }
+}
