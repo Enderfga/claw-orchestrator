@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **OpenClaw tool results now satisfy the host contract.** All 77 registered handlers pass through
+  one adapter that emits text content plus the original structured details, serializes BigInt
+  values safely, preserves already-wrapped results, and lets handler errors propagate unchanged.
+- **The Codex thread-listing tool is now `clawo_codex_threads`.** The namespaced name avoids a
+  registration collision with `@openclaw/codex`.
+
 ## [6.5.0] - 2026-09-03
 
 Claude Code 2.1.258 → 2.1.259, Codex 0.152.1 → 0.153.0, Antigravity 1.1.22 → 1.1.25, OpenCode

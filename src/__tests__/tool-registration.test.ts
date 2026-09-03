@@ -165,7 +165,7 @@ describe('plugin tool registration', () => {
       'codex_fork',
       'codex_rollback',
       'codex_models',
-      'codex_threads',
+      'clawo_codex_threads',
       'claude_agents_list',
       'fanout_start',
       'fanout_status',
