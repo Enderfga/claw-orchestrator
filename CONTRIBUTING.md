@@ -98,16 +98,40 @@ Do not open a PR that puts protocol translation for an untestable engine into
 ### The smoke record
 
 A preset is accepted on a falsifiable claim, so `provenance` must carry one.
-Run this against your engine and link the captured output:
+Run two turns through the local `clawo-mcp` server and link the captured input
+and output. Give `session_start.customEngine` the `engine` object from your draft
+preset, not the outer preset object:
+
+```text
+session_start({
+  name: "preset-smoke",
+  cwd: "<workspace>",
+  engine: "custom",
+  customEngine: <the draft preset's engine object>
+})
+
+session_send({
+  name: "preset-smoke",
+  message: "Remember the number 4173. Reply with just OK."
+})
+
+session_send({
+  name: "preset-smoke",
+  message: "What number did I ask you to remember?"
+}) // must answer 4173
+
+session_stop({ name: "preset-smoke" })
+```
+
+Do not send a custom-engine object through `clawo session-start`. That command
+uses the HTTP control plane, which deliberately rejects executable-bearing
+`customEngine` values; only a local caller such as the MCP tool or
+`SessionManager` API may configure one. See [MCP Server](skills/references/mcp.md)
+for host setup.
+
+Record the engine version separately:
 
 ```bash
-# 1. two turns, to prove the session actually carries context
-clawo session start --name preset-smoke --engine custom --custom-engine ./my-preset.json
-clawo session send --name preset-smoke "Remember the number 4173. Reply with just OK."
-clawo session send --name preset-smoke "What number did I ask you to remember?"   # must answer 4173
-clawo session stop --name preset-smoke
-
-# 2. the version you ran it against
 my-engine --version
 ```
 
