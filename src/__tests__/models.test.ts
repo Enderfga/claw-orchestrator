@@ -452,7 +452,7 @@ describe('getModelPricing fallback warning', () => {
 // default, so it quietly gets Sonnet's rates and a 200K window.
 describe('registry covers what the engines actually offer', () => {
   it('registers every Flash tier agy lists, not just the default one', () => {
-    for (const id of ['gemini-3.7-flash', 'gemini-3.6-flash', 'gemini-3.5-flash']) {
+    for (const id of ['gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.6-flash', 'gemini-3.5-flash']) {
       const m = lookupModel(id);
       expect(m, `${id} is unregistered`).toBeDefined();
       expect(m!.engine).toBe('agy');
@@ -465,6 +465,7 @@ describe('registry covers what the engines actually offer', () => {
     // Reverse assertion: 3.5 Flash is NOT $0.5/$3 — that figure was carried
     // over from an earlier generation and under-reported every turn 3x.
     expect(getModelPricing('gemini-3.5-flash')).toMatchObject({ input: 1.5, output: 9 });
+    expect(getModelPricing('gemini-3.8-flash')).toMatchObject({ input: 0.75, output: 3.75 });
     expect(getModelPricing('gemini-3.7-flash')).toMatchObject({ input: 0.75, output: 3.75 });
     expect(getModelPricing('gemini-3.6-flash')).toMatchObject({ input: 0.75, output: 3.75 });
   });
@@ -479,5 +480,14 @@ describe('registry covers what the engines actually offer', () => {
     // Guard against a blanket find-and-replace: 200K is the fallback window, so
     // a registered model must never be reachable only through it.
     expect(getContextWindow('gemini-9.9-flash')).toBe(200_000);
+  });
+
+  // agy 1.1.25 stopped serving gemini-3.5-flash (a session asking for it gets
+  // `status: ERROR`), so an alias still pointing there would fail every session
+  // that uses it. The id itself stays registered: it is a real API model.
+  it('points agy-flash at the newest Flash tier agy actually serves', () => {
+    expect(resolveAlias('agy-flash')).toBe('gemini-3.8-flash');
+    expect(lookupModel('gemini-3.5-flash')).toBeDefined();
+    expect(lookupModel('gemini-3.5-flash')!.aliases ?? []).not.toContain('agy-flash');
   });
 });

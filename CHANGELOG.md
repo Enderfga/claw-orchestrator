@@ -5,6 +5,54 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.5.0] - 2026-09-03
+
+Claude Code 2.1.258 → 2.1.259, Codex 0.152.1 → 0.153.0, Antigravity 1.1.22 → 1.1.25, OpenCode
+1.18.26 → 1.18.27; Grok Build unchanged at 1.0.13. This is the first sweep run by the new script
+rather than by hand, and it found one real regression that the by-hand method would have missed.
+
+### Added
+
+- **`scripts/sweep.ts` — the weekly engine sweep as a deterministic script.** Installed version
+  against the CLAUDE.md pin and upstream; the flags each wrapper passes against what its binary's
+  `--help` lists; one live turn per core engine **through the real wrapper class**, so the wrapper's
+  own defaults are what is tested; and the ACP + MCP handshakes. Exit 1 on a regression. No LLM in
+  it — the thing that says a wrapper is broken must not share the wrapper's failure modes.
+  `scripts/sweep-workflow.json` wraps it as a kernel run: verifier → router → an agent that drafts
+  the alignment on a `sweep/<date>` branch → a human gate. Neither ships in the package.
+- **`--permission-prompts none` on every Claude session without a prompt tool** (CLI 2.1.259+).
+  This spawn shape has no TTY and, without `permissionPromptTool`, nobody to answer a permission
+  prompt — a tool call the permission mode did not already decide sat waiting until the turn
+  timeout. It is now denied instead; the model sees the denial and can adapt, and the permission
+  mode still decides everything else. Verified against 2.1.259 with `acceptEdits`: a clean turn, no
+  denials recorded.
+- **`gemini-3.8-flash`** registered for the Antigravity engine at its current $0.75/$3.75 list rate
+  (promotional through 2026-12-31; the scheduled rate is deliberately not priced).
+
+### Fixed
+
+- **The Antigravity default model no longer exists on agy 1.1.25.** `gemini-3.5-flash` was dropped
+  from `agy models`; a session asking for it gets `status: ERROR` with an empty response and nothing
+  on stderr, while 3.7 and 3.8 complete normally. This wrapper always passes `--model`, so every
+  Antigravity session with no explicit model was failing. The default and the `agy-flash` alias
+  moved to `gemini-3.8-flash`, verified with a live turn. The 3.5 entry stays registered — it is
+  still a real API model — but no longer carries the alias. The wrapper's claim that an unknown
+  model "silently falls back" was true on 1.0.16 and is not true now; the comment says so.
+
+  The by-hand sweep exercised agy with a minimal argv and no `--model`, so it passed on agy's own
+  default and never saw this. The script's first version did the same and passed too. The live turn
+  now goes through the wrapper, which is what users run.
+
+### Notes
+
+- Help-text diffing is advisory, not a verdict. The script's first run reported four Claude flags as
+  removed (`--max-turns` among them); all four are still accepted — claude omits hidden options from
+  `--help`, and passes an unknown option straight through to help with exit 0, so there is no free
+  way to ask. Such flags are listed as "not advertised" and do not fail the sweep.
+- Grok on a spent free tier can hang `-p` silently rather than error, in any directory, with or
+  without its leader process. The sweep caps grok at 90 seconds and names a zero-turn result as a
+  silent hang. Grok could not be re-verified this week; its pin stays at 1.0.13.
+
 ## [6.4.0] - 2026-09-03
 
 ### Added

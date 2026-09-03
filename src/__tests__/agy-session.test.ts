@@ -713,7 +713,7 @@ describe('PersistentAgySession', () => {
       expect(result.text).toContain('does not support compaction');
     });
 
-    it('getCost() uses gemini-3.5-flash pricing by default', async () => {
+    it('getCost() uses gemini-3.8-flash pricing by default', async () => {
       const session = new PersistentAgySession({
         name: 'test',
         cwd: '/tmp',
@@ -722,9 +722,11 @@ describe('PersistentAgySession', () => {
       await session.start();
 
       const cost = session.getCost();
-      expect(cost.model).toBe('gemini-3.5-flash');
-      expect(cost.pricing.inputPer1M).toBe(1.5);
-      expect(cost.pricing.outputPer1M).toBe(9);
+      // 3.8, not 3.5: agy 1.1.25 stopped serving 3.5 (status: ERROR), and this
+      // wrapper always sends --model, so the default here is what really runs.
+      expect(cost.model).toBe('gemini-3.8-flash');
+      expect(cost.pricing.inputPer1M).toBe(0.75);
+      expect(cost.pricing.outputPer1M).toBe(3.75);
     });
   });
 

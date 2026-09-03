@@ -110,16 +110,31 @@ block, and the cancellation and permission limitations are in
 
 | Engine      | CLI        | Tested Version |
 | ----------- | ---------- | -------------- |
-| Claude Code | `claude`   | 2.1.258        |
-| Codex       | `codex`    | 0.152.1        |
-| Antigravity | `agy`      | 1.1.22         |
+| Claude Code | `claude`   | 2.1.259        |
+| Codex       | `codex`    | 0.153.0        |
+| Antigravity | `agy`      | 1.1.25         |
 | Grok Build  | `grok`     | 1.0.13         |
-| OpenCode    | `opencode` | 1.18.26        |
+| OpenCode    | `opencode` | 1.18.27        |
 | Custom CLI  | any        | —              |
 
 Any coding CLI that runs as a subprocess can be wired up as a custom engine — see [`multi-engine.md`](./skills/references/multi-engine.md#custom-engine-enginecustom).
 
 ---
+
+## How the engine table stays honest
+
+The versions above are not typed in — they are what the weekly sweep last ran. `scripts/sweep.ts`
+measures each core engine's installed, pinned and upstream version, diffs the flags the wrapper
+passes against the binary's `--help`, runs one live turn **through the real wrapper class**, and
+smokes the ACP and MCP entry points. It has no LLM in it, so the thing that reports a wrapper as
+broken cannot share the wrapper's failure modes.
+
+`scripts/sweep-workflow.json` wraps it as a durable run on this project's own kernel: verifier →
+router → an agent that drafts the alignment on a `sweep/<date>` branch → a human gate. That is the
+bounded form of recursive self-improvement this project practises — the loop measures, proposes and
+verifies; a person merges. The orchestrator never edits its own code unattended, on purpose: the
+recovery path has to stay simpler than what it recovers. Its first scripted run found a default
+model an engine had silently dropped, which three weeks of by-hand sweeps had walked past.
 
 ## Contributing
 

@@ -36,6 +36,12 @@ Default engine. Long-running subprocess with streaming JSON I/O. Tested with Cla
 - Full cost tracking from API usage data
 - Cross-session peer messaging (`crossSessionInbound`): sets this session's policy for messages sent from other Claude Code sessions on the same machine — `accept` delivers straight in, `hold` waits for a human to approve it in that session's terminal, `refuse` rejects it. There is no CLI flag for this; it is a settings key, delivered through the `--settings` merge. Worth setting explicitly for orchestrated sessions: with no value the CLI decides from the two sides' permission modes and holds when they differ, and an orchestrated session (`bypassPermissions` / `acceptEdits`) versus a human terminal (prompting) is exactly that case — so the message parks waiting for approval in a terminal nobody is watching. Sessions started by the orchestrator do register as addressable peers and do receive messages (verified against 2.1.232 by sending to a live one and getting a reply). Note that a user-level `~/.claude/settings.json` value may take precedence over the per-session one; only the `accept` path has been confirmed end-to-end here.
 - Hook lifecycle events (`includeHookEvents`), subagent output forwarding (`forwardSubagentText`), permission delegation (`permissionPromptTool`), prompt cache optimization (`bare` + `excludeDynamicSystemPromptSections` + `enablePromptCaching1H`), debug control, `--from-pr` resume, and MCP channel subscriptions
+- `--permission-prompts none` is passed whenever no `permissionPromptTool` is configured (CLI
+  2.1.259+). This spawn shape has no TTY and, without a prompt tool, no host to answer a permission
+  prompt — so before this a tool call the permission mode did not already decide sat waiting for an
+  answer that could never come, until the turn timeout. `none` denies it instead; the model sees the
+  denial and can adapt, and the permission mode still decides everything else. With a prompt tool
+  configured the CLI's default (`host`) is left in place so the tool is asked
 - `restricted` → `--restricted` (CLI 2.1.249+): removes the command- and code-running tools and
   `WebFetch` from the session, and ignores user/project/local settings files. Not folded into
   `sandboxMode: 'read-only'`, which maps to plan mode — measured against 2.1.251, plan mode alone
@@ -135,7 +141,7 @@ in print mode. Verified against `agy` **1.1.13**.
   `getStats().agyConversationId`.
 - **Reasoning effort**: session `effort` and per-turn `session_send` overrides map
   to `--effort`. agy accepts `low`, `medium`, and `high`; everything above that
-  (`xhigh`, `max`, `ultra`) clamps to `high`. agy 1.1.21 requires an effort with unsuffixed base
+  (`xhigh`, `max`, `ultra`) clamps to `high`. agy 1.1.25 requires an effort with unsuffixed base
   slugs such as `gemini-3.7-flash`, so `auto` resolves those to `high`; a model
   already ending in `-low`, `-medium`, or `-high` keeps that qualified effort.
   Per-turn overrides also work with qualified slugs: the adapter removes a
@@ -223,6 +229,12 @@ plan`. It refuses a direct write and a shell write, then loses to the third prom
   `--no-subagents`, the obvious next probe, deliberately not wired: the run that would have
   confirmed it hit the account's free-tier limit, and a probe that fails for lack of quota writes no
   file either. A read-only grok session throws rather than running writable under a read-only label.
+- **On a spent free tier, `grok -p` can hang silently instead of erroring.** Earlier in the same
+  session it printed a usage-limit message to stderr and exited 1; later invocations produced nothing
+  on either stream and never exited — in any directory, with or without `--no-leader`. The session's
+  turn timeout is what ends such a turn, so a caller on that tier pays the full timeout before seeing
+  a failure. Nothing in this wrapper can distinguish that hang from a slow turn; check `grok -p` by
+  hand when a grok session times out with no output.
 - Binary: `grok` (set `GROK_BIN` to override). Not `agent`: xAI's installer claims that name too,
   and so did Cursor's.
 - Requires Grok Build: see `x.ai/cli`.

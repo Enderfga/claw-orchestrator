@@ -66,6 +66,18 @@ Integration test — a manual smoke test, not part of CI; needs `claude` install
 npx tsx scripts/test-integration.ts
 ```
 
+Weekly engine sweep — the measurement half of the weekly check, deterministic, no LLM. Reports
+installed / pinned / upstream versions, the flag surface of each core engine against what its
+wrapper passes, one live turn per engine, and the ACP + MCP handshakes. Exit 1 on a regression.
+Run it before touching any wrapper; its `not in --help` list is a prompt for judgement, not a
+verdict (claude omits hidden options from help and still accepts them).
+
+```bash
+npx tsx scripts/sweep.ts             # human table
+npx tsx scripts/sweep.ts --no-live   # versions + flags only, costs nothing
+npx tsx scripts/sweep.ts --json --out report.json
+```
+
 ## Conventions
 
 - **ESM only** — `"type": "module"` in package.json, `.js` extensions in imports
@@ -206,11 +218,11 @@ Current tested versions (update on each release):
 
 | Engine      | CLI        | Tested Version | Invocation                                                                                                                                                                                                                           |
 | ----------- | ---------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Claude      | `claude`   | 2.1.258        | Persistent subprocess, `--output-format stream-json`                                                                                                                                                                                 |
-| Codex       | `codex`    | 0.152.1        | `codex exec --sandbox workspace-write --skip-git-repo-check --json -C <dir> [--ephemeral] [--ignore-user-config] [--add-dir D]` (or `codex app-server` for /goal)                                                                    |
-| Antigravity | `agy`      | 1.1.22         | `agy -p <msg> --output-format stream-json --log-file <tmp> [--conversation <id>] --dangerously-skip-permissions/--sandbox --print-timeout <n>s`                                                                                      |
+| Claude      | `claude`   | 2.1.259        | Persistent subprocess, `--output-format stream-json`                                                                                                                                                                                 |
+| Codex       | `codex`    | 0.153.0        | `codex exec --sandbox workspace-write --skip-git-repo-check --json -C <dir> [--ephemeral] [--ignore-user-config] [--add-dir D]` (or `codex app-server` for /goal)                                                                    |
+| Antigravity | `agy`      | 1.1.25         | `agy -p <msg> --output-format stream-json --log-file <tmp> [--conversation <id>] --dangerously-skip-permissions/--sandbox --print-timeout <n>s`                                                                                      |
 | Grok        | `grok`     | 1.0.13         | `grok -p <msg> --output-format json --cwd <dir> [--resume <id>] [--permission-mode M] [--effort E] [--tools/--disallowed-tools] [--json-schema] [--rules]` (read-only refused: a delegated subagent writes through a tool allowlist) |
-| OpenCode    | `opencode` | 1.18.26        | `opencode run <msg> --format json [--model provider/model] [--variant E]` (read-only sessions add `--agent clawo-readonly` + `OPENCODE_CONFIG_CONTENT`)                                                                              |
+| OpenCode    | `opencode` | 1.18.27        | `opencode run <msg> --format json [--model provider/model] [--variant E]` (read-only sessions add `--agent clawo-readonly` + `OPENCODE_CONFIG_CONTENT`)                                                                              |
 
 **Important:** When CLI vendors change flags or output format, update the corresponding `persistent-*-session.ts` and re-run integration tests.
 
