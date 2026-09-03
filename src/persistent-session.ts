@@ -308,7 +308,17 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
     if (this.options.includeHookEvents) args.push('--include-hook-events');
     // CLI 2.1.211+: surface subagent output in the parent stream.
     if (this.options.forwardSubagentText) args.push('--forward-subagent-text');
-    if (this.options.permissionPromptTool) args.push('--permission-prompt-tool', this.options.permissionPromptTool);
+    if (this.options.permissionPromptTool) {
+      args.push('--permission-prompt-tool', this.options.permissionPromptTool);
+    } else {
+      // Nobody is attached to answer a prompt in this spawn shape: no TTY, and
+      // no prompt tool. Before CLI 2.1.259 a tool call the permission mode did
+      // not already decide would sit waiting for an answer that could never
+      // come — the session hung until its turn timeout. `none` makes that
+      // deterministic: the call is denied, the model sees the denial and can
+      // adapt, and the permission mode still decides everything else.
+      args.push('--permission-prompts', 'none');
+    }
 
     // Smart default: bare mode auto-enables exclude-dynamic-system-prompt-sections for better cache hits
     const shouldExcludeDynamic =

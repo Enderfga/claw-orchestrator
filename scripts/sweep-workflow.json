@@ -1,0 +1,45 @@
+{
+  "$comment": "Weekly engine sweep as a durable run: measure (no LLM) → on red, draft the alignment on a branch → a human decides. Start it with the workflow_start tool or POST /workflow/new, passing this object as `spec` after replacing <REPO>. Not a shipped template: it names this repository's own scripts and wrappers. Topology note — the kernel has no end sentinel, a router that matches nothing falls through to the next node in order, so both paths converge on the final human_gate: green jumps to it, red passes through `draft` first.",
+  "name": "engine-sweep",
+  "cwd": "<REPO>",
+  "maxNodeVisits": 4,
+  "nodes": [
+    {
+      "id": "sweep",
+      "kind": "verifier",
+      "cwd": "<REPO>",
+      "onFailure": "continue",
+      "contract": {
+        "id": "weekly-engine-sweep",
+        "checks": [
+          {
+            "type": "command",
+            "cmd": "npx",
+            "args": ["tsx", "scripts/sweep.ts", "--json", "--out", ".clawo-sweep.json"],
+            "cwd": "<REPO>",
+            "timeoutMs": 1500000
+          }
+        ]
+      }
+    },
+    {
+      "id": "gate",
+      "kind": "router",
+      "routes": [{ "when": { "type": "node_succeeded", "node": "sweep" }, "to": "done" }]
+    },
+    {
+      "id": "draft",
+      "kind": "agent",
+      "cwd": "<REPO>",
+      "engine": "claude",
+      "effort": "high",
+      "onFailure": "continue",
+      "prompt": "The weekly engine sweep found at least one regression. Its report is in .clawo-sweep.json at the repository root; read it first.\n\nYour job is the ALIGNMENT half of the weekly check. Rules:\n\n1. Sort every item into exactly two buckets and act on both without asking: AI-facing (a flag, env var, output field or event a headless subprocess wrapper consumes) → implement the alignment in the matching src/persistent-*-session.ts; TUI/GUI-only → drop it silently. Never produce a menu of optional features.\n2. A flag listed under notAdvertised is a candidate, not a verdict: claude omits hidden options from --help and still accepts them. Verify by invocation before treating anything as removed.\n3. A live-turn failure whose note is 'usage limit' is an account fact, not a wrapper regression. Do not touch that wrapper for it.\n4. Every change needs a test, mutation-checked: revert the predicate and confirm only the new test goes red.\n5. Update CHANGELOG.md, the engine table in CLAUDE.md and README.md, and skills/references/claude-cli-tracking.md.\n6. Work on a new branch named sweep/<today's date>. Commit there. NEVER push, tag, or publish — a human reviews the branch.\n\nFinish with a short summary: what was aligned, what was dropped and why, and the exact branch name."
+    },
+    {
+      "id": "done",
+      "kind": "human_gate",
+      "prompt": "Engine sweep finished. If the sweep was red, a branch named sweep/<date> was drafted with the alignment — review it and decide whether to push and release. If it was green, there is nothing to do. The report is at .clawo-sweep.json."
+    }
+  ]
+}

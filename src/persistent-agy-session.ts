@@ -22,8 +22,10 @@
  *   - Timeout coherence: agy enforces its own --print-timeout (default 5m);
  *     we derive it from the send timeout so the two never disagree.
  *
- * Unknown --model values do not error — agy silently falls back to its
- * default model (verified empirically on 1.0.16).
+ * Unknown --model values are NOT reliably harmless. On 1.0.16 an unknown slug
+ * fell back to the default silently; on 1.1.25 a slug agy has stopped serving
+ * (gemini-3.5-flash) returns `status: ERROR` with an empty response and
+ * nothing on stderr. Treat a wrong model as a failed turn, not a quiet swap.
  */
 
 import { spawn } from 'node:child_process';
@@ -73,7 +75,14 @@ export class PersistentAgySession extends BaseOneShotSession {
   constructor(config: SessionConfig, agyBin?: string) {
     super(config, agyBin || process.env.AGY_BIN || 'agy', {
       enginePrefix: 'agy',
-      defaultModel: 'gemini-3.5-flash',
+      // 3.8 because 1.1.25 stopped serving 3.5: `--model gemini-3.5-flash`
+      // returns `status: ERROR` with an empty response and nothing on stderr,
+      // while 3.7 and 3.8 complete normally — measured, not inferred. This
+      // wrapper always passes `--model`, so whatever sits here is what actually
+      // runs; and agy's stream-json carries no model field at all, so its own
+      // default cannot be read back and adopted. Re-check `agy models` when
+      // the next tier appears.
+      defaultModel: 'gemini-3.8-flash',
       supportsCachedTokens: false,
       engineDisplayName: 'Antigravity',
     });

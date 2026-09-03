@@ -186,6 +186,27 @@ describe('PersistentClaudeSession --settings / ultracode', () => {
     expect(argv).not.toContain('--restricted');
   });
 
+  // CLI 2.1.259 added `--permission-prompts`: "host" hands a prompt to the SDK
+  // host or --permission-prompt-tool; "none" denies it. This wrapper has no
+  // host, so without a prompt tool there is nobody to ask, and a prompt used to
+  // mean a hang. Verified against 2.1.259: `-p --permission-mode acceptEdits
+  // --permission-prompts none` runs a clean turn with no denials recorded.
+  it('tells the CLI nobody answers prompts when no prompt tool is configured', async () => {
+    const session = new PersistentClaudeSession({ name: 't', cwd: '/tmp' });
+    await startReady(session, mockProc);
+    const argv = mockSpawn.mock.calls[0][1] as string[];
+    expect(argv[argv.indexOf('--permission-prompts') + 1]).toBe('none');
+    expect(argv).not.toContain('--permission-prompt-tool');
+  });
+
+  it('leaves prompts to the prompt tool when one is configured', async () => {
+    const session = new PersistentClaudeSession({ name: 't', cwd: '/tmp', permissionPromptTool: 'mcp__x__ask' });
+    await startReady(session, mockProc);
+    const argv = mockSpawn.mock.calls[0][1] as string[];
+    expect(argv[argv.indexOf('--permission-prompt-tool') + 1]).toBe('mcp__x__ask');
+    expect(argv).not.toContain('--permission-prompts');
+  });
+
   it('joins a fallbackModel array into a comma-separated --fallback-model', async () => {
     const session = new PersistentClaudeSession({ name: 't', cwd: '/tmp', fallbackModel: ['opus', 'sonnet', 'haiku'] });
     await startReady(session, mockProc);

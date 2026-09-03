@@ -315,8 +315,13 @@ const MODELS: ModelDef[] = [
   // `result` event when it carries usage and fall back to estimateTokens()
   // otherwise; the run ledger flags which of the two a turn used.
   //
-  // Slugs verified against agy 1.1.21 (`agy models`), which lists ONLY
-  // effort-qualified names (gemini-3.7-flash-high, gemini-3.1-pro-low, …).
+  // Slugs verified against agy 1.1.25 (`agy models`), which lists ONLY
+  // effort-qualified names (gemini-3.8-flash-high, gemini-3.1-pro-low, …).
+  // 1.1.25 dropped gemini-3.5-flash from that list and added 3.8: a session
+  // asking for 3.5 now gets `status: ERROR` with no message, so the
+  // `agy-flash` alias and the engine default both moved to 3.8. The 3.5 entry
+  // stays registered because it is still a real API model id with a real price;
+  // it is simply no longer reachable through this engine.
   // The base slugs registered below are the halves agy composes with
   // `--effort`, which PersistentAgySession always supplies — passing a base
   // slug without one is a hard CLI error, not a silent fallback. Tiers are not
@@ -330,10 +335,18 @@ const MODELS: ModelDef[] = [
   // caller naming a model is most likely to ask for) was measured against a
   // 200K window instead of 1M and priced at Sonnet rates.
   //
-  // Prices are the Gemini API paid-tier list rates for the same models. The two
+  // Prices are the Gemini API paid-tier list rates for the same models. The three
   // newest Flash tiers are $0.75/$3.75 today and are scheduled to double on
   // 2027-01-01; the scheduled number is deliberately NOT priced, because a
   // future rate is not what a turn run today costs.
+  {
+    id: 'gemini-3.8-flash',
+    engine: 'agy',
+    provider: 'google',
+    pricing: { input: 0.75, output: 3.75 },
+    aliases: ['agy-flash'],
+    contextWindow: 1_000_000,
+  },
   {
     id: 'gemini-3.7-flash',
     engine: 'agy',
@@ -353,7 +366,6 @@ const MODELS: ModelDef[] = [
     engine: 'agy',
     provider: 'google',
     pricing: { input: 1.5, output: 9 },
-    aliases: ['agy-flash'],
     contextWindow: 1_000_000,
   },
   {
