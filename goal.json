@@ -28,7 +28,7 @@
     },
     {
       "name": "full_suite",
-      "cmd": "npm test",
+      "cmd": "NPM_CONFIG_USERCONFIG=/dev/null npm test",
       "must": true
     }
   ],
