@@ -45,7 +45,7 @@ describe('OpenClaw tool result contract', () => {
   });
 
   it('wraps a plain handler payload in content and details', async () => {
-    const payload = [{ id: 'gpt-test' }];
+    const payload = { ok: true as const, models: [{ id: 'gpt-test' }] };
     codexModels.mockResolvedValueOnce(payload);
 
     const result = (await registration.tools.get('codex_models')!.execute('call-1', {
@@ -53,21 +53,28 @@ describe('OpenClaw tool result contract', () => {
     })) as AgentToolResult;
 
     expect(result).toEqual({
-      content: [{ type: 'text', text: '[\n  {\n    "id": "gpt-test"\n  }\n]' }],
+      content: [
+        { type: 'text', text: '{\n  "ok": true,\n  "models": [\n    {\n      "id": "gpt-test"\n    }\n  ]\n}' },
+      ],
       details: payload,
     });
     expect(result.details).toBe(payload);
   });
 
   it('serializes BigInt values in text while preserving the details payload', async () => {
-    const payload = [{ contextWindow: 128_000n }];
-    codexModels.mockResolvedValueOnce(payload as never);
+    const payload = { ok: true as const, models: [{ contextWindow: 128_000n }] };
+    codexModels.mockResolvedValueOnce(payload);
 
     const result = (await registration.tools.get('codex_models')!.execute('call-2', {
       name: 'session-1',
     })) as AgentToolResult;
 
-    expect(result.content).toEqual([{ type: 'text', text: '[\n  {\n    "contextWindow": "128000"\n  }\n]' }]);
+    expect(result.content).toEqual([
+      {
+        type: 'text',
+        text: '{\n  "ok": true,\n  "models": [\n    {\n      "contextWindow": "128000"\n    }\n  ]\n}',
+      },
+    ]);
     expect(result.details).toBe(payload);
   });
 
