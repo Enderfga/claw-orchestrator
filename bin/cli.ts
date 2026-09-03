@@ -186,10 +186,18 @@ program
   .option('--resume-session-id <id>', 'Resume existing session by ID')
   .option('--base-url <url>', 'Custom API endpoint (for proxy)')
   .option('--add-dir <dirs>', 'Comma-separated additional working directories')
+  .option(
+    '--custom-engine <preset>',
+    'With -e custom: the id of a bundled engine preset (see `clawo engines`). Inline configs are not accepted here — that is what presets are for',
+  )
   .action(async (name, opts) => {
     const body: Record<string, unknown> = { name: name || `session-${Date.now()}` };
     if (opts.cwd) body.cwd = opts.cwd;
     if (opts.engine) body.engine = opts.engine;
+    // Only a preset id. An inline config names a binary and its arguments, and
+    // this command reaches the session through the same HTTP surface that
+    // refuses those — see `clawo engines` for what is available.
+    if (opts.customEngine) body.customEngine = opts.customEngine;
     if (opts.model) body.model = opts.model;
     if (opts.permissionMode) body.permissionMode = opts.permissionMode;
     if (opts.effort) body.effort = opts.effort;
@@ -333,6 +341,37 @@ program
 function fail(r: { error?: string }): void {
   console.error(`Failed: ${r.error}`);
 }
+
+program
+  .command('engines')
+  .description('List the community engine presets bundled with this package')
+  .option('--json', 'Emit raw JSON instead of a table')
+  .action(async (opts) => {
+    // Read locally rather than over HTTP: this is a property of the installed
+    // package, and it has to work whether or not a server is running.
+    const { listEnginePresets } = await import('../src/engine-presets.js');
+    const presets = listEnginePresets();
+    if (opts.json) {
+      console.log(JSON.stringify(presets, null, 2));
+      return;
+    }
+    if (!presets.length) {
+      console.log('No engine presets are bundled with this build.');
+      return;
+    }
+    console.log('Community presets — schema-validated here, but not run here.');
+    console.log("What each one claims is its maintainer's dated attestation:\n");
+    for (const p of presets) {
+      console.log(`  ${p.id}`);
+      console.log(`    ${p.description}`);
+      console.log(
+        `    verified by ${p.provenance.maintainer} against ${p.provenance.verifiedAgainst} on ${p.provenance.verifiedOn}`,
+      );
+      if (p.provenance.smokeUrl) console.log(`    smoke: ${p.provenance.smokeUrl}`);
+      console.log(`    use:   clawo session-start my-session -e custom --custom-engine ${p.id}`);
+      console.log('');
+    }
+  });
 
 program
   .command('runs')

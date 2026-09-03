@@ -5,13 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [6.4.0] - 2026-09-03
 
 ### Added
 
-- **ZCode community engine preset.** The preset uses the contributor-maintained
-  `@bwndlct/zcode-claw-adapter` package and was verified against ZCode 0.16.5 with a published,
-  two-turn context smoke record.
+- **ZCode community engine preset**, the first one, contributed by @bwndlct. It points at the
+  contributor-maintained `@bwndlct/zcode-claw-adapter` package and carries provenance for ZCode
+  0.16.5 with a published two-turn context smoke record. The protocol translation lives in that
+  package, which is the split the community tier exists to make possible.
+- **`clawo engines`** lists the bundled presets with each one's provenance — who attested it,
+  against which engine version, on what date. Read from the installed package rather than over HTTP,
+  so it works with no server running.
+- **`clawo session-start --custom-engine <preset-id>`.** `-e custom` was offered by the CLI and
+  could not be satisfied by it: there was no option to supply the engine, so the path failed with
+  "customEngine config is required". Found by @bwndlct, twice — first while preparing the ZCode
+  preset, then in a follow-up PR to correct the guide. The contribution path's first outside user
+  walked straight into it, which is roughly the point of having one.
+
+### Changed
+
+- **The HTTP guard now refuses inline custom-engine configs specifically, rather than the whole
+  field.** Its reason has always been that a custom engine names an executable to spawn — but
+  `engine: 'codex'` spawns one too and is accepted, so spawning was never the line; arbitrary argv
+  is. A preset id cannot carry any: it selects one of the descriptions this package ships. Inline
+  configs remain local-only, and a preset id is now the supported way to reach a custom engine from
+  the CLI. Verified both directions against a running server: an inline config carrying
+  `/bin/sh -c "touch …"` is refused and writes nothing, while a preset id reaches the spawn.
+
+### Fixed
+
+- **The smoke script in CONTRIBUTING.md named a command that does not exist.** It used
+  `clawo session start` (the command is `session-start`) and a `--custom-engine` option that had not
+  been implemented. It was written without being run. It now matches the CLI, starts from
+  `clawo engines` to confirm the preset loads at all, and says why the preset — not an inline config
+  — is what has to be smoked.
 
 ## [6.3.0] - 2026-09-02
 
