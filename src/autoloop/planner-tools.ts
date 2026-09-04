@@ -10,9 +10,9 @@
  *   ```
  *
  * After each Planner turn, the dispatcher scans the reply for these blocks,
- * validates them, and translates them into runner-queue messages or direct
- * runner-state mutations. Multiple blocks per turn are allowed and processed
- * in order.
+ * validates the complete batch, and translates it into runner-queue messages
+ * or direct runner-state mutations. Multiple blocks per turn are allowed, but
+ * no effect is applied unless every block is valid.
  *
  * The naming is stable so a future MCP-based implementation can swap the
  * parser for real tool dispatch without changing any Planner-facing
@@ -98,13 +98,14 @@ export interface PlannerToolEffects {
   spawnSubagents: (args: SpawnSubagentsArgs) => Promise<void>;
   /** Mutate in-memory push policy (key→rule object). Unknown keys ignored. */
   updatePushPolicy: (delta: Record<string, unknown>) => void;
-  /**
-   * Write content to <workspace>/<file> (plan.md or goal.json), then
-   * best-effort `git add && git commit`. The Planner has no Write/Edit
-   * tools — this autoloop tool is the only path to author plan.md/goal.json,
-   * which physically prevents the Planner from doing Coder work.
-   */
-  writePlanFile: (file: 'plan.md' | 'goal.json', content: string, commitMessage?: string) => Promise<void>;
+  /** Atomically materialize the complete plan/goal write set. */
+  writePlanFiles: (writes: readonly PlannerArtifactWrite[]) => Promise<void>;
+}
+
+export interface PlannerArtifactWrite {
+  file: 'plan.md' | 'goal.json';
+  content: string;
+  commitMessage?: string;
 }
 
 // ─── Tool execution ──────────────────────────────────────────────────────────
@@ -116,9 +117,177 @@ export interface PlannerToolHandlerResult {
   errors: Array<{ tool: string; error: string }>;
 }
 
+interface PreparedPlannerCall {
+  call: PlannerToolCall;
+  artifact?: PlannerArtifactWrite;
+  message?: AnyAutoloopMessage;
+  policyDelta?: Record<string, unknown>;
+  spawnArgs?: SpawnSubagentsArgs;
+}
+
+interface PreparedDirective {
+  goal: string;
+  constraints: string[];
+  success_criteria: string[];
+  max_attempts: number;
+}
+
+const PUSH_LEVELS = new Set<PushLevel>(['info', 'warn', 'decision', 'error']);
+const PUSH_CHANNELS = new Set<PushChannel>(['auto', 'wechat', 'webchat', 'both', 'email']);
+
+function optionalStringArray(value: unknown, field: string): string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.some((entry) => typeof entry !== 'string')) {
+    throw new Error(`${field} must be an array of strings`);
+  }
+  return value;
+}
+
+function prepareDirective(raw: Record<string, unknown>, tool: string): PreparedDirective {
+  const goal = raw.goal;
+  if (typeof goal !== 'string' || !goal.trim()) throw new Error(`${tool} requires \`goal\``);
+  const maxAttempts = raw.max_attempts ?? 1;
+  if (typeof maxAttempts !== 'number' || !Number.isInteger(maxAttempts) || maxAttempts < 1) {
+    throw new Error(`${tool} max_attempts must be a positive integer`);
+  }
+  return {
+    goal,
+    constraints: optionalStringArray(raw.constraints, `${tool} constraints`),
+    success_criteria: optionalStringArray(raw.success_criteria, `${tool} success_criteria`),
+    max_attempts: maxAttempts,
+  };
+}
+
+function preparePlannerCall(call: PlannerToolCall, iter: number): PreparedPlannerCall {
+  if (typeof call.args !== 'object' || call.args === null || Array.isArray(call.args)) {
+    throw new Error(`${call.tool} requires an object \`args\``);
+  }
+
+  switch (call.tool) {
+    case 'notify_user': {
+      const { level, summary, detail, channel } = call.args;
+      if (typeof summary !== 'string' || !summary.trim()) throw new Error('notify_user requires `summary`');
+      if (level !== undefined && (typeof level !== 'string' || !PUSH_LEVELS.has(level as PushLevel))) {
+        throw new Error('notify_user has invalid `level`');
+      }
+      if (detail !== undefined && typeof detail !== 'string') throw new Error('notify_user `detail` must be a string');
+      if (channel !== undefined && (typeof channel !== 'string' || !PUSH_CHANNELS.has(channel as PushChannel))) {
+        throw new Error('notify_user has invalid `channel`');
+      }
+      return {
+        call,
+        message: Msg.pushUser(iter, {
+          level: (level as PushLevel | undefined) ?? 'info',
+          summary,
+          detail,
+          channel: (channel as PushChannel | undefined) ?? 'auto',
+        }),
+      };
+    }
+    case 'spawn_subagents': {
+      const raw = call.args;
+      if (
+        'coder_custom_engine' in raw ||
+        'reviewer_custom_engine' in raw ||
+        'coderCustomEngine' in raw ||
+        'reviewerCustomEngine' in raw ||
+        'customEngine' in raw
+      ) {
+        throw new Error('spawn_subagents cannot include custom engine config; configure it at autoloop_start');
+      }
+      for (const field of ['coder_engine', 'reviewer_engine'] as const) {
+        const value = raw[field];
+        if (value !== undefined && (typeof value !== 'string' || !ENGINE_TYPES.includes(value as EngineType))) {
+          throw new Error(`spawn_subagents ${field} has unknown engine '${String(value)}'`);
+        }
+      }
+      for (const field of ['coder_model', 'reviewer_model'] as const) {
+        const value = raw[field];
+        if (value !== undefined && typeof value !== 'string') {
+          throw new Error(`spawn_subagents ${field} must be a string`);
+        }
+      }
+      const args: SpawnSubagentsArgs = {};
+      if (raw.coder_engine !== undefined) args.coder_engine = raw.coder_engine as EngineType;
+      if (raw.coder_model !== undefined) args.coder_model = raw.coder_model as string;
+      if (raw.reviewer_engine !== undefined) args.reviewer_engine = raw.reviewer_engine as EngineType;
+      if (raw.reviewer_model !== undefined) args.reviewer_model = raw.reviewer_model as string;
+      let message: AnyAutoloopMessage | undefined;
+      if (raw.initial_directive !== undefined) {
+        if (
+          typeof raw.initial_directive !== 'object' ||
+          raw.initial_directive === null ||
+          Array.isArray(raw.initial_directive)
+        ) {
+          throw new Error('spawn_subagents initial_directive must be an object');
+        }
+        const directive = prepareDirective(
+          raw.initial_directive as Record<string, unknown>,
+          'spawn_subagents initial_directive',
+        );
+        args.initial_directive = directive;
+        message = Msg.directive(iter, directive);
+      }
+      return { call, message, spawnArgs: args };
+    }
+    case 'send_directive': {
+      const directive = prepareDirective(call.args, 'send_directive');
+      return { call, message: Msg.directive(iter, directive) };
+    }
+    case 'pause_loop': {
+      const reason = call.args.reason ?? 'planner-pause';
+      if (typeof reason !== 'string') throw new Error('pause_loop `reason` must be a string');
+      return { call, message: Msg.pause(iter, { reason }) };
+    }
+    case 'resume_loop':
+      return { call, message: Msg.resume(iter) };
+    case 'terminate': {
+      const reason = call.args.reason ?? 'planner-terminate';
+      if (typeof reason !== 'string') throw new Error('terminate `reason` must be a string');
+      return { call, message: Msg.terminate(iter, { reason }) };
+    }
+    case 'update_push_policy':
+      return { call, policyDelta: call.args };
+    case 'write_plan': {
+      const { content, commit_message } = call.args;
+      if (typeof content !== 'string' || !content.trim()) {
+        throw new Error('write_plan requires non-empty `content` (full plan.md body)');
+      }
+      if (commit_message !== undefined && typeof commit_message !== 'string') {
+        throw new Error('write_plan `commit_message` must be a string');
+      }
+      return {
+        call,
+        artifact: { file: 'plan.md', content, commitMessage: commit_message as string | undefined },
+      };
+    }
+    case 'write_goal': {
+      const { content, commit_message } = call.args;
+      if (typeof content !== 'string' || !content.trim()) {
+        throw new Error('write_goal requires non-empty `content` (full goal.json body)');
+      }
+      try {
+        JSON.parse(content);
+      } catch (error) {
+        throw new Error(`write_goal content is not valid JSON: ${(error as Error).message}`);
+      }
+      if (commit_message !== undefined && typeof commit_message !== 'string') {
+        throw new Error('write_goal `commit_message` must be a string');
+      }
+      return {
+        call,
+        artifact: { file: 'goal.json', content, commitMessage: commit_message as string | undefined },
+      };
+    }
+    default:
+      throw new Error(`unknown planner tool: ${call.tool}`);
+  }
+}
+
 /**
- * Apply a batch of parsed tool calls in order. Returns any v2 envelopes that
- * the dispatcher should hand back to the runner so it can route them.
+ * Preflight a complete batch, materialize all artifact writes as one effect,
+ * then apply policy/spawn effects. Spawn is deliberately last, independent of
+ * block order, so roles never start against a partial artifact set.
  *
  * Note: notify_user / pause_loop / resume_loop / terminate / send_directive
  * become v2 messages and flow through the runner's normal queue (so policy,
@@ -130,149 +299,58 @@ export async function applyPlannerToolCalls(
   fx: PlannerToolEffects,
   iter: number,
 ): Promise<PlannerToolHandlerResult> {
-  const emitted_messages: AnyAutoloopMessage[] = [];
   const errors: Array<{ tool: string; error: string }> = [];
+  const prepared: PreparedPlannerCall[] = [];
 
   for (const call of calls) {
     try {
-      switch (call.tool) {
-        case 'notify_user': {
-          const { level, summary, detail, channel } = call.args as {
-            level?: PushLevel;
-            summary?: string;
-            detail?: string;
-            channel?: PushChannel;
-          };
-          if (!summary) throw new Error('notify_user requires `summary`');
-          emitted_messages.push(
-            Msg.pushUser(iter, {
-              level: level ?? 'info',
-              summary,
-              detail,
-              channel: channel ?? 'auto',
-            }),
-          );
-          break;
-        }
-        case 'spawn_subagents': {
-          const raw = call.args;
-          if (
-            'coder_custom_engine' in raw ||
-            'reviewer_custom_engine' in raw ||
-            'coderCustomEngine' in raw ||
-            'reviewerCustomEngine' in raw ||
-            'customEngine' in raw
-          ) {
-            throw new Error('spawn_subagents cannot include custom engine config; configure it at autoloop_start');
-          }
-          for (const field of ['coder_engine', 'reviewer_engine'] as const) {
-            const value = raw[field];
-            if (value !== undefined && (typeof value !== 'string' || !ENGINE_TYPES.includes(value as EngineType))) {
-              throw new Error(`spawn_subagents ${field} has unknown engine '${String(value)}'`);
-            }
-          }
-          for (const field of ['coder_model', 'reviewer_model'] as const) {
-            const value = raw[field];
-            if (value !== undefined && typeof value !== 'string') {
-              throw new Error(`spawn_subagents ${field} must be a string`);
-            }
-          }
-          const args: SpawnSubagentsArgs = {};
-          if (raw.coder_engine !== undefined) args.coder_engine = raw.coder_engine as EngineType;
-          if (raw.coder_model !== undefined) args.coder_model = raw.coder_model as string;
-          if (raw.reviewer_engine !== undefined) args.reviewer_engine = raw.reviewer_engine as EngineType;
-          if (raw.reviewer_model !== undefined) args.reviewer_model = raw.reviewer_model as string;
-          if (raw.initial_directive !== undefined) {
-            args.initial_directive = raw.initial_directive as SpawnSubagentsArgs['initial_directive'];
-          }
-          await fx.spawnSubagents(args);
-          // If caller asked for an initial directive, fire it via the runner queue.
-          const init = args.initial_directive;
-          if (init?.goal) {
-            emitted_messages.push(
-              Msg.directive(iter, {
-                goal: init.goal,
-                constraints: init.constraints ?? [],
-                success_criteria: init.success_criteria ?? [],
-                max_attempts: init.max_attempts ?? 1,
-              }),
-            );
-          }
-          break;
-        }
-        case 'send_directive': {
-          const { goal, constraints, success_criteria, max_attempts } = call.args as {
-            goal?: string;
-            constraints?: string[];
-            success_criteria?: string[];
-            max_attempts?: number;
-          };
-          if (!goal) throw new Error('send_directive requires `goal`');
-          emitted_messages.push(
-            Msg.directive(iter, {
-              goal,
-              constraints: constraints ?? [],
-              success_criteria: success_criteria ?? [],
-              max_attempts: max_attempts ?? 1,
-            }),
-          );
-          break;
-        }
-        case 'pause_loop': {
-          emitted_messages.push(
-            Msg.pause(iter, {
-              reason: ((call.args as { reason?: string }).reason as string) ?? 'planner-pause',
-            }),
-          );
-          break;
-        }
-        case 'resume_loop': {
-          emitted_messages.push(Msg.resume(iter));
-          break;
-        }
-        case 'terminate': {
-          emitted_messages.push(
-            Msg.terminate(iter, {
-              reason: ((call.args as { reason?: string }).reason as string) ?? 'planner-terminate',
-            }),
-          );
-          break;
-        }
-        case 'update_push_policy': {
-          fx.updatePushPolicy(call.args);
-          break;
-        }
-        case 'write_plan': {
-          const { content, commit_message } = call.args as { content?: string; commit_message?: string };
-          if (typeof content !== 'string' || !content.trim()) {
-            throw new Error('write_plan requires non-empty `content` (full plan.md body)');
-          }
-          await fx.writePlanFile('plan.md', content, commit_message);
-          break;
-        }
-        case 'write_goal': {
-          const { content, commit_message } = call.args as { content?: string; commit_message?: string };
-          if (typeof content !== 'string' || !content.trim()) {
-            throw new Error('write_goal requires non-empty `content` (full goal.json body)');
-          }
-          // Validate it parses as JSON — goal.json must be machine-readable.
-          // The error message includes the parse position so the Planner can
-          // self-correct on the next turn.
-          try {
-            JSON.parse(content);
-          } catch (e) {
-            throw new Error(`write_goal content is not valid JSON: ${(e as Error).message}`);
-          }
-          await fx.writePlanFile('goal.json', content, commit_message);
-          break;
-        }
-        default:
-          errors.push({ tool: call.tool as string, error: `unknown planner tool: ${call.tool}` });
-      }
+      prepared.push(preparePlannerCall(call, iter));
     } catch (err) {
       errors.push({ tool: call.tool, error: (err as Error).message });
     }
   }
 
-  return { emitted_messages, errors };
+  if (errors.length > 0) return { emitted_messages: [], errors };
+
+  for (const singleton of ['write_plan', 'write_goal', 'spawn_subagents'] as const) {
+    if (prepared.filter(({ call }) => call.tool === singleton).length > 1) {
+      errors.push({ tool: singleton, error: `duplicate ${singleton} control in one Planner batch` });
+    }
+  }
+  if (errors.length > 0) return { emitted_messages: [], errors };
+
+  const artifacts = prepared.flatMap(({ artifact }) => (artifact ? [artifact] : []));
+  if (artifacts.length > 0) {
+    try {
+      await fx.writePlanFiles(artifacts);
+    } catch (err) {
+      return {
+        emitted_messages: [],
+        errors: [{ tool: artifacts.map(({ file }) => file).join(','), error: (err as Error).message }],
+      };
+    }
+  }
+
+  for (const entry of prepared) {
+    if (!entry.policyDelta) continue;
+    try {
+      fx.updatePushPolicy(entry.policyDelta);
+    } catch (err) {
+      return { emitted_messages: [], errors: [{ tool: entry.call.tool, error: (err as Error).message }] };
+    }
+  }
+
+  const spawnCall = prepared.find(({ spawnArgs }) => spawnArgs !== undefined);
+  if (spawnCall?.spawnArgs) {
+    try {
+      await fx.spawnSubagents(spawnCall.spawnArgs);
+    } catch (err) {
+      return { emitted_messages: [], errors: [{ tool: spawnCall.call.tool, error: (err as Error).message }] };
+    }
+  }
+
+  return {
+    emitted_messages: prepared.flatMap(({ message }) => (message ? [message] : [])),
+    errors,
+  };
 }

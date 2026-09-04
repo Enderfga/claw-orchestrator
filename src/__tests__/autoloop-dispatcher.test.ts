@@ -7,7 +7,8 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import * as fs from 'node:fs';
+import fsDefault, * as fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
@@ -137,6 +138,10 @@ function genuineSendTimeout(): Error {
   return new Error('Timeout waiting for response');
 }
 
+function plannerControl(tool: string, args: Record<string, unknown>): string {
+  return `\`\`\`autoloop\n${JSON.stringify({ tool, args })}\n\`\`\``;
+}
+
 describe('ClaudeAgentDispatcher — role engine configuration', () => {
   it('keeps the legacy Claude model defaults when no role overrides are provided', async () => {
     const { dispatcher, calls } = makeDispatcher();
@@ -144,7 +149,12 @@ describe('ClaudeAgentDispatcher — role engine configuration', () => {
     await dispatcher.deliver(Msg.chat(0, { text: 'hello' }));
     await dispatcher.spawnSubagents();
 
-    expect(findStart(calls, 'planner')).toMatchObject({ engine: 'claude', model: 'opus' });
+    expect(findStart(calls, 'planner')).toMatchObject({
+      engine: 'claude',
+      model: 'opus',
+      permissionMode: 'manual',
+      sandboxMode: 'read-only',
+    });
     expect(findStart(calls, 'coder')).toMatchObject({ engine: 'claude', model: 'sonnet' });
     expect(findStart(calls, 'reviewer')).toMatchObject({ engine: 'claude', model: 'sonnet' });
   });
@@ -175,10 +185,16 @@ describe('ClaudeAgentDispatcher — role engine configuration', () => {
 
     await dispatcher.deliver(Msg.chat(0, { text: 'inspect this repository' }));
 
-    expect(findStart(calls, 'planner')).toMatchObject({
+    const start = findStart(calls, 'planner');
+    expect(start).toMatchObject({
       permissionMode: 'manual',
       sandboxMode: 'read-only',
     });
+    expect(start).not.toHaveProperty('permissionMode', 'bypassPermissions');
+    const systemPrompt = start.systemPrompt as string;
+    expect(systemPrompt).toMatch(/native shell\/file tools must not create `plan\.md` or `goal\.json`/i);
+    expect(systemPrompt).toContain('fenced in-band controls');
+    expect(systemPrompt).toContain('`write_plan`, `write_goal`, and approved `spawn_subagents`');
     const prompt = calls.sendMessage.mock.calls[0][1] as string;
     expect(prompt).toContain('<autoloop_role_instructions>');
     expect(prompt).toContain('Planner');
@@ -344,6 +360,110 @@ describe('ClaudeAgentDispatcher — role engine configuration', () => {
     await dispatcher.spawnSubagents();
     expect(findStart(calls, 'coder')).toBeDefined();
     expect(findStart(calls, 'reviewer')).toBeDefined();
+  });
+});
+
+describe('ClaudeAgentDispatcher — Planner control transactions', () => {
+  it('rejects a malformed control batch without writes, spawn, or an initial directive', async () => {
+    const originalPlan = '# original plan\n';
+    const originalGoal = '{"original":true}\n';
+    fs.writeFileSync(path.join(tmpRoot, 'plan.md'), originalPlan);
+    fs.writeFileSync(path.join(tmpRoot, 'goal.json'), originalGoal);
+    const spawn = vi.fn(async () => undefined);
+    const reply = [
+      plannerControl('write_plan', { content: '# replacement plan\n' }),
+      '```autoloop\n{malformed json\n```',
+      plannerControl('spawn_subagents', { initial_directive: { goal: 'must not run' } }),
+    ].join('\n');
+    const { dispatcher } = makeDispatcher({ onSpawnSubagents: spawn }, { sendOutput: reply });
+
+    const emitted = await dispatcher.deliver(Msg.chat(0, { text: 'apply the batch' }));
+
+    expect(fs.readFileSync(path.join(tmpRoot, 'plan.md'), 'utf-8')).toBe(originalPlan);
+    expect(fs.readFileSync(path.join(tmpRoot, 'goal.json'), 'utf-8')).toBe(originalGoal);
+    expect(spawn).not.toHaveBeenCalled();
+    expect(emitted.filter((message) => message.type === 'directive')).toEqual([]);
+  });
+
+  it('restores pre-existing artifacts and suppresses spawn when an artifact write fails', async () => {
+    const originalPlan = '# original plan\n';
+    const originalGoal = '{"original":true}\n';
+    const replacementPlan = '# replacement plan\n';
+    const replacementGoal = '{"replacement":true}\n';
+    const planPath = path.join(tmpRoot, 'plan.md');
+    const goalPath = path.join(tmpRoot, 'goal.json');
+    fs.writeFileSync(planPath, originalPlan);
+    fs.writeFileSync(goalPath, originalGoal);
+    const spawn = vi.fn(async () => undefined);
+    const reply = [
+      plannerControl('write_plan', { content: replacementPlan }),
+      plannerControl('write_goal', { content: replacementGoal }),
+      plannerControl('spawn_subagents', { initial_directive: { goal: 'must not run' } }),
+    ].join('\n');
+    const { dispatcher } = makeDispatcher({ onSpawnSubagents: spawn }, { sendOutput: reply });
+
+    // Fail the second visible replacement, after plan.md has been replaced,
+    // so the transaction must restore the first file from its byte snapshot.
+    const originalRenameSync = fsDefault.renameSync;
+    let failed = false;
+    fsDefault.renameSync = ((from: fs.PathLike, to: fs.PathLike) => {
+      if (!failed && path.resolve(String(to)) === goalPath) {
+        failed = true;
+        throw new Error('simulated artifact replacement failure');
+      }
+      return originalRenameSync(from, to);
+    }) as typeof fs.renameSync;
+    syncBuiltinESMExports();
+    let emitted: AnyAutoloopMessage[] = [];
+    try {
+      emitted = await dispatcher.deliver(Msg.chat(0, { text: 'apply the batch' }));
+    } finally {
+      fsDefault.renameSync = originalRenameSync;
+      syncBuiltinESMExports();
+    }
+
+    expect(fs.readFileSync(planPath, 'utf-8')).toBe(originalPlan);
+    expect(fs.readFileSync(goalPath, 'utf-8')).toBe(originalGoal);
+    expect(spawn).not.toHaveBeenCalled();
+    expect(emitted.filter((message) => message.type === 'directive')).toEqual([]);
+  });
+
+  it('materializes exact artifacts before exactly one spawn and initial directive', async () => {
+    const plan = '# exact plan\n\nNo normalization.\n';
+    const goal = '{\n  "scalar": null,\n  "gates": []\n}\n';
+    const observedAtSpawn: Array<{ plan: string; goal: string }> = [];
+    const spawn = vi.fn(async () => {
+      observedAtSpawn.push({
+        plan: fs.readFileSync(path.join(tmpRoot, 'plan.md'), 'utf-8'),
+        goal: fs.readFileSync(path.join(tmpRoot, 'goal.json'), 'utf-8'),
+      });
+    });
+    const reply = [
+      plannerControl('spawn_subagents', { initial_directive: { goal: 'ship exact artifacts' } }),
+      plannerControl('write_plan', { content: plan }),
+      plannerControl('write_goal', { content: goal }),
+    ].join('\n');
+    const { dispatcher } = makeDispatcher({ onSpawnSubagents: spawn }, { sendOutput: reply });
+
+    const emitted = await dispatcher.deliver(Msg.chat(0, { text: 'approved' }));
+
+    expect(observedAtSpawn).toEqual([{ plan, goal }]);
+    expect(spawn).toHaveBeenCalledTimes(1);
+    expect(emitted.filter((message) => message.type === 'directive')).toHaveLength(1);
+  });
+
+  it('rejects duplicate spawn controls without duplicate startup or directives', async () => {
+    const spawn = vi.fn(async () => undefined);
+    const reply = [
+      plannerControl('spawn_subagents', { initial_directive: { goal: 'first' } }),
+      plannerControl('spawn_subagents', { initial_directive: { goal: 'second' } }),
+    ].join('\n');
+    const { dispatcher } = makeDispatcher({ onSpawnSubagents: spawn }, { sendOutput: reply });
+
+    const emitted = await dispatcher.deliver(Msg.chat(0, { text: 'approved once' }));
+
+    expect(spawn).not.toHaveBeenCalled();
+    expect(emitted.filter((message) => message.type === 'directive')).toEqual([]);
   });
 });
 
