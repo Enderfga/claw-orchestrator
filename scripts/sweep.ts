@@ -30,6 +30,12 @@
  * dropped by the engine; the wrapper's defaults are part of what is under test.
  * The not-advertised list is a prompt for the judgement step downstream.
  *
+ * It also diffs `src/models.ts` against both vendors' published price tables.
+ * That half was added after a sweep passed clean while all three GPT-5.6 tiers
+ * sat at their launch rates — a wrong cost is silent, so nothing was ever going
+ * to go red on its own. Its first run found two more: o3 with no cached rate,
+ * and o4-mini copied from the Batch column at half its real price.
+ *
  * Usage:
  *   npx tsx scripts/sweep.ts               # human table, exit 1 on a regression
  *   npx tsx scripts/sweep.ts --json        # machine-readable, same exit code
@@ -241,6 +247,7 @@ interface Report {
   engines: EngineReport[];
   acp: { ok: boolean; note?: string };
   mcp: { ok: boolean; version?: string; note?: string };
+  registry: RegistryReport;
   regressions: string[];
 }
 
@@ -344,6 +351,224 @@ async function mcpSmoke(): Promise<Report['mcp']> {
   return { ok: true, version };
 }
 
+// ─── Registry drift ─────────────────────────────────────────────────────────
+//
+// The other half of the weekly check, and the half nobody was doing. Every
+// regression this sweep caught in its first month was in a wrapper; the ones it
+// missed were in `src/models.ts`, where a vendor repriced a model and the
+// registry kept the launch number. Nothing goes red for that — costs are just
+// reported wrong, indefinitely. It happened to all three GPT-5.6 tiers at once,
+// over-reporting one of them fivefold, and the unit test meant to catch it had
+// pinned the same stale literals, so it drifted along in step and stayed green.
+//
+// Both vendors publish their price tables as markdown, so reading them needs no
+// model and no HTML parsing: fetch, find the table, split on pipes.
+//
+// A source that cannot be fetched is a regression, not a skip. An unverified
+// pass is exactly what let a spent Grok quota carry a pin for a week.
+
+interface PublishedPrice {
+  id: string;
+  input: number;
+  cached: number;
+  output: number;
+}
+
+interface RegistryDrift {
+  id: string;
+  field: 'input' | 'cached' | 'output';
+  ours: number | undefined;
+  published: number;
+}
+
+interface RegistryReport {
+  checked: number;
+  drift: RegistryDrift[];
+  /** Priced by the vendor and selectable by the engine binary, but unregistered. */
+  unregistered: string[];
+  notes: string[];
+}
+
+async function fetchText(url: string): Promise<string | null> {
+  try {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 45_000);
+    const res = await fetch(url, { signal: ctl.signal });
+    clearTimeout(timer);
+    return res.ok ? await res.text() : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Cells of each body row of the markdown table following `heading`. */
+function tableUnder(md: string, heading: string): string[][] {
+  const lines = md.split('\n');
+  const start = lines.findIndex((l) => l.trim() === heading);
+  if (start < 0) return [];
+  const rows: string[][] = [];
+  let sawHeader = false;
+  for (let i = start + 1; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line.startsWith('|')) {
+      if (sawHeader) break;
+      continue;
+    }
+    const cells = line
+      .split('|')
+      .slice(1, -1)
+      .map((c) => c.trim());
+    if (!sawHeader) {
+      sawHeader = true;
+      continue;
+    }
+    if (cells.every((c) => /^-+$/.test(c))) continue;
+    rows.push(cells);
+  }
+  return rows;
+}
+
+/** First dollar amount in a cell; null for a `-` placeholder. */
+function money(cell: string): number | null {
+  const m = cell.match(/\$([0-9]+(?:\.[0-9]+)?)/);
+  return m ? Number(m[1]) : null;
+}
+
+async function openaiPrices(): Promise<{ prices: PublishedPrice[]; note?: string }> {
+  const md = await fetchText('https://developers.openai.com/api/docs/pricing.md');
+  if (!md) return { prices: [], note: 'openai prices NOT verified — pricing table could not be fetched' };
+  // Standard tier, short-context columns: model | input | cached | cache write |
+  // output. OpenAI publishes four identically shaped tables per model (Standard,
+  // Batch, Flex, Fast); reading the wrong one is how o4-mini ended up in this
+  // repo at half price. The long-context columns that follow are a separate tier
+  // the registry does not model, as `src/models.ts` states at its GPT-5.5 entry.
+  const prices: PublishedPrice[] = [];
+  for (const cells of tableUnder(md, '### Standard pricing data')) {
+    const id = cells[0].replace(/\s*\(.*$/, '').trim();
+    const input = money(cells[1]);
+    const cached = money(cells[2]);
+    const output = money(cells[4]);
+    if (!id || input === null || cached === null || output === null) continue;
+    prices.push({ id, input, cached, output });
+  }
+  return prices.length
+    ? { prices }
+    : { prices: [], note: 'openai Standard pricing table parsed empty — format changed?' };
+}
+
+async function anthropicPrices(): Promise<{ prices: PublishedPrice[]; note?: string }> {
+  const md = await fetchText('https://docs.claude.com/en/docs/about-claude/pricing.md');
+  if (!md) return { prices: [], note: 'anthropic prices NOT verified — pricing table could not be fetched' };
+  // Keyed by display name ("Claude Opus 4.8"), not by API id, and the name cell
+  // carries parenthetical status links. Columns: name | input | 5m write |
+  // 1h write | cache hits | output. "Cache hits" is what the registry calls
+  // `cached`; the two write columns are derived from input and not stored.
+  const prices: PublishedPrice[] = [];
+  for (const line of md.split('\n')) {
+    const t = line.trim();
+    if (!t.startsWith('| Claude ')) continue;
+    const cells = t
+      .split('|')
+      .slice(1, -1)
+      .map((c) => c.trim());
+    if (cells.length < 6) continue;
+    const id = cells[0]
+      .replace(/\s*\(.*$/, '')
+      .trim()
+      .toLowerCase()
+      .replace(/\./g, '-')
+      .replace(/\s+/g, '-');
+    const input = money(cells[1]);
+    const cached = money(cells[4]);
+    const output = money(cells[5]);
+    if (!id || input === null || cached === null || output === null) continue;
+    prices.push({ id, input, cached, output });
+  }
+  return prices.length ? { prices } : { prices: [], note: 'anthropic pricing table parsed empty — format changed?' };
+}
+
+/**
+ * Model ids the codex binary can actually select.
+ *
+ * Read in chunks rather than whole: the binary is ~210 MB, and this runs on a
+ * box with an OOM history. The overlap keeps an id straddling a chunk boundary
+ * from being missed.
+ */
+async function codexModelIds(bin: string): Promise<Set<string>> {
+  const ids = new Set<string>();
+  const resolved = await run('readlink', ['-f', bin]);
+  const target = resolved.out.trim() && fs.existsSync(resolved.out.trim()) ? resolved.out.trim() : bin;
+  let fd: number;
+  try {
+    fd = fs.openSync(target, 'r');
+  } catch {
+    return ids;
+  }
+  try {
+    const CHUNK = 4 << 20;
+    const buf = Buffer.alloc(CHUNK);
+    let pos = 0;
+    let tail = '';
+    for (;;) {
+      const n = fs.readSync(fd, buf, 0, CHUNK, pos);
+      if (n <= 0) break;
+      const text = tail + buf.subarray(0, n).toString('latin1');
+      for (const m of text.matchAll(/gpt-[0-9][a-z0-9.-]*/g)) ids.add(m[0].replace(/[.-]+$/, ''));
+      tail = text.slice(-64);
+      pos += n;
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+  return ids;
+}
+
+async function sweepRegistry(codexBin: string): Promise<RegistryReport> {
+  // Through the module's public lookup rather than a private table, so this
+  // check cannot quietly stop matching when the registry's internals move.
+  // `lookupModel` also resolves aliases, so the id equality below matters: it
+  // keeps an alias from being compared against the entry it points at.
+  const { lookupModel } = (await import(path.join(ROOT, 'src', 'models.ts'))) as {
+    lookupModel: (
+      id: string,
+    ) => { id: string; pricing: { input: number; output: number; cached?: number } } | undefined;
+  };
+  const registered = (id: string) => {
+    const m = lookupModel(id);
+    return m && m.id === id ? m.pricing : undefined;
+  };
+
+  const notes: string[] = [];
+  const published: PublishedPrice[] = [];
+  for (const src of [await openaiPrices(), await anthropicPrices()]) {
+    if (src.note) notes.push(src.note);
+    published.push(...src.prices);
+  }
+
+  const drift: RegistryDrift[] = [];
+  let checked = 0;
+  for (const p of published) {
+    const mine = registered(p.id);
+    if (!mine) continue;
+    checked++;
+    for (const field of ['input', 'cached', 'output'] as const) {
+      if (mine[field] !== p[field]) drift.push({ id: p.id, field, ours: mine[field], published: p[field] });
+    }
+  }
+
+  // Only flag an unregistered model the engine can really select. A vendor
+  // prices plenty this project can never reach, and a list that cries wolf is
+  // the list nobody reads. `gpt-5.6-pro` and `gpt-5.6-cyber` were each left out
+  // for one of these two halves failing.
+  const selectable = await codexModelIds(codexBin);
+  const unregistered = published
+    .filter((p) => p.id.startsWith('gpt-') && selectable.has(p.id) && !registered(p.id))
+    .map((p) => p.id)
+    .sort();
+
+  return { checked, drift, unregistered, notes };
+}
+
 // ─── Main ───────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
@@ -358,6 +583,7 @@ async function main(): Promise<void> {
   for (const e of ENGINES) engines.push(await sweepEngine(e, pinned[e.id] ?? null, live));
   const acp = await acpSmoke();
   const mcp = await mcpSmoke();
+  const registry = await sweepRegistry(ENGINES.find((e) => e.id === 'codex')!.bin);
 
   const regressions: string[] = [];
   for (const e of engines) {
@@ -366,8 +592,14 @@ async function main(): Promise<void> {
   }
   if (!acp.ok) regressions.push(`acp: ${acp.note}`);
   if (!mcp.ok) regressions.push(`mcp: ${mcp.note}`);
+  for (const d of registry.drift)
+    regressions.push(`registry: ${d.id} ${d.field} is ${d.ours ?? 'not set'}, published ${d.published}`);
+  // An unreadable price source is a regression too. It means this run did not
+  // check the prices, and calling that a pass is how a stale number keeps its
+  // cover for another week.
+  for (const n of registry.notes) regressions.push(`registry: ${n}`);
 
-  const report: Report = { at: new Date().toISOString(), engines, acp, mcp, regressions };
+  const report: Report = { at: new Date().toISOString(), engines, acp, mcp, registry, regressions };
   if (outPath) fs.writeFileSync(outPath, JSON.stringify(report, null, 2));
 
   if (json) {
@@ -388,7 +620,14 @@ async function main(): Promise<void> {
     console.log(
       `\nacp: ${acp.ok ? 'ok' : 'FAIL ' + acp.note}    mcp: ${mcp.ok ? 'ok ' + mcp.version : 'FAIL ' + mcp.note}`,
     );
+    console.log(
+      `registry: ${registry.checked} model(s) checked against published prices, ${registry.drift.length} drifted`,
+    );
     console.log(`\n* installed differs from the CLAUDE.md pin    ! upstream is ahead of installed`);
+    for (const d of registry.drift)
+      console.log(`  DRIFT ${d.id} ${d.field}: registry ${d.ours ?? 'not set'} vs published ${d.published}`);
+    if (registry.unregistered.length)
+      console.log(`\nunregistered but selectable by codex (judge before adding): ${registry.unregistered.join(' ')}`);
     for (const e of engines) {
       if (e.notAdvertised.length)
         console.log(

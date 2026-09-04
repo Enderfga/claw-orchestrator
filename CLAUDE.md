@@ -68,7 +68,9 @@ npx tsx scripts/test-integration.ts
 
 Weekly engine sweep — the measurement half of the weekly check, deterministic, no LLM. Reports
 installed / pinned / upstream versions, the flag surface of each core engine against what its
-wrapper passes, one live turn per engine, and the ACP + MCP handshakes. Exit 1 on a regression.
+wrapper passes, one live turn per engine, the ACP + MCP handshakes, and `src/models.ts` against
+both vendors' published price tables. Exit 1 on a regression, and an unreachable price source
+counts as one — an unverified pass is how a stale number keeps its cover.
 Run it before touching any wrapper; its `not in --help` list is a prompt for judgement, not a
 verdict (claude omits hidden options from help and still accepts them).
 

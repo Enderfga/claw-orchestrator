@@ -288,18 +288,24 @@ const MODELS: ModelDef[] = [
   },
 
   // ── OpenAI Reasoning ───────────────────────────────────────────────────
+  // Standard-tier rates. OpenAI's pricing page publishes four tiers per model
+  // (Standard, Batch, Flex, Fast) in identically shaped tables, and o4-mini sat
+  // here at 0.55/2.2 — the Batch and Flex number, exactly half of Standard —
+  // understating its cost by 2x until the sweep started diffing this file
+  // against the published table. Read the Standard table, not whichever one the
+  // eye lands on.
   {
     id: 'o3',
     engine: 'codex',
     provider: 'openai',
-    pricing: { input: 2, output: 8 },
+    pricing: { input: 2, output: 8, cached: 0.5 },
     contextWindow: 200_000,
   },
   {
     id: 'o4-mini',
     engine: 'codex',
     provider: 'openai',
-    pricing: { input: 0.55, output: 2.2 },
+    pricing: { input: 1.1, output: 4.4, cached: 0.275 },
     contextWindow: 200_000,
   },
   {
