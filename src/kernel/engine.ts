@@ -841,7 +841,7 @@ export class RunKernel extends EventEmitter {
   private async _executeNode(
     node: NodeSpec,
     ctx: NodeContext,
-    timeoutMs: number,
+    timeoutMs: number | undefined,
     attemptSignal: { aborted: boolean },
     inflight: Set<Promise<unknown>>,
   ): Promise<NodeResult> {
@@ -850,17 +850,20 @@ export class RunKernel extends EventEmitter {
       return { ok: false, error: `no executor registered for node kind '${node.kind}'` };
     }
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const timeout = new Promise<NodeResult>((resolve) => {
-      timer = setTimeout(() => {
-        // Aborts this attempt only. A timeout is a node failure — it still gets
-        // its retries and still honours `onFailure` — whereas cancelling the run
-        // is a separate, user-initiated thing. Conflating the two made a hung
-        // node report the whole run as `cancelled`.
-        attemptSignal.aborted = true;
-        resolve({ ok: false, error: `node timed out after ${timeoutMs}ms` });
-      }, timeoutMs);
-      if (typeof timer.unref === 'function') timer.unref();
-    });
+    const timeout =
+      timeoutMs === undefined
+        ? undefined
+        : new Promise<NodeResult>((resolve) => {
+            timer = setTimeout(() => {
+              // Aborts this attempt only. A timeout is a node failure — it still gets
+              // its retries and still honours `onFailure` — whereas cancelling the run
+              // is a separate, user-initiated thing. Conflating the two made a hung
+              // node report the whole run as `cancelled`.
+              attemptSignal.aborted = true;
+              resolve({ ok: false, error: `node timed out after ${timeoutMs}ms` });
+            }, timeoutMs);
+            if (typeof timer.unref === 'function') timer.unref();
+          });
     // The executor promise is tracked, not just raced. A timeout abandons the
     // wait, not the work — the executor keeps running and can still write — so
     // the run has to know it is out there before it calls anything verified.
@@ -871,7 +874,7 @@ export class RunKernel extends EventEmitter {
     inflight.add(running);
 
     try {
-      return await Promise.race([running, timeout]);
+      return timeout ? await Promise.race([running, timeout]) : await running;
     } catch (err) {
       return { ok: false, error: (err as Error).message };
     } finally {
@@ -1009,7 +1012,10 @@ export class RunKernel extends EventEmitter {
   private async _runWithRetry(handle: RunHandle, spec: NodeSpec): Promise<NodeResult> {
     const txn = handle.txn;
     const maxAttempts = (spec.retry?.max ?? 0) + 1;
-    const timeoutMs = spec.timeoutMs ?? this.nodeTimeoutMs;
+    // Autoloops own their long-lived timeout policy. An explicit node timeout is
+    // still honoured, but the kernel's generic 30-minute default must not end a
+    // healthy loop merely because it is still running.
+    const timeoutMs = spec.timeoutMs ?? (spec.kind === 'autoloop' ? undefined : this.nodeTimeoutMs);
     let last: NodeResult = { ok: false, error: 'not attempted' };
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {

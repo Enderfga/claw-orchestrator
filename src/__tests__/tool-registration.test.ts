@@ -1,5 +1,6 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import plugin from '../index.js';
+import { SessionManager } from '../session-manager.js';
 import { ENGINE_TYPES } from '../types.js';
 import type { PluginConfig, PermissionMode, EffortLevel } from '../types.js';
 
@@ -7,30 +8,42 @@ interface RegisteredTool {
   name: string;
   description: string;
   parameters: Record<string, unknown>;
+  execute: (toolCallId: string, params: Record<string, unknown>) => Promise<unknown>;
 }
 
 interface RegisteredRoute {
   path: string;
 }
 
-function collectRegistration(): { tools: RegisteredTool[]; routes: RegisteredRoute[] } {
+interface RegisteredService {
+  stop: () => void;
+}
+
+function collectRegistration(): {
+  tools: RegisteredTool[];
+  routes: RegisteredRoute[];
+  services: RegisteredService[];
+} {
   const tools: RegisteredTool[] = [];
   const routes: RegisteredRoute[] = [];
+  const services: RegisteredService[] = [];
   // Minimal stub PluginAPI — just enough to capture registration calls.
   const fakeApi = {
     pluginConfig: {},
     logger: { info: () => {}, error: () => {}, warn: () => {} },
-    registerTool: (def: { name: string; description: string; parameters: Record<string, unknown> }) => {
-      tools.push({ name: def.name, description: def.description, parameters: def.parameters });
+    registerTool: (def: RegisteredTool) => {
+      tools.push(def);
     },
     on: () => {},
     registerHttpRoute: (def: { path: string }) => {
       routes.push({ path: def.path });
     },
-    registerService: () => {},
+    registerService: (def: RegisteredService) => {
+      services.push(def);
+    },
   };
   (plugin as unknown as { register: (api: unknown) => void }).register(fakeApi);
-  return { tools, routes };
+  return { tools, routes, services };
 }
 
 const CANONICAL_RENAMED_TOOLS = [
@@ -155,6 +168,95 @@ describe('plugin tool registration', () => {
       expect(properties[`${role}_model`]?.type).toBe('string');
       expect(properties[`${role}_custom_engine`]?.type).toBe('object');
       expect(properties[`${role}_custom_engine`]?.required).toEqual(['name', 'bin', 'args']);
+    }
+  });
+
+  it('declares exact Autoloop timeout bounds/defaults and forwards the snake_case values once', async () => {
+    const registration = collectRegistration();
+    const tool = registration.tools.find((candidate) => candidate.name === 'autoloop_start');
+    expect(tool).toBeDefined();
+    const properties = (tool!.parameters.properties ?? {}) as Record<string, Record<string, unknown>>;
+
+    expect(properties.send_timeout_ms).toMatchObject({
+      type: 'number',
+      default: 600_000,
+      minimum: 5_000,
+      maximum: 7_200_000,
+    });
+    expect(properties.activity_lease_ms).toMatchObject({
+      type: 'number',
+      default: 1_800_000,
+      minimum: 60_000,
+      maximum: 7_200_000,
+    });
+    expect(properties.autoloop_hard_timeout_ms).toMatchObject({
+      type: 'number',
+      default: 86_400_000,
+      minimum: 600_000,
+      maximum: 259_200_000,
+    });
+    for (const field of ['send_timeout_ms', 'activity_lease_ms', 'autoloop_hard_timeout_ms']) {
+      expect(properties[field].description).toEqual(expect.any(String));
+      expect(String(properties[field].description).length).toBeGreaterThan(20);
+    }
+
+    const start = vi.spyOn(SessionManager.prototype, 'autoloopStart').mockResolvedValue({
+      runId: 'tool-timeouts',
+      plannerSession: 'autoloop-tool-timeouts-planner',
+      state: {} as never,
+    });
+    const previousNoServer = process.env.CLAWO_NO_EMBEDDED_SERVER;
+    process.env.CLAWO_NO_EMBEDDED_SERVER = '1';
+    try {
+      await tool!.execute('timeout-contract', {
+        run_id: 'tool-timeouts',
+        workspace: '/tmp',
+        send_timeout_ms: 7_200_000,
+        activity_lease_ms: 60_000,
+        autoloop_hard_timeout_ms: 259_200_000,
+      });
+      expect(start).toHaveBeenCalledWith(
+        expect.objectContaining({
+          runId: 'tool-timeouts',
+          workspace: '/tmp',
+          sendTimeoutMs: 7_200_000,
+          activityLeaseMs: 60_000,
+          autoloopHardTimeoutMs: 259_200_000,
+        }),
+      );
+    } finally {
+      registration.services[0]?.stop();
+      start.mockRestore();
+      if (previousNoServer === undefined) delete process.env.CLAWO_NO_EMBEDDED_SERVER;
+      else process.env.CLAWO_NO_EMBEDDED_SERVER = previousNoServer;
+    }
+  });
+
+  it('rejects malformed tool timeout values before invoking autoloopStart', async () => {
+    const registration = collectRegistration();
+    const tool = registration.tools.find((candidate) => candidate.name === 'autoloop_start')!;
+    const start = vi
+      .spyOn(SessionManager.prototype, 'autoloopStart')
+      .mockRejectedValue(new Error('autoloopStart must not be reached'));
+
+    try {
+      for (const invalid of [
+        { send_timeout_ms: 4_999 },
+        { send_timeout_ms: 7_200_001 },
+        { send_timeout_ms: Number.POSITIVE_INFINITY },
+        { activity_lease_ms: 59_999 },
+        { activity_lease_ms: '1800000' },
+        { autoloop_hard_timeout_ms: 599_999 },
+        { autoloop_hard_timeout_ms: Number.NaN },
+      ]) {
+        await expect(
+          tool.execute('invalid-timeout', { run_id: 'invalid-timeout', workspace: '/tmp', ...invalid }),
+        ).rejects.toThrow(/must be a finite number in the inclusive range/);
+      }
+      expect(start).not.toHaveBeenCalled();
+    } finally {
+      registration.services[0]?.stop();
+      start.mockRestore();
     }
   });
 

@@ -18,6 +18,7 @@
  */
 
 import { EventEmitter } from 'node:events';
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -31,9 +32,11 @@ import { capturePatch, changedFilesSince } from '../verify/baseline.js';
 import { runContract } from '../verify/runner.js';
 import { writeEvidence } from '../verify/evidence.js';
 import type { AcceptanceContract } from '../verify/contract.js';
-import { type AnyAutoloopMessage, Msg } from './messages.js';
+import { type AnyAutoloopMessage, Msg, type SendTimeoutPayload } from './messages.js';
 import {
+  DEFAULT_SEND_TIMEOUT_MS,
   LEDGER_SCHEMA_VERSION,
+  validateAutoloopTimeoutConfig,
   type AgentDispatcher,
   type AutoloopRoleName,
   type AutoloopState,
@@ -93,6 +96,8 @@ export interface ClaudeAgentDispatcherConfig {
   reviewerCustomEngine?: CustomEngineConfig;
   /** Per-message wall-clock cap. Default 10 min. */
   sendTimeoutMs?: number;
+  /** Internal failure-atomic resume marker; never accepted from an agent. */
+  suppressFailedStartAudit?: boolean;
   /**
    * Optional acceptance contract. When present the Reviewer's `advance` is no
    * longer sufficient on its own: the contract runs against the workspace and a
@@ -149,6 +154,35 @@ interface SendMessageResult {
   error?: string;
   /** Set when even the recovery retry failed — caller surfaces as phase_error. */
   fatal?: boolean;
+  /** Genuine send deadlines pause for an explicit resume instead of retrying. */
+  recoverable_timeout?: SendTimeoutPayload;
+}
+
+type PendingSendTimeout = Omit<SendTimeoutPayload, 'error'>;
+
+/**
+ * Adapter send deadlines use one of these explicit signals. Deliberately do
+ * not classify arbitrary messages containing "timeout": configuration errors
+ * and other subprocess failures must retain reset-once/retry-once recovery.
+ */
+function genuineSendTimeoutMessage(error: unknown): string | null {
+  const record = error as { name?: unknown; code?: unknown; message?: unknown } | null;
+  const message = typeof error === 'string' ? error : typeof record?.message === 'string' ? record.message : '';
+  const namedTimeout = record?.name === 'TimeoutError';
+  const codedTimeout = record?.code === 'ETIMEDOUT';
+  const adapterTimeout = /^Timeout waiting for (?:(?:.+ )?response|.+ turn to complete)$/i.test(message);
+  return namedTimeout || codedTimeout || adapterTimeout ? message || 'Agent send timed out' : null;
+}
+
+/**
+ * Hash only immutable logical routing identity. `msg_id` distinguishes two
+ * intentional sends with otherwise identical content; envelope timestamps,
+ * wall-clock time, random values, retry attempts, and mutable counters are not
+ * inputs, so re-delivery in this or another dispatcher derives the same ID.
+ */
+function deriveDispatchId(runId: string, env: AnyAutoloopMessage): string {
+  const identity = JSON.stringify([runId, env.msg_id, env.iter, env.from, env.to, env.type]);
+  return `dispatch_${createHash('sha256').update(identity).digest('hex')}`;
 }
 
 interface AutoloopRoleSelection {
@@ -168,6 +202,7 @@ interface DecisionLogEntry {
     | 'compact'
     | 'spawn_subagents'
     | 'phase_error'
+    | 'send_timeout'
     | 'policy_silence_blocked';
   actor: 'planner' | 'runner' | 'dispatcher';
   payload: Record<string, unknown>;
@@ -192,6 +227,8 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
   /** Where Reviewer reads from. Created lazily by stageReviewSandbox(). */
   private reviewerSandboxDir: string;
   private ledgerDir: string;
+  /** One promise per immutable logical dispatch, retained for run-lifetime dedup. */
+  private logicalDispatches = new Map<string, Promise<AnyAutoloopMessage[]>>();
 
   constructor(config: ClaudeAgentDispatcherConfig) {
     super();
@@ -234,11 +271,13 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
   }
 
   async shutdown(reason: string, opts: { purge?: boolean } = {}): Promise<void> {
-    this.appendDecisionLog({
-      kind: 'terminate',
-      actor: reason === 'phase_error_circuit' ? 'runner' : 'planner',
-      payload: { reason },
-    });
+    if (!(reason === 'start-failed' && this.config.suppressFailedStartAudit)) {
+      this.appendDecisionLog({
+        kind: 'terminate',
+        actor: reason === 'phase_error_circuit' ? 'runner' : 'planner',
+        payload: { reason },
+      });
+    }
     // Best-effort cleanup. Stopping a non-existent session is a no-op.
     // keepPersisted: true keeps the persistedSessions entry on disk so a
     // later /autoloop/<id>/resume can re-attach the Planner's Claude
@@ -253,13 +292,42 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
   }
 
   async deliver(env: AnyAutoloopMessage): Promise<AnyAutoloopMessage[]> {
+    const dispatchId = deriveDispatchId(this.config.runId, env);
+    const existing = this.logicalDispatches.get(dispatchId);
+    if (existing) return await existing;
+
+    const pending = this.deliverOnce(env, dispatchId);
+    this.logicalDispatches.set(dispatchId, pending);
+    return await pending;
+  }
+
+  /** Current per-agent deadline, including the backward-compatible default. */
+  get effectiveSendTimeoutMs(): number {
+    return this.config.sendTimeoutMs ?? DEFAULT_SEND_TIMEOUT_MS;
+  }
+
+  /**
+   * Apply an already-authorized timeout migration. This seam intentionally has
+   * no decrease mode: even an internal caller must supply a valid strict
+   * increase, while SessionManager owns persistence and dispatch matching.
+   */
+  increaseSendTimeoutMs(next: number): void {
+    validateAutoloopTimeoutConfig({ sendTimeoutMs: next });
+    const current = this.effectiveSendTimeoutMs;
+    if (next <= current) {
+      throw new Error(`sendTimeoutMs must be strictly greater than the current effective value ${current}`);
+    }
+    this.config.sendTimeoutMs = next;
+  }
+
+  private async deliverOnce(env: AnyAutoloopMessage, dispatchId: string): Promise<AnyAutoloopMessage[]> {
     switch (env.to) {
       case 'planner':
-        return await this.deliverToPlanner(env);
+        return await this.deliverToPlanner(env, dispatchId);
       case 'coder':
-        return await this.deliverToCoder(env);
+        return await this.deliverToCoder(env, dispatchId);
       case 'reviewer':
-        return await this.deliverToReviewer(env);
+        return await this.deliverToReviewer(env, dispatchId);
       default:
         throw new Error(`[autoloop] unexpected dispatcher target: ${env.to}`);
     }
@@ -497,21 +565,59 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
     }
   }
 
+  private pendingSendTimeout(env: AnyAutoloopMessage, agent: AutoloopRoleName, dispatchId: string): PendingSendTimeout {
+    return {
+      status: 'awaiting_resume',
+      dispatch_id: dispatchId,
+      agent,
+      message_id: env.msg_id,
+      message_type: env.type,
+      iter: env.iter,
+      timeout_ms: this.config.sendTimeoutMs ?? DEFAULT_SEND_TIMEOUT_MS,
+    };
+  }
+
+  private recoverableSendTimeout(pending: PendingSendTimeout, error: string): SendMessageResult {
+    const timeout: SendTimeoutPayload = { ...pending, error };
+    this.appendDecisionLog({
+      kind: 'send_timeout',
+      actor: 'dispatcher',
+      payload: { ...timeout },
+    });
+    return { output: '', error, recoverable_timeout: timeout };
+  }
+
+  /** One physical send attempt with strict timeout classification. */
+  private async sendAttempt(name: string, promptText: string, pending: PendingSendTimeout): Promise<SendMessageResult> {
+    try {
+      const result = (await this.config.manager.sendMessage(name, promptText, {
+        timeout: this.config.sendTimeoutMs ?? DEFAULT_SEND_TIMEOUT_MS,
+        parentRunId: this.config.runId,
+      })) as SendMessageResult;
+      const timeoutMessage = result.error ? genuineSendTimeoutMessage(result.error) : null;
+      return timeoutMessage ? this.recoverableSendTimeout(pending, timeoutMessage) : result;
+    } catch (err) {
+      const timeoutMessage = genuineSendTimeoutMessage(err);
+      if (timeoutMessage) return this.recoverableSendTimeout(pending, timeoutMessage);
+      throw err;
+    }
+  }
+
   /**
-   * Wrap a subagent send. If the underlying session throws or returns an
-   * error string, auto-reset the subagent once and retry. Used by
-   * deliverToCoder / deliverToReviewer to recover from subprocess deaths.
+   * Wrap a subagent send. Genuine timeouts are never retried because the first
+   * turn may still finish with side effects. Other throws/error results retain
+   * the established reset-once/retry-once subprocess recovery path.
    */
   private async sendWithRecovery(
     agent: 'coder' | 'reviewer',
     name: string,
     promptText: string,
+    pending: PendingSendTimeout,
   ): Promise<SendMessageResult> {
     try {
-      return (await this.config.manager.sendMessage(name, promptText, {
-        timeout: this.config.sendTimeoutMs ?? 10 * 60_000,
-        parentRunId: this.config.runId,
-      })) as SendMessageResult;
+      const result = await this.sendAttempt(name, promptText, pending);
+      if (result.recoverable_timeout || !result.error) return result;
+      throw new Error(result.error);
     } catch (err) {
       this.logger.warn?.(`[autoloop] ${agent} send threw, attempting reset+retry: ${(err as Error).message}`);
       await this.resetAgent(agent, { eagerRestart: true });
@@ -521,10 +627,9 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
       // lockstep retries across concurrent runs.
       await new Promise((r) => setTimeout(r, 500 + Math.floor(Math.random() * 250)));
       try {
-        return (await this.config.manager.sendMessage(name, promptText, {
-          timeout: this.config.sendTimeoutMs ?? 10 * 60_000,
-          parentRunId: this.config.runId,
-        })) as SendMessageResult;
+        const result = await this.sendAttempt(name, promptText, pending);
+        if (result.recoverable_timeout || !result.error) return result;
+        throw new Error(result.error);
       } catch (err2) {
         this.logger.error?.(`[autoloop] ${agent} second attempt failed after reset: ${(err2 as Error).message}`);
         return { output: '', error: (err2 as Error).message, fatal: true };
@@ -663,7 +768,7 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
     this.plannerStarted = true;
   }
 
-  private async deliverToPlanner(env: AnyAutoloopMessage): Promise<AnyAutoloopMessage[]> {
+  private async deliverToPlanner(env: AnyAutoloopMessage, dispatchId: string): Promise<AnyAutoloopMessage[]> {
     if (env.type !== 'chat' && env.type !== 'directive_ack' && env.type !== 'iter_done') {
       // Other types (push_user / pause / resume / terminate) are runner-only
       // or planner-emitted; they should never arrive *to* planner.
@@ -687,14 +792,16 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
       promptText = `[system] iter ${env.iter} done. verdict=${env.payload.verdict} metric=${env.payload.metric}`;
     }
 
-    const result = (await this.config.manager.sendMessage(
+    const pendingTimeout = this.pendingSendTimeout(env, 'planner', dispatchId);
+    const result = await this.sendAttempt(
       this.plannerName,
       this.withRoleInstructions('planner', this.plannerSelection, this.plannerSystemPrompt, promptText),
-      {
-        timeout: this.config.sendTimeoutMs ?? 10 * 60_000,
-        parentRunId: this.config.runId,
-      },
-    )) as SendMessageResult;
+      pendingTimeout,
+    );
+
+    if (result.recoverable_timeout) {
+      return [Msg.sendTimeout(env.iter, result.recoverable_timeout)];
+    }
 
     if (result.error) {
       this.logger.error?.(`[autoloop] planner send error: ${result.error}`);
@@ -820,7 +927,7 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
     this.coderStarted = true;
   }
 
-  private async deliverToCoder(env: AnyAutoloopMessage): Promise<AnyAutoloopMessage[]> {
+  private async deliverToCoder(env: AnyAutoloopMessage, dispatchId: string): Promise<AnyAutoloopMessage[]> {
     if (env.type !== 'directive') {
       throw new Error(`[autoloop] coder does not accept message type=${env.type}`);
     }
@@ -882,7 +989,11 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
       'coder',
       this.coderName,
       this.withRoleInstructions('coder', this.coderSelection, this.coderSystemPrompt, promptText),
+      this.pendingSendTimeout(env, 'coder', dispatchId),
     );
+    if (result.recoverable_timeout) {
+      return [Msg.sendTimeout(env.iter, result.recoverable_timeout)];
+    }
     this.recordTurn('coder', 'user', promptText);
     this.recordTurn('coder', 'agent', (result.output ?? '').trim());
     // A3: subprocess died (recovery retry exhausted). Surface as phase_error
@@ -1083,7 +1194,7 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
     }
   }
 
-  private async deliverToReviewer(env: AnyAutoloopMessage): Promise<AnyAutoloopMessage[]> {
+  private async deliverToReviewer(env: AnyAutoloopMessage, dispatchId: string): Promise<AnyAutoloopMessage[]> {
     if (env.type !== 'review_request') {
       throw new Error(`[autoloop] reviewer does not accept message type=${env.type}`);
     }
@@ -1116,7 +1227,11 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
         this.reviewerSessionPrompt ?? this.reviewerSystemPrompt,
         promptText,
       ),
+      this.pendingSendTimeout(env, 'reviewer', dispatchId),
     );
+    if (result.recoverable_timeout) {
+      return [Msg.sendTimeout(env.iter, result.recoverable_timeout)];
+    }
     this.recordTurn('reviewer', 'user', promptText);
     this.recordTurn('reviewer', 'agent', (result.output ?? '').trim());
     if (result.fatal) {

@@ -3,7 +3,7 @@
  *
  * Pure transport: validates messages, dispatches to agents, handles the
  * tiny set of runner-self-targeted messages (iter_artifacts, review_verdict,
- * pause/resume/terminate, push_user). No LLM logic lives here — that's the
+ * send_timeout, pause/resume/terminate, push_user). No LLM logic lives here — that's the
  * AgentDispatcher's job (S2-S4 will plug in real Claude sessions; S1 ships
  * with a mock dispatcher used by tests).
  *
@@ -12,7 +12,14 @@
 
 import { EventEmitter } from 'node:events';
 import { type AnyAutoloopMessage, AutoloopRoutingError, Msg, validateMessage } from './messages.js';
-import { DEFAULT_PUSH_POLICY, MAX_METRIC_HISTORY, type AutoloopConfig, type AutoloopState } from './types.js';
+import {
+  DEFAULT_PUSH_POLICY,
+  MAX_METRIC_HISTORY,
+  resolveAutoloopTimeoutConfig,
+  type AutoloopConfig,
+  type AutoloopState,
+  type ResolvedAutoloopTimeoutConfig,
+} from './types.js';
 
 const MAX_DISPATCH_DEPTH = 64;
 /** Cap on agent-bound messages parked during a pause, to bound memory if an
@@ -23,11 +30,39 @@ const DEFAULT_STALL_MS = 30 * 60_000;
 const DEFAULT_STALL_CHECK_MS = 30_000;
 
 /**
+ * The single allow-list for activity-lease renewal. These values describe
+ * externally validated forward progress, rather than work the runner creates
+ * for itself. Timer checks and bookkeeping are explicit negative cases so a
+ * caller cannot accidentally turn polling into an infinite lease.
+ */
+export const LEASE_RENEWING_ACTIVITY_KINDS = [
+  'queue_message_accepted',
+  'agent_progress',
+  'lifecycle_transition',
+  'checkpoint_persisted',
+] as const;
+
+export type LeaseRenewingActivityKind = (typeof LEASE_RENEWING_ACTIVITY_KINDS)[number];
+export type AutoloopActivityKind = LeaseRenewingActivityKind | 'timer_check' | 'runner_bookkeeping';
+export type AutoloopTimeoutKind = 'activity_lease_expired' | 'hard_timeout_exceeded';
+
+export interface AutoloopTimeoutEvent {
+  kind: AutoloopTimeoutKind;
+  observed_at: number;
+  deadline_at: number;
+  last_activity_at: number;
+}
+
+const LEASE_RENEWING_ACTIVITY_SET = new Set<string>(LEASE_RENEWING_ACTIVITY_KINDS);
+
+/**
  * Events emitted by the runner (string keys, documented payloads):
  * - 'message'    : (env: AnyAutoloopMessage) — every routed message
  * - 'state'      : (state: AutoloopState) — status / iter changes
  * - 'push'       : ({ level, summary, detail?, channel }) — fired before notifyUser
  * - 'iter_done'  : ({ iter, verdict, metric }) — Reviewer verdict committed
+ * - 'send_timeout': (payload: SendTimeoutPayload) — recoverable agent deadline
+ * - 'timeout'    : (event: AutoloopTimeoutEvent) — lease or hard deadline expired
  * - 'terminated' : (reason: string) — final state, no more messages
  * - 'error'      : (err: Error) — routing or dispatcher errors
  */
@@ -48,44 +83,213 @@ export class AutoloopRunner extends EventEmitter {
   /** Recent push events for dedup (5 min window). */
   private recentPushes: Array<{ key: string; ts: number }> = [];
   private stallTimer: ReturnType<typeof setInterval> | null = null;
+  private activityLeaseTimer: ReturnType<typeof setTimeout> | null = null;
+  private hardDeadlineTimer: ReturnType<typeof setTimeout> | null = null;
+  private lifecycleTimersStarted = false;
+  private timeoutMonitoringStopped = false;
+  private activityLeaseExpired = false;
+  private terminationStarted = false;
+  private terminationPromise: Promise<void> | null = null;
+  /** Timeout outcomes explicitly advanced by an operator resume. Retained so a
+   *  late/replayed result for the same logical dispatch cannot pause the run a
+   *  second time after it has already been resolved. */
+  private readonly resolvedTimedOutDispatches = new Set<string>();
+  private readonly timeouts: ResolvedAutoloopTimeoutConfig;
+  private readonly hardDeadlineAt: number;
 
   constructor(config: AutoloopConfig) {
     super();
     this.config = config;
+    this.timeouts = resolveAutoloopTimeoutConfig(config);
+    const startedAt = Date.now();
+    this.hardDeadlineAt = startedAt + this.timeouts.autoloopHardTimeoutMs;
     this.state = {
       run_id: config.run_id,
       status: 'planning',
       iter: 0,
       subagents_spawned: false,
-      started_at: new Date().toISOString(),
+      started_at: new Date(startedAt).toISOString(),
       workspace: config.workspace,
       ledger_dir: config.ledger_dir,
       push_log_count: 0,
       status_reason: null,
+      pending_dispatch: null,
       consecutive_phase_errors: 0,
       recent_phase_errors: [],
       metric_history: [],
-      last_activity_at: Date.now(),
+      last_activity_at: startedAt,
     };
   }
 
   async start(): Promise<void> {
-    await this.config.dispatcher.init?.(this.state);
+    this.startLifecycleTimers();
+    try {
+      await this.config.dispatcher.init?.(this.state);
+    } catch (err) {
+      this.stop();
+      throw err;
+    }
+    if (this.timeoutMonitoringStopped || this.terminationStarted) return;
     // Surface initial state so listeners can render the planning UI.
     this.emit('state', this.state);
     this.startStallDetector();
   }
 
-  /** Stop the stall detector; safe to call multiple times. Tests use this. */
+  /**
+   * Stop every runner-owned timer. Safe to call repeatedly; cancellation uses
+   * this before shutting down agents so no late timeout callback can mutate
+   * state or initiate a second shutdown.
+   */
   stop(): void {
+    this.timeoutMonitoringStopped = true;
     if (this.stallTimer) {
       clearInterval(this.stallTimer);
       this.stallTimer = null;
     }
+    if (this.activityLeaseTimer) {
+      clearTimeout(this.activityLeaseTimer);
+      this.activityLeaseTimer = null;
+    }
+    if (this.hardDeadlineTimer) {
+      clearTimeout(this.hardDeadlineTimer);
+      this.hardDeadlineTimer = null;
+    }
+  }
+
+  /**
+   * Record a candidate activity signal through the centralized renewal rule.
+   * Returns true only when the signal renewed the lease. Callers must validate
+   * progress before selecting one of the four allow-listed kinds above.
+   */
+  recordActivity(kind: AutoloopActivityKind): boolean {
+    if (!LEASE_RENEWING_ACTIVITY_SET.has(kind)) return false;
+    if (
+      this.timeoutMonitoringStopped ||
+      this.activityLeaseExpired ||
+      this.terminationStarted ||
+      this.state.status === 'terminated' ||
+      this.state.status === 'crashed'
+    ) {
+      return false;
+    }
+    const now = Date.now();
+    if (now >= this.hardDeadlineAt) {
+      void this.expireHardDeadline().catch((err) => this.emit('error', err));
+      return false;
+    }
+    this.state.last_activity_at = now;
+    this.armActivityLease();
+    return true;
+  }
+
+  private startLifecycleTimers(): void {
+    if (this.lifecycleTimersStarted || this.timeoutMonitoringStopped) return;
+    this.lifecycleTimersStarted = true;
+    // Arm the absolute deadline first. armActivityLease deliberately omits a
+    // lease timer when both deadlines coincide, making hard-cap precedence
+    // independent of timer insertion order.
+    this.armHardDeadline();
+    this.armActivityLease();
+  }
+
+  private armHardDeadline(): void {
+    if (this.timeoutMonitoringStopped || this.terminationStarted) return;
+    if (this.hardDeadlineTimer) clearTimeout(this.hardDeadlineTimer);
+    const delay = Math.max(0, this.hardDeadlineAt - Date.now());
+    this.hardDeadlineTimer = setTimeout(() => {
+      this.hardDeadlineTimer = null;
+      void this.expireHardDeadline().catch((err) => this.emit('error', err));
+    }, delay);
+    this.hardDeadlineTimer?.unref?.();
+  }
+
+  private armActivityLease(): void {
+    if (this.activityLeaseTimer) {
+      clearTimeout(this.activityLeaseTimer);
+      this.activityLeaseTimer = null;
+    }
+    if (
+      !this.lifecycleTimersStarted ||
+      this.timeoutMonitoringStopped ||
+      this.activityLeaseExpired ||
+      this.terminationStarted ||
+      this.state.pending_dispatch
+    ) {
+      return;
+    }
+    const activityDeadline = this.state.last_activity_at + this.timeouts.activityLeaseMs;
+    if (activityDeadline >= this.hardDeadlineAt) return;
+    this.activityLeaseTimer = setTimeout(
+      () => {
+        this.activityLeaseTimer = null;
+        this.expireActivityLease();
+      },
+      Math.max(0, activityDeadline - Date.now()),
+    );
+    this.activityLeaseTimer?.unref?.();
+  }
+
+  private expireActivityLease(): void {
+    if (this.timeoutMonitoringStopped || this.activityLeaseExpired || this.terminationStarted) return;
+    const now = Date.now();
+    if (now >= this.hardDeadlineAt) {
+      void this.expireHardDeadline().catch((err) => this.emit('error', err));
+      return;
+    }
+    const activityDeadline = this.state.last_activity_at + this.timeouts.activityLeaseMs;
+    // A clock adjustment or renewal racing this callback may make it early.
+    if (now < activityDeadline) {
+      this.armActivityLease();
+      return;
+    }
+    this.activityLeaseExpired = true;
+    this.state.status = 'paused';
+    this.state.status_reason = 'activity_lease_expired';
+    const event: AutoloopTimeoutEvent = {
+      kind: 'activity_lease_expired',
+      observed_at: now,
+      deadline_at: activityDeadline,
+      last_activity_at: this.state.last_activity_at,
+    };
+    this.emit('state', this.state);
+    this.emit('timeout', event);
+  }
+
+  private async expireHardDeadline(): Promise<void> {
+    if (this.timeoutMonitoringStopped || this.terminationStarted) return;
+    const now = Date.now();
+    if (now < this.hardDeadlineAt) {
+      this.armHardDeadline();
+      return;
+    }
+    await this.terminate('hard_timeout_exceeded', {
+      kind: 'hard_timeout_exceeded',
+      observed_at: now,
+      deadline_at: this.hardDeadlineAt,
+      last_activity_at: this.state.last_activity_at,
+    });
+  }
+
+  private terminate(reason: string, timeoutEvent?: AutoloopTimeoutEvent): Promise<void> {
+    if (this.terminationStarted) return this.terminationPromise ?? Promise.resolve();
+    this.terminationStarted = true;
+    this.state.status = 'terminated';
+    this.state.status_reason = reason;
+    this.state.pending_dispatch = null;
+    this.queue.length = 0;
+    this.pausedBuffer.length = 0;
+    this.stop();
+    this.emit('state', this.state);
+    if (timeoutEvent) this.emit('timeout', timeoutEvent);
+    this.terminationPromise = (async () => {
+      await this.config.dispatcher.shutdown?.(reason);
+      this.emit('terminated', reason);
+    })();
+    return this.terminationPromise;
   }
 
   private startStallDetector(): void {
-    if (this.stallTimer) return;
+    if (this.stallTimer || this.timeoutMonitoringStopped || this.terminationStarted) return;
     const stallMs = this.config.stallMs ?? DEFAULT_STALL_MS;
     const intervalMs = this.config.stallCheckIntervalMs ?? DEFAULT_STALL_CHECK_MS;
     this.stallTimer = setInterval(() => {
@@ -104,6 +308,7 @@ export class AutoloopRunner extends EventEmitter {
   /** Enqueue a message and drain the queue. Resolves when the queue is idle. */
   async send(env: AnyAutoloopMessage): Promise<void> {
     validateMessage(env);
+    this.recordActivity('queue_message_accepted');
     this.queue.push(env);
     await this.drain();
   }
@@ -113,9 +318,40 @@ export class AutoloopRunner extends EventEmitter {
     return this.send(Msg.chat(this.state.iter, { text }));
   }
 
+  /**
+   * Advance one exact recoverable send-timeout pause without replaying the
+   * logical dispatch that timed out. SessionManager validates and audits the
+   * timeout increase before calling this synchronous transition.
+   */
+  resumeTimedOutDispatch(dispatchId: string): boolean {
+    const pending = this.state.pending_dispatch;
+    if (
+      this.state.status !== 'paused' ||
+      !pending ||
+      pending.dispatch_id !== dispatchId ||
+      this.state.status_reason !== `awaiting_resume:send_timeout:${pending.agent}:${dispatchId}`
+    ) {
+      return false;
+    }
+
+    this.resolvedTimedOutDispatches.add(dispatchId);
+    this.state.pending_dispatch = null;
+    this.state.status = 'running';
+    this.state.status_reason = null;
+    this.recordActivity('lifecycle_transition');
+    this.restorePausedMessages();
+    this.emit('state', this.state);
+    // This entry point is called outside the normal queue drain. Resume only
+    // the messages parked *after* the timed-out dispatch; the timed-out message
+    // itself is deliberately never requeued.
+    void this.drain().catch((err) => this.emit('error', err));
+    return true;
+  }
+
   /** Mark subagents spawned (called by S3's spawn_subagents tool handler). */
   markSubagentsSpawned(): void {
     if (this.state.subagents_spawned) return;
+    this.recordActivity('lifecycle_transition');
     this.state.subagents_spawned = true;
     this.state.status = 'running';
     this.emit('state', this.state);
@@ -149,9 +385,8 @@ export class AutoloopRunner extends EventEmitter {
     // 'terminated' is the final state — once reached, no message of any kind is
     // processed (see events contract above). The terminate message itself still
     // runs because status only flips to 'terminated' while handling it.
-    if (this.state.status === 'terminated') return;
+    if (this.state.status === 'terminated' || this.state.status === 'crashed') return;
     this.emit('message', env);
-    this.state.last_activity_at = Date.now();
 
     // Runner is the target for a small set of messages — handle them inline.
     if (env.to === 'runner') {
@@ -183,6 +418,10 @@ export class AutoloopRunner extends EventEmitter {
     const replies = await this.config.dispatcher.deliver(env);
     for (const r of replies) {
       validateMessage(r);
+      // A dispatcher-generated deadline record is bookkeeping, not agent
+      // progress. Letting it renew the lease would make a timeout extend the
+      // run whose lack of progress caused it.
+      if (r.type !== 'send_timeout') this.recordActivity('agent_progress');
       this.queue.push(r);
     }
   }
@@ -281,6 +520,27 @@ export class AutoloopRunner extends EventEmitter {
         }
         return;
       }
+      case 'send_timeout': {
+        const pending = env.payload;
+        if (this.resolvedTimedOutDispatches.has(pending.dispatch_id)) return;
+        // The dispatcher coalesces duplicate delivery, but the runner also
+        // guards its public inbox so replaying the same structured outcome
+        // cannot emit a second timeout event or mutate state twice.
+        if (this.state.pending_dispatch?.dispatch_id === pending.dispatch_id) return;
+        // Awaiting an operator decision is a deliberate pause, not subsequent
+        // inactivity. Suspend only the renewable lease; the absolute hard
+        // deadline stays armed and remains terminal.
+        if (this.activityLeaseTimer) {
+          clearTimeout(this.activityLeaseTimer);
+          this.activityLeaseTimer = null;
+        }
+        this.state.status = 'paused';
+        this.state.status_reason = `awaiting_resume:send_timeout:${pending.agent}:${pending.dispatch_id}`;
+        this.state.pending_dispatch = { ...pending };
+        this.emit('state', this.state);
+        this.emit('send_timeout', this.state.pending_dispatch);
+        return;
+      }
       case 'pause': {
         this.state.status = 'paused';
         this.state.status_reason = env.payload.reason;
@@ -289,34 +549,32 @@ export class AutoloopRunner extends EventEmitter {
       }
       case 'resume': {
         if (this.state.status === 'paused') {
+          // I4 owns the explicit timeout-increase resume contract. Until that
+          // arrives, an ordinary resume envelope must not silently discard a
+          // pending send deadline and risk replaying its side effects.
+          if (this.state.pending_dispatch) return;
           this.state.status = 'running';
           this.state.status_reason = null;
-          // Restore parked agent-bound messages at the queue head, preserving
-          // arrival order so the loop continues from where pause caught it.
-          while (this.pausedBuffer.length > 0) {
-            const item = this.pausedBuffer.pop();
-            if (item) this.queue.unshift(item);
-          }
+          this.restorePausedMessages();
           this.emit('state', this.state);
         }
         return;
       }
       case 'terminate': {
-        this.state.status = 'terminated';
-        this.state.status_reason = env.payload.reason;
-        // Drop any messages queued behind this terminate — they are moot now
-        // and the contract says no more messages flow after termination.
-        this.queue.length = 0;
-        this.pausedBuffer.length = 0;
-        this.stop();
-        this.emit('state', this.state);
-        await this.config.dispatcher.shutdown?.(env.payload.reason);
-        this.emit('terminated', env.payload.reason);
+        await this.terminate(env.payload.reason);
         return;
       }
       default:
         // review_request / iter_done etc. arriving with to=runner is a routing bug.
         throw new AutoloopRoutingError(`Unexpected runner-targeted message type: ${env.type}`, env);
+    }
+  }
+
+  /** Restore parked agent-bound messages at the queue head in arrival order. */
+  private restorePausedMessages(): void {
+    while (this.pausedBuffer.length > 0) {
+      const item = this.pausedBuffer.pop();
+      if (item) this.queue.unshift(item);
     }
   }
 

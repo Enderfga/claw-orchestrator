@@ -40,6 +40,11 @@ class MockSession extends EventEmitter implements ISession {
   compactCalls: string[] = [];
   /** Overrides the result event this session resolves with. */
   nextEvent?: Record<string, unknown>;
+  /** Test seam for exercising real SessionManager/dispatcher send outcomes. */
+  sendImplementation?: (
+    message: string | unknown[],
+    options?: SessionSendOptions,
+  ) => Promise<TurnResult | { requestId: number; sent: boolean }>;
   /** Overrides `turnsSucceeded`, to simulate a turn the engine did not count. */
   turnsSucceededOverride?: number;
 
@@ -86,6 +91,7 @@ class MockSession extends EventEmitter implements ISession {
     if (options?.waitForComplete === false) {
       return { requestId: 1, sent: true };
     }
+    if (this.sendImplementation) return await this.sendImplementation(message, options);
     return {
       text: `response to: ${typeof message === 'string' ? message : JSON.stringify(message)}`,
       event: this.nextEvent ?? { type: 'result', result: 'done' },
@@ -213,6 +219,12 @@ vi.mock('node:fs', async () => {
     if (isProtected(p)) return;
     (actual.appendFileSync as (...a: unknown[]) => void)(p, ...rest);
   });
+  const openSync = vi.fn((p: unknown, ...rest: unknown[]) =>
+    (actual.openSync as (...a: unknown[]) => number)(p, ...rest),
+  );
+  const writeSync = vi.fn((fd: unknown, ...rest: unknown[]) =>
+    (actual.writeSync as (...a: unknown[]) => number)(fd, ...rest),
+  );
   const mkdirSync = vi.fn((p: unknown, ...rest: unknown[]) => {
     if (isProtected(p)) return undefined;
     return (actual.mkdirSync as (...a: unknown[]) => string | undefined)(p, ...rest);
@@ -227,6 +239,8 @@ vi.mock('node:fs', async () => {
     readFileSync,
     writeFileSync,
     appendFileSync,
+    openSync,
+    writeSync,
     mkdirSync,
     renameSync,
     // The async persistence path is stubbed wholesale: nothing else in the
@@ -242,6 +256,7 @@ vi.mock('node:fs', async () => {
 
 // Import AFTER mocking fs
 const { SessionManager } = await import('../session-manager.js');
+const { Msg: AutoloopMsg } = await import('../autoloop/messages.js');
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -1597,6 +1612,637 @@ describe('SessionManager', () => {
       const after = mgr.workflowStatus('resume-fail');
       expect(after).toBeDefined();
       expect(after.spec).toEqual(before!.spec);
+    });
+
+    describe('Autoloop send-timeout resume migration', () => {
+      type ResumeOverride = {
+        sendTimeoutMs?: unknown;
+        pendingDispatchId?: string;
+      };
+
+      const resumeWithOverride = (runId: string, opts: ResumeOverride = {}) =>
+        mgr.autoloopResume(
+          runId,
+          opts as unknown as Parameters<InstanceType<typeof SessionManager>['autoloopResume']>[1],
+        );
+
+      const workspaceFor = (runId: string): string => {
+        const workspace = path.join(TEST_WF_DIR, 'workspaces', runId);
+        fs.mkdirSync(workspace, { recursive: true });
+        return workspace;
+      };
+
+      const auditPathFor = (workspace: string, runId: string): string =>
+        path.join(workspace, 'tasks', runId, 'decisions.jsonl');
+
+      const readIfPresent = (file: string): string => (fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '');
+
+      const storedSpecPath = (runId: string): string => path.join(TEST_WF_DIR, runId, 'spec.json');
+
+      const pendingTimeout = (dispatchId: string, timeoutMs: number) => ({
+        status: 'awaiting_resume' as const,
+        dispatch_id: dispatchId,
+        agent: 'planner' as const,
+        message_id: `message-${dispatchId}`,
+        message_type: 'chat' as const,
+        iter: 0,
+        timeout_ms: timeoutMs,
+        error: `Timed out after ${timeoutMs}ms`,
+      });
+
+      const pauseForTimeout = async (runId: string, workspace: string, timeoutMs: number, dispatchId: string) => {
+        await mgr.autoloopStart({ runId, workspace, sendTimeoutMs: timeoutMs });
+        const handle = mgr.getAutoloop(runId)!;
+        const pending = pendingTimeout(dispatchId, timeoutMs);
+        await handle.runner.send(AutoloopMsg.sendTimeout(0, pending));
+        expect(handle.runner.state).toMatchObject({
+          status: 'paused',
+          pending_dispatch: pending,
+        });
+        return { handle, pending };
+      };
+
+      const terminateAndReconstructManager = async (runId: string): Promise<void> => {
+        await mgr.autoloopStop(runId, 'test-restart');
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await (mgr as any).kernel.wait(runId);
+        await mgr.shutdown();
+        mgr = createManager();
+      };
+
+      it('increases a live recoverable timeout through the matching dispatch without replaying it', async () => {
+        const runId = 'resume-timeout-live';
+        const workspace = workspaceFor(runId);
+        const dispatchId = 'dispatch-live-planner-0';
+        const { handle, pending } = await pauseForTimeout(runId, workspace, 600_000, dispatchId);
+        const auditPath = auditPathFor(workspace, runId);
+        const historyPath = path.join(workspace, 'tasks', runId, 'chat.jsonl');
+        const historicAudit = `${JSON.stringify({ ts: '2026-01-01T00:00:00.000Z', kind: 'existing' })}\n`;
+        const historicChat = `${JSON.stringify({ who: 'user', text: 'keep me', ts: '2026-01-01T00:00:00.000Z' })}\n`;
+        fs.writeFileSync(auditPath, historicAudit);
+        fs.writeFileSync(historyPath, historicChat);
+        const originalSpec = fs.readFileSync(storedSpecPath(runId), 'utf8');
+        const sendsBefore = mockSessions[0].sendCalls.length;
+
+        // No override retains the old public behaviour: a live handle is only
+        // observed, and its recoverable pause is not discarded.
+        await expect(mgr.autoloopResume(runId)).resolves.toBe(handle.runner.state);
+        expect(handle.runner.state).toMatchObject({ status: 'paused', pending_dispatch: pending });
+        expect(readIfPresent(auditPath)).toBe(historicAudit);
+
+        const resumed = await resumeWithOverride(runId, {
+          sendTimeoutMs: 7_200_000,
+          pendingDispatchId: dispatchId,
+        });
+
+        expect(resumed).toBe(handle.runner.state);
+        expect(resumed).toMatchObject({
+          run_id: runId,
+          status: 'running',
+          status_reason: null,
+          pending_dispatch: null,
+        });
+        expect(handle.dispatcher.config.sendTimeoutMs).toBe(7_200_000);
+        expect(fs.readFileSync(storedSpecPath(runId), 'utf8')).toBe(originalSpec);
+        expect(fs.readFileSync(historyPath, 'utf8')).toBe(historicChat);
+
+        const auditAfter = fs.readFileSync(auditPath, 'utf8');
+        expect(auditAfter.startsWith(historicAudit)).toBe(true);
+        const migrations = auditAfter
+          .trim()
+          .split('\n')
+          .map((line) => JSON.parse(line) as Record<string, unknown>)
+          .filter((row) => row.kind === 'timeout_migration');
+        expect(migrations).toHaveLength(1);
+        expect(migrations[0]).toMatchObject({
+          kind: 'timeout_migration',
+          runId,
+          field: 'sendTimeoutMs',
+          oldValue: 600_000,
+          newValue: 7_200_000,
+          reason: 'recoverable_send_timeout_resume',
+          pendingDispatchId: dispatchId,
+        });
+        expect(Date.parse(String(migrations[0].timestamp))).not.toBeNaN();
+
+        // Replaying the already-resolved timeout result is ignored. In
+        // particular it neither starts another Planner turn nor pauses again.
+        await handle.runner.send(AutoloopMsg.sendTimeout(0, pending));
+        expect(handle.runner.state).toMatchObject({ status: 'running', pending_dispatch: null });
+        expect(mockSessions[0].sendCalls).toHaveLength(sendsBefore);
+        await mgr.autoloopChat(runId, 'a distinct logical dispatch after resume');
+        expect(mockSessions[0].sendCalls.at(-1)?.options?.timeout).toBe(7_200_000);
+        await expect(
+          resumeWithOverride(runId, { sendTimeoutMs: 7_200_000, pendingDispatchId: dispatchId }),
+        ).rejects.toThrow(/not awaiting.*send timeout/i);
+        expect(fs.readFileSync(auditPath, 'utf8')).toBe(auditAfter);
+      });
+
+      it('rejects equal, decreased, malformed, and out-of-range live overrides atomically', async () => {
+        const runId = 'resume-timeout-invalid';
+        const workspace = workspaceFor(runId);
+        const dispatchId = 'dispatch-invalid-planner-0';
+        const { handle } = await pauseForTimeout(runId, workspace, 600_000, dispatchId);
+        const auditPath = auditPathFor(workspace, runId);
+        const historyPath = path.join(workspace, 'tasks', runId, 'chat.jsonl');
+        fs.writeFileSync(auditPath, '{"kind":"existing"}\n');
+        fs.writeFileSync(historyPath, '{"who":"user","text":"history"}\n');
+        const before = {
+          state: JSON.stringify(handle.runner.state),
+          timeout: handle.dispatcher.config.sendTimeoutMs,
+          sessions: mgr.listSessions().map((session) => session.name),
+          audit: fs.readFileSync(auditPath, 'utf8'),
+          history: fs.readFileSync(historyPath, 'utf8'),
+          spec: fs.readFileSync(storedSpecPath(runId), 'utf8'),
+        };
+        const invalidValues: unknown[] = [
+          600_000,
+          599_999,
+          4_999,
+          7_200_001,
+          Number.NaN,
+          Number.POSITIVE_INFINITY,
+          '700000',
+        ];
+
+        for (const sendTimeoutMs of invalidValues) {
+          await expect(resumeWithOverride(runId, { sendTimeoutMs, pendingDispatchId: dispatchId })).rejects.toThrow(
+            /sendTimeoutMs/,
+          );
+          expect(JSON.stringify(handle.runner.state)).toBe(before.state);
+          expect(handle.dispatcher.config.sendTimeoutMs).toBe(before.timeout);
+          expect(mgr.listSessions().map((session) => session.name)).toEqual(before.sessions);
+          expect(fs.readFileSync(auditPath, 'utf8')).toBe(before.audit);
+          expect(fs.readFileSync(historyPath, 'utf8')).toBe(before.history);
+          expect(fs.readFileSync(storedSpecPath(runId), 'utf8')).toBe(before.spec);
+        }
+      });
+
+      it('rejects a stale pending dispatch identity before changing timeout or audit state', async () => {
+        const runId = 'resume-timeout-stale';
+        const workspace = workspaceFor(runId);
+        const dispatchId = 'dispatch-current-planner-0';
+        const { handle } = await pauseForTimeout(runId, workspace, 600_000, dispatchId);
+        const auditPath = auditPathFor(workspace, runId);
+        const auditBefore = readIfPresent(auditPath);
+        const stateBefore = JSON.stringify(handle.runner.state);
+
+        await expect(resumeWithOverride(runId, { sendTimeoutMs: 700_000 })).rejects.toThrow(
+          /pendingDispatchId is required/i,
+        );
+        await expect(
+          resumeWithOverride(runId, { sendTimeoutMs: 700_000, pendingDispatchId: 'dispatch-stale-planner-0' }),
+        ).rejects.toThrow(/pending dispatch.*does not match/i);
+
+        expect(JSON.stringify(handle.runner.state)).toBe(stateBefore);
+        expect(handle.dispatcher.config.sendTimeoutMs).toBe(600_000);
+        expect(readIfPresent(auditPath)).toBe(auditBefore);
+      });
+
+      it('persists increases across manager reconstruction while leaving the original spec and evidence untouched', async () => {
+        const runId = 'resume-timeout-reconstructed';
+        const workspace = workspaceFor(runId);
+        await mgr.autoloopStart({ runId, workspace, sendTimeoutMs: 650_000 });
+        const auditPath = auditPathFor(workspace, runId);
+        const historyPath = path.join(workspace, 'tasks', runId, 'chat.jsonl');
+        const evidencePath = path.join(workspace, 'tasks', runId, 'iter', '0', 'verdict.json');
+        fs.mkdirSync(path.dirname(evidencePath), { recursive: true });
+        fs.writeFileSync(historyPath, '{"who":"planner","text":"historic chat"}\n');
+        fs.writeFileSync(evidencePath, '{"decision":"hold","historic":true}\n');
+        const original = {
+          spec: fs.readFileSync(storedSpecPath(runId), 'utf8'),
+          history: fs.readFileSync(historyPath, 'utf8'),
+          evidence: fs.readFileSync(evidencePath, 'utf8'),
+        };
+
+        await terminateAndReconstructManager(runId);
+        const first = await resumeWithOverride(runId, { sendTimeoutMs: 700_000 });
+        expect(first.run_id).toBe(runId);
+        expect(mgr.getAutoloop(runId)!.dispatcher.config.sendTimeoutMs).toBe(700_000);
+        const afterFirstAudit = fs.readFileSync(auditPath, 'utf8');
+        expect(fs.readFileSync(storedSpecPath(runId), 'utf8')).toBe(original.spec);
+        expect(fs.readFileSync(historyPath, 'utf8')).toBe(original.history);
+        expect(fs.readFileSync(evidencePath, 'utf8')).toBe(original.evidence);
+
+        // A plain resume after another process reconstruction carries forward
+        // the latest effective increase but does not append another migration.
+        await terminateAndReconstructManager(runId);
+        const beforePlainResume = fs.readFileSync(auditPath, 'utf8');
+        expect(beforePlainResume.startsWith(afterFirstAudit)).toBe(true);
+        await mgr.autoloopResume(runId);
+        expect(mgr.getAutoloop(runId)!.dispatcher.config.sendTimeoutMs).toBe(700_000);
+        expect(fs.readFileSync(auditPath, 'utf8')).toBe(beforePlainResume);
+
+        await terminateAndReconstructManager(runId);
+        const beforeRejectedEqual = fs.readFileSync(auditPath, 'utf8');
+        await expect(resumeWithOverride(runId, { sendTimeoutMs: 700_000 })).rejects.toThrow(/strictly greater/i);
+        expect(mgr.getAutoloop(runId)).toBeUndefined();
+        expect(fs.readFileSync(auditPath, 'utf8')).toBe(beforeRejectedEqual);
+
+        await resumeWithOverride(runId, { sendTimeoutMs: 800_000 });
+        expect(mgr.getAutoloop(runId)!.dispatcher.config.sendTimeoutMs).toBe(800_000);
+        const migrations = fs
+          .readFileSync(auditPath, 'utf8')
+          .trim()
+          .split('\n')
+          .map((line) => JSON.parse(line) as Record<string, unknown>)
+          .filter((row) => row.kind === 'timeout_migration');
+        expect(migrations).toMatchObject([
+          { runId, oldValue: 650_000, newValue: 700_000 },
+          { runId, oldValue: 700_000, newValue: 800_000 },
+        ]);
+        expect(fs.readFileSync(storedSpecPath(runId), 'utf8')).toBe(original.spec);
+        expect(fs.readFileSync(historyPath, 'utf8')).toBe(original.history);
+        expect(fs.readFileSync(evidencePath, 'utf8')).toBe(original.evidence);
+      });
+
+      it('uses the 600000ms compatibility default for a legacy stored run', async () => {
+        const runId = 'resume-timeout-legacy';
+        const workspace = workspaceFor(runId);
+        await mgr.autoloopStart({ runId, workspace });
+        const originalSpec = fs.readFileSync(storedSpecPath(runId), 'utf8');
+        expect(JSON.parse(originalSpec).nodes[0].config).not.toHaveProperty('sendTimeoutMs');
+
+        await terminateAndReconstructManager(runId);
+        await resumeWithOverride(runId, { sendTimeoutMs: 600_001 });
+
+        expect(mgr.getAutoloop(runId)!.dispatcher.config.sendTimeoutMs).toBe(600_001);
+        expect(fs.readFileSync(storedSpecPath(runId), 'utf8')).toBe(originalSpec);
+        const migrations = fs
+          .readFileSync(auditPathFor(workspace, runId), 'utf8')
+          .trim()
+          .split('\n')
+          .map((line) => JSON.parse(line) as Record<string, unknown>)
+          .filter((row) => row.kind === 'timeout_migration');
+        expect(migrations).toMatchObject([{ oldValue: 600_000, newValue: 600_001 }]);
+      });
+
+      it('does not persist an increase or disturb pending evidence when a reconstructed resume fails', async () => {
+        const runId = 'resume-timeout-failed';
+        const workspace = workspaceFor(runId);
+        const dispatchId = 'dispatch-failed-planner-0';
+        await pauseForTimeout(runId, workspace, 600_000, dispatchId);
+        const historyPath = path.join(workspace, 'tasks', runId, 'chat.jsonl');
+        const evidencePath = path.join(workspace, 'tasks', runId, 'iter', '0', 'verdict.json');
+        fs.mkdirSync(path.dirname(evidencePath), { recursive: true });
+        fs.writeFileSync(historyPath, '{"who":"user","text":"preserve"}\n');
+        fs.writeFileSync(evidencePath, '{"decision":"hold"}\n');
+
+        // Simulate loss of the owning process. Unlike an operator terminate,
+        // cancellation checkpoints the recoverable pending-dispatch metadata.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const oldKernel = (mgr as any).kernel;
+        oldKernel.cancel(runId);
+        await oldKernel.wait(runId);
+        await mgr.shutdown();
+        mgr = createManager();
+
+        const auditPath = auditPathFor(workspace, runId);
+        const before = {
+          spec: fs.readFileSync(storedSpecPath(runId), 'utf8'),
+          audit: readIfPresent(auditPath),
+          history: fs.readFileSync(historyPath, 'utf8'),
+          evidence: fs.readFileSync(evidencePath, 'utf8'),
+          sessions: mgr.listSessions().map((session) => session.name),
+          pending: JSON.stringify(
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            (mgr.workflowStatus(runId).nodes.main.data as any).state.pending_dispatch,
+          ),
+        };
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (mgr as any)._createSession = (): ISession => {
+          const mock = new MockSession();
+          mock.start = async () => {
+            throw new Error('resume planner failed');
+          };
+          return mock;
+        };
+
+        await expect(
+          resumeWithOverride(runId, { sendTimeoutMs: 700_000, pendingDispatchId: dispatchId }),
+        ).rejects.toThrow('resume planner failed');
+
+        expect(fs.readFileSync(storedSpecPath(runId), 'utf8')).toBe(before.spec);
+        expect(readIfPresent(auditPath)).toBe(before.audit);
+        expect(fs.readFileSync(historyPath, 'utf8')).toBe(before.history);
+        expect(fs.readFileSync(evidencePath, 'utf8')).toBe(before.evidence);
+        expect(mgr.listSessions().map((session) => session.name)).toEqual(before.sessions);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        expect(JSON.stringify((mgr.workflowStatus(runId).nodes.main.data as any).state.pending_dispatch)).toBe(
+          before.pending,
+        );
+      });
+
+      it('does not start a reconstructed migration when its audit append cannot be prepared', async () => {
+        const runId = 'resume-timeout-audit-unavailable';
+        const workspace = workspaceFor(runId);
+        const dispatchId = 'dispatch-audit-unavailable-planner-0';
+        await pauseForTimeout(runId, workspace, 600_000, dispatchId);
+        const historyPath = path.join(workspace, 'tasks', runId, 'chat.jsonl');
+        const evidencePath = path.join(workspace, 'tasks', runId, 'iter', '0', 'verdict.json');
+        fs.mkdirSync(path.dirname(evidencePath), { recursive: true });
+        fs.writeFileSync(historyPath, '{"who":"user","text":"preserve"}\n');
+        fs.writeFileSync(evidencePath, '{"decision":"hold"}\n');
+
+        // Reconstruct the manager while preserving the recoverable timeout
+        // checkpoint, as if the owning process disappeared mid-dispatch.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const oldKernel = (mgr as any).kernel;
+        oldKernel.cancel(runId);
+        await oldKernel.wait(runId);
+        await mgr.shutdown();
+        mgr = createManager();
+
+        const auditPath = auditPathFor(workspace, runId);
+        const before = {
+          spec: fs.readFileSync(storedSpecPath(runId), 'utf8'),
+          audit: readIfPresent(auditPath),
+          history: fs.readFileSync(historyPath, 'utf8'),
+          evidence: fs.readFileSync(evidencePath, 'utf8'),
+          sessions: mgr.listSessions().map((session) => session.name),
+          pending: JSON.stringify(
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            (mgr.workflowStatus(runId).nodes.main.data as any).state.pending_dispatch,
+          ),
+        };
+        const actualFs = await vi.importActual<typeof import('node:fs')>('node:fs');
+        const auditOpen = vi.mocked((await import('node:fs')).openSync);
+        auditOpen.mockImplementation(((file, flags, mode) => {
+          if (String(file) === auditPath && flags === 'a') throw new Error('audit append unavailable');
+          return actualFs.openSync(file, flags, mode);
+        }) as typeof fs.openSync);
+
+        try {
+          await expect(
+            resumeWithOverride(runId, { sendTimeoutMs: 700_000, pendingDispatchId: dispatchId }),
+          ).rejects.toThrow('audit append unavailable');
+        } finally {
+          auditOpen.mockImplementation(((file, flags, mode) =>
+            actualFs.openSync(file, flags, mode)) as typeof fs.openSync);
+        }
+
+        expect(mgr.getAutoloop(runId)).toBeUndefined();
+        expect(fs.readFileSync(storedSpecPath(runId), 'utf8')).toBe(before.spec);
+        expect(readIfPresent(auditPath)).toBe(before.audit);
+        expect(fs.readFileSync(historyPath, 'utf8')).toBe(before.history);
+        expect(fs.readFileSync(evidencePath, 'utf8')).toBe(before.evidence);
+        expect(mgr.listSessions().map((session) => session.name)).toEqual(before.sessions);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        expect(JSON.stringify((mgr.workflowStatus(runId).nodes.main.data as any).state.pending_dispatch)).toBe(
+          before.pending,
+        );
+      });
+
+      it('rolls back reconstructed startup when the prepared audit append fails', async () => {
+        const runId = 'resume-timeout-audit-write-failed';
+        const workspace = workspaceFor(runId);
+        const dispatchId = 'dispatch-audit-write-failed-planner-0';
+        await pauseForTimeout(runId, workspace, 600_000, dispatchId);
+        const historyPath = path.join(workspace, 'tasks', runId, 'chat.jsonl');
+        const evidencePath = path.join(workspace, 'tasks', runId, 'iter', '0', 'verdict.json');
+        fs.mkdirSync(path.dirname(evidencePath), { recursive: true });
+        fs.writeFileSync(historyPath, '{"who":"user","text":"preserve"}\n');
+        fs.writeFileSync(evidencePath, '{"decision":"hold"}\n');
+
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const oldKernel = (mgr as any).kernel;
+        oldKernel.cancel(runId);
+        await oldKernel.wait(runId);
+        await mgr.shutdown();
+        mgr = createManager();
+
+        const auditPath = auditPathFor(workspace, runId);
+        const before = {
+          spec: fs.readFileSync(storedSpecPath(runId), 'utf8'),
+          audit: readIfPresent(auditPath),
+          history: fs.readFileSync(historyPath, 'utf8'),
+          evidence: fs.readFileSync(evidencePath, 'utf8'),
+          sessions: mgr.listSessions().map((session) => session.name),
+          pending: JSON.stringify(
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            (mgr.workflowStatus(runId).nodes.main.data as any).state.pending_dispatch,
+          ),
+        };
+        const actualFs = await vi.importActual<typeof import('node:fs')>('node:fs');
+        const auditWrite = vi.mocked((await import('node:fs')).writeSync);
+        auditWrite.mockImplementation((() => {
+          throw new Error('audit append failed');
+        }) as typeof fs.writeSync);
+
+        try {
+          await expect(
+            resumeWithOverride(runId, { sendTimeoutMs: 700_000, pendingDispatchId: dispatchId }),
+          ).rejects.toThrow('audit append failed');
+        } finally {
+          auditWrite.mockImplementation(((fd, ...args) =>
+            (actualFs.writeSync as (...values: unknown[]) => number)(fd, ...args)) as typeof fs.writeSync);
+        }
+
+        expect(mgr.getAutoloop(runId)).toBeUndefined();
+        expect(fs.readFileSync(storedSpecPath(runId), 'utf8')).toBe(before.spec);
+        expect(readIfPresent(auditPath)).toBe(before.audit);
+        expect(fs.readFileSync(historyPath, 'utf8')).toBe(before.history);
+        expect(fs.readFileSync(evidencePath, 'utf8')).toBe(before.evidence);
+        expect(mgr.listSessions().map((session) => session.name)).toEqual(before.sessions);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        expect(JSON.stringify((mgr.workflowStatus(runId).nodes.main.data as any).state.pending_dispatch)).toBe(
+          before.pending,
+        );
+      });
+
+      describe('Autoloop timeout resilience integration', () => {
+        it('carries a genuine timed-out send through an atomic increase and a distinct later send', async () => {
+          const runId = 'timeout-integration-lifecycle';
+          const workspace = workspaceFor(runId);
+          await mgr.autoloopStart({
+            runId,
+            workspace,
+            sendTimeoutMs: 600_000,
+            activityLeaseMs: 60_000,
+            autoloopHardTimeoutMs: 86_400_000,
+          });
+          const handle = mgr.getAutoloop(runId)!;
+          const planner = mockSessions[0];
+          const auditPath = auditPathFor(workspace, runId);
+          const historyPath = path.join(workspace, 'tasks', runId, 'chat.jsonl');
+          const evidencePath = path.join(workspace, 'tasks', runId, 'iter', '0', 'verdict.json');
+          fs.mkdirSync(path.dirname(evidencePath), { recursive: true });
+          fs.writeFileSync(evidencePath, '{"decision":"historic-hold"}\n');
+          const originalSpec = fs.readFileSync(storedSpecPath(runId), 'utf8');
+          const evidenceBefore = fs.readFileSync(evidencePath, 'utf8');
+          const observedTimeouts: unknown[] = [];
+          handle.runner.on('send_timeout', (event) => observedTimeouts.push(event));
+
+          planner.sendImplementation = async () => {
+            planner.sendImplementation = undefined;
+            throw new Error('Timeout waiting for response');
+          };
+          await mgr.autoloopChat(runId, 'one logical send that reaches its deadline');
+
+          expect(planner.sendCalls).toHaveLength(1);
+          expect(planner.sendCalls[0].options?.timeout).toBe(600_000);
+          expect(observedTimeouts).toHaveLength(1);
+          expect(handle.runner.state).toMatchObject({
+            status: 'paused',
+            pending_dispatch: {
+              status: 'awaiting_resume',
+              agent: 'planner',
+              message_type: 'chat',
+              timeout_ms: 600_000,
+            },
+          });
+          const pending = handle.runner.state.pending_dispatch!;
+          expect(pending.dispatch_id).toMatch(/^dispatch_[a-f0-9]{64}$/);
+          expect(handle.runner.state.status_reason).toBe(`awaiting_resume:send_timeout:planner:${pending.dispatch_id}`);
+
+          // Even qualified progress cannot replace or conceal the unresolved
+          // dispatch identity. The renewable lease remains suspended here.
+          expect(handle.runner.recordActivity('agent_progress')).toBe(true);
+          expect(handle.runner.state).toMatchObject({
+            status: 'paused',
+            status_reason: `awaiting_resume:send_timeout:planner:${pending.dispatch_id}`,
+            pending_dispatch: pending,
+          });
+
+          const beforeResume = {
+            state: JSON.stringify(handle.runner.state),
+            timeout: handle.dispatcher.effectiveSendTimeoutMs,
+            sessions: mgr.listSessions().map((session) => session.name),
+            spec: fs.readFileSync(storedSpecPath(runId), 'utf8'),
+            audit: fs.readFileSync(auditPath, 'utf8'),
+            history: fs.readFileSync(historyPath, 'utf8'),
+            evidence: fs.readFileSync(evidencePath, 'utf8'),
+          };
+          const rejected: ResumeOverride[] = [
+            { sendTimeoutMs: 650_000, pendingDispatchId: 'dispatch_stale' },
+            { sendTimeoutMs: 600_000, pendingDispatchId: pending.dispatch_id },
+            { sendTimeoutMs: 599_999, pendingDispatchId: pending.dispatch_id },
+            { sendTimeoutMs: 7_200_001, pendingDispatchId: pending.dispatch_id },
+            { sendTimeoutMs: Number.NaN, pendingDispatchId: pending.dispatch_id },
+          ];
+          for (const override of rejected) {
+            await expect(resumeWithOverride(runId, override)).rejects.toThrow();
+            expect(JSON.stringify(handle.runner.state)).toBe(beforeResume.state);
+            expect(handle.dispatcher.effectiveSendTimeoutMs).toBe(beforeResume.timeout);
+            expect(mgr.listSessions().map((session) => session.name)).toEqual(beforeResume.sessions);
+            expect(fs.readFileSync(storedSpecPath(runId), 'utf8')).toBe(beforeResume.spec);
+            expect(fs.readFileSync(auditPath, 'utf8')).toBe(beforeResume.audit);
+            expect(fs.readFileSync(historyPath, 'utf8')).toBe(beforeResume.history);
+            expect(fs.readFileSync(evidencePath, 'utf8')).toBe(beforeResume.evidence);
+          }
+
+          await resumeWithOverride(runId, {
+            sendTimeoutMs: 700_000,
+            pendingDispatchId: pending.dispatch_id,
+          });
+          expect(handle.runner.state).toMatchObject({
+            status: 'running',
+            status_reason: null,
+            pending_dispatch: null,
+          });
+          expect(handle.dispatcher.effectiveSendTimeoutMs).toBe(700_000);
+          expect(planner.sendCalls).toHaveLength(1);
+          expect(fs.readFileSync(storedSpecPath(runId), 'utf8')).toBe(originalSpec);
+          expect(fs.readFileSync(historyPath, 'utf8')).toBe(beforeResume.history);
+          expect(fs.readFileSync(evidencePath, 'utf8')).toBe(evidenceBefore);
+
+          const auditAfterResume = fs.readFileSync(auditPath, 'utf8');
+          expect(auditAfterResume.startsWith(beforeResume.audit)).toBe(true);
+          const appendedRows = auditAfterResume
+            .slice(beforeResume.audit.length)
+            .trim()
+            .split('\n')
+            .map((line) => JSON.parse(line) as Record<string, unknown>);
+          expect(appendedRows).toMatchObject([
+            {
+              kind: 'timeout_migration',
+              runId,
+              field: 'sendTimeoutMs',
+              oldValue: 600_000,
+              newValue: 700_000,
+              reason: 'recoverable_send_timeout_resume',
+              pendingDispatchId: pending.dispatch_id,
+            },
+          ]);
+
+          await mgr.autoloopChat(runId, 'a later and distinct logical send');
+          expect(planner.sendCalls).toHaveLength(2);
+          expect(planner.sendCalls[1].options?.timeout).toBe(700_000);
+          expect(observedTimeouts).toHaveLength(1);
+          expect(fs.readFileSync(storedSpecPath(runId), 'utf8')).toBe(originalSpec);
+          expect(fs.readFileSync(evidencePath, 'utf8')).toBe(evidenceBefore);
+        });
+
+        it('keeps all three defaults when public start omits timeout configuration', async () => {
+          const runId = 'timeout-integration-defaults';
+          const workspace = workspaceFor(runId);
+          await mgr.autoloopStart({ runId, workspace });
+          const handle = mgr.getAutoloop(runId)!;
+          const runtime = handle.runner as unknown as {
+            timeouts: {
+              sendTimeoutMs: number;
+              activityLeaseMs: number;
+              autoloopHardTimeoutMs: number;
+            };
+          };
+
+          expect(runtime.timeouts).toEqual({
+            sendTimeoutMs: 600_000,
+            activityLeaseMs: 1_800_000,
+            autoloopHardTimeoutMs: 86_400_000,
+          });
+          await mgr.autoloopChat(runId, 'default timeout dispatch');
+          expect(mockSessions[0].sendCalls[0].options?.timeout).toBe(600_000);
+        });
+
+        it.each(['hard timeout', 'operator stop'] as const)(
+          'keeps %s terminal when an in-flight send reports its timeout late',
+          async (terminalCause) => {
+            const runId = `timeout-integration-${terminalCause.replace(' ', '-')}`;
+            const workspace = workspaceFor(runId);
+            await mgr.autoloopStart({
+              runId,
+              workspace,
+              sendTimeoutMs: 7_200_000,
+              activityLeaseMs: 7_200_000,
+              autoloopHardTimeoutMs: 600_000,
+            });
+            const handle = mgr.getAutoloop(runId)!;
+            const planner = mockSessions[0];
+            const observedTimeouts: unknown[] = [];
+            handle.runner.on('send_timeout', (event) => observedTimeouts.push(event));
+            let rejectSend!: (reason?: unknown) => void;
+            planner.sendImplementation = () =>
+              new Promise((_resolve, reject) => {
+                rejectSend = reject;
+              });
+
+            const chat = mgr.autoloopChat(runId, 'send still running at terminal transition');
+            await vi.waitFor(() => expect(planner.sendCalls).toHaveLength(1));
+
+            if (terminalCause === 'hard timeout') {
+              // Qualified progress can renew the lease, but cannot move the
+              // absolute deadline anchored at run construction.
+              await vi.advanceTimersByTimeAsync(300_000);
+              expect(handle.runner.recordActivity('agent_progress')).toBe(true);
+              await vi.advanceTimersByTimeAsync(300_000);
+            } else {
+              await mgr.autoloopStop(runId, 'operator-stop-during-send');
+            }
+
+            rejectSend(new Error('Timeout waiting for response'));
+            await chat;
+
+            expect(handle.runner.state).toMatchObject({
+              status: 'terminated',
+              status_reason: terminalCause === 'hard timeout' ? 'hard_timeout_exceeded' : 'operator-stop-during-send',
+              pending_dispatch: null,
+            });
+            expect(observedTimeouts).toHaveLength(0);
+            expect(planner.sendCalls).toHaveLength(1);
+          },
+        );
+      });
     });
 
     it('records the engines and models spawn_subagents actually chose', async () => {

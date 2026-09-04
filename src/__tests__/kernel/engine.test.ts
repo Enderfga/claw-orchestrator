@@ -7,7 +7,7 @@
  * sourced from an agent's own output.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -269,6 +269,35 @@ describe('retry and timeout', () => {
     const done = await kernel.wait(started.runId);
     expect(done!.state).toBe('failed');
     expect(done!.nodes.a.error).toContain('timed out');
+  });
+
+  it('lets an autoloop node continue past the kernel default timeout', async () => {
+    vi.useFakeTimers();
+    try {
+      let finishAutoloop!: (result: NodeResult) => void;
+      const kernel = new RunKernel();
+      kernel.setExecutor(
+        'autoloop',
+        () =>
+          new Promise<NodeResult>((resolve) => {
+            finishAutoloop = resolve;
+          }),
+      );
+      const started = await kernel.start({
+        name: 'long-autoloop',
+        nodes: [{ id: 'loop', kind: 'autoloop', workspace: tmp, config: {} }],
+      });
+
+      await vi.advanceTimersByTimeAsync(30 * 60_000 + 1);
+
+      expect(loadRun(started.runId)!.nodes.loop.state).toBe('running');
+      finishAutoloop({ ok: true });
+      await vi.advanceTimersByTimeAsync(0);
+      const done = await kernel.wait(started.runId);
+      expect(done!.state).toBe('completed');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('reports a missing executor rather than silently succeeding', async () => {
