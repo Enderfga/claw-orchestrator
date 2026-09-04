@@ -62,7 +62,7 @@ describe('ultraapp write MCP tools dispatch', () => {
   it('ultraapp_new → createRun', async () => {
     const r = await tools.get('ultraapp_new')!.execute('id', {});
     expect(stub.createRun).toHaveBeenCalled();
-    expect((r as { runId: string }).runId).toBe('ua-test-1');
+    expect((r as { details: { runId: string } }).details.runId).toBe('ua-test-1');
   });
 
   it('ultraapp_answer → submitAnswer', async () => {
