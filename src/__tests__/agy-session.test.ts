@@ -52,6 +52,11 @@ function closeProc(proc: ReturnType<typeof createMockProcess>, code: number) {
   proc.emit('close', code);
 }
 
+function succeedProc(proc: ReturnType<typeof createMockProcess>, text = 'OK') {
+  feedText(proc, `${text}\n`);
+  closeProc(proc, 0);
+}
+
 /** Read the private agy log path from the actual spawn args. */
 function logPathFromSpawn(callIndex = mockSpawn.mock.calls.length - 1): string {
   const args = mockSpawn.mock.calls[callIndex][1] as string[];
@@ -111,7 +116,7 @@ describe('PersistentAgySession', () => {
       await session.start();
 
       const sendPromise = session.send('hello', { waitForComplete: true });
-      setTimeout(() => closeProc(mockProc, 0), 10);
+      setTimeout(() => succeedProc(mockProc), 10);
       await sendPromise;
 
       const spawnArgs = mockSpawn.mock.calls[0][1] as string[];
@@ -133,7 +138,7 @@ describe('PersistentAgySession', () => {
       await session.start();
 
       const sendPromise = session.send('hello', { waitForComplete: true });
-      setTimeout(() => closeProc(mockProc, 0), 10);
+      setTimeout(() => succeedProc(mockProc), 10);
       await sendPromise;
 
       const spawnArgs = mockSpawn.mock.calls[0][1] as string[];
@@ -147,7 +152,7 @@ describe('PersistentAgySession', () => {
       await session.start();
 
       const sendPromise = session.send('hello', { waitForComplete: true });
-      setTimeout(() => closeProc(mockProc, 0), 10);
+      setTimeout(() => succeedProc(mockProc), 10);
       await sendPromise;
 
       const spawnArgs = mockSpawn.mock.calls[0][1] as string[];
@@ -160,7 +165,7 @@ describe('PersistentAgySession', () => {
       await session.start();
 
       const sendPromise = session.send('hello', { waitForComplete: true });
-      setTimeout(() => closeProc(mockProc, 0), 10);
+      setTimeout(() => succeedProc(mockProc), 10);
       await sendPromise;
 
       const spawnArgs = mockSpawn.mock.calls[0][1] as string[];
@@ -173,7 +178,7 @@ describe('PersistentAgySession', () => {
       await session.start();
 
       const sendPromise = session.send('hello', { waitForComplete: true });
-      setTimeout(() => closeProc(mockProc, 0), 10);
+      setTimeout(() => succeedProc(mockProc), 10);
       await sendPromise;
 
       const spawnArgs = mockSpawn.mock.calls[0][1] as string[];
@@ -190,7 +195,7 @@ describe('PersistentAgySession', () => {
       await session.start();
 
       const sendPromise = session.send('hello', { waitForComplete: true, timeout: 60_000 });
-      setTimeout(() => closeProc(mockProc, 0), 10);
+      setTimeout(() => succeedProc(mockProc), 10);
       await sendPromise;
 
       const spawnArgs = mockSpawn.mock.calls[0][1] as string[];
@@ -210,7 +215,7 @@ describe('PersistentAgySession', () => {
       await session.start();
 
       const sendPromise = session.send('hello', { waitForComplete: true });
-      setTimeout(() => closeProc(mockProc, 0), 10);
+      setTimeout(() => succeedProc(mockProc), 10);
       await sendPromise;
 
       const spawnArgs = mockSpawn.mock.calls[0][1] as string[];
@@ -230,7 +235,7 @@ describe('PersistentAgySession', () => {
       await session.start();
 
       const sendPromise = session.send('hello', { waitForComplete: true });
-      setTimeout(() => closeProc(mockProc, 0), 10);
+      setTimeout(() => succeedProc(mockProc), 10);
       await sendPromise;
 
       const spawnArgs = mockSpawn.mock.calls[0][1] as string[];
@@ -249,7 +254,7 @@ describe('PersistentAgySession', () => {
       await session.start();
 
       const sendPromise = session.send('hello', { waitForComplete: true, effort: 'medium' });
-      setTimeout(() => closeProc(mockProc, 0), 10);
+      setTimeout(() => succeedProc(mockProc), 10);
       await sendPromise;
 
       const spawnArgs = mockSpawn.mock.calls[0][1] as string[];
@@ -268,7 +273,7 @@ describe('PersistentAgySession', () => {
       await session.start();
 
       const sendPromise = session.send('hello', { waitForComplete: true });
-      setTimeout(() => closeProc(mockProc, 0), 10);
+      setTimeout(() => succeedProc(mockProc), 10);
       await sendPromise;
 
       const spawnArgs = mockSpawn.mock.calls[0][1] as string[];
@@ -287,7 +292,7 @@ describe('PersistentAgySession', () => {
       await session.start();
 
       const sendPromise = session.send('hello', { waitForComplete: true });
-      setTimeout(() => closeProc(mockProc, 0), 10);
+      setTimeout(() => succeedProc(mockProc), 10);
       await sendPromise;
 
       const spawnArgs = mockSpawn.mock.calls[0][1] as string[];
@@ -305,7 +310,7 @@ describe('PersistentAgySession', () => {
       await session.start();
 
       const sendPromise = session.send('hello', { waitForComplete: true });
-      setTimeout(() => closeProc(mockProc, 0), 10);
+      setTimeout(() => succeedProc(mockProc), 10);
       await sendPromise;
 
       const spawnArgs = mockSpawn.mock.calls[0][1] as string[];
@@ -323,7 +328,7 @@ describe('PersistentAgySession', () => {
       await session.start();
 
       const sendPromise = session.send('hello', { waitForComplete: true });
-      setTimeout(() => closeProc(mockProc, 0), 10);
+      setTimeout(() => succeedProc(mockProc), 10);
       await sendPromise;
 
       const spawnArgs = mockSpawn.mock.calls[0][1] as string[];
@@ -342,7 +347,7 @@ describe('PersistentAgySession', () => {
       await session.start();
 
       const sendPromise = session.send('hello', { waitForComplete: true, effort: 'high' });
-      setTimeout(() => closeProc(mockProc, 0), 10);
+      setTimeout(() => succeedProc(mockProc), 10);
       await sendPromise;
 
       const spawnArgs = mockSpawn.mock.calls[0][1] as string[];
@@ -401,6 +406,125 @@ describe('PersistentAgySession', () => {
       await expect(sendPromise).rejects.toThrow(/invalid model selection/);
     });
 
+    it.each([
+      ['missing', undefined],
+      [
+        'blank',
+        JSON.stringify({
+          event: 'result',
+          result: {
+            conversation_id: '11111111-2222-3333-4444-555555555555',
+            status: 'SUCCESS',
+            response: ' \n\t ',
+          },
+        }) + '\n',
+      ],
+    ])('rejects an exit-0 %s response as a failed, recoverable turn', async (_kind, stdout) => {
+      const session = new PersistentAgySession({
+        name: 'test',
+        cwd: '/tmp',
+        permissionMode: 'bypassPermissions',
+      });
+      await session.start();
+
+      const completed: Array<{ stop_reason?: string }> = [];
+      session.on('turn_complete', (event: { stop_reason?: string }) => completed.push(event));
+
+      const sendPromise = session.send('hello', { waitForComplete: true });
+      if (stdout) feedText(mockProc, stdout);
+      setTimeout(() => closeProc(mockProc, 0), 10);
+
+      await expect(sendPromise).rejects.toThrow(
+        'Antigravity returned an empty response; the turn failed but the session remains available for retry',
+      );
+      expect(completed).toEqual([expect.objectContaining({ stop_reason: 'error' })]);
+      expect(session.getStats()).toMatchObject({ turns: 1, turnsSucceeded: 0 });
+    });
+
+    it('surfaces a fixed denial diagnosis and preserves conversation continuity for a retry', async () => {
+      const session = new PersistentAgySession({
+        name: 'test',
+        cwd: '/tmp',
+        permissionMode: 'manual',
+        sandboxMode: 'read-only',
+      });
+      await session.start();
+
+      const firstSend = session.send('first turn', { waitForComplete: true });
+      const logFile = logPathFromSpawn();
+      tmpLogs.push(logFile);
+      fs.writeFileSync(
+        logFile,
+        'E0904 tool_confirmation_manager.go:188] mode: soft-denying tool confirmation "RunCommand"\n',
+      );
+      feedText(
+        mockProc,
+        JSON.stringify({ event: 'init', conversation_id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' }) + '\n',
+      );
+      setTimeout(() => closeProc(mockProc, 0), 10);
+
+      const firstError = await firstSend.catch((error: Error) => error);
+      expect(firstError).toBeInstanceOf(Error);
+      expect((firstError as Error).message).toBe(
+        'Antigravity returned an empty response after a tool permission denial; the turn failed but the session remains available for retry',
+      );
+      expect((firstError as Error).message).not.toContain('RunCommand');
+      expect(session.conversationId).toBe('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
+
+      const secondProc = createMockProcess();
+      mockSpawn.mockReturnValue(secondProc);
+      const secondSend = session.send('retry turn', { waitForComplete: true });
+      const secondArgs = mockSpawn.mock.calls[1][1] as string[];
+      expect(secondArgs.slice(secondArgs.indexOf('--conversation'), secondArgs.indexOf('--conversation') + 2)).toEqual([
+        '--conversation',
+        'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      ]);
+      feedText(
+        secondProc,
+        JSON.stringify({
+          event: 'result',
+          result: {
+            conversation_id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+            status: 'SUCCESS',
+            response: 'Recovered',
+          },
+        }) + '\n',
+      );
+      setTimeout(() => closeProc(secondProc, 0), 10);
+
+      await expect(secondSend).resolves.toMatchObject({ text: 'Recovered' });
+      expect(session.getStats()).toMatchObject({ turns: 2, turnsSucceeded: 1 });
+    });
+
+    it('does not classify a stale prior-turn denial log as the current empty response', async () => {
+      const session = new PersistentAgySession({
+        name: 'test',
+        cwd: '/tmp',
+        permissionMode: 'manual',
+        sandboxMode: 'read-only',
+      });
+      await session.start();
+
+      const firstSend = session.send('first turn', { waitForComplete: true });
+      const logFile = logPathFromSpawn();
+      tmpLogs.push(logFile);
+      fs.writeFileSync(
+        logFile,
+        'E0904 tool_confirmation_manager.go:188] mode: soft-denying tool confirmation "RunCommand"\n',
+      );
+      setTimeout(() => succeedProc(mockProc), 10);
+      await firstSend;
+
+      const secondProc = createMockProcess();
+      mockSpawn.mockReturnValue(secondProc);
+      const secondSend = session.send('second turn', { waitForComplete: true });
+      setTimeout(() => closeProc(secondProc, 0), 10);
+
+      await expect(secondSend).rejects.toThrow(
+        'Antigravity returned an empty response; the turn failed but the session remains available for retry',
+      );
+    });
+
     it('still resolves a successful turn', async () => {
       const session = new PersistentAgySession({
         name: 'test',
@@ -454,8 +578,7 @@ describe('PersistentAgySession', () => {
       mockSpawn.mockReturnValue(proc2);
       const send2 = session.send('second turn', { waitForComplete: true });
       setTimeout(() => {
-        proc2.stdout.push(null);
-        proc2.emit('close', 0);
+        succeedProc(proc2);
       }, 10);
       await send2;
 
@@ -475,7 +598,7 @@ describe('PersistentAgySession', () => {
       await session.start();
 
       const sendPromise = session.send('hello again', { waitForComplete: true });
-      setTimeout(() => closeProc(mockProc, 0), 10);
+      setTimeout(() => succeedProc(mockProc), 10);
       await sendPromise;
 
       const spawnArgs = mockSpawn.mock.calls[0][1] as string[];
@@ -494,7 +617,7 @@ describe('PersistentAgySession', () => {
       await session.start();
 
       const sendPromise = session.send('hello again', { waitForComplete: true });
-      setTimeout(() => closeProc(mockProc, 0), 10);
+      setTimeout(() => succeedProc(mockProc), 10);
       await sendPromise;
 
       const spawnArgs = mockSpawn.mock.calls[0][1] as string[];
@@ -515,7 +638,7 @@ describe('PersistentAgySession', () => {
       tmpLogs.push(logFile);
       setTimeout(() => {
         fs.writeFileSync(logFile, 'I0705 server.go:825] Created conversation ffffffff-1111-2222-3333-444444444444\n');
-        closeProc(mockProc, 0);
+        succeedProc(mockProc);
       }, 10);
       await sendPromise;
 
@@ -555,7 +678,7 @@ describe('PersistentAgySession', () => {
       session.on('log', (msg: string) => logs.push(msg));
 
       const sendPromise = session.send('hello', { waitForComplete: true });
-      setTimeout(() => closeProc(mockProc, 0), 10);
+      setTimeout(() => succeedProc(mockProc), 10);
       await sendPromise;
 
       expect(logs.some((l) => l.includes('no conversation ID found in log'))).toBe(true);
@@ -609,7 +732,7 @@ describe('PersistentAgySession', () => {
           mockProc,
           JSON.stringify({ event: 'init', conversation_id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' }) + '\n',
         );
-        closeProc(mockProc, 0);
+        succeedProc(mockProc);
       }, 10);
       await p;
 
@@ -747,7 +870,7 @@ describe('PersistentAgySession', () => {
       const sendPromise = session.send('hello', { waitForComplete: true });
       setTimeout(() => {
         mockProc.stderr.emit('data', Buffer.from('auth failed: Bearer ya29.secret-token not valid'));
-        closeProc(mockProc, 0);
+        succeedProc(mockProc);
       }, 10);
 
       await sendPromise;
@@ -769,7 +892,7 @@ describe('PersistentAgySession', () => {
       const sendPromise = session.send('hello', { waitForComplete: true });
       setTimeout(() => {
         mockProc.stderr.emit('data', Buffer.from('GEMINI_API_KEY=AIza12345 key=sk-proj-abcdef1234567890'));
-        closeProc(mockProc, 0);
+        succeedProc(mockProc);
       }, 10);
 
       await sendPromise;
@@ -784,9 +907,9 @@ describe('PersistentAgySession', () => {
   //
   // agy is the engine where the exit code is the weakest of the three signals: it
   // can exit 0 while its own result event reports a non-SUCCESS status. That turn
-  // resolves — so it used to reach the caller, and the run ledger, as a success.
+  // must reject and remain counted as failed even when it carries partial text.
   describe('turnsSucceeded', () => {
-    it('does not count exit 0 with a non-SUCCESS status, and says so in the event', async () => {
+    it('rejects and does not count exit 0 with a non-SUCCESS status', async () => {
       const session = new PersistentAgySession({ name: 'test', cwd: '/tmp', permissionMode: 'default' });
       await session.start();
 
@@ -801,9 +924,9 @@ describe('PersistentAgySession', () => {
       );
       setTimeout(() => closeProc(mockProc, 0), 10);
 
-      // It resolves — which is exactly why the status has to be read.
-      const result = (await sendPromise) as { text: string; event: { stop_reason: string } };
-      expect(result.event.stop_reason).toBe('error');
+      await expect(sendPromise).rejects.toThrow(
+        'Antigravity reported an unsuccessful turn; the turn failed but the session remains available for retry',
+      );
 
       const stats = session.getStats();
       expect(stats.turns).toBe(1);
@@ -846,9 +969,10 @@ describe('PersistentAgySession', () => {
           '\n',
       );
       setTimeout(() => closeProc(mockProc, 0), 10);
-      const result = (await sendPromise) as { event: { stop_reason: string } };
 
-      expect(result.event.stop_reason).toBe('error');
+      await expect(sendPromise).rejects.toThrow(
+        'Antigravity reported an unsuccessful turn; the turn failed but the session remains available for retry',
+      );
       expect(session.getStats().turnsSucceeded).toBe(0);
     });
 
