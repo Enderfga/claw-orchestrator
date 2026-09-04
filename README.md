@@ -110,8 +110,8 @@ block, and the cancellation and permission limitations are in
 
 | Engine      | CLI        | Tested Version |
 | ----------- | ---------- | -------------- |
-| Claude Code | `claude`   | 2.1.259        |
-| Codex       | `codex`    | 0.153.0        |
+| Claude Code | `claude`   | 2.1.260        |
+| Codex       | `codex`    | 0.153.2        |
 | Antigravity | `agy`      | 1.1.25         |
 | Grok Build  | `grok`     | 1.0.13         |
 | OpenCode    | `opencode` | 1.18.27        |

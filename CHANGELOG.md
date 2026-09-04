@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.1.0] - 2026-09-04
+
+Weekly engine sweep. Five engines, zero regressions, every live turn through the real wrapper.
+
+### Fixed
+
+- **The GPT-5.6 tiers were priced at their launch rates.** OpenAI repriced all three after launch
+  and this registry kept the old numbers, so reported cost was wrong for every run on them — Luna
+  by 5x. Now Sol/bare `4 / 0.4 / 20`, Terra `2 / 0.2 / 12`, Luna `0.2 / 0.02 / 1.2`, cross-checked
+  against both the pricing table and each model's own docs page. The test that was supposed to
+  catch this pinned the launch literals; it now asserts bare `gpt-5.6` equals `gpt-5.6-sol`, which
+  is the actual invariant and survives the next repricing.
+
+### Added
+
+- **`gpt-6-astra`** — 1,050,000-token window, `10 / 1 / 50`. Absent from Codex 0.153.0 and present
+  in 0.153.2, so baselining the sweep on the installed binary rather than on upstream would have
+  hidden it for another week.
+
+### Changed
+
+- Tested versions: Claude Code 2.1.259 → 2.1.260, Codex 0.153.0 → 0.153.2. Antigravity 1.1.25,
+  Grok 1.0.13, and OpenCode 1.18.27 unchanged. Grok's live turn passed this week — last week it
+  could only be carried unverified, because a spent free tier hangs silently instead of erroring.
+- Deliberately still unregistered: `gpt-5.6-pro` (in the Codex binary, no docs page and no pricing
+  row) and `gpt-5.6-cyber` (documented, but no engine here can select it).
+
 ## [7.0.0] - 2026-09-04
 
 Two contributed fixes for defects that were invisible from inside the project, plus the
