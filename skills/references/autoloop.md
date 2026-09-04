@@ -52,6 +52,19 @@ Planner receives `permissionMode: 'manual'` and its `CustomEngineConfig` **must*
 map that mode to the CLI's read-only flag — if it cannot, the session refuses to
 start rather than silently running write-enabled.
 
+Antigravity's read-only boundary remains `--mode plan` on every Planner turn,
+including recovery. agy 1.1.26 can soft-deny a tool confirmation, emit a valid
+conversation id, leave `result.response` blank, and still exit 0. A missing or
+whitespace-only response is therefore a failed turn at the agy adapter boundary
+for every caller, not a successful empty Planner reply. If the private log for
+that exact turn contains agy's narrow `tool_confirmation_manager` soft-denial
+marker, the caller receives a fixed, sanitized diagnosis; native log content is
+never returned. The captured conversation id remains usable, so a later
+operator-initiated chat resumes with `--conversation`. Recovery neither retries
+the failed message automatically nor relaxes permissions. Because the failed
+reply never reaches the control parser, it cannot change `plan.md` or
+`goal.json`, spawn subagents, or emit an initial directive.
+
 Coder and Reviewer engine/model choices can be overridden by the first successful
 `spawn_subagents`; later attempts to change an already-started role are rejected
 instead of silently diverging from the running session.
@@ -150,6 +163,18 @@ curl -X POST http://127.0.0.1:18789/v1/openclaw/tools/autoloop_stop \
 The Planner controls the run by emitting fenced ` ```autoloop ` JSON blocks
 inside its replies. The dispatcher parses them out and applies them. You
 never see the JSON — only the Planner's narrative.
+
+These fenced reply blocks are the only Planner control channel. Native shell or
+file-tool activity is never interpreted as a control, and the read-only Planner
+still cannot write the artifacts directly. The dispatcher parses and validates
+the complete block batch before applying any effect, including rejecting
+malformed blocks and duplicate `write_plan`, `write_goal`, or
+`spawn_subagents` controls. A valid batch has fixed ordering even when the
+blocks appear in another order: all plan/goal bodies are staged and replaced as
+one failure-atomic artifact transaction, then policy effects run, then at most
+one subagent spawn runs, and only then are directive messages returned to the
+runner. A staging or replacement failure restores the prior artifact bytes,
+removes partial files, and suppresses both spawn and directives.
 
 | Tool                 | Args                                                                                                                                  | What                                                                                                                                                                                                                                                                                 |
 | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |

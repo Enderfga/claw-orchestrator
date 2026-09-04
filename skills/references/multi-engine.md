@@ -127,7 +127,7 @@ await manager.startSession({
 
 Wraps Google's **Antigravity CLI** (`agy`) — the successor to Gemini CLI (consumer
 Gemini CLI tiers stopped serving 2026-06-18). Each `send()` spawns a new process
-in print mode. Verified against `agy` **1.1.13**.
+in print mode. Adapter behavior is covered through `agy` **1.1.26**.
 
 - One-shot execution per message (no persistent subprocess)
 - **Structured output and real usage** — `--output-format stream-json` emits an
@@ -139,6 +139,15 @@ in print mode. Verified against `agy` **1.1.13**.
   scrape remains as a fallback for turns that die before emitting `init`. Seed it
   externally via `resumeSessionId` (bare UUID only); read it back from
   `getStats().agyConversationId`.
+- **Empty responses fail adapter-wide and remain recoverable**: an exit-0 result
+  with a missing, blank, or whitespace-only response rejects instead of becoming
+  a successful empty reply, whether the caller is Autoloop, MCP, HTTP, or the
+  library API. agy 1.1.26 may do this after plan mode soft-denies a tool
+  confirmation. The adapter clears the per-session log before each spawn and
+  recognizes only the narrow current-turn `tool_confirmation_manager` marker,
+  returning a fixed sanitized diagnosis without exposing native log content. A
+  conversation id already emitted by `init` is retained for the caller's next
+  send; the failed turn is not retried automatically.
 - **Reasoning effort**: session `effort` and per-turn `session_send` overrides map
   to `--effort`. agy accepts `low`, `medium`, and `high`; everything above that
   (`xhigh`, `max`, `ultra`) clamps to `high`. agy 1.1.25 requires an effort with unsuffixed base
@@ -157,15 +166,21 @@ in print mode. Verified against `agy` **1.1.13**.
 - Permission modes: `bypassPermissions` → `--dangerously-skip-permissions`,
   `default` → `--sandbox` (terminal-restricted), and
   `sandboxMode: 'read-only'` → `--mode plan` (takes precedence). Other modes
-  run agy's own approval flow, which blocks in headless print mode — use
-  `bypassPermissions` for autonomous write-enabled work
+  run agy's own approval flow, which can block in headless print mode. A caller
+  must explicitly choose `bypassPermissions` for a write-enabled session; it is
+  not a recovery mechanism. In particular, an Autoloop Planner stays on
+  `--mode plan` when its preserved conversation is resumed.
 - agy enforces its own print timeout (default 5m); the engine derives
   `--print-timeout` from the send timeout so the wrapper timer decides
-- Unknown `--model` slugs do **not** error — agy silently falls back to its
-  default model. Registered slugs: `gemini-3.5-flash` (alias `agy-flash`),
-  `gemini-3.1-pro` (alias `agy-pro`); agy also proxies Claude and GPT-OSS
-  models (`agy models` lists them) which pass through unregistered. The
-  `agy/` prefix forces Antigravity routing for provider-like model strings
+- Do not rely on an unknown `--model` falling back: current agy versions can
+  report `status: ERROR` with no usable response. The adapter rejects result
+  errors, non-success statuses, and empty responses. `agy-flash` and the engine
+  default resolve to `gemini-3.8-flash`; `agy-pro` resolves to
+  `gemini-3.1-pro`. The registry also describes the 3.5/3.6/3.7 Flash API
+  families for pricing and routing, but agy's own `agy models` output decides
+  which slugs are executable. agy also proxies Claude and GPT-OSS models, which
+  pass through unregistered. The `agy/` prefix forces Antigravity routing for
+  provider-like model strings.
 - Consumer auth is a one-time `agy` Google OAuth login (subscription quotas, no
   per-token billing — registry pricing mirrors Gemini API rates as a value proxy)
 - Requires `agy` installed: `curl -fsSL https://antigravity.google/cli/install.sh | bash`
@@ -175,7 +190,7 @@ in print mode. Verified against `agy` **1.1.13**.
 await manager.startSession({
   name: 'antigravity-task',
   engine: 'agy',
-  model: 'gemini-3.5-flash',
+  model: 'gemini-3.8-flash',
   effort: 'high',
   cwd: '/project',
 });
