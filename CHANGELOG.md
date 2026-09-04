@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.1.1] - 2026-09-04
+
+The weekly sweep now checks the model registry, and its first run found two more wrong prices.
+
+### Fixed
+
+- **`o4-mini` was priced at half its real cost.** OpenAI publishes four identically shaped tables
+  per model — Standard, Batch, Flex, Fast — and this entry had been copied from the Batch column:
+  `0.55 / 4.4` against a Standard `1.1 / 4.4`. Every run on it under-reported spend by 2x.
+- **`o3` and `o4-mini` had no cached rate**, so cached reads were billed into the report at the
+  full input price instead of a quarter of it.
+
+### Added
+
+- **The sweep diffs `src/models.ts` against both vendors' published price tables.** Until now it
+  only checked engines, so a repriced model was invisible to it: a wrong cost does not crash, it
+  just stays wrong. Both vendors publish their tables as markdown, so this needs no model to read
+  them. A model is reported as missing only when the vendor prices it *and* the engine binary can
+  select it, which is the same test used by hand to keep `gpt-5.6-pro` and `gpt-5.6-cyber` out.
+  A price source that cannot be fetched is reported as a regression rather than skipped — an
+  unverified pass is what let a spent Grok quota carry a pin for a week.
+
 ## [7.1.0] - 2026-09-04
 
 Weekly engine sweep. Five engines, zero regressions, every live turn through the real wrapper.
