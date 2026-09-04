@@ -52,6 +52,7 @@ describe('lookupModel', () => {
       'claude-sonnet-5',
       'claude-sonnet-4-6',
       'claude-haiku-4-5',
+      'gpt-6-astra',
       'gpt-5.6-sol',
       'gpt-5.6-terra',
       'gpt-5.6-luna',
@@ -282,12 +283,18 @@ describe('claude-sonnet-5', () => {
 });
 
 describe('registry entries added by the weekly sweep', () => {
+  // Stated as an equality with Sol rather than as literal rates. The invariant
+  // is "bare gpt-5.6 is Sol", which survives a repricing; the literals did not,
+  // and this test kept asserting the launch numbers after OpenAI cut them.
   it("registers bare gpt-5.6 at Sol's numbers, not the Sonnet fallback", () => {
     const m = lookupModel('gpt-5.6');
+    const sol = lookupModel('gpt-5.6-sol');
     expect(m).toBeDefined();
+    expect(sol).toBeDefined();
+    expect(m!.contextWindow).toBe(sol!.contextWindow);
+    expect(m!.pricing).toEqual(sol!.pricing);
+    // Not the 200K/Sonnet fallback the registry uses for unknown ids.
     expect(m!.contextWindow).toBe(1_050_000);
-    expect(m!.pricing.input).toBe(5);
-    expect(m!.pricing.output).toBe(30);
   });
 
   it('leaves gpt-5.6-pro unregistered — it is in the codex binary but has no model docs', () => {
@@ -489,5 +496,21 @@ describe('registry covers what the engines actually offer', () => {
     expect(resolveAlias('agy-flash')).toBe('gemini-3.8-flash');
     expect(lookupModel('gemini-3.5-flash')).toBeDefined();
     expect(lookupModel('gemini-3.5-flash')!.aliases ?? []).not.toContain('agy-flash');
+  });
+
+  // The registry drifting behind OpenAI's published rates is the recurring bug
+  // this file exists to catch: all three GPT-5.6 tiers were repriced after
+  // launch and this file kept the launch numbers, over-reporting Luna by 5x.
+  it('prices the GPT-5.6 tiers at the current published rates, not the launch ones', () => {
+    expect(getModelPricing('gpt-5.6-sol')).toMatchObject({ input: 4, output: 20, cached: 0.4 });
+    expect(getModelPricing('gpt-5.6')).toMatchObject({ input: 4, output: 20, cached: 0.4 });
+    expect(getModelPricing('gpt-5.6-terra')).toMatchObject({ input: 2, output: 12, cached: 0.2 });
+    expect(getModelPricing('gpt-5.6-luna')).toMatchObject({ input: 0.2, output: 1.2, cached: 0.02 });
+  });
+
+  it('registers gpt-6-astra so it is not priced as a fallback tier', () => {
+    expect(getContextWindow('gpt-6-astra')).toBe(1_050_000);
+    expect(getModelPricing('gpt-6-astra')).toMatchObject({ input: 10, output: 50, cached: 1 });
+    expect(resolveEngineAndModel('gpt-6-astra')).toEqual({ engine: 'codex', model: 'gpt-6-astra' });
   });
 });

@@ -195,37 +195,59 @@ const MODELS: ModelDef[] = [
   // model config listing 272,000 for these ids — that is the CLI's own cap
   // (272K is also the price-tier breakpoint), NOT the model's window, so it is
   // deliberately not mirrored here.
-  // Bare `gpt-5.6` IS documented (1,050,000 window, $5/$0.5/$30 — identical to
-  // Sol) and codex 0.148.0 offers it, so it is registered. Unregistered it fell
-  // back to Sonnet pricing and a 200K window, which over-reported contextPercent
-  // by 5.25x. `gpt-5.6-pro` appears in the codex binary but has no model-docs
-  // page (404), so it stays out rather than carry invented pricing.
+  // Bare `gpt-5.6` IS documented and codex offers it, so it is registered.
+  // Unregistered it fell back to Sonnet pricing and a 200K window, which
+  // over-reported contextPercent by 5.25x.
+  //
+  // All three tiers were repriced downward after launch (Sol's reduction is
+  // promotional, held at least through 2026-11-21). The rates below are the
+  // current published ones, cross-checked against both the pricing table and
+  // each model's own docs page. The launch rates this file used to carry —
+  // 5/0.5/30, 2.5/0.25/15, 1/0.1/6 — over-reported Luna's cost by 5x.
+  //
+  // Deliberately unregistered: `gpt-5.6-pro` is in the codex binary but has no
+  // docs page and no pricing-table row, so registering it would mean inventing
+  // numbers. `gpt-5.6-cyber` is the reverse — documented (400K window,
+  // 12.5/1.25/75) but absent from the codex binary, so no engine here can
+  // select it.
   {
     id: 'gpt-5.6',
     engine: 'codex',
     provider: 'openai',
-    pricing: { input: 5, output: 30, cached: 0.5 },
+    pricing: { input: 4, output: 20, cached: 0.4 },
     contextWindow: 1_050_000,
   },
   {
     id: 'gpt-5.6-sol',
     engine: 'codex',
     provider: 'openai',
-    pricing: { input: 5, output: 30, cached: 0.5 },
+    pricing: { input: 4, output: 20, cached: 0.4 },
     contextWindow: 1_050_000,
   },
   {
     id: 'gpt-5.6-terra',
     engine: 'codex',
     provider: 'openai',
-    pricing: { input: 2.5, output: 15, cached: 0.25 },
+    pricing: { input: 2, output: 12, cached: 0.2 },
     contextWindow: 1_050_000,
   },
   {
     id: 'gpt-5.6-luna',
     engine: 'codex',
     provider: 'openai',
-    pricing: { input: 1, output: 6, cached: 0.1 },
+    pricing: { input: 0.2, output: 1.2, cached: 0.02 },
+    contextWindow: 1_050_000,
+  },
+
+  // ── OpenAI GPT-6 ──────────────────────────────────────────────────────
+  // New flagship generation. Absent from codex 0.153.0 and present in 0.153.2,
+  // which is why the sweep baselines on upstream rather than on whatever is
+  // installed — the older binary would have hidden it for another week.
+  {
+    id: 'gpt-6-astra',
+    engine: 'codex',
+    provider: 'openai',
+    pricing: { input: 10, output: 50, cached: 1 },
     contextWindow: 1_050_000,
   },
 
