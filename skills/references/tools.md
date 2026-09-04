@@ -300,7 +300,7 @@ Codex app-server v2 RPCs (require `engine: "codex-app"`). Method names + param s
 | `codex_fork`      | `thread/fork`     | `name`                                                          | `{ ok, threadId }` — branches the thread; returns the forked id                                              |
 | `codex_rollback`  | `thread/rollback` | `name`, `numTurns`                                              | `{ ok, numTurns }` — drops the last N turns                                                                  |
 | `codex_models`    | `model/list`      | `name`                                                          | `{ ok, models }` — incl. each model's `supportedReasoningEfforts`                                            |
-| `codex_threads`   | `thread/list`     | `name`, `searchTerm?`, `cwd?`, `archived?`, `cursor?`, `limit?` | `{ ok, data, nextCursor }` — list threads with filters + pagination                                          |
+| `codex_thread_list` | `thread/list`     | `name`, `searchTerm?`, `cwd?`, `archived?`, `cursor?`, `limit?` | `{ ok, data, nextCursor }` — list threads with filters + pagination                                          |
 
 To **resume** a codex-app thread, start a session with `engine: "codex-app"` and
 `resumeSessionId: "<threadId>"` — it loads the existing thread via `thread/resume` instead of
@@ -557,7 +557,9 @@ Start a chat-mode autoloop. Planner starts immediately; Coder + Reviewer start o
 | `reviewer_engine`        | EngineType |          | Default Reviewer engine (default `claude`)                                                       |
 | `reviewer_model`         | string     |          | Default Reviewer model (Claude default `sonnet`)                                                 |
 | `reviewer_custom_engine` | object     |          | Trusted config when Reviewer may use `custom`. **Local callers only**                            |
-| `send_timeout_ms`        | number     |          | Per-message timeout (default 600000)                                                             |
+| `send_timeout_ms`        | number     |          | Per-agent send cap in ms (default 600000; inclusive 5000–7200000)                                |
+| `activity_lease_ms`      | number     |          | Inactivity lease in ms (default 1800000; inclusive 60000–7200000)                                |
+| `autoloop_hard_timeout_ms` | number   |          | Absolute run cap in ms (default 86400000; inclusive 600000–259200000)                             |
 
 > **Custom engines are local-only.** A `CustomEngineConfig` names an executable to
 > spawn plus its argv and env, so it may only be supplied by a caller that already
@@ -586,6 +588,25 @@ Start a chat-mode autoloop. Planner starts immediately; Coder + Reviewer start o
 > host, and an unknown name fails loudly rather than starting without credentials.
 
 Custom configs are not persisted or accepted from Planner output. See [`multi-engine.md`](./multi-engine.md) for their shape.
+
+The three timeout controls form a hierarchy. `send_timeout_ms` caps one
+Planner, Coder, or Reviewer delivery. A genuine send timeout is not retried:
+the run pauses in `awaiting_resume` with a stable pending dispatch identity.
+`activity_lease_ms` bounds inactivity and is renewed only by validated user or
+agent progress, never by timer checks or runner bookkeeping.
+`autoloop_hard_timeout_ms` is anchored to run start and never renews; it wins
+when it coincides with lease expiry.
+
+Recovery is exposed by `POST /autoloop/<id>/resume`, not by an MCP resume tool.
+Its timeout body is limited to `send_timeout_ms` plus
+`pending_dispatch_id`. The send timeout must be finite, in range, and strictly
+larger than the run's latest effective value (legacy baseline: 600000). Equal
+or smaller values are rejected, and there is deliberately no
+`allow_decrease`. Lease and hard-cap overrides are not accepted on resume.
+Each successful increase appends one migration row to `decisions.jsonl`; the
+original run spec, history, and prior audit bytes are not rewritten. The
+matching live awaiting-resume condition is advanced without replaying the
+timed-out logical dispatch.
 
 ### `autoloop_chat`
 

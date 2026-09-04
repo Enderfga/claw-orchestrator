@@ -34,11 +34,21 @@ process.env.CLAWO_NO_EMBEDDED_SERVER ??= '1';
 
 const { default: plugin } = await import('../src/index.js');
 
+/**
+ * What `plugin.register()` hands back. Since the plugin entry normalises every
+ * handler into OpenClaw's `AgentToolResult`, `execute` resolves to text content
+ * blocks plus the original structured payload in `details`.
+ */
+type AgentToolResult = {
+  content: Array<{ type: string; text?: string }>;
+  details: unknown;
+};
+
 type ToolDef = {
   name: string;
   description: string;
   parameters: Record<string, unknown>;
-  execute: (toolCallId: string, params: Record<string, unknown>) => Promise<unknown>;
+  execute: (toolCallId: string, params: Record<string, unknown>) => Promise<AgentToolResult>;
 };
 
 type Annotation = {
@@ -179,9 +189,11 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
   }
   try {
     const result = await tool.execute(`mcp-${Date.now()}`, (req.params.arguments ?? {}) as Record<string, unknown>);
-    return {
-      content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
-    };
+    // The plugin entry already formatted the payload as MCP-shaped text blocks,
+    // so hand them straight over. Stringifying `result` here instead would ship
+    // the data twice — once escaped inside `content[0].text`, once again under
+    // `details` — which is what this line did before the results were normalised.
+    return { content: result.content };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return {

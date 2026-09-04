@@ -399,6 +399,249 @@ describe('AutoloopRunner', () => {
     vi.useRealTimers();
   });
 
+  describe('activity lease and absolute hard deadline', () => {
+    it('pauses an idle run at the activity deadline and emits the expiration exactly once', async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+      const dispatcher: AgentDispatcher = {
+        async deliver() {
+          return [];
+        },
+      };
+      const { runner } = makeRunner(dispatcher, [], {
+        activityLeaseMs: 60_000,
+        autoloopHardTimeoutMs: 600_000,
+      });
+      const timeoutKinds: string[] = [];
+      runner.on('timeout', (event: { kind: string }) => timeoutKinds.push(event.kind));
+
+      await runner.start();
+      runner.markSubagentsSpawned();
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      expect(runner.state.status).toBe('paused');
+      expect(runner.state.status_reason).toBe('activity_lease_expired');
+      expect(timeoutKinds).toEqual(['activity_lease_expired']);
+
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(timeoutKinds).toEqual(['activity_lease_expired']);
+      runner.stop();
+    });
+
+    it('renews only for accepted messages and validated forward-progress signals', async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+      const dispatcher: AgentDispatcher = {
+        async deliver() {
+          return [];
+        },
+      };
+      const { runner } = makeRunner(dispatcher, [], {
+        activityLeaseMs: 60_000,
+        autoloopHardTimeoutMs: 600_000,
+      });
+      const timeoutKinds: string[] = [];
+      runner.on('timeout', (event: { kind: string }) => timeoutKinds.push(event.kind));
+
+      await runner.start();
+      runner.markSubagentsSpawned();
+      await vi.advanceTimersByTimeAsync(59_000);
+      await runner.chat('validated queue activity');
+      await vi.advanceTimersByTimeAsync(59_000);
+      expect(runner.recordActivity('agent_progress')).toBe(true);
+      await vi.advanceTimersByTimeAsync(59_000);
+      expect(runner.recordActivity('lifecycle_transition')).toBe(true);
+      await vi.advanceTimersByTimeAsync(59_000);
+      expect(runner.recordActivity('checkpoint_persisted')).toBe(true);
+
+      await vi.advanceTimersByTimeAsync(59_999);
+      expect(timeoutKinds).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(timeoutKinds).toEqual(['activity_lease_expired']);
+      runner.stop();
+    });
+
+    it('does not renew for timer checks or runner bookkeeping', async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+      const dispatcher: AgentDispatcher = {
+        async deliver() {
+          return [];
+        },
+      };
+      const { runner } = makeRunner(dispatcher, [], {
+        activityLeaseMs: 60_000,
+        autoloopHardTimeoutMs: 600_000,
+      });
+      const timeoutKinds: string[] = [];
+      runner.on('timeout', (event: { kind: string }) => timeoutKinds.push(event.kind));
+
+      await runner.start();
+      runner.markSubagentsSpawned();
+      await vi.advanceTimersByTimeAsync(59_000);
+      expect(runner.recordActivity('timer_check')).toBe(false);
+      expect(runner.recordActivity('runner_bookkeeping')).toBe(false);
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      expect(timeoutKinds).toEqual(['activity_lease_expired']);
+      runner.stop();
+    });
+
+    it('enforces the absolute hard deadline despite repeated qualified activity', async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+      const shutdown = vi.fn(async () => undefined);
+      const dispatcher: AgentDispatcher = {
+        async deliver() {
+          return [];
+        },
+        shutdown,
+      };
+      const { runner } = makeRunner(dispatcher, [], {
+        activityLeaseMs: 60_000,
+        autoloopHardTimeoutMs: 600_000,
+      });
+      const timeoutKinds: string[] = [];
+      const terminatedReasons: string[] = [];
+      runner.on('timeout', (event: { kind: string }) => timeoutKinds.push(event.kind));
+      runner.on('terminated', (reason: string) => terminatedReasons.push(reason));
+
+      await runner.start();
+      runner.markSubagentsSpawned();
+      for (let elapsed = 50_000; elapsed < 600_000; elapsed += 50_000) {
+        await vi.advanceTimersByTimeAsync(50_000);
+        expect(runner.recordActivity('agent_progress')).toBe(true);
+      }
+      expect(timeoutKinds).toEqual([]);
+
+      await vi.advanceTimersByTimeAsync(50_000);
+      expect(runner.state.status).toBe('terminated');
+      expect(runner.state.status_reason).toBe('hard_timeout_exceeded');
+      expect(timeoutKinds).toEqual(['hard_timeout_exceeded']);
+      expect(terminatedReasons).toEqual(['hard_timeout_exceeded']);
+      expect(shutdown).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('lets the hard deadline win when it coincides with activity-lease expiry', async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+      const shutdown = vi.fn(async () => undefined);
+      const dispatcher: AgentDispatcher = {
+        async deliver() {
+          return [];
+        },
+        shutdown,
+      };
+      const { runner } = makeRunner(dispatcher, [], {
+        activityLeaseMs: 600_000,
+        autoloopHardTimeoutMs: 600_000,
+      });
+      const timeoutKinds: string[] = [];
+      runner.on('timeout', (event: { kind: string }) => timeoutKinds.push(event.kind));
+
+      await runner.start();
+      runner.markSubagentsSpawned();
+      await vi.advanceTimersByTimeAsync(600_000);
+
+      expect(runner.state.status).toBe('terminated');
+      expect(timeoutKinds).toEqual(['hard_timeout_exceeded']);
+      expect(shutdown).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('keeps the hard deadline anchored while dispatcher initialization is pending', async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+      let finishInit: (() => void) | undefined;
+      const shutdown = vi.fn(async () => undefined);
+      const dispatcher: AgentDispatcher = {
+        init: () =>
+          new Promise<void>((resolve) => {
+            finishInit = resolve;
+          }),
+        async deliver() {
+          return [];
+        },
+        shutdown,
+      };
+      const { runner } = makeRunner(dispatcher, [], {
+        activityLeaseMs: 600_000,
+        autoloopHardTimeoutMs: 600_000,
+      });
+      const timeoutKinds: string[] = [];
+      runner.on('timeout', (event: { kind: string }) => timeoutKinds.push(event.kind));
+
+      const start = runner.start();
+      await vi.advanceTimersByTimeAsync(600_000);
+      finishInit?.();
+      await start;
+
+      expect(runner.state.status).toBe('terminated');
+      expect(timeoutKinds).toEqual(['hard_timeout_exceeded']);
+      expect(shutdown).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('operator stop clears lifecycle timers before they can emit late timeouts', async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+      const shutdown = vi.fn(async () => undefined);
+      const dispatcher: AgentDispatcher = {
+        async deliver() {
+          return [];
+        },
+        shutdown,
+      };
+      const { runner } = makeRunner(dispatcher, [], {
+        activityLeaseMs: 60_000,
+        autoloopHardTimeoutMs: 600_000,
+      });
+      const timeoutKinds: string[] = [];
+      runner.on('timeout', (event: { kind: string }) => timeoutKinds.push(event.kind));
+
+      await runner.start();
+      runner.markSubagentsSpawned();
+      expect(vi.getTimerCount()).toBeGreaterThan(1);
+      runner.stop();
+      expect(vi.getTimerCount()).toBe(0);
+
+      await vi.advanceTimersByTimeAsync(700_000);
+      expect(timeoutKinds).toEqual([]);
+      expect(runner.state.status).toBe('running');
+      expect(shutdown).not.toHaveBeenCalled();
+    });
+
+    it('termination clears lifecycle timers and shuts down only once', async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+      const shutdown = vi.fn(async () => undefined);
+      const dispatcher: AgentDispatcher = {
+        async deliver() {
+          return [];
+        },
+        shutdown,
+      };
+      const { runner } = makeRunner(dispatcher, [], {
+        activityLeaseMs: 60_000,
+        autoloopHardTimeoutMs: 600_000,
+      });
+      const timeoutKinds: string[] = [];
+      runner.on('timeout', (event: { kind: string }) => timeoutKinds.push(event.kind));
+
+      await runner.start();
+      runner.markSubagentsSpawned();
+      expect(vi.getTimerCount()).toBeGreaterThan(1);
+      await runner.send(Msg.terminate(0, { reason: 'operator-stop' }));
+      expect(vi.getTimerCount()).toBe(0);
+
+      await vi.advanceTimersByTimeAsync(700_000);
+      expect(timeoutKinds).toEqual([]);
+      expect(runner.state.status).toBe('terminated');
+      expect(shutdown).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it('rejects invalid envelopes via validateMessage', async () => {
     const dispatcher: AgentDispatcher = {
       async deliver() {

@@ -27,6 +27,7 @@ import { councilWorkflow, fanoutWorkflow, solveWorkflow, type SolveArgs } from '
 import { readEvents as readKernelEvents } from './kernel/store.js';
 import { resolveSecretRefs } from './kernel/secrets.js';
 import type { RunState, WorkflowSpec } from './kernel/types.js';
+import { AUTOLOOP_TIMEOUT_SCHEMA, validateAutoloopTimeoutConfig } from './autoloop/types.js';
 
 // ─── Standalone Export ───────────────────────────────────────────────────────
 
@@ -57,16 +58,25 @@ export * from './types.js';
 // ─── Plugin Entry ────────────────────────────────────────────────────────────
 
 /** OpenClaw Plugin SDK interface (minimal typing for what we use) */
+type ToolExecute = (toolCallId: string, params: Record<string, unknown>) => Promise<unknown>;
+
+interface ToolDefinition {
+  name: string;
+  label?: string;
+  description: string;
+  parameters: Record<string, unknown>;
+  execute: ToolExecute;
+}
+
+interface AgentToolResult {
+  content: unknown[];
+  details: unknown;
+}
+
 interface PluginAPI {
   pluginConfig: Record<string, unknown>;
   logger: { info(...args: unknown[]): void; error(...args: unknown[]): void; warn(...args: unknown[]): void };
-  registerTool(def: {
-    name: string;
-    label?: string;
-    description: string;
-    parameters: Record<string, unknown>;
-    execute: (toolCallId: string, params: Record<string, unknown>) => Promise<unknown>;
-  }): void;
+  registerTool(def: ToolDefinition): void;
   on(event: string, handler: (event: Record<string, unknown>, ctx?: unknown) => Promise<void>): void;
   registerHttpRoute(def: {
     path: string;
@@ -75,6 +85,26 @@ interface PluginAPI {
     handler: (...args: unknown[]) => Promise<boolean>;
   }): void;
   registerService(def: { id: string; start: () => void; stop: () => void }): void;
+}
+
+function isAgentToolResult(result: unknown): result is AgentToolResult {
+  return (
+    typeof result === 'object' &&
+    result !== null &&
+    'content' in result &&
+    Array.isArray(result.content) &&
+    'details' in result
+  );
+}
+
+function normalizeToolResult(result: unknown): AgentToolResult {
+  if (isAgentToolResult(result)) return result;
+
+  const text = JSON.stringify(result, (_key, value) => (typeof value === 'bigint' ? value.toString() : value), 2);
+  return {
+    content: [{ type: 'text', text: text ?? 'null' }],
+    details: result,
+  };
 }
 
 const CUSTOM_ENGINE_SCHEMA = {
@@ -136,6 +166,13 @@ const plugin = {
 
   register(api: PluginAPI): void {
     const rawConfig = (api.pluginConfig || {}) as Partial<PluginConfig>;
+
+    const registerTool = (definition: ToolDefinition): void => {
+      api.registerTool({
+        ...definition,
+        execute: async (toolCallId, params) => normalizeToolResult(await definition.execute(toolCallId, params)),
+      });
+    };
 
     // ─── Lazy Init ────────────────────────────────────────────────────────
     //
@@ -215,7 +252,7 @@ const plugin = {
 
     // ─── Tool: session_start ──────────────────────────────────────────────
 
-    api.registerTool({
+    registerTool({
       name: 'session_start',
       description:
         'Start a persistent coding session. Supports multiple engines: claude (default) for Claude Code CLI, codex for OpenAI Codex CLI, gemini for Google Gemini CLI, agy for Google Antigravity CLI, cursor for Cursor Agent CLI, opencode for sst/opencode CLI, or custom for any user-configured coding agent CLI.',
@@ -372,7 +409,7 @@ const plugin = {
 
     // ─── Tool: session_send ───────────────────────────────────────────────
 
-    api.registerTool({
+    registerTool({
       name: 'session_send',
       description: 'Send a message to a persistent coding session and get the response',
       parameters: {
@@ -421,7 +458,7 @@ const plugin = {
 
     // ─── Tool: session_stop ───────────────────────────────────────────────
 
-    api.registerTool({
+    registerTool({
       name: 'session_stop',
       description: 'Stop a persistent coding session',
       parameters: {
@@ -437,7 +474,7 @@ const plugin = {
 
     // ─── Tool: session_list ───────────────────────────────────────────────
 
-    api.registerTool({
+    registerTool({
       name: 'session_list',
       description: 'List all active coding sessions',
       parameters: { type: 'object', properties: {} },
@@ -449,7 +486,7 @@ const plugin = {
 
     // ─── Tool: sessions_overview ──────────────────────────────────────────
 
-    api.registerTool({
+    registerTool({
       name: 'sessions_overview',
       description:
         'Get an aggregate overview of all active coding sessions — readiness, busy/paused state, cost, context usage, and last activity for each. Use this for a dashboard view across all sessions. For single-session detail, use coding_session_status instead.',
@@ -470,7 +507,7 @@ const plugin = {
 
     // ─── Tool: coding_session_status ──────────────────────────────────────
 
-    api.registerTool({
+    registerTool({
       name: 'coding_session_status',
       description: 'Get detailed status of a coding session (context %, tokens, cost, uptime)',
       parameters: {
@@ -486,7 +523,7 @@ const plugin = {
 
     // ─── Tool: session_grep ───────────────────────────────────────────────
 
-    api.registerTool({
+    registerTool({
       name: 'session_grep',
       description: 'Search session history for events matching a regex pattern',
       parameters: {
@@ -511,7 +548,7 @@ const plugin = {
 
     // ─── Tool: session_compact ────────────────────────────────────────────
 
-    api.registerTool({
+    registerTool({
       name: 'session_compact',
       description: 'Compact a session to reclaim context window space',
       parameters: {
@@ -530,7 +567,7 @@ const plugin = {
 
     // ─── Tool: coding_agents_list ─────────────────────────────────────────
 
-    api.registerTool({
+    registerTool({
       name: 'coding_agents_list',
       description: 'List agent definitions from .claude/agents/',
       parameters: {
@@ -545,7 +582,7 @@ const plugin = {
 
     // ─── Tool: team_list ──────────────────────────────────────────────────
 
-    api.registerTool({
+    registerTool({
       name: 'team_list',
       description: 'List teammates in an agent team session (requires enableAgentTeams)',
       parameters: {
@@ -561,7 +598,7 @@ const plugin = {
 
     // ─── Tool: team_send ──────────────────────────────────────────────────
 
-    api.registerTool({
+    registerTool({
       name: 'team_send',
       description: 'Send a message to a specific teammate in an agent team session',
       parameters: {
@@ -585,7 +622,7 @@ const plugin = {
 
     // ─── Tool: session_update_tools ───────────────────────────────────────
 
-    api.registerTool({
+    registerTool({
       name: 'session_update_tools',
       description:
         'Update allowedTools or disallowedTools for a running session. Restarts the session process with --resume to apply the new tool constraints while preserving conversation history. Rejects if the session is currently busy.',
@@ -625,7 +662,7 @@ const plugin = {
 
     // ─── Tool: session_switch_model ───────────────────────────────────────
 
-    api.registerTool({
+    registerTool({
       name: 'session_switch_model',
       description:
         'Switch the model for a running session immediately. Restarts the session process with --resume so the new model takes effect on the next message while preserving conversation history.',
@@ -645,7 +682,7 @@ const plugin = {
 
     // ─── Tool: project_purge (CLI 2.1.126) ────────────────────────────────
 
-    api.registerTool({
+    registerTool({
       name: 'project_purge',
       description:
         'Delete Claude Code project state (transcripts, tasks, file history, config entry) via `claude project purge`. Defaults to dry-run for safety — pass dry_run=false to actually delete. Use all=true to purge every project.',
@@ -679,7 +716,7 @@ const plugin = {
 
     // ─── Tool: plugin_details (CLI 2.1.139) ─────────────────────────────
 
-    api.registerTool({
+    registerTool({
       name: 'plugin_details',
       description:
         "Show a plugin's component inventory (commands, hooks, MCP servers, agents, skills) plus the per-session token cost of loading it. Wraps `claude plugin details <name>` (CLI 2.1.139+).",
@@ -708,7 +745,7 @@ const plugin = {
     // normal session channel — there is no separate goal-state event to
     // intercept (unlike Codex). Engine must be "claude".
 
-    api.registerTool({
+    registerTool({
       name: 'claude_goal_set',
       description:
         'Set a goal condition on a claude session. Claude Code keeps working across turns until the condition is met, evaluating after each turn via Haiku. Sends `/goal <objective>`. Requires engine: "claude".',
@@ -733,7 +770,7 @@ const plugin = {
       },
     });
 
-    api.registerTool({
+    registerTool({
       name: 'claude_goal_clear',
       description: 'Clear the active goal on a claude session. Sends `/goal clear`. Requires engine: "claude".',
       parameters: {
@@ -749,7 +786,7 @@ const plugin = {
       },
     });
 
-    api.registerTool({
+    registerTool({
       name: 'claude_goal_status',
       description:
         'Query the active goal on a claude session (objective, elapsed, turns, tokens). Sends bare `/goal` and returns the assistant reply. Requires engine: "claude".',
@@ -768,7 +805,7 @@ const plugin = {
 
     // ─── Tool: codex_resume (Codex 0.119+) ──────────────────────────────
 
-    api.registerTool({
+    registerTool({
       name: 'codex_resume',
       description:
         'Resume a previously recorded Codex thread by UUID/name, or pick the most recent with last=true. Spawns `codex exec resume` with --json so the output is parsed into structured fields. Independent of session manager state — useful for cross-process continuity.',
@@ -798,7 +835,7 @@ const plugin = {
 
     // ─── Tool: codex_review ─────────────────────────────────────────────
 
-    api.registerTool({
+    registerTool({
       name: 'codex_review',
       description:
         'Run a non-interactive Codex code review (`codex review`). Pick exactly one diff scope: uncommitted (working-tree changes), base (vs branch), or commit (vs SHA). Output is plain text — Codex `review` does not emit JSON.',
@@ -846,7 +883,7 @@ const plugin = {
     // started with engine: "codex-app". Calls against any other engine
     // surface a clear error rather than silently no-op'ing.
 
-    api.registerTool({
+    registerTool({
       name: 'codex_goal_set',
       description:
         'Set a long-horizon objective on a codex-app session. Sends `/goal <objective>` via the app-server slash command. Requires engine: "codex-app".',
@@ -871,7 +908,7 @@ const plugin = {
       },
     });
 
-    api.registerTool({
+    registerTool({
       name: 'codex_goal_get',
       description:
         'Read the cached goal state on a codex-app session (objective, status, tokensUsed, timeUsedSeconds, tokenBudget). Returns null if no goal is active. Pure read — does not send any turn.',
@@ -885,7 +922,7 @@ const plugin = {
       },
     });
 
-    api.registerTool({
+    registerTool({
       name: 'codex_goal_pause',
       description: 'Pause goal pursuit on a codex-app session. Sends `/goal pause`.',
       parameters: {
@@ -901,7 +938,7 @@ const plugin = {
       },
     });
 
-    api.registerTool({
+    registerTool({
       name: 'codex_goal_resume',
       description: 'Resume a paused goal on a codex-app session. Sends `/goal resume`.',
       parameters: {
@@ -917,7 +954,7 @@ const plugin = {
       },
     });
 
-    api.registerTool({
+    registerTool({
       name: 'codex_goal_clear',
       description: 'Clear the active goal on a codex-app session. Sends `/goal clear`.',
       parameters: {
@@ -935,7 +972,7 @@ const plugin = {
 
     // ─── Codex app-server v2 RPC tools (codex-app engine, Codex 0.137) ────
 
-    api.registerTool({
+    registerTool({
       name: 'codex_interrupt',
       description: 'Cancel the in-flight turn on a codex-app session (`turn/interrupt`).',
       parameters: {
@@ -946,7 +983,7 @@ const plugin = {
       execute: async (_id, args) => getManager().codexInterrupt(args.name as string),
     });
 
-    api.registerTool({
+    registerTool({
       name: 'codex_steer',
       description:
         'Add input to the in-flight turn on a codex-app session without restarting it (`turn/steer`). Falls back to a normal turn when idle.',
@@ -961,7 +998,7 @@ const plugin = {
       execute: async (_id, args) => getManager().codexSteer(args.name as string, args.message as string),
     });
 
-    api.registerTool({
+    registerTool({
       name: 'codex_fork',
       description: 'Branch a codex-app thread into a new one (`thread/fork`); returns the forked thread id.',
       parameters: {
@@ -972,7 +1009,7 @@ const plugin = {
       execute: async (_id, args) => getManager().codexForkThread(args.name as string),
     });
 
-    api.registerTool({
+    registerTool({
       name: 'codex_rollback',
       description: 'Drop the last N turns from a codex-app thread (`thread/rollback`).',
       parameters: {
@@ -986,7 +1023,7 @@ const plugin = {
       execute: async (_id, args) => getManager().codexRollback(args.name as string, args.numTurns as number),
     });
 
-    api.registerTool({
+    registerTool({
       name: 'codex_models',
       description: 'List models available to a codex-app session (`model/list`), incl. supported reasoning efforts.',
       parameters: {
@@ -997,8 +1034,8 @@ const plugin = {
       execute: async (_id, args) => getManager().codexModels(args.name as string),
     });
 
-    api.registerTool({
-      name: 'codex_threads',
+    registerTool({
+      name: 'codex_thread_list',
       description: 'List Codex threads visible to a codex-app session (`thread/list`), with optional filters.',
       parameters: {
         type: 'object',
@@ -1024,7 +1061,7 @@ const plugin = {
 
     // ─── Tool: claude_agents_list (Claude CLI 2.1.x, claude engine) ───────
 
-    api.registerTool({
+    registerTool({
       name: 'claude_agents_list',
       description:
         'List Claude Code background agent sessions via `claude agents --json` (state/model/title/progress). One-shot, not tied to a managed session.',
@@ -1041,7 +1078,7 @@ const plugin = {
 
     // ─── Fan-out tools (parallel multi-engine task, no consensus) ─────────
 
-    api.registerTool({
+    registerTool({
       name: 'fanout_start',
       description:
         'Run one task across N engine/model agents IN PARALLEL and collect their answers (optional synthesis). Cross-engine best-of-N / diverse-perspective primitive. No rounds, votes, or worktrees — use council for isolated parallel edits. Runs in background; poll with fanout_status.',
@@ -1104,7 +1141,7 @@ const plugin = {
       },
     });
 
-    api.registerTool({
+    registerTool({
       name: 'fanout_status',
       description: 'Poll a running or finished fan-out by id; returns per-agent results and any synthesis.',
       parameters: {
@@ -1115,7 +1152,7 @@ const plugin = {
       execute: async (_id, args) => ({ ok: true, ...getManager().fanoutStatus(args.id as string) }),
     });
 
-    api.registerTool({
+    registerTool({
       name: 'fanout_abort',
       description: 'Abort a running fan-out by id (already-started agents finish; synthesis is skipped).',
       parameters: {
@@ -1131,7 +1168,7 @@ const plugin = {
 
     // ─── Tools: workflow_* (durable run kernel) ─────────────────────────
 
-    api.registerTool({
+    registerTool({
       name: 'workflow_start',
       description:
         "Start a durable workflow run. Nodes: agent | fanout | council | verifier | human_gate | router | subflow. Every state transition is checkpointed to disk, so a run survives a process restart and can be resumed. When a contract is supplied the run cannot reach `completed` unless the runtime's own checks pass — without one it completes as `unverified`, which means nothing checked it. Runs in background; poll with workflow_status.",
@@ -1292,7 +1329,7 @@ const plugin = {
       },
     });
 
-    api.registerTool({
+    registerTool({
       name: 'workflow_status',
       description:
         'Poll a workflow run. Returns state, per-node status, and the outcome: `verified` (a contract passed), `refuted` (it failed), or `unverified` (none was declared — nothing checked the work).',
@@ -1324,7 +1361,7 @@ const plugin = {
       },
     });
 
-    api.registerTool({
+    registerTool({
       name: 'workflow_list',
       description: 'List workflow runs on this machine, newest first. Survives restarts.',
       parameters: {
@@ -1348,7 +1385,7 @@ const plugin = {
       }),
     });
 
-    api.registerTool({
+    registerTool({
       name: 'workflow_resume',
       description:
         'Re-attach to a workflow whose process died. Nodes already marked succeeded are not re-run; the node that was in flight is retried, because a half-finished node left no result to trust.',
@@ -1374,14 +1411,14 @@ const plugin = {
       },
     });
 
-    api.registerTool({
+    registerTool({
       name: 'workflow_cancel',
       description: 'Cancel a running workflow. The current node is asked to stop; the run ends in `cancelled`.',
       parameters: { type: 'object', properties: { runId: { type: 'string' } }, required: ['runId'] },
       execute: async (_id, args) => ({ ok: true, ...getManager().workflowCancel(args.runId as string) }),
     });
 
-    api.registerTool({
+    registerTool({
       name: 'workflow_steer',
       description:
         "Queue a correction for a running workflow. The text is prepended to the next agent node's prompt — corrections belong before the task, not after it.",
@@ -1396,7 +1433,7 @@ const plugin = {
       }),
     });
 
-    api.registerTool({
+    registerTool({
       name: 'workflow_approve',
       description: 'Answer a workflow parked at a human_gate node.',
       parameters: {
@@ -1410,7 +1447,7 @@ const plugin = {
       }),
     });
 
-    api.registerTool({
+    registerTool({
       name: 'verify_run',
       description:
         'Run an acceptance contract against a directory and return the evidence bundle. Use it to check work that did not come through a workflow — a plain session that edited a repo, say. The contract is yours; nothing is taken from agent output.',
@@ -1505,7 +1542,7 @@ const plugin = {
 
     // ─── Tool: council_start ────────────────────────────────────────────
 
-    api.registerTool({
+    registerTool({
       name: 'council_start',
       description:
         'Start a multi-agent council that collaborates on a task using git worktree isolation, round-based execution, and consensus voting. Agents can use different engines (Claude, Codex) and models.',
@@ -1579,7 +1616,7 @@ const plugin = {
 
     // ─── Tool: council_status ───────────────────────────────────────────
 
-    api.registerTool({
+    registerTool({
       name: 'council_status',
       description: 'Get the status of a running council session',
       parameters: {
@@ -1596,7 +1633,7 @@ const plugin = {
 
     // ─── Tool: council_abort ────────────────────────────────────────────
 
-    api.registerTool({
+    registerTool({
       name: 'council_abort',
       description: 'Abort a running council, stopping all agent sessions',
       parameters: {
@@ -1612,7 +1649,7 @@ const plugin = {
 
     // ─── Tool: council_inject ───────────────────────────────────────────
 
-    api.registerTool({
+    registerTool({
       name: 'council_inject',
       description:
         'Inject a user message into the next round of a running council. The message will be appended to all agent prompts in the next round.',
@@ -1632,7 +1669,7 @@ const plugin = {
 
     // ─── Tool: council_review ──────────────────────────────────────────
 
-    api.registerTool({
+    registerTool({
       name: 'council_review',
       description:
         'Review a completed council session. Returns a structured report of all changed files, branches, worktrees, plan.md status, review files, and agent summaries. Does not modify any state — purely informational. Use this before deciding to accept or reject.',
@@ -1649,7 +1686,7 @@ const plugin = {
 
     // ─── Tool: council_accept ──────────────────────────────────────────
 
-    api.registerTool({
+    registerTool({
       name: 'council_accept',
       description:
         'Accept and finalize council work. Cleans up all council scaffolding: removes worktrees, deletes council/* branches, removes plan.md and reviews/ directory. Only call after reviewing with council_review.',
@@ -1666,7 +1703,7 @@ const plugin = {
 
     // ─── Tool: council_reject ──────────────────────────────────────────
 
-    api.registerTool({
+    registerTool({
       name: 'council_reject',
       description:
         'Reject council work and provide feedback. Rewrites plan.md with rejection feedback and commits it. Does NOT delete any worktrees or branches — the council can be restarted to retry. Use this when the council output is incomplete or broken.',
@@ -1689,7 +1726,7 @@ const plugin = {
 
     // ─── Tool: session_send_to ────────────────────────────────────────────
 
-    api.registerTool({
+    registerTool({
       name: 'session_send_to',
       description:
         'Send a cross-session message from one session to another. If the target is idle, the message is delivered immediately. If busy, it is queued in the inbox for later delivery. Use "*" as target to broadcast to all other sessions.',
@@ -1716,7 +1753,7 @@ const plugin = {
 
     // ─── Tool: session_inbox ──────────────────────────────────────────────
 
-    api.registerTool({
+    registerTool({
       name: 'session_inbox',
       description: 'Read inbox messages for a session. Returns unread messages by default.',
       parameters: {
@@ -1738,7 +1775,7 @@ const plugin = {
 
     // ─── Tool: session_deliver_inbox ──────────────────────────────────────
 
-    api.registerTool({
+    registerTool({
       name: 'session_deliver_inbox',
       description:
         'Deliver all queued inbox messages to an idle session. Call this when a session finishes a task to process waiting messages.',
@@ -1755,7 +1792,7 @@ const plugin = {
 
     // ─── Tool: ultraplan_start ──────────────────────────────────────
 
-    api.registerTool({
+    registerTool({
       name: 'ultraplan_start',
       description:
         'Start an Ultraplan session: a dedicated Opus planning session that explores your project for up to 30 minutes and produces a detailed implementation plan. Runs in background.',
@@ -1781,7 +1818,7 @@ const plugin = {
 
     // ─── Tool: ultraplan_status ─────────────────────────────────────
 
-    api.registerTool({
+    registerTool({
       name: 'ultraplan_status',
       description: 'Get the status of an Ultraplan session. Returns the plan text when completed.',
       parameters: {
@@ -1798,7 +1835,7 @@ const plugin = {
 
     // ─── Tool: ultrareview_start ────────────────────────────────────
 
-    api.registerTool({
+    registerTool({
       name: 'ultrareview_start',
       description:
         'Start an Ultrareview: a fleet of bug-hunting agents (5-20) that review your codebase from different angles in parallel. Each agent specializes in a different area (security, performance, logic, types, etc.). Runs in background.',
@@ -1836,7 +1873,7 @@ const plugin = {
 
     // ─── Tool: ultrareview_status ───────────────────────────────────
 
-    api.registerTool({
+    registerTool({
       name: 'ultrareview_status',
       description: 'Get the status of an Ultrareview. Returns all findings when completed.',
       parameters: {
@@ -1857,7 +1894,7 @@ const plugin = {
     // Starting a run only launches the Planner — Coder and Reviewer are
     // spawned later by the Planner once the user approves the plan (S3).
 
-    api.registerTool({
+    registerTool({
       name: 'autoloop_start',
       description:
         'Start a v2 autoloop run in chat mode. Planner, Coder, and Reviewer default to Claude (opus/sonnet/sonnet) but each role can use a different engine/model. Coder and Reviewer are spawned later by the Planner after plan approval. Returns a run_id and the Planner session name.',
@@ -1891,11 +1928,30 @@ const plugin = {
             description: 'Default Reviewer model (default: sonnet for Claude; engine default otherwise)',
           },
           reviewer_custom_engine: CUSTOM_ENGINE_SCHEMA,
-          send_timeout_ms: { type: 'number', description: 'Per-message wall-clock cap (default 600000 = 10 min)' },
+          send_timeout_ms: {
+            ...AUTOLOOP_TIMEOUT_SCHEMA.sendTimeoutMs,
+            description: 'Per-agent send wall-clock cap in milliseconds (default 600000; inclusive range 5000–7200000)',
+          },
+          activity_lease_ms: {
+            ...AUTOLOOP_TIMEOUT_SCHEMA.activityLeaseMs,
+            description:
+              'Inactivity lease in milliseconds, renewed by qualified progress (default 1800000; inclusive range 60000–7200000)',
+          },
+          autoloop_hard_timeout_ms: {
+            ...AUTOLOOP_TIMEOUT_SCHEMA.autoloopHardTimeoutMs,
+            description:
+              'Absolute non-renewable run deadline in milliseconds (default 86400000; inclusive range 600000–259200000)',
+          },
         },
         required: ['run_id', 'workspace'],
       },
       execute: async (_id, args) => {
+        const timeoutConfig = {
+          sendTimeoutMs: args.send_timeout_ms as number | undefined,
+          activityLeaseMs: args.activity_lease_ms as number | undefined,
+          autoloopHardTimeoutMs: args.autoloop_hard_timeout_ms as number | undefined,
+        };
+        validateAutoloopTimeoutConfig(timeoutConfig);
         const result = await getManager().autoloopStart({
           runId: args.run_id as string,
           workspace: sanitizeCwd(args.workspace as string)!,
@@ -1908,7 +1964,7 @@ const plugin = {
           reviewerEngine: args.reviewer_engine as EngineType | undefined,
           reviewerModel: args.reviewer_model as string | undefined,
           reviewerCustomEngine: args.reviewer_custom_engine as CustomEngineConfig | undefined,
-          sendTimeoutMs: args.send_timeout_ms as number | undefined,
+          ...timeoutConfig,
         });
         return {
           ok: true,
@@ -1920,7 +1976,7 @@ const plugin = {
 
     // ─── Tool: autoloop_chat ─────────────────────────────────────
 
-    api.registerTool({
+    registerTool({
       name: 'autoloop_chat',
       description:
         "Send a chat message to the Planner of a v2 autoloop run. Returns the Planner's natural-language reply. Blocking: resolves after the Planner finishes its turn.",
@@ -1940,7 +1996,7 @@ const plugin = {
 
     // ─── Tool: autoloop_status ───────────────────────────────────
 
-    api.registerTool({
+    registerTool({
       name: 'autoloop_status',
       description: 'Get current state of a v2 autoloop run (status, iter, push count, subagents_spawned).',
       parameters: {
@@ -1957,7 +2013,7 @@ const plugin = {
 
     // ─── Tool: autoloop_list ─────────────────────────────────────
 
-    api.registerTool({
+    registerTool({
       name: 'autoloop_list',
       description: 'List all v2 autoloop runs in this manager process.',
       parameters: { type: 'object', properties: {} },
@@ -1969,7 +2025,7 @@ const plugin = {
 
     // ─── Tool: autoloop_reset_agent ──────────────────────────────
 
-    api.registerTool({
+    registerTool({
       name: 'autoloop_reset_agent',
       description:
         'Reset a single subagent (Coder or Reviewer) on a v2 run. Stops its persistent session; the next directive/review_request will re-prime from the system prompt + ledger artifacts. Use when an agent has drifted (repeated rejects, hallucinated context, token bloat). Planner reset requires force=true because it discards chat history with the user.',
@@ -2002,7 +2058,7 @@ const plugin = {
 
     // ─── Tool: autoloop_stop ─────────────────────────────────────
 
-    api.registerTool({
+    registerTool({
       name: 'autoloop_stop',
       description: 'Terminate a v2 autoloop run. Stops Planner (and Coder/Reviewer once spawned).',
       parameters: {
@@ -2022,7 +2078,7 @@ const plugin = {
 
     // ─── ultraapp (read-only) ─────────────────────────────────────────────
 
-    api.registerTool({
+    registerTool({
       name: 'ultraapp_list',
       description:
         'List all ultraapp runs (interview/build/done) with title, mode, and timestamps. Read-only — to start a new run, open the Forge dashboard tab.',
@@ -2034,7 +2090,7 @@ const plugin = {
       },
     });
 
-    api.registerTool({
+    registerTool({
       name: 'ultraapp_get',
       description: 'Get the AppSpec, chat history, and state for one ultraapp run. Pass `runId` from ultraapp_list.',
       parameters: {
@@ -2054,7 +2110,7 @@ const plugin = {
       },
     });
 
-    api.registerTool({
+    registerTool({
       name: 'ultraapp_status',
       description: 'Get the run state (mode, failure reason if any) for one ultraapp run. Cheap; no chat or spec data.',
       parameters: {
@@ -2071,7 +2127,7 @@ const plugin = {
 
     // ─── ultraapp (write) ─────────────────────────────────────────────────
 
-    api.registerTool({
+    registerTool({
       name: 'ultraapp_new',
       description:
         'Start a new ultraapp run. Spawns the interview Claude Opus session; the first question lands on the SSE stream / next ultraapp_get call. Returns the runId.',
@@ -2083,7 +2139,7 @@ const plugin = {
       },
     });
 
-    api.registerTool({
+    registerTool({
       name: 'ultraapp_answer',
       description:
         'Submit an answer to the current interview question. Either pick `value` (one of the option values from the latest question) or pass `freeform` text — both can be used together for "selected X with caveat".',
@@ -2106,7 +2162,7 @@ const plugin = {
       },
     });
 
-    api.registerTool({
+    registerTool({
       name: 'ultraapp_add_file',
       description:
         'Reference a local example file by absolute path (under $HOME or /tmp; symlinks and dotfiles rejected). Use this to attach reference inputs the interview can extract metadata from. For binary uploads from a browser, use the dashboard.',
@@ -2128,7 +2184,7 @@ const plugin = {
       },
     });
 
-    api.registerTool({
+    registerTool({
       name: 'ultraapp_spec_edit',
       description:
         'Manually edit the AppSpec via a JSON Patch (RFC 6902). Use sparingly — the interview engine produces and updates the spec automatically. Useful to correct a slot before clicking build.',
@@ -2151,7 +2207,7 @@ const plugin = {
       },
     });
 
-    api.registerTool({
+    registerTool({
       name: 'ultraapp_build_start',
       description:
         'Enqueue a build for the run. Builds run serially. Watch ultraapp_status for transitions: queued → building → build-complete (or → deploying → done if a router is wired).',
@@ -2167,7 +2223,7 @@ const plugin = {
       },
     });
 
-    api.registerTool({
+    registerTool({
       name: 'ultraapp_build_cancel',
       description:
         'Cancel a queued or in-flight build. Best-effort for in-flight; the worker is expected to honour its own cancellation signal (v0.2 only emits the event).',
@@ -2183,7 +2239,7 @@ const plugin = {
       },
     });
 
-    api.registerTool({
+    registerTool({
       name: 'ultraapp_feedback',
       description:
         'Submit a done-mode feedback message (after the run reaches `done`). The text is classified by Haiku into cosmetic / spec-delta / structural and routed: cosmetic runs the patcher (Opus diff + validate + auto-revert + version snapshot); spec-delta flips the run back to `interview` with a focused bootstrap; structural posts a "start fresh" suggestion.',
@@ -2202,7 +2258,7 @@ const plugin = {
       },
     });
 
-    api.registerTool({
+    registerTool({
       name: 'ultraapp_promote_version',
       description:
         "Atomically swap which previously-built version is currently deployed. Stops the old container, starts the target version's container, updates the router map. Requires a router to be wired (see clawo serve).",
@@ -2221,7 +2277,7 @@ const plugin = {
       },
     });
 
-    api.registerTool({
+    registerTool({
       name: 'ultraapp_start_container',
       description:
         'Start the deployed container for a run (e.g., after `ultraapp_stop_container` or after orchestrator restart with a stopped container). Re-registers the slug on the router.',
@@ -2237,7 +2293,7 @@ const plugin = {
       },
     });
 
-    api.registerTool({
+    registerTool({
       name: 'ultraapp_stop_container',
       description:
         'Stop the deployed container and deregister the slug from the router. URL returns 404 until ultraapp_start_container.',
@@ -2253,7 +2309,7 @@ const plugin = {
       },
     });
 
-    api.registerTool({
+    registerTool({
       name: 'ultraapp_delete',
       description:
         'Delete a run completely: stops the container, removes the image, deregisters the slug, and removes the on-disk run dir at ~/.claw-orchestrator/ultraapps/<runId>/. Irreversible.',
