@@ -102,9 +102,26 @@ function findCustomEngineKey(value: unknown, depth = 0, trail = ''): string | nu
   return null;
 }
 
-/** An inline config — the form that carries a binary and argv of its own. */
+/**
+ * An inline config — the form that carries a binary and argv of its own.
+ *
+ * Tested by the thing that makes it dangerous: a name that resolves to an
+ * executable. `CustomEngineConfig` requires `bin`, and `resolveBin()` reads only
+ * `binEnv` then `bin`, so an object carrying neither cannot spawn anything.
+ *
+ * "Any object at all" was too wide, and not in a harmless direction. A request
+ * body may legitimately contain *descriptions* of this shape rather than an
+ * instance of it — an OpenAI/Anthropic `tools` array carries JSON Schema, and
+ * this package's own `autoloop_start` schema declares
+ * `planner_custom_engine` / `coder_custom_engine` / `reviewer_custom_engine`.
+ * Those property definitions are objects, so the old test rejected the whole
+ * request: every tool-bearing turn through `/v1/chat/completions` failed with a
+ * 400 while a tool-free smoke test passed, which is why it went unnoticed.
+ */
 function isInlineCustomEngine(value: unknown): boolean {
-  return typeof value === 'object' && value !== null;
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const cfg = value as { bin?: unknown; binEnv?: unknown };
+  return typeof cfg.bin === 'string' || typeof cfg.binEnv === 'string';
 }
 
 function rejectCustomEngineOverHttp(body: unknown): string | null {
@@ -112,6 +129,14 @@ function rejectCustomEngineOverHttp(body: unknown): string | null {
   if (!key) return null;
   return `${key} may not be given as an inline config over HTTP: it names an executable and its arguments, so it is accepted only from a local caller (MCP tool / SessionManager API). Pass the id of a bundled engine preset instead, or use a built-in engine.`;
 }
+
+/**
+ * Exposed so the tool registry can check its own schemas against this guard.
+ * The schemas are what a host sends back in a `tools` array, and several of
+ * them describe custom-engine properties — the guard must read those as
+ * descriptions, not as an attempt to name a binary.
+ */
+export const __rejectCustomEngineOverHttpForTest = rejectCustomEngineOverHttp;
 
 /**
  * A guarded SSE writer.

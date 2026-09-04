@@ -300,7 +300,7 @@ Codex app-server v2 RPCs (require `engine: "codex-app"`). Method names + param s
 | `codex_fork`      | `thread/fork`     | `name`                                                          | `{ ok, threadId }` — branches the thread; returns the forked id                                              |
 | `codex_rollback`  | `thread/rollback` | `name`, `numTurns`                                              | `{ ok, numTurns }` — drops the last N turns                                                                  |
 | `codex_models`    | `model/list`      | `name`                                                          | `{ ok, models }` — incl. each model's `supportedReasoningEfforts`                                            |
-| `clawo_codex_threads` | `thread/list`     | `name`, `searchTerm?`, `cwd?`, `archived?`, `cursor?`, `limit?` | `{ ok, data, nextCursor }` — list threads with filters + pagination                                          |
+| `codex_thread_list` | `thread/list`     | `name`, `searchTerm?`, `cwd?`, `archived?`, `cursor?`, `limit?` | `{ ok, data, nextCursor }` — list threads with filters + pagination                                          |
 
 To **resume** a codex-app thread, start a session with `engine: "codex-app"` and
 `resumeSessionId: "<threadId>"` — it loads the existing thread via `thread/resume` instead of

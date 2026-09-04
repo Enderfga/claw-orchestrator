@@ -516,6 +516,31 @@ describe('ClaudeAgentDispatcher — recoverable send timeout and dispatch identi
     expect(calls.sendMessage).toHaveBeenCalledTimes(2);
   });
 
+  it('bounds the retained dispatch cache while still coalescing a recent re-delivery', async () => {
+    const { dispatcher, calls } = makeDispatcher();
+    calls.sendMessage.mockResolvedValue({ output: '', error: undefined });
+    const retained = dispatcher as unknown as { logicalDispatches: Map<string, unknown> };
+
+    const recent = fixedIdentity(Msg.chat(1, { text: 'recent turn' }), 'logical-recent');
+    await dispatcher.deliver(recent);
+    const sendsAfterRecent = calls.sendMessage.mock.calls.length;
+
+    // Far more distinct dispatches than the cache is allowed to hold.
+    for (let i = 0; i < 200; i++) {
+      await dispatcher.deliver(fixedIdentity(Msg.chat(1, { text: `turn ${i}` }), `logical-bulk-${i}`));
+    }
+
+    expect(retained.logicalDispatches.size).toBeLessThanOrEqual(64);
+
+    // A dispatch well inside the retention window is still deduped, not re-sent.
+    // Deliberately not the very last one: that survives even a cache of size 1,
+    // so it could not tell a real window from a degenerate one.
+    const sendsBeforeReplay = calls.sendMessage.mock.calls.length;
+    await dispatcher.deliver(fixedIdentity(Msg.chat(1, { text: 'turn 190' }), 'logical-bulk-190'));
+    expect(calls.sendMessage.mock.calls.length).toBe(sendsBeforeReplay);
+    expect(sendsAfterRecent).toBeGreaterThan(0);
+  });
+
   it('derives the same ID across dispatcher instances without using envelope time, but separates message identities', async () => {
     vi.useFakeTimers();
     const firstHarness = makeDispatcher({ sendTimeoutMs: 7_200_000 });

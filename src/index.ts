@@ -1035,7 +1035,7 @@ const plugin = {
     });
 
     registerTool({
-      name: 'clawo_codex_threads',
+      name: 'codex_thread_list',
       description: 'List Codex threads visible to a codex-app session (`thread/list`), with optional filters.',
       parameters: {
         type: 'object',

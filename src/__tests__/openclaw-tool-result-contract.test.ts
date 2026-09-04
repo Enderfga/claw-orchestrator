@@ -105,7 +105,7 @@ describe('OpenClaw tool result contract', () => {
 
   it('registers only the namespaced Codex thread-listing tool', () => {
     expect(registration.tools).toHaveLength(77);
-    expect(registration.tools.has('clawo_codex_threads')).toBe(true);
+    expect(registration.tools.has('codex_thread_list')).toBe(true);
     expect(registration.tools.has('codex_threads')).toBe(false);
   });
 });

@@ -334,6 +334,45 @@ describe('EmbeddedServer', () => {
       expect(manager.startSession).toHaveBeenCalled();
     });
 
+    // A body may describe this shape instead of carrying one. An OpenAI-style
+    // `tools` array is JSON Schema, and this package's own `autoloop_start`
+    // schema declares `planner_custom_engine` — so matching "any object under a
+    // custom-engine key" rejected every tool-bearing turn through the
+    // OpenAI-compatible endpoint with a 400. A tool-free request passed, which
+    // is why a curl smoke test never showed it.
+    it('accepts a tool schema that merely declares custom-engine properties', async () => {
+      await server.start();
+
+      const res = await request(port, '/session/start', {
+        method: 'POST',
+        body: {
+          name: 'schema-ok',
+          cwd: '/tmp',
+          tools: [
+            {
+              type: 'function',
+              function: {
+                name: 'autoloop_start',
+                parameters: {
+                  type: 'object',
+                  properties: {
+                    planner_custom_engine: {
+                      type: 'object',
+                      description: 'Custom engine config.',
+                      properties: { bin: { type: 'string' }, name: { type: 'string' } },
+                    },
+                  },
+                },
+              },
+            },
+          ],
+        },
+      });
+
+      expect(res.status).not.toBe(400);
+      expect(manager.startSession).toHaveBeenCalled();
+    });
+
     it('refuses a nested custom engine, wherever in the body it sits', async () => {
       await server.start();
 

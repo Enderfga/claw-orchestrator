@@ -5,15 +5,48 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [7.0.0] - 2026-09-04
+
+Two contributed fixes for defects that were invisible from inside the project, plus the
+follow-ups they surfaced. Thanks to @ajmtrz for both, and for finding them by running this
+orchestrator's own autoloop against the repository.
 
 ### Fixed
 
-- **OpenClaw tool results now satisfy the host contract.** All 77 registered handlers pass through
-  one adapter that emits text content plus the original structured details, serializes BigInt
-  values safely, preserves already-wrapped results, and lets handler errors propagate unchanged.
-- **The Codex thread-listing tool is now `clawo_codex_threads`.** The namespaced name avoids a
-  registration collision with `@openclaw/codex`.
+- **Tool results reaching an OpenClaw host were empty.** Every handler returned its raw payload,
+  but the host reads `result.content`, so tools ran — with their side effects — and the model was
+  handed nothing back. All 77 registrations now pass through one adapter that emits text content
+  plus the original structured value in `details`, serializes BigInt safely, preserves an
+  already-wrapped result, and lets handler errors propagate unchanged.
+- **MCP tool results no longer carry the payload twice.** With handlers now normalized, the MCP
+  bridge's own `JSON.stringify` would have shipped the data once escaped inside a text block and
+  again under `details`. It forwards the content blocks instead.
+- **An autoloop node no longer dies at 30 minutes.** The kernel's generic default node timeout
+  applied to autoloop nodes, which are built to run for hours or days. Autoloops now own their
+  timeout policy; an explicitly configured node timeout is still honoured.
+- **A timed-out agent send is recoverable instead of fatal.** Sends gained a bounded per-message
+  deadline, a renewable inactivity lease, and an absolute run lifetime cap. A genuine send
+  deadline parks the run in `awaiting_resume` with the pending dispatch identity, so a resume can
+  raise the deadline and continue rather than restart. Explicit stop and hard-timeout terminal
+  states win races against a late timeout.
+- **The retained dispatch cache is bounded.** Deduplicating logical dispatches for a run's whole
+  lifetime meant holding every iteration's full diff in memory, on runs allowed to last 72 hours.
+  Settled entries are evicted past a cap; in-flight ones never are, so coalescing still holds.
+- **A request may describe a custom engine without being refused as one.** The HTTP guard matched
+  any object under a custom-engine key, so a `tools` array — JSON Schema, including this package's
+  own `autoloop_start` declaration — tripped it, and every tool-bearing turn through
+  `/v1/chat/completions` failed with a 400 while a tool-free request passed. The guard now tests
+  what makes an inline config dangerous: a `bin`/`binEnv` that resolves to an executable. Actual
+  inline configs are refused exactly as before.
+
+### Changed
+
+- **BREAKING: the Codex thread-listing tool is now `codex_thread_list`.** `codex_threads`
+  collided with the identically named tool in `@openclaw/codex`, and neither plugin reported a
+  diagnostic — the two silently shadowed each other. Callers using `codex_threads` must update.
+- Autoloop start and resume accept `send_timeout_ms`, `activity_lease_ms`, and
+  `autoloop_hard_timeout_ms` over the tools, HTTP, and CLI surfaces. Runs that omit them keep the
+  previous behaviour.
 
 ## [6.5.0] - 2026-09-03
 

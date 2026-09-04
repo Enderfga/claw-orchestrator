@@ -175,6 +175,13 @@ function genuineSendTimeoutMessage(error: unknown): string | null {
 }
 
 /**
+ * How many settled logical dispatches stay cached for dedup. One iteration
+ * spends a handful, so this holds many iterations' worth of replay window while
+ * keeping the retained diffs bounded.
+ */
+const MAX_RETAINED_DISPATCHES = 64;
+
+/**
  * Hash only immutable logical routing identity. `msg_id` distinguishes two
  * intentional sends with otherwise identical content; envelope timestamps,
  * wall-clock time, random values, retry attempts, and mutable counters are not
@@ -227,8 +234,23 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
   /** Where Reviewer reads from. Created lazily by stageReviewSandbox(). */
   private reviewerSandboxDir: string;
   private ledgerDir: string;
-  /** One promise per immutable logical dispatch, retained for run-lifetime dedup. */
+  /**
+   * One promise per immutable logical dispatch, so a re-delivered message is
+   * coalesced onto the first send instead of spending a second agent turn.
+   *
+   * Bounded, because what these promises resolve to is not small: a Coder
+   * dispatch returns `iter_artifacts` carrying the iteration's entire diff, and
+   * a run may legitimately last up to `MAX_AUTOLOOP_HARD_TIMEOUT_MS` (72 h).
+   * Retaining every one of those for the run's lifetime grows without limit.
+   *
+   * Evicting the oldest is safe: the queue consumes each message once, and the
+   * only replay path (`restorePausedMessages`) re-queues messages that were
+   * parked *before* delivery. Re-delivery therefore happens within a few
+   * messages of the original, far inside this window — while an entry still
+   * in flight is never evicted, so concurrent duplicates always coalesce.
+   */
   private logicalDispatches = new Map<string, Promise<AnyAutoloopMessage[]>>();
+  private readonly settledDispatches = new Set<string>();
 
   constructor(config: ClaudeAgentDispatcherConfig) {
     super();
@@ -298,7 +320,29 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
 
     const pending = this.deliverOnce(env, dispatchId);
     this.logicalDispatches.set(dispatchId, pending);
-    return await pending;
+    // Mark settled before trimming so eviction can tell an in-flight dispatch
+    // from a finished one. A rejection settles too; `deliver` still rethrows it
+    // to this caller, and the entry is only a dedup record afterwards.
+    void pending.then(
+      () => this.settledDispatches.add(dispatchId),
+      () => this.settledDispatches.add(dispatchId),
+    );
+    try {
+      return await pending;
+    } finally {
+      this.trimLogicalDispatches();
+    }
+  }
+
+  /** Drop the oldest settled dispatches once the retained set exceeds its cap. */
+  private trimLogicalDispatches(): void {
+    if (this.logicalDispatches.size <= MAX_RETAINED_DISPATCHES) return;
+    for (const id of this.logicalDispatches.keys()) {
+      if (this.logicalDispatches.size <= MAX_RETAINED_DISPATCHES) break;
+      if (!this.settledDispatches.has(id)) continue; // still in flight — must stay
+      this.logicalDispatches.delete(id);
+      this.settledDispatches.delete(id);
+    }
   }
 
   /** Current per-agent deadline, including the backward-compatible default. */

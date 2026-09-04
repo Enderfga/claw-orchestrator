@@ -1,7 +1,10 @@
 import { describe, it, expect, vi } from 'vitest';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
 import plugin from '../index.js';
 import { SessionManager } from '../session-manager.js';
 import { ENGINE_TYPES } from '../types.js';
+import { __rejectCustomEngineOverHttpForTest as rejectCustomEngineOverHttp } from '../embedded-server.js';
 import type { PluginConfig, PermissionMode, EffortLevel } from '../types.js';
 
 interface RegisteredTool {
@@ -205,12 +208,16 @@ describe('plugin tool registration', () => {
       plannerSession: 'autoloop-tool-timeouts-planner',
       state: {} as never,
     });
+    // The handler canonicalises the workspace, and on macOS `/tmp` is a symlink
+    // to `/private/tmp` — so a literal `/tmp` here fails the round-trip on every
+    // Mac while passing on the Linux runner. Start from the resolved path.
+    const workspace = fs.realpathSync(os.tmpdir());
     const previousNoServer = process.env.CLAWO_NO_EMBEDDED_SERVER;
     process.env.CLAWO_NO_EMBEDDED_SERVER = '1';
     try {
       await tool!.execute('timeout-contract', {
         run_id: 'tool-timeouts',
-        workspace: '/tmp',
+        workspace,
         send_timeout_ms: 7_200_000,
         activity_lease_ms: 60_000,
         autoloop_hard_timeout_ms: 259_200_000,
@@ -218,7 +225,7 @@ describe('plugin tool registration', () => {
       expect(start).toHaveBeenCalledWith(
         expect.objectContaining({
           runId: 'tool-timeouts',
-          workspace: '/tmp',
+          workspace,
           sendTimeoutMs: 7_200_000,
           activityLeaseMs: 60_000,
           autoloopHardTimeoutMs: 259_200_000,
@@ -267,7 +274,7 @@ describe('plugin tool registration', () => {
       'codex_fork',
       'codex_rollback',
       'codex_models',
-      'clawo_codex_threads',
+      'codex_thread_list',
       'claude_agents_list',
       'fanout_start',
       'fanout_status',
@@ -357,5 +364,33 @@ describe('openclaw.plugin.json parity', () => {
       [...permissionModes].sort(),
     );
     expect([...(manifest.configSchema.properties.defaultEffort.enum ?? [])].sort()).toEqual([...effortLevels].sort());
+  });
+
+  // A host echoes the tool list back inside its request, so every schema this
+  // plugin registers ends up as request-body content. Several of them describe
+  // custom-engine properties — `session_start.customEngine`,
+  // `autoloop_start.{planner,coder,reviewer}_custom_engine`, and
+  // `council_start.agents.items.properties.customEngine`, which sits deeper and
+  // behind an array. The HTTP guard used to match any object under such a key,
+  // so it rejected the whole request and every tool-bearing turn through
+  // `/v1/chat/completions` returned 400. Checked against the real registry
+  // rather than a fixture, so a tool added later is covered too.
+  it('does not let the HTTP custom-engine guard reject its own tool schemas', () => {
+    const registration = collectRegistration();
+    try {
+      const asHostToolList = {
+        model: 'claude-sonnet-5',
+        messages: [{ role: 'user', content: 'hi' }],
+        tools: registration.tools.map((t) => ({
+          type: 'function',
+          function: { name: t.name, description: t.description, parameters: t.parameters },
+        })),
+      };
+
+      expect(registration.tools.length).toBeGreaterThan(70);
+      expect(rejectCustomEngineOverHttp(asHostToolList)).toBeNull();
+    } finally {
+      registration.services[0]?.stop();
+    }
   });
 });
