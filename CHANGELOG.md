@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.3.0] - 2026-09-13
+
+### Added
+
+- **`session_handoff` — continue a conversation on another engine.** Starts a new session on the
+  target engine (or the same engine with another model) in the source's working directory, and
+  carries the conversation into it, so the new agent picks up where the old one stopped. The source
+  keeps running untouched; the two go separate ways from there.
+  - No engine can resume another's session, and each keeps its history in its own undocumented
+    on-disk format, so the conversation travels as text: a `<conversation_history>` block in front
+    of the new session's first message, after which the new engine holds it itself. Nothing is
+    written into either engine's session store, and it works across every engine, custom ones
+    included. Every turn in the block is fenced against the block's own tags.
+  - What was said is recorded per session as it is sent and answered. The engine's history buffer
+    is not used for this: it is capped by event count, and on a long session the opening request is
+    the first thing it drops.
+  - When the conversation is longer than `maxChars` (default 240,000 characters), the opening
+    request is kept, the newest turns fill the rest, and one line records how many turns in
+    between were left out.
+  - The new session inherits the engine-neutral settings — permission and sandbox mode, effort,
+    spend cap, system prompts, extra directories — and none that were written for the source
+    engine. A second handoff carries the whole conversation, not only the part the middle session
+    saw. A first send that fails on the new engine keeps the history for the retry.
+  - Verified end to end over MCP against the installed engines: a fact planted in a Claude session
+    was recalled by Codex after a handoff, and again by Claude after a second handoff back, which
+    also named Codex as the engine it had taken over from.
+
 ## [7.2.0] - 2026-09-13
 
 Weekly engine sweep. Five engines upgraded in place, every live turn through the real wrapper,

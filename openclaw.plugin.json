@@ -111,6 +111,7 @@
     "tools": [
       "session_start",
       "session_send",
+      "session_handoff",
       "session_stop",
       "session_list",
       "sessions_overview",
