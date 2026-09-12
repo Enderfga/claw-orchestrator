@@ -158,6 +158,15 @@ in cleanup), `gemini` succeeds on exit 53 because its turn limit resolves,
 `interrupt()` does not count, and `opencode` refuses a turn on purpose when
 read-only enforcement did not load.
 
+**A succeeded turn is not a turn that did the work.** When the engine refuses a
+tool call it usually does not fail the turn. Measured on Claude Code 2.1.269 with
+`--permission-prompts none` — which a session gets whenever no prompt tool is
+configured — a turn asked to write a file came back `subtype: 'success'`,
+`is_error: false`, with the refused Bash call listed in the result event and no
+file on disk. It counts in `turnsSucceeded` and sets no `error`. The refused calls
+reach the caller as `permissionDenials` on the send result; read that before
+treating a successful turn as work done.
+
 The run ledger's `ok` reads this same counter, so a turn cannot be a failure on
 `/v1/sessions` and a success in `clawo runs`.
 

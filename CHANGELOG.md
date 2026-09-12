@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.2.0] - 2026-09-13
+
+Weekly engine sweep. Five engines upgraded in place, every live turn through the real wrapper,
+registry 25 models with no drift.
+
+### Added
+
+- **`SendResult.permissionDenials` — the tool calls the engine refused during a turn.** A refused
+  call does not fail the turn. Measured on Claude Code 2.1.269 with `--permission-prompts none`,
+  which a session gets whenever no prompt tool is configured: asked to write a file, the turn ended
+  `subtype: 'success'` with `is_error: false`, the Bash call listed as denied in the result event, and
+  no file on disk. It counted in `turnsSucceeded` and set no `error`. `sendMessage` — the one path
+  every caller goes through — dropped that event, so council agents, autoloop roles, and MCP callers
+  all saw a clean success. The field is present only when something was refused, and it reaches
+  `session_send` and every other caller unchanged.
+
+### Changed
+
+- Tested versions: Claude Code 2.1.260 → 2.1.269, Codex 0.153.2 → 0.154.0, Antigravity
+  1.1.25 → 1.2.2, Grok Build 1.0.13 → 1.0.30, OpenCode 1.18.27 → 1.18.30.
+- Codex 0.154.0's `--worktree` is deliberately not passed. Measured: edits land in a
+  Codex-managed worktree on a detached HEAD rather than in the session's working directory, and the
+  event stream does not report where. Acceptance contracts and evidence read the session's working
+  directory, so they would verify an untouched tree.
+
 ## [7.1.1] - 2026-09-04
 
 The weekly sweep now checks the model registry, and its first run found two more wrong prices.
