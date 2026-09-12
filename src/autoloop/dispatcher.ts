@@ -18,7 +18,7 @@
  */
 
 import { EventEmitter } from 'node:events';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -46,6 +46,7 @@ import {
 import {
   applyPlannerToolCalls,
   parsePlannerReply,
+  type PlannerArtifactWrite,
   type PlannerToolEffects,
   type SpawnSubagentsArgs,
 } from './planner-tools.js';
@@ -797,8 +798,8 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
       engine: this.plannerSelection.engine,
       model: this.roleModel('planner', this.plannerSelection),
       customEngine: this.plannerSelection.engine === 'custom' ? this.plannerSelection.customEngine : undefined,
-      permissionMode: this.plannerSelection.engine === 'claude' ? 'bypassPermissions' : 'manual',
-      sandboxMode: this.plannerSelection.engine === 'claude' ? undefined : 'read-only',
+      permissionMode: 'manual',
+      sandboxMode: 'read-only',
       systemPrompt: this.plannerSystemPrompt,
       // Hard role boundary: Planner must NEVER author content files itself.
       // Its only writes are plan.md / goal.json via the write_plan /
@@ -810,6 +811,73 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
       disallowedTools: ['Write', 'Edit', 'MultiEdit', 'NotebookEdit'],
     });
     this.plannerStarted = true;
+  }
+
+  /**
+   * Replace a Planner turn's complete artifact set or leave the prior set
+   * untouched. Every new body is staged before the first visible rename; if a
+   * later rename fails, already-replaced targets are restored from byte
+   * snapshots before the error reaches the control handler.
+   */
+  private replacePlannerArtifacts(writes: readonly PlannerArtifactWrite[]): void {
+    const nonce = randomUUID();
+    const entries = writes.map((write, index) => {
+      const target = path.join(this.config.workspace, write.file);
+      const existed = fs.existsSync(target);
+      const stat = existed ? fs.statSync(target) : undefined;
+      if (stat && !stat.isFile()) throw new Error(`${write.file} exists but is not a regular file`);
+      return {
+        ...write,
+        target,
+        staged: path.join(this.config.workspace, `.${write.file}.${nonce}.${index}.tmp`),
+        existed,
+        original: existed ? fs.readFileSync(target) : undefined,
+        originalMode: stat ? stat.mode & 0o777 : undefined,
+      };
+    });
+    const replaced: typeof entries = [];
+
+    try {
+      for (const entry of entries) {
+        fs.writeFileSync(entry.staged, entry.content, { encoding: 'utf-8', flag: 'wx', mode: 0o666 });
+      }
+      for (const entry of entries) {
+        fs.renameSync(entry.staged, entry.target);
+        replaced.push(entry);
+        if (entry.originalMode !== undefined) fs.chmodSync(entry.target, entry.originalMode);
+      }
+    } catch (error) {
+      const rollbackErrors: string[] = [];
+      for (const entry of [...replaced].reverse()) {
+        try {
+          if (!entry.existed) {
+            if (fs.existsSync(entry.target)) fs.unlinkSync(entry.target);
+            continue;
+          }
+          const restore = `${entry.staged}.restore`;
+          try {
+            fs.writeFileSync(restore, entry.original!, { flag: 'wx', mode: entry.originalMode });
+            fs.renameSync(restore, entry.target);
+            if (entry.originalMode !== undefined) fs.chmodSync(entry.target, entry.originalMode);
+          } finally {
+            if (fs.existsSync(restore)) fs.unlinkSync(restore);
+          }
+        } catch (rollbackError) {
+          rollbackErrors.push(`${entry.file}: ${(rollbackError as Error).message}`);
+        }
+      }
+      for (const entry of entries) {
+        try {
+          if (fs.existsSync(entry.staged)) fs.unlinkSync(entry.staged);
+        } catch (cleanupError) {
+          rollbackErrors.push(`${entry.file} staging cleanup: ${(cleanupError as Error).message}`);
+        }
+      }
+      if (rollbackErrors.length > 0) {
+        throw new Error(`${(error as Error).message}; artifact rollback failed: ${rollbackErrors.join('; ')}`);
+      }
+      throw error;
+    }
   }
 
   private async deliverToPlanner(env: AnyAutoloopMessage, dispatchId: string): Promise<AnyAutoloopMessage[]> {
@@ -926,20 +994,32 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
           });
         }
       },
-      writePlanFile: async (file, content, commitMessage) => {
+      writePlanFiles: async (writes) => {
         // Author plan.md / goal.json on the Planner's behalf. The Planner
         // can't Write/Edit directly (disallowedTools), so this autoloop tool
-        // is the single legitimate authoring path. Best-effort git commit
-        // keeps the ledger honest.
-        const target = path.join(this.config.workspace, file);
-        fs.writeFileSync(target, content);
-        await this.gitCommit(file, commitMessage ?? `autoloop: planner writes ${file}`);
+        // is the single legitimate authoring path. Materialize the entire set
+        // before commit or any spawn effect.
+        this.replacePlannerArtifacts(writes);
+        const filenames = writes.map(({ file }) => file).join(', ');
+        const commitMessage =
+          writes.find(({ commitMessage: candidate }) => candidate)?.commitMessage ??
+          `autoloop: planner writes ${filenames}`;
+        await this.gitCommit(filenames, commitMessage);
       },
     };
     // After iter_done(N) the run has advanced to iter N+1 in runner state;
     // any directive Planner emits in response targets the new iter.
     const nextIter = env.type === 'iter_done' ? env.iter + 1 : env.iter;
-    const handlerResult = await applyPlannerToolCalls(parsed.calls, effects, nextIter);
+    const handlerResult =
+      parsed.parse_errors.length > 0
+        ? {
+            emitted_messages: [],
+            errors: parsed.parse_errors.map(({ block_index, error }) => ({
+              tool: `autoloop block ${block_index}`,
+              error,
+            })),
+          }
+        : await applyPlannerToolCalls(parsed.calls, effects, nextIter);
     for (const errEntry of handlerResult.errors) {
       this.logger.warn?.(`[autoloop] tool '${errEntry.tool}' failed: ${errEntry.error}`);
     }

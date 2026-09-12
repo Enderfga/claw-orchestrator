@@ -36,7 +36,12 @@ import * as path from 'node:path';
 import type { EffortLevel, SessionConfig, SessionSendOptions, StreamEvent, TurnResult } from './types.js';
 import { estimateTokens } from './models.js';
 import { sanitizeSecrets } from './sanitize.js';
-import { extractCreatedAgyConversationId, isAgyConversationId } from './agy-conversation.js';
+import {
+  extractCreatedAgyConversationId,
+  extractAgyToolPermissionDenials,
+  hasAgyToolPermissionDenial,
+  isAgyConversationId,
+} from './agy-conversation.js';
 import { SESSION_EVENT } from './constants.js';
 import { BaseOneShotSession } from './base-oneshot-session.js';
 
@@ -61,6 +66,11 @@ interface AgyStreamEvent {
     usage?: AgyUsage;
   };
 }
+
+const EMPTY_RESPONSE_ERROR =
+  'Antigravity returned an empty response; the turn failed but the session remains available for retry';
+const TOOL_DENIAL_EMPTY_RESPONSE_ERROR =
+  'Antigravity returned an empty response after a tool permission denial; the turn failed but the session remains available for retry';
 
 // ─── PersistentAgySession ───────────────────────────────────────────────────
 
@@ -183,15 +193,12 @@ export class PersistentAgySession extends BaseOneShotSession {
    * `Created conversation <uuid>`; resumed ones only log lookups, so an
    * existing ID is never overwritten by a miss.
    */
-  private _harvestConversationId(): void {
+  private _harvestConversationId(log: string | undefined): void {
     // Once harvested (or seeded) the ID is final for the life of the session
-    // — skip the synchronous whole-log re-read on every later turn.
+    // — skip the fallback match on every later turn.
     if (this.agyConversationId) return;
-    try {
-      const log = fs.readFileSync(this._logFile, 'utf8');
+    if (log) {
       this.agyConversationId = extractCreatedAgyConversationId(log);
-    } catch {
-      // Log file missing — agy failed before logging anything
     }
     if (!this.agyConversationId) {
       // Without an ID every later send silently starts a fresh conversation.
@@ -212,6 +219,16 @@ export class PersistentAgySession extends BaseOneShotSession {
   protected _run(message: string, options: SessionSendOptions): Promise<TurnResult> {
     const timeout = options.timeout || 300_000;
     const args = this._buildArgs(message, timeout, options.effort);
+
+    // The path is stable for the session, so remove the previous turn's file
+    // before spawning. If that cannot be proven, do not inspect the file at all:
+    // a stale denial must never be attributed to the current empty response.
+    let mayReadTurnLog = true;
+    try {
+      fs.unlinkSync(this._logFile);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') mayReadTurnLog = false;
+    }
 
     return new Promise<TurnResult>((resolve, reject) => {
       let resultText = '';
@@ -311,25 +328,34 @@ export class PersistentAgySession extends BaseOneShotSession {
         this.currentProc = null;
         if (pending) handleLine(pending, false);
 
+        const text = resultText.replace(/\n$/, '');
+        const emptyResponse = text.trim().length === 0;
+        let turnLog: string | undefined;
+        const needsLog = !this.agyConversationId || (!settled && code === 0 && !turnError);
+        if (mayReadTurnLog && needsLog) {
+          try {
+            turnLog = fs.readFileSync(this._logFile, 'utf8');
+          } catch {
+            // Log file missing — agy failed before logging anything.
+          }
+        }
+
         // Harvest BEFORE the settled check: a turn that hit the wrapper timeout
         // has already rejected (settled), but agy may still have announced the
         // conversation before being killed. Skipping this would lose the id
         // permanently and every later send would silently start fresh. The
         // stream normally supplies it from the `init` event; this is the
         // fallback for a turn that died before emitting one.
-        this._harvestConversationId();
+        this._harvestConversationId(turnLog);
 
         if (settled) return;
         settled = true;
 
-        // One expression for the outcome: it feeds the counter here and the `stop_reason`
-        // below, and it is the reject condition at the end of this handler. The exit code
-        // stays in the conjunction — agy can report SUCCESS and then die in cleanup, and a
-        // turn whose promise rejects is not a turn that succeeded.
-        const ok = !turnError && !turnStatus && code === 0;
+        // One expression for the outcome feeds both the counter and `stop_reason`.
+        // A non-SUCCESS status with a partial reply still resolves below so callers do
+        // not lose useful output, but it deliberately remains a failed ledger turn.
+        const ok = !turnError && !turnStatus && code === 0 && !emptyResponse;
         this._recordTurnComplete(ok);
-
-        const text = resultText.replace(/\n$/, '');
 
         // Real usage from the `result` event. estimateTokens() is the fallback
         // for a turn that produced no result event (killed, crashed, or an
@@ -350,13 +376,16 @@ export class PersistentAgySession extends BaseOneShotSession {
 
         this._addHistory({ text, code });
 
+        const permissionDenials = extractAgyToolPermissionDenials(turnLog ?? '');
         const event: StreamEvent = {
           type: 'result',
           result: text,
-          // agy can exit 0 while reporting a non-SUCCESS status or an error in the
-          // result event (e.g. a turn stopped early), so the status is
-          // authoritative when present and the exit code is the fallback.
+          // agy can exit 0 while reporting a non-SUCCESS status, an error, or no
+          // usable response, so all terminal signals participate in the verdict.
           stop_reason: ok ? 'end_turn' : 'error',
+          ...(permissionDenials.length > 0
+            ? { permission_denials: permissionDenials.map((tool_name) => ({ tool_name })) }
+            : {}),
         };
 
         this.emit(SESSION_EVENT.RESULT, event);
@@ -368,6 +397,12 @@ export class PersistentAgySession extends BaseOneShotSession {
           reject(new Error(turnError));
         } else if (code !== 0) {
           reject(new Error(stderr || `Antigravity exited with code ${code}`));
+        } else if (emptyResponse) {
+          reject(
+            new Error(
+              hasAgyToolPermissionDenial(turnLog ?? '') ? TOOL_DENIAL_EMPTY_RESPONSE_ERROR : EMPTY_RESPONSE_ERROR,
+            ),
+          );
         } else {
           resolve({ text, event });
         }

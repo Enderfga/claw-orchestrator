@@ -23,9 +23,11 @@ function makeMockEffects(): {
       Object.assign(policyDelta, delta);
       calls.push(`updatePushPolicy:${JSON.stringify(delta)}`);
     },
-    writePlanFile: async (file, content, msg) => {
-      writes.push({ file, content, msg });
-      calls.push(`write:${file}:${msg ?? ''}`);
+    writePlanFiles: async (batch) => {
+      for (const { file, content, commitMessage: msg } of batch) {
+        writes.push({ file, content, msg });
+        calls.push(`write:${file}:${msg ?? ''}`);
+      }
     },
   };
   return { fx, calls, policyDelta, writes };
@@ -89,6 +91,99 @@ then
 });
 
 describe('applyPlannerToolCalls', () => {
+  it('prevalidates the complete batch before applying any effect', async () => {
+    const { fx, calls, writes } = makeMockEffects();
+    const r = await applyPlannerToolCalls(
+      [
+        { tool: 'write_plan', args: { content: '# replacement plan' } },
+        {
+          tool: 'spawn_subagents',
+          args: { initial_directive: { goal: 'must not run' } },
+        },
+        { tool: 'write_goal', args: { content: '{not valid json' } },
+      ],
+      fx,
+      0,
+    );
+
+    expect(r.errors).toHaveLength(1);
+    expect(r.errors[0]).toMatchObject({ tool: 'write_goal' });
+    expect(writes).toEqual([]);
+    expect(calls).toEqual([]);
+    expect(r.emitted_messages).toEqual([]);
+  });
+
+  it('does not spawn or emit a directive when artifact materialization fails', async () => {
+    const harness = makeMockEffects();
+    harness.fx.writePlanFiles = async (batch) => {
+      for (const { file } of batch) harness.calls.push(`write:${file}:`);
+      throw new Error('simulated goal write failure');
+    };
+
+    const r = await applyPlannerToolCalls(
+      [
+        { tool: 'write_plan', args: { content: '# replacement plan' } },
+        { tool: 'write_goal', args: { content: '{"scalar":null,"gates":[]}' } },
+        {
+          tool: 'spawn_subagents',
+          args: { initial_directive: { goal: 'must not run' } },
+        },
+      ],
+      harness.fx,
+      0,
+    );
+
+    expect(r.errors).toHaveLength(1);
+    expect(r.errors[0].error).toContain('simulated goal write failure');
+    expect(harness.calls.filter((call) => call.startsWith('spawnSubagents:'))).toEqual([]);
+    expect(r.emitted_messages).toEqual([]);
+  });
+
+  it('materializes all artifacts before spawning even when spawn appears first', async () => {
+    const { fx, calls, writes } = makeMockEffects();
+    const plan = '# exact plan\n';
+    const goal = '{"scalar":null,"gates":[]}\n';
+    const r = await applyPlannerToolCalls(
+      [
+        {
+          tool: 'spawn_subagents',
+          args: { initial_directive: { goal: 'run after writes' } },
+        },
+        { tool: 'write_goal', args: { content: goal } },
+        { tool: 'write_plan', args: { content: plan } },
+      ],
+      fx,
+      4,
+    );
+
+    expect(r.errors).toEqual([]);
+    expect(writes).toEqual([
+      { file: 'goal.json', content: goal, msg: undefined },
+      { file: 'plan.md', content: plan, msg: undefined },
+    ]);
+    const spawnIndex = calls.findIndex((call) => call.startsWith('spawnSubagents:'));
+    expect(spawnIndex).toBeGreaterThan(calls.findIndex((call) => call.startsWith('write:goal.json:')));
+    expect(spawnIndex).toBeGreaterThan(calls.findIndex((call) => call.startsWith('write:plan.md:')));
+    expect(r.emitted_messages.filter((message) => message.type === 'directive')).toHaveLength(1);
+  });
+
+  it('rejects duplicate spawn controls before starting roles or emitting directives', async () => {
+    const { fx, calls } = makeMockEffects();
+    const r = await applyPlannerToolCalls(
+      [
+        { tool: 'spawn_subagents', args: { initial_directive: { goal: 'first' } } },
+        { tool: 'spawn_subagents', args: { initial_directive: { goal: 'second' } } },
+      ],
+      fx,
+      0,
+    );
+
+    expect(r.errors).toHaveLength(1);
+    expect(r.errors[0].error).toContain('duplicate');
+    expect(calls).toEqual([]);
+    expect(r.emitted_messages).toEqual([]);
+  });
+
   it('notify_user becomes a push_user envelope', async () => {
     const { fx } = makeMockEffects();
     const r = await applyPlannerToolCalls(
