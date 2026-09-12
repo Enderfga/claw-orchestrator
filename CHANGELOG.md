@@ -5,7 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [7.4.0] - 2026-09-13
+
+Antigravity turns that did nothing no longer pass as successes, and Autoloop's Planner writes its
+plan, goal and spawn as one step. Thanks to @ajmtrz (#105).
 
 ### Fixed
 
