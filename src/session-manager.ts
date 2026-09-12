@@ -171,6 +171,7 @@ import {
   type SessionConfig,
   type SessionInfo,
   type SendOptions,
+  type PermissionDenial,
   type SendResult,
   type PluginConfig,
   type EffortLevel,
@@ -496,6 +497,30 @@ function validateAutoloopRole(
     validateAutoloopCustomEngine(role, customEngine);
   }
   return resolved;
+}
+
+/**
+ * The tool calls a turn's `result` event says the engine refused, normalized.
+ *
+ * Read defensively: the field is Claude Code's, and a persistent `custom`
+ * engine emits a result event of its own shape, so anything that is not an
+ * array of objects naming a tool is ignored rather than trusted.
+ */
+function readPermissionDenials(evt: Record<string, unknown> | undefined): PermissionDenial[] {
+  const raw = evt?.permission_denials;
+  if (!Array.isArray(raw)) return [];
+  const out: PermissionDenial[] = [];
+  for (const d of raw) {
+    if (!d || typeof d !== 'object') continue;
+    const r = d as Record<string, unknown>;
+    if (typeof r.tool_name !== 'string') continue;
+    out.push({
+      toolName: r.tool_name,
+      ...(typeof r.tool_use_id === 'string' ? { toolUseId: r.tool_use_id } : {}),
+      ...('tool_input' in r ? { input: r.tool_input } : {}),
+    });
+  }
+  return out;
 }
 
 export class SessionManager {
@@ -839,11 +864,16 @@ export class SessionManager {
           if (evt?.is_error) {
             turnError = String((evt.result as string) || result.text || 'turn failed');
           }
+          // Surfaced here because this is the one place every caller funnels
+          // through. The result event was dropped at this line, and it is the
+          // only record of a blocked call: the turn itself still reports success.
+          const permissionDenials = readPermissionDenials(evt);
           return {
             output: result.text,
             sessionId: this._managedResumeId(managed),
             error: turnError,
             events: [],
+            ...(permissionDenials.length ? { permissionDenials } : {}),
           };
         }
 

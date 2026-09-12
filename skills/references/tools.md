@@ -71,6 +71,12 @@ Send a message and get the response.
 | `timeout` | number  |          | Timeout in ms (default 300000)     |
 | `stream`  | boolean |          | Collect streaming chunks in result |
 
+Returns `{ ok, output, sessionId, error?, permissionDenials? }`. `permissionDenials` lists the tool
+calls the engine refused during the turn — `[{ toolName, toolUseId?, input? }]` — and is present only
+when there was at least one. Check it even when `error` is absent: a turn whose tool calls were all
+denied still ends as a success. See [sessions.md](./sessions.md) on what "succeeded" does and does
+not mean.
+
 ### `session_stop`
 
 Graceful shutdown (SIGTERM, then SIGKILL after 3s).
