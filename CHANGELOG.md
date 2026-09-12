@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Antigravity no longer treats an exit-0 empty response as a successful
+  turn.** The invariant applies at the adapter boundary, so Autoloop and every
+  other SessionManager caller now reject missing, blank, and whitespace-only
+  replies while keeping a captured conversation id available for an explicit
+  retry. agy 1.1.26 can produce this shape when plan mode soft-denies a tool
+  confirmation; a narrow marker from the freshly cleared current-turn log adds
+  a fixed sanitized diagnosis without exposing the log. Recovery does not
+  retry automatically or widen the Planner beyond `--mode plan`. agy 1.2.2 can
+  report the same denial with `status: SUCCESS` and a non-empty reply; refused
+  tool names now flow through `SendResult.permissionDenials` without dropping
+  that reply.
+- **Autoloop Planner control batches are in-band-only and failure-atomic for
+  artifacts.** The dispatcher prevalidates the complete fenced-control batch,
+  rejects duplicate plan/goal/spawn controls, stages exact `plan.md` and
+  `goal.json` bytes as one rollback-capable replacement, and materializes both
+  before at most one subagent spawn. A malformed block or artifact failure now
+  leaves prior files unchanged and emits neither spawn nor an initial
+  directive; the Planner's existing read-only isolation is unchanged.
+
+### Added
+
+- **A real-subprocess agy 1.1.26 Planner regression fixture** reproduces the
+  first-turn soft denial and blank result, then verifies that the resumed
+  conversation returns fenced plan/goal/spawn controls, exact artifacts exist
+  before the single spawn, and no failed-turn effect leaks through.
+
 ## [7.3.0] - 2026-09-13
 
 ### Added
@@ -62,22 +92,6 @@ registry 25 models with no drift.
 The weekly sweep now checks the model registry, and its first run found two more wrong prices.
 
 ### Fixed
-
-- **Antigravity no longer treats an exit-0 empty response as a successful
-  turn.** The invariant applies at the adapter boundary, so Autoloop and every
-  other SessionManager caller now reject missing, blank, and whitespace-only
-  replies while keeping a captured conversation id available for an explicit
-  retry. agy 1.1.26 can produce this shape when plan mode soft-denies a tool
-  confirmation; a narrow marker from the freshly cleared current-turn log adds
-  a fixed sanitized diagnosis without exposing the log. Recovery does not
-  retry automatically or widen the Planner beyond `--mode plan`.
-- **Autoloop Planner control batches are in-band-only and failure-atomic for
-  artifacts.** The dispatcher prevalidates the complete fenced-control batch,
-  rejects duplicate plan/goal/spawn controls, stages exact `plan.md` and
-  `goal.json` bytes as one rollback-capable replacement, and materializes both
-  before at most one subagent spawn. A malformed block or artifact failure now
-  leaves prior files unchanged and emits neither spawn nor an initial
-  directive; the Planner's existing read-only isolation is unchanged.
 - **`o4-mini` was priced at half its real cost.** OpenAI publishes four identically shaped tables
   per model — Standard, Batch, Flex, Fast — and this entry had been copied from the Batch column:
   `0.55 / 4.4` against a Standard `1.1 / 4.4`. Every run on it under-reported spend by 2x.
@@ -85,11 +99,6 @@ The weekly sweep now checks the model registry, and its first run found two more
   full input price instead of a quarter of it.
 
 ### Added
-
-- **A real-subprocess agy 1.1.26 Planner regression fixture** reproduces the
-  first-turn soft denial and blank result, then verifies that the resumed
-  conversation returns fenced plan/goal/spawn controls, exact artifacts exist
-  before the single spawn, and no failed-turn effect leaks through.
 - **The sweep diffs `src/models.ts` against both vendors' published price tables.** Until now it
   only checked engines, so a repriced model was invisible to it: a wrong cost does not crash, it
   just stays wrong. Both vendors publish their tables as markdown, so this needs no model to read

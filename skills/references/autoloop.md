@@ -63,7 +63,10 @@ never returned. The captured conversation id remains usable, so a later
 operator-initiated chat resumes with `--conversation`. Recovery neither retries
 the failed message automatically nor relaxes permissions. Because the failed
 reply never reaches the control parser, it cannot change `plan.md` or
-`goal.json`, spawn subagents, or emit an initial directive.
+`goal.json`, spawn subagents, or emit an initial directive. agy 1.2.2 can instead
+return a non-empty successful reply for the same soft denial; the adapter emits
+the refused tool names through `SendResult.permissionDenials` while preserving
+that reply.
 
 Coder and Reviewer engine/model choices can be overridden by the first successful
 `spawn_subagents`; later attempts to change an already-started role are rejected

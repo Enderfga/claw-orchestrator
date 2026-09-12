@@ -133,7 +133,7 @@ await manager.startSession({
 
 Wraps Google's **Antigravity CLI** (`agy`) — the successor to Gemini CLI (consumer
 Gemini CLI tiers stopped serving 2026-06-18). Each `send()` spawns a new process
-in print mode. Adapter behavior is covered through `agy` **1.1.26**.
+in print mode. Adapter behavior is covered through `agy` **1.2.2**.
 
 - One-shot execution per message (no persistent subprocess)
 - **Structured output and real usage** — `--output-format stream-json` emits an
@@ -153,7 +153,10 @@ in print mode. Adapter behavior is covered through `agy` **1.1.26**.
   recognizes only the narrow current-turn `tool_confirmation_manager` marker,
   returning a fixed sanitized diagnosis without exposing native log content. A
   conversation id already emitted by `init` is retained for the caller's next
-  send; the failed turn is not retried automatically.
+  send; the failed turn is not retried automatically. On agy 1.2.2 the same
+  denial can accompany `status: SUCCESS` and a non-empty reply; the refused tool
+  names are emitted as `permission_denials`, which SessionManager exposes as
+  `SendResult.permissionDenials` without discarding the reply.
 - **Reasoning effort**: session `effort` and per-turn `session_send` overrides map
   to `--effort`. agy accepts `low`, `medium`, and `high`; everything above that
   (`xhigh`, `max`, `ultra`) clamps to `high`. agy 1.1.25 requires an effort with unsuffixed base

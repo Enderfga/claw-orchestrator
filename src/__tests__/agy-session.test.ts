@@ -496,6 +496,43 @@ describe('PersistentAgySession', () => {
       expect(session.getStats()).toMatchObject({ turns: 2, turnsSucceeded: 1 });
     });
 
+    it('emits an agy 1.2.2 soft-denied tool on a successful turn with a non-empty reply', async () => {
+      const session = new PersistentAgySession({
+        name: 'test',
+        cwd: '/tmp',
+        permissionMode: 'manual',
+        sandboxMode: 'read-only',
+      });
+      await session.start();
+
+      const sendPromise = session.send('run the command', { waitForComplete: true });
+      const logFile = logPathFromSpawn();
+      tmpLogs.push(logFile);
+      fs.writeFileSync(
+        logFile,
+        'E0912 tool_confirmation_manager.go:188] mode: soft-denying tool confirmation "RunCommand"\n',
+      );
+      feedText(
+        mockProc,
+        JSON.stringify({
+          event: 'result',
+          result: {
+            conversation_id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+            status: 'SUCCESS',
+            response: 'I could not run that command.',
+          },
+        }) + '\n',
+      );
+      setTimeout(() => closeProc(mockProc, 0), 10);
+
+      const result = await sendPromise;
+      if (!('text' in result)) throw new Error('expected a completed turn');
+      expect(result.text).toBe('I could not run that command.');
+      expect(result.event.stop_reason).toBe('end_turn');
+      expect(result.event.permission_denials).toEqual([{ tool_name: 'RunCommand' }]);
+      expect(session.getStats()).toMatchObject({ turns: 1, turnsSucceeded: 1 });
+    });
+
     it('does not classify a stale prior-turn denial log as the current empty response', async () => {
       const session = new PersistentAgySession({
         name: 'test',
@@ -907,9 +944,9 @@ describe('PersistentAgySession', () => {
   //
   // agy is the engine where the exit code is the weakest of the three signals: it
   // can exit 0 while its own result event reports a non-SUCCESS status. That turn
-  // must reject and remain counted as failed even when it carries partial text.
+  // resolves so callers can use its partial reply, but remains counted as failed.
   describe('turnsSucceeded', () => {
-    it('rejects and does not count exit 0 with a non-SUCCESS status', async () => {
+    it('resolves but does not count exit 0 with a non-SUCCESS status', async () => {
       const session = new PersistentAgySession({ name: 'test', cwd: '/tmp', permissionMode: 'default' });
       await session.start();
 
@@ -924,9 +961,10 @@ describe('PersistentAgySession', () => {
       );
       setTimeout(() => closeProc(mockProc, 0), 10);
 
-      await expect(sendPromise).rejects.toThrow(
-        'Antigravity reported an unsuccessful turn; the turn failed but the session remains available for retry',
-      );
+      const result = await sendPromise;
+      if (!('text' in result)) throw new Error('expected a completed turn');
+      expect(result.text).toBe('partial');
+      expect(result.event.stop_reason).toBe('error');
 
       const stats = session.getStats();
       expect(stats.turns).toBe(1);
@@ -970,9 +1008,9 @@ describe('PersistentAgySession', () => {
       );
       setTimeout(() => closeProc(mockProc, 0), 10);
 
-      await expect(sendPromise).rejects.toThrow(
-        'Antigravity reported an unsuccessful turn; the turn failed but the session remains available for retry',
-      );
+      const result = await sendPromise;
+      if (!('text' in result)) throw new Error('expected a completed turn');
+      expect(result.event.stop_reason).toBe('error');
       expect(session.getStats().turnsSucceeded).toBe(0);
     });
 

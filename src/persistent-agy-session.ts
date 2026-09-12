@@ -38,6 +38,7 @@ import { estimateTokens } from './models.js';
 import { sanitizeSecrets } from './sanitize.js';
 import {
   extractCreatedAgyConversationId,
+  extractAgyToolPermissionDenials,
   hasAgyToolPermissionDenial,
   isAgyConversationId,
 } from './agy-conversation.js';
@@ -70,8 +71,6 @@ const EMPTY_RESPONSE_ERROR =
   'Antigravity returned an empty response; the turn failed but the session remains available for retry';
 const TOOL_DENIAL_EMPTY_RESPONSE_ERROR =
   'Antigravity returned an empty response after a tool permission denial; the turn failed but the session remains available for retry';
-const UNSUCCESSFUL_TURN_ERROR =
-  'Antigravity reported an unsuccessful turn; the turn failed but the session remains available for retry';
 
 // ─── PersistentAgySession ───────────────────────────────────────────────────
 
@@ -332,7 +331,7 @@ export class PersistentAgySession extends BaseOneShotSession {
         const text = resultText.replace(/\n$/, '');
         const emptyResponse = text.trim().length === 0;
         let turnLog: string | undefined;
-        const needsLog = !this.agyConversationId || (!settled && code === 0 && emptyResponse && !turnError);
+        const needsLog = !this.agyConversationId || (!settled && code === 0 && !turnError);
         if (mayReadTurnLog && needsLog) {
           try {
             turnLog = fs.readFileSync(this._logFile, 'utf8');
@@ -352,10 +351,9 @@ export class PersistentAgySession extends BaseOneShotSession {
         if (settled) return;
         settled = true;
 
-        // One expression for the outcome: it feeds the counter here and the `stop_reason`
-        // below, and it is the reject condition at the end of this handler. The exit code
-        // stays in the conjunction — agy can report SUCCESS and then die in cleanup, and a
-        // turn whose promise rejects is not a turn that succeeded.
+        // One expression for the outcome feeds both the counter and `stop_reason`.
+        // A non-SUCCESS status with a partial reply still resolves below so callers do
+        // not lose useful output, but it deliberately remains a failed ledger turn.
         const ok = !turnError && !turnStatus && code === 0 && !emptyResponse;
         this._recordTurnComplete(ok);
 
@@ -378,12 +376,16 @@ export class PersistentAgySession extends BaseOneShotSession {
 
         this._addHistory({ text, code });
 
+        const permissionDenials = extractAgyToolPermissionDenials(turnLog ?? '');
         const event: StreamEvent = {
           type: 'result',
           result: text,
           // agy can exit 0 while reporting a non-SUCCESS status, an error, or no
           // usable response, so all terminal signals participate in the verdict.
           stop_reason: ok ? 'end_turn' : 'error',
+          ...(permissionDenials.length > 0
+            ? { permission_denials: permissionDenials.map((tool_name) => ({ tool_name })) }
+            : {}),
         };
 
         this.emit(SESSION_EVENT.RESULT, event);
@@ -401,8 +403,6 @@ export class PersistentAgySession extends BaseOneShotSession {
               hasAgyToolPermissionDenial(turnLog ?? '') ? TOOL_DENIAL_EMPTY_RESPONSE_ERROR : EMPTY_RESPONSE_ERROR,
             ),
           );
-        } else if (turnStatus) {
-          reject(new Error(UNSUCCESSFUL_TURN_ERROR));
         } else {
           resolve({ text, event });
         }
