@@ -471,7 +471,7 @@ function messageText(m: OpenAIChatMessage): string {
 // because the attack is imaginary — reaching them means corrupting `if (count < user && x)`. Which
 // tags still get corrupted, and where the fence does not run at all:
 // skills/references/openai-compat.md.
-function fenceHistoryTags(text: string): string {
+export function fenceHistoryTags(text: string): string {
   return text.replace(
     /<(?=[/\p{Cc}\p{Cf}\p{Mn}\p{Me}\p{Default_Ignorable_Code_Point}]*(?:conversation_history|available_tools|tool_results?|tool_calls|system|user|assistant)(?:[\s></\p{Cc}\p{Cf}\p{Mn}\p{Me}\p{Default_Ignorable_Code_Point}⠀]|$))/giu,
     '&lt;',

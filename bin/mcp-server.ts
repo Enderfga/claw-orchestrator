@@ -90,6 +90,7 @@ const ANNOTATIONS: Record<string, Annotation> = {
   // mutating + open-world (call external model APIs)
   session_start: { openWorldHint: true },
   session_send: { openWorldHint: true },
+  session_handoff: { openWorldHint: true },
   team_send: { openWorldHint: true },
   session_send_to: { openWorldHint: true },
   session_deliver_inbox: { openWorldHint: true },

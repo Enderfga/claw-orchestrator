@@ -10,7 +10,7 @@
 [![CI](https://github.com/Enderfga/claw-orchestrator/actions/workflows/ci.yml/badge.svg)](https://github.com/Enderfga/claw-orchestrator/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
-Coding CLIs are designed for humans at terminals. Claw Orchestrator turns them into headless engines and stacks an agent platform on top: a 77-tool API that scales from a single session call up to a fully generated, deployed web app — reachable through the CLI, the OpenClaw gateway, the Model Context Protocol, or directly from TypeScript, and visible through an embedded three-tab dashboard.
+Coding CLIs are designed for humans at terminals. Claw Orchestrator turns them into headless engines and stacks an agent platform on top: a 78-tool API that scales from a single session call up to a fully generated, deployed web app — reachable through the CLI, the OpenClaw gateway, the Model Context Protocol, or directly from TypeScript, and visible through an embedded three-tab dashboard.
 
 https://github.com/user-attachments/assets/fbd2b0ea-28d8-4387-9894-c29cf15ba030
 
@@ -26,6 +26,7 @@ https://github.com/user-attachments/assets/fbd2b0ea-28d8-4387-9894-c29cf15ba030
 | --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
 | **Persistent Sessions**     | Long-lived coding agents kept alive across requests, with full context, tool, model, and worktree control.                                                                                                                                                                                                                                                                                                                                | [`sessions.md`](./skills/references/sessions.md)           |
 | **Multi-Engine Runtime**    | One interface over Claude Code, Codex, Antigravity (agy), Grok Build, OpenCode, and arbitrary custom CLIs.                                                                                                                                                                                                                                                                                                                                | [`multi-engine.md`](./skills/references/multi-engine.md)   |
+| **Session Handoff**         | Move a live conversation to another engine or model — a stuck Claude session into Codex, an expensive model into a cheaper one. The new session picks up where the old one stopped, in the same workspace; the old one keeps running.                                                                                                                                                                                                     | [`sessions.md`](./skills/references/sessions.md)           |
 | **Multi-Agent Council**     | Parallel agents in isolated git worktrees, voting on consensus until they agree.                                                                                                                                                                                                                                                                                                                                                          | [`council.md`](./skills/references/council.md)             |
 | **Fan-out**                 | Run one task across N engine/model agents in parallel and collect their answers, with an optional synthesis pass — the cross-engine best-of-N / diverse-perspective primitive (no rounds or worktrees).                                                                                                                                                                                                                                   | [`tools.md`](./skills/references/tools.md)                 |
 | **ultracode**               | `session_start({ ultracode: true })` lets Claude orchestrate a dynamic JS workflow and fan out to subagents per task (Claude engine).                                                                                                                                                                                                                                                                                                     | [`tools.md`](./skills/references/tools.md)                 |
@@ -37,7 +38,7 @@ https://github.com/user-attachments/assets/fbd2b0ea-28d8-4387-9894-c29cf15ba030
 | **Verification Plane**      | Acceptance contracts the runtime executes itself — commands, HTTP probes, screenshots, diff policy, file assertions — producing an evidence bundle on disk. A run carrying a contract cannot reach `completed` unless it passes, and one without a contract completes as `unverified` rather than claiming success.                                                                                                                       | [`verification.md`](./skills/references/verification.md)   |
 | **Run Ledger & Spend Caps** | Every turn on every engine is appended to a durable JSONL ledger — engine, model, tokens, cost, duration, and the council/fanout/autoloop it belonged to — queryable with `clawo runs` after a restart. Rows carry both the engine's self-report (`ok`) and the runtime's own measurement (`verified`), kept apart. `maxBudgetUsd` is enforced by the runtime, so a cap holds on Codex, Grok, agy and OpenCode too, not just Claude Code. | [`observability.md`](./skills/references/observability.md) |
 
-The full 77-tool surface is enumerated in [`tools.md`](./skills/references/tools.md).
+The full 78-tool surface is enumerated in [`tools.md`](./skills/references/tools.md).
 
 ---
 
@@ -76,7 +77,7 @@ Every command is documented in [`cli.md`](./skills/references/cli.md).
 curl -fsSL https://raw.githubusercontent.com/Enderfga/claw-orchestrator/main/install.sh | bash
 ```
 
-Installs via npm, registers the plugin in `~/.openclaw/openclaw.json`, restarts the gateway. All 77 tools become available to every OpenClaw agent.
+Installs via npm, registers the plugin in `~/.openclaw/openclaw.json`, restarts the gateway. All 78 tools become available to every OpenClaw agent.
 
 ### Model Context Protocol Server
 

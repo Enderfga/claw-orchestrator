@@ -77,6 +77,53 @@ await manager.startSession({
 
 > `claude continue/respawn/stop/logs` are not headless subcommands — session continuation is via `resumeSessionId`/`forkSession`. Use the `claude_agents_list` tool (`claude agents --json`) to enumerate Claude Code background agent sessions.
 
+### Handing off to another engine
+
+`resumeSessionId` and `forkSession` continue a conversation on the engine that holds it. To continue
+it somewhere else — a stuck Claude session into Codex, an expensive model into a cheaper one —
+use `handoffSession` (tool: `session_handoff`):
+
+```typescript
+await manager.handoffSession('refactor', {
+  engine: 'codex',
+  message: 'Carry on from where we stopped.', // optional: send now and return the reply
+});
+// → new session 'refactor-codex', same cwd; 'refactor' keeps running untouched
+```
+
+**How the conversation travels.** No engine can resume another's session, and each keeps its
+history in its own undocumented on-disk format. So the conversation is replayed as text: a
+`<conversation_history>` block in front of the new session's first message, after which the new
+engine holds it itself. Every turn in it is fenced, so a reply that contains the block's own tags
+cannot close it early and speak as another role. Nothing is written into either engine's session
+store.
+
+**What carries across.** What was said: every message sent through `sendMessage` and every reply,
+recorded per session as it happens. The session's own history buffer is not used for this — it is
+capped by event count, and on a long session the opening request is the first thing it loses. The
+new session inherits the source's working directory and its engine-neutral settings (permission and
+sandbox mode, effort, spend cap, system prompts, extra directories). It does not inherit anything
+written for the source engine — its model, tool allowlists in that engine's tool names, resume ids,
+profiles.
+
+**What does not.** The source engine's hidden reasoning, which no engine exposes, and the detail of
+tool calls — the new agent sees the replies that described the work, and the workspace itself, which
+the framing tells it to check before relying on anything the history describes.
+
+**When it is too long.** Up to `maxChars` (default 240,000 characters, ~60k tokens) the whole
+conversation is sent. Past that, the opening request is kept, the newest turns fill what is left,
+and one line records how many turns in between were left out: the request says what the work is
+for, the newest turns say where it stands, and the middle is what the workspace can answer.
+
+**A fork, not a move.** The two sessions go their separate ways. The new one starts from the
+source's record, so handing it off again carries the whole conversation rather than only its own
+part. The history is cleared only after a first send succeeds, so a first turn that fails on the
+new engine does not strand the conversation it was carrying.
+
+Verified end to end over MCP against the installed engines: a fact planted in a Claude session was
+recalled by Codex 0.154.0 after a handoff, and again by Claude after a second handoff back, which
+also named Codex as the engine it had taken over from.
+
 ### ultracode (Claude dynamic workflows)
 
 Set `ultracode: true` on a Claude `session_start` to have Claude orchestrate a JS workflow per substantive task and fan out to subagents. It is injected as the `ultracode: true` settings key merged into `--settings` (not a `--effort` value — the CLI rejects `--effort ultracode`):
