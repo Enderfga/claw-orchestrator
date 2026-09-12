@@ -456,6 +456,49 @@ const plugin = {
       },
     });
 
+    // ─── Tool: session_handoff ────────────────────────────────────────────
+
+    registerTool({
+      name: 'session_handoff',
+      description:
+        "Continue a session's conversation on another engine (or another model). Starts a new session on the target engine in the same working directory and carries the conversation into it as text, so the new agent picks up where the old one left off. The source session keeps running untouched — stop it yourself if you are done with it. Pass `message` to send the next instruction immediately; otherwise the history travels with whatever you send next via session_send.",
+      parameters: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: 'The session to hand off from' },
+          engine: {
+            type: 'string',
+            enum: ENGINE_TYPES,
+            description: 'Engine for the new session. May be the same engine with a different model.',
+          },
+          model: { type: 'string', description: 'Model for the new session (default: the engine default)' },
+          newName: { type: 'string', description: 'Name for the new session (default: `<name>-<engine>`)' },
+          message: {
+            type: 'string',
+            description: 'Send this as the first message now and return the reply (default: wait for session_send)',
+          },
+          maxChars: {
+            type: 'number',
+            description:
+              'Upper bound on the carried history, in characters (default 240000, minimum 4000). When the conversation is longer, the opening request and the newest turns are kept and the turns between them are left out.',
+          },
+          customEngine: CUSTOM_ENGINE_SCHEMA,
+        },
+        required: ['name', 'engine'],
+      },
+      execute: async (_id, args) => {
+        const result = await getManager().handoffSession(args.name as string, {
+          engine: args.engine as EngineType,
+          model: args.model as string | undefined,
+          newName: args.newName as string | undefined,
+          message: args.message as string | undefined,
+          maxChars: args.maxChars as number | undefined,
+          customEngine: args.customEngine as Parameters<SessionManager['handoffSession']>[1]['customEngine'],
+        });
+        return { ok: true, ...result };
+      },
+    });
+
     // ─── Tool: session_stop ───────────────────────────────────────────────
 
     registerTool({

@@ -158,6 +158,15 @@ import { checkBudget, isBudgetExceeded } from './budget.js';
 import { InboxManager, type SessionLookup } from './inbox-manager.js';
 import { sanitizeCwd, validateName } from './validation.js';
 import { PersistentClaudeSession } from './persistent-session.js';
+import {
+  cloneTranscript,
+  DEFAULT_HANDOFF_CHARS,
+  MIN_HANDOFF_CHARS,
+  newTranscript,
+  recordExchange,
+  renderHandoff,
+  type Transcript,
+} from './handoff.js';
 import { PersistentGeminiSession } from './persistent-gemini-session.js';
 import { PersistentCodexSession } from './persistent-codex-session.js';
 import { PersistentCodexAppServerSession } from './persistent-codex-app-session.js';
@@ -171,6 +180,7 @@ import {
   type SessionConfig,
   type SessionInfo,
   type SendOptions,
+  type PermissionDenial,
   type SendResult,
   type PluginConfig,
   type EffortLevel,
@@ -243,6 +253,18 @@ interface ManagedSession {
    * session listings can show *why* a session stopped accepting turns.
    */
   budgetExhausted?: boolean;
+  /**
+   * The conversation as sent and answered, kept for `handoffSession()`. Not the
+   * engine's history buffer, which is capped by event count and loses the
+   * opening request first on a long session. Created on first send.
+   */
+  transcript?: Transcript;
+  /**
+   * The rendered history of a session this one was handed off from, put in
+   * front of the first message it receives. Cleared only once a send succeeds,
+   * so a first turn that fails does not strand the conversation it was carrying.
+   */
+  pendingHandoff?: string;
 }
 
 /**
@@ -496,6 +518,30 @@ function validateAutoloopRole(
     validateAutoloopCustomEngine(role, customEngine);
   }
   return resolved;
+}
+
+/**
+ * The tool calls a turn's `result` event says the engine refused, normalized.
+ *
+ * Read defensively: the field is Claude Code's, and a persistent `custom`
+ * engine emits a result event of its own shape, so anything that is not an
+ * array of objects naming a tool is ignored rather than trusted.
+ */
+function readPermissionDenials(evt: Record<string, unknown> | undefined): PermissionDenial[] {
+  const raw = evt?.permission_denials;
+  if (!Array.isArray(raw)) return [];
+  const out: PermissionDenial[] = [];
+  for (const d of raw) {
+    if (!d || typeof d !== 'object') continue;
+    const r = d as Record<string, unknown>;
+    if (typeof r.tool_name !== 'string') continue;
+    out.push({
+      toolName: r.tool_name,
+      ...(typeof r.tool_use_id === 'string' ? { toolUseId: r.tool_use_id } : {}),
+      ...('tool_input' in r ? { input: r.tool_input } : {}),
+    });
+  }
+  return out;
 }
 
 export class SessionManager {
@@ -813,7 +859,10 @@ export class SessionManager {
       let turnError: string | undefined;
 
       try {
-        const result = await managed.session.send(message, sendOpts);
+        // A session handed off from another engine carries that conversation in
+        // front of its first message; after that the engine holds it itself.
+        const outgoing = managed.pendingHandoff ? `${managed.pendingHandoff}\n\n${message}` : message;
+        const result = await managed.session.send(outgoing, sendOpts);
 
         // Update the resume-capable session ID if available (skip disk persist
         // for ephemeral sessions that were started with skipPersistence)
@@ -839,11 +888,24 @@ export class SessionManager {
           if (evt?.is_error) {
             turnError = String((evt.result as string) || result.text || 'turn failed');
           }
+          // Surfaced here because this is the one place every caller funnels
+          // through. The result event was dropped at this line, and it is the
+          // only record of a blocked call: the turn itself still reports success.
+          const permissionDenials = readPermissionDenials(evt);
+          // The record holds what the caller said, never the replayed history in
+          // front of it — a second handoff would otherwise nest one inside the other.
+          managed.transcript ??= newTranscript();
+          recordExchange(managed.transcript, 'user', message);
+          if (!turnError) {
+            recordExchange(managed.transcript, 'assistant', result.text);
+            managed.pendingHandoff = undefined;
+          }
           return {
             output: result.text,
             sessionId: this._managedResumeId(managed),
             error: turnError,
             events: [],
+            ...(permissionDenials.length ? { permissionDenials } : {}),
           };
         }
 
@@ -862,6 +924,95 @@ export class SessionManager {
       // If this was the tail of the chain, clear it so memory doesn't grow.
       if (managed.sendChain === link) managed.sendChain = undefined;
     }
+  }
+
+  // ─── Handoff ───────────────────────────────────────────────────────────
+
+  /**
+   * Continue a session's conversation in a new session on another engine.
+   *
+   * The source is left running and untouched — this is a fork, not a move: the
+   * two go their separate ways from here, and the caller stops the source if it
+   * is done with it. The new session inherits the source's working directory and
+   * its engine-neutral settings (permission and sandbox mode, effort, spend cap,
+   * system prompts, extra directories), and nothing tied to the source engine
+   * (model, tool allowlists written in its tool names, resume ids, profiles).
+   *
+   * The conversation travels as text in front of the new session's first message
+   * — see `src/handoff.ts` for why, and for what is kept when it does not all fit.
+   * With `message`, that first message is sent now and its reply returned; without
+   * it, the history waits for whatever the caller sends next.
+   */
+  async handoffSession(
+    name: string,
+    opts: {
+      engine: EngineType;
+      model?: string;
+      newName?: string;
+      message?: string;
+      maxChars?: number;
+      customEngine?: SessionConfig['customEngine'];
+    },
+  ): Promise<{
+    name: string;
+    engine: EngineType;
+    from: { name: string; engine: EngineType };
+    carried: { turns: number; omitted: number; chars: number };
+    result?: SendResult;
+  }> {
+    const source = this._getSession(name);
+    const record = source.transcript;
+    if (!record || record.entries.length === 0) {
+      throw new Error(`Session '${name}' has no completed exchange to hand off yet`);
+    }
+    if (opts.maxChars !== undefined && (!Number.isFinite(opts.maxChars) || opts.maxChars < MIN_HANDOFF_CHARS)) {
+      throw new Error(`maxChars must be a number of at least ${MIN_HANDOFF_CHARS}`);
+    }
+    const fromEngine = (source.config.engine || 'claude') as EngineType;
+    const targetName = opts.newName ?? `${name}-${opts.engine}`;
+
+    const inherited: Partial<SessionConfig> = {
+      cwd: source.cwd,
+      permissionMode: source.config.permissionMode,
+      dangerouslySkipPermissions: source.config.dangerouslySkipPermissions,
+      sandboxMode: source.config.sandboxMode,
+      effort: source.config.effort,
+      maxBudgetUsd: source.config.maxBudgetUsd,
+      systemPrompt: source.config.systemPrompt,
+      appendSystemPrompt: source.config.appendSystemPrompt,
+      addDir: source.config.addDir,
+    };
+    for (const k of Object.keys(inherited) as (keyof SessionConfig)[]) {
+      if (inherited[k] === undefined) delete inherited[k];
+    }
+
+    const rendered = renderHandoff(
+      record,
+      { engine: fromEngine, model: source.config.model, cwd: source.cwd },
+      opts.maxChars ?? DEFAULT_HANDOFF_CHARS,
+    );
+
+    await this.startSession({
+      ...inherited,
+      name: targetName,
+      engine: opts.engine,
+      ...(opts.model ? { model: opts.model } : {}),
+      ...(opts.customEngine ? { customEngine: opts.customEngine } : {}),
+    });
+    const target = this._getSession(targetName);
+    // The new session's record starts as the source's, so a second handoff from
+    // it carries the whole conversation rather than only the part it has seen.
+    target.transcript = cloneTranscript(record);
+    target.pendingHandoff = rendered.text;
+
+    const out = {
+      name: targetName,
+      engine: opts.engine,
+      from: { name, engine: fromEngine },
+      carried: { turns: rendered.turns, omitted: rendered.omitted, chars: rendered.text.length },
+    };
+    if (opts.message === undefined) return out;
+    return { ...out, result: await this.sendMessage(targetName, opts.message) };
   }
 
   // ─── Run ledger + budget bookkeeping ───────────────────────────────────

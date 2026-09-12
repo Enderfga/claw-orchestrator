@@ -2,7 +2,7 @@
 
 All tools are registered as Claw Orchestrator plugin tools. In standalone mode, they're accessible via the embedded HTTP server.
 
-## Session Lifecycle (5)
+## Session Lifecycle (6)
 
 ### `session_start`
 
@@ -70,6 +70,32 @@ Send a message and get the response.
 | `plan`    | boolean |          | Enable plan mode                   |
 | `timeout` | number  |          | Timeout in ms (default 300000)     |
 | `stream`  | boolean |          | Collect streaming chunks in result |
+
+Returns `{ ok, output, sessionId, error?, permissionDenials? }`. `permissionDenials` lists the tool
+calls the engine refused during the turn — `[{ toolName, toolUseId?, input? }]` — and is present only
+when there was at least one. Check it even when `error` is absent: a turn whose tool calls were all
+denied still ends as a success. See [sessions.md](./sessions.md) on what "succeeded" does and does
+not mean.
+
+### `session_handoff`
+
+Continue a session's conversation on another engine — or the same engine with another model. Starts
+a new session in the source's working directory and carries the conversation into it; the source
+keeps running untouched.
+
+| Parameter      | Type   | Required | Description                                                                 |
+| -------------- | ------ | -------- | --------------------------------------------------------------------------- |
+| `name`         | string | yes      | The session to hand off from                                                |
+| `engine`       | string | yes      | Engine for the new session                                                  |
+| `model`        | string |          | Model for the new session (default: the engine's default)                   |
+| `newName`      | string |          | Name for the new session (default `<name>-<engine>`)                        |
+| `message`      | string |          | Send this now and return the reply; otherwise the history waits for `session_send` |
+| `maxChars`     | number |          | Cap on the carried history, in characters (default 240000, minimum 4000)   |
+| `customEngine` | object |          | As in `session_start`, when `engine` is `custom`                            |
+
+Returns `{ ok, name, engine, from: { name, engine }, carried: { turns, omitted, chars }, result? }`.
+`result` is the send result of `message`, when one was given. See [sessions.md](./sessions.md) for
+what carries across, what does not, and what is kept when the conversation is too long to send whole.
 
 ### `session_stop`
 

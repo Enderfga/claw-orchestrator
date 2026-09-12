@@ -579,11 +579,32 @@ export interface SessionInfo {
   budgetExhausted?: boolean;
 }
 
+/** A tool call the engine refused to run during a turn. */
+export interface PermissionDenial {
+  toolName: string;
+  toolUseId?: string;
+  /** The arguments the model passed, as the engine reported them. */
+  input?: unknown;
+}
+
 export interface SendResult {
   output: string;
   sessionId?: string;
   error?: string;
   events: StreamEvent[];
+  /**
+   * Tool calls the engine blocked during this turn. Present only when there was
+   * at least one.
+   *
+   * Read this alongside `error`, not instead of it: a turn whose every tool call
+   * was denied still ends `subtype: 'success'` with `is_error: false`, so it
+   * counts in `turnsSucceeded` and sets no `error`. Measured against Claude Code
+   * 2.1.269 with `--permission-prompts none` (what a session gets when no prompt
+   * tool is configured): asked to write a file, the turn "succeeded", the Bash
+   * call appeared here, and no file was written. A caller that treats a
+   * successful turn as work done needs this field to know otherwise.
+   */
+  permissionDenials?: PermissionDenial[];
 }
 
 export interface GrepMatch {
