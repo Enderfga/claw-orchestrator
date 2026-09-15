@@ -473,6 +473,18 @@ const MODELS: ModelDef[] = [
     listed: false,
     contextWindow: 128_000,
   },
+  // Priced by OpenAI and reachable from Codex under API-key auth, but unregistered
+  // until the sweep's missing-model check first actually ran — it had been
+  // scanning nothing — and named it. Unregistered it priced as the Sonnet
+  // fallback with a 200K window instead of its own ~1M.
+  {
+    id: 'gpt-4.1',
+    engine: 'codex',
+    provider: 'openai',
+    pricing: { input: 2, output: 8, cached: 0.5 },
+    listed: false,
+    contextWindow: 1_047_576,
+  },
 ];
 
 // ─── Derived Lookup Tables (generated once at import time) ───────────────────

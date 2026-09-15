@@ -20,6 +20,16 @@ engine's flag surface changed.
   CLI verbatim, so tool and MCP callers could already pass them; TypeScript callers could not. The
   new `AgentDefinition` names `omitClaudeMd` and passes the rest through, and a test pins the
   verbatim hand-over so a field the CLI adds next is not dropped on the way.
+- **`gpt-4.1` is registered** (`2 / 0.5 / 8`, 1,047,576-token window). It is priced by OpenAI and
+  reachable from Codex under API-key auth, and was being priced as the Sonnet fallback with a 200K
+  window.
+- **The sweep's missing-model check never ran.** Added in 7.1.1 to flag a model that a vendor prices
+  and an engine can select but this registry does not know, it resolved the engine binary against the
+  working directory instead of `PATH`, found no binary, and reported nothing — which reads exactly
+  like "no new models". It now resolves through `PATH`, covers Claude as well as Codex (a new Claude
+  model would otherwise have gone unnoticed until someone asked whether it had shipped), skips rows
+  the vendor marks retired, and reports a binary it cannot scan as a regression rather than an empty
+  result. Its first real run found `gpt-4.1`.
 
 ## [7.4.0] - 2026-09-13
 

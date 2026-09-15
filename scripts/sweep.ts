@@ -372,6 +372,8 @@ interface PublishedPrice {
   input: number;
   cached: number;
   output: number;
+  /** Marked retired or deprecated on the vendor's page — still priced, no longer offered. */
+  retired?: boolean;
 }
 
 interface RegistryDrift {
@@ -482,27 +484,34 @@ async function anthropicPrices(): Promise<{ prices: PublishedPrice[]; note?: str
     const cached = money(cells[4]);
     const output = money(cells[5]);
     if (!id || input === null || cached === null || output === null) continue;
-    prices.push({ id, input, cached, output });
+    const retired = /retired|deprecat/i.test(cells[0]);
+    prices.push({ id, input, cached, output, ...(retired ? { retired } : {}) });
   }
   return prices.length ? { prices } : { prices: [], note: 'anthropic pricing table parsed empty — format changed?' };
 }
 
 /**
- * Model ids the codex binary can actually select.
+ * Model ids an engine binary can actually select, found by scanning the binary
+ * for `pattern` (which must carry the `g` flag).
  *
- * Read in chunks rather than whole: the binary is ~210 MB, and this runs on a
- * box with an OOM history. The overlap keeps an id straddling a chunk boundary
- * from being missed.
+ * Read in chunks rather than whole: the codex binary is ~210 MB, and this runs
+ * on a box with an OOM history. The overlap keeps an id straddling a chunk
+ * boundary from being missed.
  */
-async function codexModelIds(bin: string): Promise<Set<string>> {
+async function modelIdsInBinary(bin: string, pattern: RegExp): Promise<Set<string> | null> {
   const ids = new Set<string>();
-  const resolved = await run('readlink', ['-f', bin]);
-  const target = resolved.out.trim() && fs.existsSync(resolved.out.trim()) ? resolved.out.trim() : bin;
+  // Through PATH first: `bin` is a command name, and `readlink -f` on a bare name
+  // resolves it against the working directory, not PATH. That is how this scan
+  // returned an empty set on every run from 7.1.1 until it was noticed — and an
+  // empty set reads exactly like "no new models", so nothing ever looked wrong.
+  const onPath = (await run('which', [bin])).out.trim().split('\n')[0] ?? '';
+  const target = onPath ? (await run('readlink', ['-f', onPath])).out.trim() || onPath : '';
+  if (!target || !fs.existsSync(target)) return null;
   let fd: number;
   try {
     fd = fs.openSync(target, 'r');
   } catch {
-    return ids;
+    return null;
   }
   try {
     const CHUNK = 4 << 20;
@@ -513,17 +522,17 @@ async function codexModelIds(bin: string): Promise<Set<string>> {
       const n = fs.readSync(fd, buf, 0, CHUNK, pos);
       if (n <= 0) break;
       const text = tail + buf.subarray(0, n).toString('latin1');
-      for (const m of text.matchAll(/gpt-[0-9][a-z0-9.-]*/g)) ids.add(m[0].replace(/[.-]+$/, ''));
+      for (const m of text.matchAll(pattern)) ids.add(m[0].replace(/[.-]+$/, ''));
       tail = text.slice(-64);
       pos += n;
     }
   } finally {
     fs.closeSync(fd);
   }
-  return ids;
+  return ids.size ? ids : null;
 }
 
-async function sweepRegistry(codexBin: string): Promise<RegistryReport> {
+async function sweepRegistry(codexBin: string, claudeBin: string): Promise<RegistryReport> {
   // Through the module's public lookup rather than a private table, so this
   // check cannot quietly stop matching when the registry's internals move.
   // `lookupModel` also resolves aliases, so the id equality below matters: it
@@ -560,9 +569,26 @@ async function sweepRegistry(codexBin: string): Promise<RegistryReport> {
   // prices plenty this project can never reach, and a list that cries wolf is
   // the list nobody reads. `gpt-5.6-pro` and `gpt-5.6-cyber` were each left out
   // for one of these two halves failing.
-  const selectable = await codexModelIds(codexBin);
+  //
+  // Claude is held to the same test against the claude binary. It was not at
+  // first, so a new Claude model would have passed this sweep silently and been
+  // priced as the fallback until someone asked whether it had shipped. Retired
+  // rows are excluded: the binary keeps their ids for old sessions, and
+  // flagging them every week is exactly the noise this filter exists to avoid.
+  //
+  // A binary that cannot be found or yields no ids at all is a regression, not
+  // an empty result: this check once passed every week while scanning nothing.
+  const codexIds = await modelIdsInBinary(codexBin, /gpt-[0-9][a-z0-9.-]*/g);
+  const claudeIds = await modelIdsInBinary(claudeBin, /claude-(?:opus|sonnet|haiku|fable|mythos)-[0-9][a-z0-9-]*/g);
+  if (!codexIds) notes.push(`missing-model check NOT run for codex — no model ids found in the \`${codexBin}\` binary`);
+  if (!claudeIds)
+    notes.push(`missing-model check NOT run for claude — no model ids found in the \`${claudeBin}\` binary`);
+  const selectable = (p: PublishedPrice) =>
+    p.id.startsWith('gpt-')
+      ? !!codexIds?.has(p.id)
+      : p.id.startsWith('claude-') && !p.retired && !!claudeIds?.has(p.id);
   const unregistered = published
-    .filter((p) => p.id.startsWith('gpt-') && selectable.has(p.id) && !registered(p.id))
+    .filter((p) => selectable(p) && !registered(p.id))
     .map((p) => p.id)
     .sort();
 
@@ -583,7 +609,10 @@ async function main(): Promise<void> {
   for (const e of ENGINES) engines.push(await sweepEngine(e, pinned[e.id] ?? null, live));
   const acp = await acpSmoke();
   const mcp = await mcpSmoke();
-  const registry = await sweepRegistry(ENGINES.find((e) => e.id === 'codex')!.bin);
+  const registry = await sweepRegistry(
+    ENGINES.find((e) => e.id === 'codex')!.bin,
+    ENGINES.find((e) => e.id === 'claude')!.bin,
+  );
 
   const regressions: string[] = [];
   for (const e of engines) {
@@ -627,7 +656,9 @@ async function main(): Promise<void> {
     for (const d of registry.drift)
       console.log(`  DRIFT ${d.id} ${d.field}: registry ${d.ours ?? 'not set'} vs published ${d.published}`);
     if (registry.unregistered.length)
-      console.log(`\nunregistered but selectable by codex (judge before adding): ${registry.unregistered.join(' ')}`);
+      console.log(
+        `\nunregistered but selectable by an engine (judge before adding): ${registry.unregistered.join(' ')}`,
+      );
     for (const e of engines) {
       if (e.notAdvertised.length)
         console.log(
