@@ -221,11 +221,11 @@ Current tested versions (update on each release):
 
 | Engine      | CLI        | Tested Version | Invocation                                                                                                                                                                                                                           |
 | ----------- | ---------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Claude      | `claude`   | 2.1.269        | Persistent subprocess, `--output-format stream-json`                                                                                                                                                                                 |
+| Claude      | `claude`   | 2.1.271        | Persistent subprocess, `--output-format stream-json`                                                                                                                                                                                 |
 | Codex       | `codex`    | 0.154.0        | `codex exec --sandbox workspace-write --skip-git-repo-check --json -C <dir> [--ephemeral] [--ignore-user-config] [--add-dir D]` (or `codex app-server` for /goal)                                                                    |
 | Antigravity | `agy`      | 1.2.2          | `agy -p <msg> --output-format stream-json --log-file <tmp> [--conversation <id>] --dangerously-skip-permissions/--sandbox --print-timeout <n>s`                                                                                      |
 | Grok        | `grok`     | 1.0.30         | `grok -p <msg> --output-format json --cwd <dir> [--resume <id>] [--permission-mode M] [--effort E] [--tools/--disallowed-tools] [--json-schema] [--rules]` (read-only refused: a delegated subagent writes through a tool allowlist) |
-| OpenCode    | `opencode` | 1.18.30        | `opencode run <msg> --format json [--model provider/model] [--variant E]` (read-only sessions add `--agent clawo-readonly` + `OPENCODE_CONFIG_CONTENT`)                                                                              |
+| OpenCode    | `opencode` | 1.18.31        | `opencode run <msg> --format json [--model provider/model] [--variant E]` (read-only sessions add `--agent clawo-readonly` + `OPENCODE_CONFIG_CONTENT`)                                                                              |
 
 **Important:** When CLI vendors change flags or output format, update the corresponding `persistent-*-session.ts` and re-run integration tests.
 

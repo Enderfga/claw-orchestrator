@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.4.1] - 2026-09-15
+
+Weekly engine sweep: Claude Code 2.1.269 → 2.1.271, OpenCode 1.18.30 → 1.18.31. Every live turn
+passed through the real wrapper, the model registry matched both vendors' published prices, and no
+engine's flag surface changed.
+
+### Fixed
+
+- **`SessionConfig.agents` accepts every field the CLI does.** The type named only `description` and
+  `prompt`, while Claude Code's `--agents` schema also takes `tools`, `model`, `maxTurns`,
+  `background`, `memory`, `isolation`, `effort`, and — from 2.1.271 — `omitClaudeMd`, which runs a
+  subagent without the user, project and local CLAUDE.md files. Definitions were always handed to the
+  CLI verbatim, so tool and MCP callers could already pass them; TypeScript callers could not. The
+  new `AgentDefinition` names `omitClaudeMd` and passes the rest through, and a test pins the
+  verbatim hand-over so a field the CLI adds next is not dropped on the way.
+- **`gpt-4.1` is registered** (`2 / 0.5 / 8`, 1,047,576-token window). It is priced by OpenAI and
+  reachable from Codex under API-key auth, and was being priced as the Sonnet fallback with a 200K
+  window.
+- **The sweep's missing-model check never ran.** Added in 7.1.1 to flag a model that a vendor prices
+  and an engine can select but this registry does not know, it resolved the engine binary against the
+  working directory instead of `PATH`, found no binary, and reported nothing — which reads exactly
+  like "no new models". It now resolves through `PATH`, covers Claude as well as Codex (a new Claude
+  model would otherwise have gone unnoticed until someone asked whether it had shipped), skips rows
+  the vendor marks retired, and reports a binary it cannot scan as a regression rather than an empty
+  result. Its first real run found `gpt-4.1`.
+
 ## [7.4.0] - 2026-09-13
 
 Antigravity turns that did nothing no longer pass as successes, and Autoloop's Planner writes its

@@ -513,4 +513,9 @@ describe('registry covers what the engines actually offer', () => {
     expect(getModelPricing('gpt-6-astra')).toMatchObject({ input: 10, output: 50, cached: 1 });
     expect(resolveEngineAndModel('gpt-6-astra')).toEqual({ engine: 'codex', model: 'gpt-6-astra' });
   });
+
+  it('registers gpt-4.1 at its published rates and window', () => {
+    expect(getModelPricing('gpt-4.1')).toMatchObject({ input: 2, output: 8, cached: 0.5 });
+    expect(getContextWindow('gpt-4.1')).toBe(1_047_576);
+  });
 });
