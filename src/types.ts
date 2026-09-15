@@ -240,6 +240,26 @@ export interface CustomEngineConfig {
 
 // ─── Session Config ──────────────────────────────────────────────────────────
 
+/**
+ * One entry of Claude Code's `--agents` JSON, passed to the CLI verbatim.
+ *
+ * Only `prompt` is required. The CLI's schema for this object grows from
+ * release to release — `tools`, `model`, `maxTurns`, `background`, `memory`,
+ * `isolation` and `effort` already sit beside the two fields this type used to
+ * name — so it stays open: a field the CLI adds reaches it without waiting for
+ * a change here.
+ */
+export interface AgentDefinition {
+  description?: string;
+  prompt: string;
+  /**
+   * Run the subagent without the user, project and local CLAUDE.md files
+   * (CLI 2.1.271+; managed policy still applies). Verified accepted by 2.1.271.
+   */
+  omitClaudeMd?: boolean;
+  [field: string]: unknown;
+}
+
 export interface SessionConfig {
   name: string;
   cwd: string;
@@ -260,7 +280,7 @@ export interface SessionConfig {
   // Permissions
   dangerouslySkipPermissions?: boolean;
   // Agents
-  agents?: Record<string, { description?: string; prompt: string }>;
+  agents?: Record<string, AgentDefinition>;
   agent?: string;
   // Session identity
   customSessionId?: string;

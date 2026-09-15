@@ -155,6 +155,25 @@ describe('PersistentClaudeSession', () => {
       expect(args).toContain('resume_abc');
     });
 
+    // The CLI's agent schema grows every few releases (2.1.271 added
+    // `omitClaudeMd`). Agents are handed over verbatim, so a field the CLI adds
+    // must reach it unchanged — mapping them through a list of known fields
+    // would drop the next one silently.
+    it('passes agent definitions to --agents verbatim, fields it does not name included', async () => {
+      const agents = {
+        scout: { description: 'Looks things up', prompt: 'You are a scout.', omitClaudeMd: true, maxTurns: 3 },
+      };
+      session = new PersistentClaudeSession(makeConfig({ agents }));
+      const { spawn } = await import('node:child_process');
+      const startPromise = session.start();
+      emitInitEvent(mockProc);
+      await startPromise;
+
+      const args = vi.mocked(spawn).mock.calls.at(-1)![1] as string[];
+      const json = args[args.indexOf('--agents') + 1];
+      expect(JSON.parse(json)).toEqual(agents);
+    });
+
     it('routes non-Claude model through proxy when baseUrl is set', async () => {
       session = new PersistentClaudeSession(makeConfig({ model: 'gpt-5.4', baseUrl: 'http://localhost:3000' }));
       const { spawn } = await import('node:child_process');
