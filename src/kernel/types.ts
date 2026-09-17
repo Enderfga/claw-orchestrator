@@ -13,6 +13,7 @@
  * `unverified` — it says it does not know, which is not the same as success.
  */
 
+import type { TestSnapshot } from '../verify/protected-tests.js';
 import type { AcceptanceContract } from '../verify/contract.js';
 import type { EngineType } from '../types.js';
 
@@ -112,6 +113,12 @@ export interface FanoutNode extends NodeBase {
   maxTurnsPerAgent?: number;
   maxBudgetUsd?: number;
   cwd?: string;
+  /**
+   * One agent's send. `timeoutMs` bounds the whole node, and agents past the free
+   * session slots wait for one, so the two are not the same budget. Omitted, it
+   * falls back to `timeoutMs`, which is what the field meant before.
+   */
+  agentTimeoutMs?: number;
 }
 
 export interface CouncilNode extends NodeBase {
@@ -123,6 +130,8 @@ export interface CouncilNode extends NodeBase {
   maxTurnsPerAgent?: number;
   maxBudgetUsd?: number;
   defaultPermissionMode?: string;
+  /** One agent's send; `timeoutMs` bounds the whole council. Falls back to `timeoutMs`. */
+  agentTimeoutMs?: number;
 }
 
 export interface VerifierNode extends NodeBase {
@@ -299,6 +308,11 @@ export interface RunRecord {
   evidenceId?: string;
   /** `git rev-parse HEAD` captured at run start, when cwd is a repo. */
   baseSha?: string;
+  /**
+   * The test files and test configuration as the run found them, for the
+   * protected-tests check. Taken only when the spec has a verifier or a subflow.
+   */
+  baseTests?: TestSnapshot;
   /** Recorded for the record. Never consulted to decide completion. */
   consensusVotes?: ConsensusVote[];
   costUsd?: number;

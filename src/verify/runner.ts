@@ -18,6 +18,7 @@ import path from 'node:path';
 import type { Logger } from '../logger.js';
 import { exec as realExec, lastLines, type ExecResult } from '../kernel/exec.js';
 import { changedFilesSince, isUnder, resolveIn } from './baseline.js';
+import { checkProtectedTests, contractScripts, type TestSnapshot } from './protected-tests.js';
 import {
   contractPassed,
   DEFAULT_CHECK_TIMEOUT_MS,
@@ -45,6 +46,12 @@ export interface VerifyContext {
   /** Directory for check-produced files (screenshots). Created on demand. */
   artifactDir: string;
   baseSha?: string;
+  /**
+   * The tests as a kernel run found them (`snapshotTests`), which turns on the
+   * protected-tests check. `null`: the run has no snapshot, reported as not checked.
+   * Omitted (`verify_run`, autoloop, ultraapp): the check does not apply.
+   */
+  baseTests?: TestSnapshot | null;
   exec?: ExecFn;
   fetchFn?: typeof fetch;
   logger?: Logger;
@@ -352,6 +359,16 @@ export async function runChecks(
   opts: { stopOnRequiredFailure?: boolean } = {},
 ): Promise<CheckResult[]> {
   const results: CheckResult[] = [];
+  // First, so it judges the tree the agent handed over rather than one a test
+  // command may have rewritten. Only a command check runs the repository's tests,
+  // so only then can editing them change the verdict.
+  if (
+    contract.protectTests !== false &&
+    ctx.baseTests !== undefined &&
+    contract.checks.some((c) => c.spec.type === 'command')
+  ) {
+    results.push(await checkProtectedTests(ctx.cwd, ctx.baseTests, contractScripts(contract)));
+  }
   for (let i = 0; i < contract.checks.length; i++) {
     if (ctx.signal?.aborted) break;
     const check = contract.checks[i];

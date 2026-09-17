@@ -25,7 +25,12 @@ export function makeSubflowExecutor(kernel: RunKernel, resolve?: WorkflowResolve
     // spec deliberately cannot carry, so a child that does not get them starts
     // its agents on a different engine than the parent was told to use — and
     // `kernel/nodes/council.ts` reads them straight out of `ctx.secrets`.
-    const record = await kernel.start(child, { cwd: ctx.cwd, secrets: ctx.secrets });
+    const record = await kernel.start(child, {
+      cwd: ctx.cwd,
+      secrets: ctx.secrets,
+      // The child works in the parent's tree; the tests as the parent found them are the reference.
+      baseTests: ctx.record.baseTests,
+    });
     // Recorded now, not with the result: a parent cancelled while the child is
     // still running has to be able to find it.
     ctx.setChild(record.runId);

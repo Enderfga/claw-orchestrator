@@ -126,11 +126,18 @@ also named Codex as the engine it had taken over from.
 
 ### ultracode (Claude dynamic workflows)
 
-Set `ultracode: true` on a Claude `session_start` to have Claude orchestrate a JS workflow per substantive task and fan out to subagents. It is injected as the `ultracode: true` settings key merged into `--settings` (not a `--effort` value — the CLI rejects `--effort ultracode`):
+Set `ultracode: true` on a Claude `session_start` to have Claude orchestrate a JS workflow per substantive task and fan out to subagents. It is injected as the `ultracode: true` settings key merged into `--settings`:
 
 ```typescript
 await manager.startSession({ name: 'big-task', engine: 'claude', ultracode: true });
 ```
+
+A workflow runs in the background, so `session_send` returns once it is launched — the reply is
+Claude saying so, not the workflow's result. When the workflow finishes, Claude Code starts a turn of
+its own to report it. That turn answers no send: it is never returned as the reply to a later
+`session_send`, it does not count toward `turnsSucceeded`, and its cost is included in the session's
+spend. The same holds for any turn the session did not send, such as a message from another Claude
+Code session. Read the outcome by sending a follow-up once the workflow has had time to finish.
 
 ### Codex app-server turn control (`engine: 'codex-app'`)
 
@@ -139,6 +146,8 @@ Mid-turn and thread control via Codex 0.137 v2 RPCs, surfaced as tools: `codex_i
 ### Fan-out (cross-engine parallel)
 
 `fanout_start` runs one task across N engine/model agents in parallel and collects their answers (optional synthesis) — the best-of-N / diverse-perspective primitive. Unlike Council, no rounds/votes/worktrees; use Council for isolated parallel edits. See [tools.md](./tools.md#fan-out-3).
+
+Each agent is a session and counts against `maxConcurrentSessions`. Fan-out and Council run no more agents at once than there are free slots when they start, and the rest wait for an agent to finish. When no slot is free at all, the agents fail on the cap rather than wait for sessions they do not own. On a memory-constrained host, the cap is the knob that bounds how many engine processes run at once. An aborted fan-out starts none of the agents still waiting.
 
 ## Runtime Operations
 

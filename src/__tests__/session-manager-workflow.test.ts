@@ -174,6 +174,28 @@ describe('ledger verdict join', () => {
     expect(manager.getRunLedger({ since: '1h', verified: false }).rows).toEqual([]);
   });
 
+  it('applies the row limit after the verified filter', async () => {
+    const kernel = stubAgents(manager);
+    const rec = await manager.workflowStart(
+      { name: 'x', cwd: tmp, nodes: [{ id: 'a', kind: 'agent', prompt: 'go' }] },
+      { contract: { checks: [{ type: 'command', cmd: 'true' }] } },
+    );
+    await kernel.wait(rec.runId);
+    appendRunRow(row({ session: 'in-run-1', parent: rec.runId }));
+    appendRunRow(row({ session: 'in-run-2', parent: rec.runId }));
+    for (let i = 0; i < 5; i++) appendRunRow(row({ session: `loose-${i}` }));
+
+    // The five newest rows are all unjudged. Limiting before filtering would
+    // keep only those and find no verified row at all.
+    expect(manager.getRunLedger({ since: '1h', verified: true, limit: 2 }).rows.map((r) => r.session)).toEqual([
+      'in-run-1',
+      'in-run-2',
+    ]);
+    expect(manager.getRunLedger({ since: '1h', verified: true, limit: 1 }).rows.map((r) => r.session)).toEqual([
+      'in-run-2',
+    ]);
+  });
+
   it('leaves rows alone when their run has no verdict', async () => {
     const kernel = stubAgents(manager);
     const rec = await manager.workflowStart({ name: 'x', cwd: tmp, nodes: [{ id: 'a', kind: 'agent', prompt: 'go' }] });

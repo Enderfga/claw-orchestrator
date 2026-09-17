@@ -6,6 +6,7 @@
  */
 
 import { spawn, ChildProcess } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import * as readline from 'node:readline';
 import * as fs from 'node:fs';
@@ -98,6 +99,10 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
   private _engineCostUsd = 0;
   /** Context window the engine reported for the model it actually used. */
   private _engineContextWindow: number | null = null;
+  /** Model id the CLI reported in its init event — what answers when no `model` was set. */
+  private _engineModel: string | undefined;
+  /** Ids of messages this session wrote whose result has not arrived yet. */
+  private _unanswered = new Set<string>();
   /** Full prompt size of the last turn: input + cached reads + cache writes. */
   private _lastTurnPromptTokens = 0;
 
@@ -151,8 +156,9 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
    * expressed as settings keys rather than flags.
    *
    * Two live here today:
-   *   - `ultracode` enables dynamic workflows. It is a settings key, NOT an
-   *     `--effort` value (the CLI rejects `--effort ultracode`).
+   *   - `ultracode` enables dynamic workflows. Passed as the settings key rather
+   *     than `--effort ultracode` (accepted since 2.1.203), so it composes with a
+   *     separately chosen `effort`.
    *   - `crossSessionInbound` sets this session's policy for peer messages from
    *     other Claude Code sessions on the machine.
    *
@@ -397,6 +403,8 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
     }
 
     // Spawn
+    // A new process answers none of the old one's messages.
+    this._unanswered.clear();
     this.proc = spawn(resolvedBin, args, {
       cwd: this.options.cwd,
       env: spawnEnv,
@@ -519,6 +527,8 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
         if (event.subtype === 'init') {
           this.sessionId = event.session_id;
           this.stats.startTime = new Date().toISOString();
+          const initModel = (event as Record<string, unknown>).model;
+          if (typeof initModel === 'string' && initModel) this._engineModel = initModel;
           const pluginErrors = (event as Record<string, unknown>).plugin_errors;
           if (Array.isArray(pluginErrors) && pluginErrors.length > 0) {
             this.stats.pluginErrors = pluginErrors as Array<{ plugin: string; reason: string }>;
@@ -544,19 +554,11 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
           // zero. Reset the per-message baseline so the next delta is measured
           // against this message, not the previous one.
           this._msgProvisional = { in: 0, out: 0, cacheRead: 0, cacheCreate: 0, cacheCreate1h: 0 };
-        } else if (innerType === 'content_block_start') {
-          const block = (inner as Record<string, unknown>).content_block as Record<string, unknown> | undefined;
-          if (block?.type === 'tool_use') {
-            this.stats.toolCalls++;
-            const toolEvent = { tool: { name: block.name, input: {} } };
-            try {
-              this._streamCallbacks?.onToolUse?.(toolEvent);
-            } catch (err) {
-              this.emit(SESSION_EVENT.LOG, `[stream callback error] onToolUse: ${(err as Error).message}`);
-            }
-            this.emit(SESSION_EVENT.TOOL_USE, toolEvent);
-          }
         } else if (innerType === 'content_block_delta') {
+          // No tool_use handling on `content_block_start`: the same block arrives
+          // again, with the same id and its full input, as an `assistant` event
+          // (measured on 2.1.274). Reporting it from both counted every tool call
+          // twice and sent ACP clients two tool_call updates, the first with no input.
           const delta = (inner as Record<string, unknown>).delta as Record<string, unknown> | undefined;
           if (delta?.type === 'text_delta' && delta.text) {
             try {
@@ -583,6 +585,16 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
 
       case 'user':
         this.stats.turns++;
+        // Tool results come back inside a user message, not as a top-level
+        // `tool_result` event, so a failed tool is only visible here.
+        if (Array.isArray(event.message?.content)) {
+          for (const block of event.message.content as Array<Record<string, unknown>>) {
+            if (block?.type === 'tool_result' && block.is_error === true) {
+              this.stats.toolErrors++;
+              this._fireHook('onToolError', { tool: block.tool_use_id, error: block.content });
+            }
+          }
+        }
         this.emit(SESSION_EVENT.USER_ECHO, event);
         break;
 
@@ -647,15 +659,22 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
         if (usage) this._applyTurnUsage(usage, true);
         this._applyReportedCost((event as Record<string, unknown>).total_cost_usd);
         this._captureContextWindow((event as Record<string, unknown>).modelUsage);
+        // A turn this session did not send ends with a result too: a background
+        // workflow reporting back, or a message from another session. It answers no
+        // send, so it must not resolve the one waiting — which would hand that caller
+        // the other turn's reply — nor count as that send's success. Its usage and
+        // cost above are real and stay counted.
+        const unsolicited = !this._answersOwnMessage(event);
         // The result event is the only place the outcome is known, and it arrives once
         // per send — unlike the `user` echo that drives `turns`, which the CLI also
         // emits per tool-result batch. `is_error` is read as truthy on purpose: for a
         // persistent `custom` engine this event comes from an arbitrary CLI.
-        if (!(event.is_error || event.stop_reason === 'error')) {
+        if (!unsolicited && !(event.is_error || event.stop_reason === 'error')) {
           this.stats.turnsSucceeded++;
         }
         this.emit(SESSION_EVENT.RESULT, event);
-        this.emit(SESSION_EVENT.TURN_COMPLETE, event);
+        if (unsolicited) this.emit(SESSION_EVENT.UNSOLICITED_RESULT, event);
+        else this.emit(SESSION_EVENT.TURN_COMPLETE, event);
         this._fireHook('onTurnComplete', {
           text: event.result,
           usage,
@@ -717,8 +736,13 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
       }
     }
 
+    // The CLI echoes this id back on the result that answers the message
+    // (`user_message_uuids`), which is how a result is matched to its send.
+    const uuid = randomUUID();
+    this._unanswered.add(uuid);
     const payload = {
       type: 'user',
+      uuid,
       message: {
         role: 'user',
         content: typeof finalMessage === 'string' ? [{ type: 'text', text: finalMessage }] : finalMessage,
@@ -740,7 +764,7 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
     if (options.waitForComplete) {
       this._isBusy = true;
       try {
-        return await this._waitForTurnComplete(options.timeout || TURN_TIMEOUT_MS);
+        return await this._waitForTurnComplete(options.timeout || TURN_TIMEOUT_MS, uuid);
       } finally {
         this._isBusy = false;
         if (options.callbacks) this._streamCallbacks = null;
@@ -752,7 +776,33 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
 
   // ─── Wait for Turn Complete ──────────────────────────────────────────────
 
-  private _waitForTurnComplete(timeout: number): Promise<TurnResult> {
+  /**
+   * Whether a result answers a message this session wrote.
+   *
+   * Measured on 2.1.274: a result carries the ids of the messages it answers in
+   * `user_message_uuids`, and a turn the CLI started on its own (a finished
+   * background workflow, `origin: {kind: 'task-notification'}`) carries none. The
+   * ids decide when present — including a message the CLI folds into a turn it
+   * started itself. Without them, which is what an older CLI or a custom engine
+   * emits, a non-human `origin` is the only sign of a turn nobody sent.
+   */
+  private _answersOwnMessage(event: StreamEvent): boolean {
+    const e = event as Record<string, unknown>;
+    const ids = Array.isArray(e.user_message_uuids)
+      ? e.user_message_uuids.filter((id): id is string => typeof id === 'string')
+      : typeof e.user_message_uuid === 'string'
+        ? [e.user_message_uuid]
+        : [];
+    if (ids.length > 0) {
+      let own = false;
+      for (const id of ids) own = this._unanswered.delete(id) || own;
+      return own;
+    }
+    const origin = e.origin as { kind?: unknown } | undefined;
+    return !origin || origin.kind === 'human';
+  }
+
+  private _waitForTurnComplete(timeout: number, uuid: string): Promise<TurnResult> {
     return new Promise((resolve, reject) => {
       let settled = false;
       let streamedText = '';
@@ -779,11 +829,25 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
       };
       this.on(SESSION_EVENT.TOOL_USE, onToolUse);
 
+      // Text and tools streamed before a turn this send did not start are that
+      // turn's, not this reply's fallback.
+      const onUnsolicited = () => {
+        streamedText = '';
+        allAssistantText = '';
+        toolNames.length = 0;
+      };
+
+      // No longer waiting, so a result that arrives for it later is not this
+      // session's to hand to the next send.
+      const abandon = () => this._unanswered.delete(uuid);
+      this.on(SESSION_EVENT.UNSOLICITED_RESULT, onUnsolicited);
+
       const cleanup = () => {
         clearTimeout(timer);
         this.removeListener(SESSION_EVENT.TEXT, onText);
         this.removeListener(SESSION_EVENT.ASSISTANT, onAssistant);
         this.removeListener(SESSION_EVENT.TOOL_USE, onToolUse);
+        this.removeListener(SESSION_EVENT.UNSOLICITED_RESULT, onUnsolicited);
         this.removeListener(SESSION_EVENT.TURN_COMPLETE, onTurnComplete);
         this.removeListener(SESSION_EVENT.ERROR, onError);
         this.removeListener(SESSION_EVENT.CLOSE, onClose);
@@ -793,11 +857,24 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
         if (settled) return;
         settled = true;
         cleanup();
+        abandon();
         reject(new Error('Timeout waiting for response'));
       }, timeout);
 
       const onTurnComplete = (event: StreamEvent) => {
         if (settled) return;
+        // The answer to another message this session wrote — one sent without
+        // waiting, such as an inbox delivery — is not this send's reply.
+        const e = event as Record<string, unknown>;
+        const ids = Array.isArray(e.user_message_uuids)
+          ? e.user_message_uuids
+          : typeof e.user_message_uuid === 'string'
+            ? [e.user_message_uuid]
+            : [];
+        if (ids.length > 0 && !ids.includes(uuid)) {
+          onUnsolicited();
+          return;
+        }
         settled = true;
         cleanup();
         let text =
@@ -813,6 +890,7 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
         if (settled) return;
         settled = true;
         cleanup();
+        abandon();
         reject(err);
       };
 
@@ -820,6 +898,7 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
         if (settled) return;
         settled = true;
         cleanup();
+        abandon();
         const text = streamedText || allAssistantText.trim() || '';
         resolve({
           text,
@@ -832,7 +911,7 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
         });
       };
 
-      this.once(SESSION_EVENT.TURN_COMPLETE, onTurnComplete);
+      this.on(SESSION_EVENT.TURN_COMPLETE, onTurnComplete);
       this.once(SESSION_EVENT.ERROR, onError);
       this.once(SESSION_EVENT.CLOSE, onClose);
     });
@@ -879,10 +958,11 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
   }
 
   getCost(): CostBreakdown {
-    const pricing = getModelPricing(this.options.model);
+    const model = this.options.model || this._engineModel;
+    const pricing = getModelPricing(model);
     const nonCachedIn = Math.max(0, this.stats.tokensIn - this.stats.cachedTokens);
     return {
-      model: this.options.model || 'default',
+      model: model || 'default',
       tokensIn: this.stats.tokensIn,
       tokensOut: this.stats.tokensOut,
       cachedTokens: this.stats.cachedTokens,

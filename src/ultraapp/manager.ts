@@ -198,12 +198,13 @@ export class UltraappManager {
 
   private ultraappNodeDeps(): UltraappNodeDeps {
     return {
-      synth: async ({ appRunId, runDir }) =>
+      synth: async ({ appRunId, runDir, signal }) =>
         runCouncilSynth({
           spec: await this.opts.store.readSpec(appRunId),
           runId: appRunId,
           runDir,
           sessionManager: this.opts.sessionManager,
+          signal,
         }),
       deploy: async ({ appRunId, version, codebasePath, slug }) =>
         this.deployStage({ runId: appRunId, version, worktreePath: codebasePath, slug }),

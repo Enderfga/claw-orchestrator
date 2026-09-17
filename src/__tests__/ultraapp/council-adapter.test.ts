@@ -123,6 +123,27 @@ describe('runCouncilSynth', () => {
       expect(r.worktreePath).toMatch(/codebase$/);
       expect(fs.existsSync(path.join(r.worktreePath!, '.git'))).toBe(true);
       expect(r.rounds).toBe(4);
+      // No signal given, none passed on.
+      expect(fakeCouncilRun.mock.calls[0][0].signal).toBeUndefined();
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('hands the kernel signal to the council, so a cancelled build opens no further round', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ua-signal-'));
+    try {
+      const signal = { aborted: false };
+      const councilRun = vi.fn().mockResolvedValue({ id: 'c', task: 't', status: 'error', config: {}, responses: [] });
+      await runCouncilSynth({
+        spec: makeEmptySpec('ua-signal'),
+        runId: 'ua-signal',
+        runDir: tmp,
+        sessionManager: { startSession: vi.fn(), sendMessage: vi.fn(), stopSession: vi.fn() } as never,
+        councilRun,
+        signal,
+      });
+      expect(councilRun.mock.calls[0][0].signal).toBe(signal);
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
     }

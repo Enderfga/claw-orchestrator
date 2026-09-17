@@ -9,6 +9,48 @@
 
 import type { AcceptanceContract } from '../../verify/contract.js';
 import type { CouncilNode, FanoutAgentSpec, FanoutNode, NodeSpec, WorkflowSpec } from '../types.js';
+import { DEFAULT_AGENT_TIMEOUT_MS as FANOUT_AGENT_TIMEOUT_MS } from '../../fanout.js';
+import {
+  DEFAULT_AGENT_TIMEOUT_MS as COUNCIL_AGENT_TIMEOUT_MS,
+  DEFAULT_MAX_ROUNDS,
+  EMPTY_RESPONSE_MAX_RETRIES,
+  EMPTY_RESPONSE_RETRY_DELAY_MS,
+  FOLLOWUP_MAX_RETRIES,
+  FOLLOWUP_TIMEOUT_MS,
+  INTER_ROUND_DELAY_MS,
+  SESSION_READY_TIMEOUT_MS,
+} from '../../constants.js';
+
+// A fan-out or council node's timeout is a backstop for the whole mode, not a
+// second per-agent limit. Agents past the free session slots wait for one, so a
+// node sized for a single agent timed out while the first wave was still running
+// and dropped every result. These bounds assume the worst case — one agent at a
+// time, every retry taken — and each agent is still held to its own timeout.
+
+/** Worst case for a fan-out node: each agent in turn, including its start, then synthesis. */
+export function fanoutNodeBudget(
+  agents: number,
+  synthesize: boolean | undefined,
+  agentTimeoutMs = FANOUT_AGENT_TIMEOUT_MS,
+): number {
+  return (agentTimeoutMs + SESSION_READY_TIMEOUT_MS) * (Math.max(1, agents) + (synthesize ? 1 : 0));
+}
+
+/**
+ * Worst case for a council node. Per agent per round, `Council.runSingleAgent`
+ * may start and send up to `EMPTY_RESPONSE_MAX_RETRIES + 1` times and then send
+ * `FOLLOWUP_MAX_RETRIES` follow-ups.
+ */
+export function councilNodeBudget(
+  agents: number,
+  maxRounds: number | undefined,
+  agentTimeoutMs = COUNCIL_AGENT_TIMEOUT_MS,
+): number {
+  const perAgent =
+    (EMPTY_RESPONSE_MAX_RETRIES + 1) * (agentTimeoutMs + SESSION_READY_TIMEOUT_MS + EMPTY_RESPONSE_RETRY_DELAY_MS) +
+    FOLLOWUP_MAX_RETRIES * (FOLLOWUP_TIMEOUT_MS + EMPTY_RESPONSE_RETRY_DELAY_MS);
+  return (maxRounds ?? DEFAULT_MAX_ROUNDS) * (Math.max(1, agents) * perAgent + INTER_ROUND_DELAY_MS);
+}
 
 export interface CommonArgs {
   task: string;
@@ -42,6 +84,8 @@ export function councilWorkflow(args: CouncilArgs): WorkflowSpec {
         agents: args.agents,
         projectDir: args.cwd,
         maxRounds: args.maxRounds,
+        agentTimeoutMs: COUNCIL_AGENT_TIMEOUT_MS,
+        timeoutMs: councilNodeBudget(args.agents.length, args.maxRounds),
       },
     ],
   };
@@ -65,6 +109,8 @@ export function fanoutWorkflow(args: FanoutArgs): WorkflowSpec {
         agents: args.agents,
         synthesize: args.synthesize,
         cwd: args.cwd,
+        agentTimeoutMs: FANOUT_AGENT_TIMEOUT_MS,
+        timeoutMs: fanoutNodeBudget(args.agents.length, args.synthesize),
       },
     ],
   };
@@ -101,6 +147,8 @@ export function solveWorkflow(args: SolveArgs): WorkflowSpec {
       agents: args.scouts,
       synthesize: args.scouts.length >= 2,
       cwd: args.cwd,
+      agentTimeoutMs: FANOUT_AGENT_TIMEOUT_MS,
+      timeoutMs: fanoutNodeBudget(args.scouts.length, args.scouts.length >= 2),
     },
   ];
 
@@ -137,6 +185,8 @@ export function solveWorkflow(args: SolveArgs): WorkflowSpec {
       agents: args.reviewers,
       synthesize: args.reviewers.length >= 2,
       cwd: args.cwd,
+      agentTimeoutMs: FANOUT_AGENT_TIMEOUT_MS,
+      timeoutMs: fanoutNodeBudget(args.reviewers.length, args.reviewers.length >= 2),
       onFailure: 'continue',
     });
   }
@@ -219,7 +269,11 @@ export function legacyCouncilWorkflow(args: LegacyCouncilArgs): WorkflowSpec {
         agents: args.agents,
         projectDir: args.cwd,
         maxRounds: args.maxRounds,
-        timeoutMs: args.timeoutMs,
+        // Explicit even when the caller set none: the executor falls back to the
+        // node timeout, which is the whole council's budget, not one agent's.
+        // `||`: a zero or negative timeout means "use the default" to Council itself.
+        agentTimeoutMs: args.timeoutMs || COUNCIL_AGENT_TIMEOUT_MS,
+        timeoutMs: councilNodeBudget(args.agents.length, args.maxRounds, args.timeoutMs || COUNCIL_AGENT_TIMEOUT_MS),
         maxTurnsPerAgent: args.maxTurnsPerAgent,
         maxBudgetUsd: args.maxBudgetUsd,
         defaultPermissionMode: args.defaultPermissionMode,
@@ -259,7 +313,9 @@ export function legacyFanoutWorkflow(args: LegacyFanoutArgs): WorkflowSpec {
         maxTurnsPerAgent: args.maxTurnsPerAgent,
         maxBudgetUsd: args.maxBudgetUsd,
         cwd: args.cwd,
-        timeoutMs: args.timeoutMs,
+        // `||`: a zero timeout reaches the send as "use the default", so budget for that.
+        agentTimeoutMs: args.timeoutMs || FANOUT_AGENT_TIMEOUT_MS,
+        timeoutMs: fanoutNodeBudget(args.agents.length, args.synthesize, args.timeoutMs || FANOUT_AGENT_TIMEOUT_MS),
       },
     ],
   };
@@ -363,6 +419,8 @@ export function ultraappWorkflow(args: UltraappArgs): WorkflowSpec {
       appRunId: args.appRunId,
       runDir: args.runDir,
       slug: args.slug,
+      // The synth stage is a three-agent, eight-round council (ultraapp/council-adapter.ts).
+      timeoutMs: councilNodeBudget(3, 8),
     },
     {
       id: 'build',

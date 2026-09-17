@@ -57,6 +57,7 @@ import {
   DEFAULT_MAX_ROUNDS,
 } from './constants.js';
 import { type Logger, createConsoleLogger } from './logger.js';
+import { mapBounded } from './concurrency.js';
 
 // Forward-declare SessionManager to avoid circular imports at the type level.
 // The actual instance is injected via constructor.
@@ -64,6 +65,8 @@ interface SessionManagerLike {
   startSession(config: Partial<SessionConfig> & { name?: string }): Promise<SessionInfo>;
   sendMessage(name: string, message: string, options?: Partial<SendOptions>): Promise<SendResult>;
   stopSession(name: string): Promise<void>;
+  /** Optional so lightweight fakes stay valid; without it every agent starts at once. */
+  freeSessionSlots?(): number;
 }
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -436,6 +439,10 @@ export class Council extends EventEmitter {
   private manager: SessionManagerLike;
   private agentTimeoutMs: number;
   private _aborted = false;
+
+  private _stopped(): boolean {
+    return this._aborted || this.config.signal?.aborted === true;
+  }
   private _activeSessions = new Set<string>();
   private _session: CouncilSession | null = null;
   private _pendingInjection: string | null = null;
@@ -518,7 +525,7 @@ export class Council extends EventEmitter {
     let content = '';
     try {
       for (let attempt = 0; attempt <= EMPTY_RESPONSE_MAX_RETRIES; attempt++) {
-        if (this._aborted) throw new Error('Council aborted');
+        if (this._stopped()) throw new Error('Council aborted');
         if (attempt > 0) {
           this.emitEvent({
             type: 'agent-chunk',
@@ -569,9 +576,9 @@ export class Council extends EventEmitter {
 
       // Follow-up if response is too short and has no consensus marker
       const strippedContent = content.replace(/^\[Agent completed[^\]]*\]\s*/i, '').trim();
-      if (!this._aborted && strippedContent.length < MIN_COMPLETE_RESPONSE_LENGTH && !hasConsensusMarker(content)) {
+      if (!this._stopped() && strippedContent.length < MIN_COMPLETE_RESPONSE_LENGTH && !hasConsensusMarker(content)) {
         for (let i = 0; i < FOLLOWUP_MAX_RETRIES; i++) {
-          if (this._aborted) break;
+          if (this._stopped()) break;
           try {
             const followup = await this.manager.sendMessage(
               sessionName,
@@ -681,7 +688,7 @@ export class Council extends EventEmitter {
 
     try {
       for (let round = 1; round <= this.config.maxRounds; round++) {
-        if (this._aborted) break;
+        if (this._stopped()) break;
 
         this.logger.info(`Round ${round} (${this.config.agents.length} agents parallel)`);
         this.emitEvent({ type: 'round-start', sessionId: session.id, round });
@@ -701,11 +708,15 @@ export class Council extends EventEmitter {
           return { agent, prompt, systemPrompt, workDir };
         });
 
-        // Execute all agents in parallel
-        const results = await Promise.allSettled(
-          agentTasks.map(({ agent, prompt, systemPrompt, workDir }) =>
-            this.runSingleAgent(agent, prompt, systemPrompt, workDir, round, session.id),
-          ),
+        // Execute the agents in parallel, no more at once than there are session slots.
+        const results = await mapBounded(
+          agentTasks,
+          this.manager.freeSessionSlots?.() ?? agentTasks.length,
+          ({ agent, prompt, systemPrompt, workDir }): Promise<PromiseSettledResult<AgentResponse>> =>
+            this.runSingleAgent(agent, prompt, systemPrompt, workDir, round, session.id).then(
+              (value) => ({ status: 'fulfilled', value }),
+              (reason: unknown) => ({ status: 'rejected', reason }),
+            ),
         );
 
         // Collect results
@@ -749,8 +760,14 @@ export class Council extends EventEmitter {
         }
       }
 
-      if (this._aborted) {
+      if (this._stopped()) {
         session.status = 'error';
+      }
+      // Worktrees go only on an explicit abort. A kernel timeout stops this attempt
+      // through the signal while a retry of the same node may already be running
+      // in the same `.worktrees/<agent>` paths, so discarding them here would pull
+      // the tree out from under it.
+      if (this._aborted) {
         // An abort that lands while setupWorktrees is still running finds an
         // empty `_worktreeMap` — it is not assigned until setup returns — so
         // abort() skips its own cleanup, setup then completes and creates every

@@ -476,16 +476,172 @@ describe('PersistentClaudeSession', () => {
       await startPromise;
     });
 
-    it('tracks tool calls from stream_event content_block_start', () => {
-      const event = {
+    // The event order of a real two-tool turn (claude 2.1.274, --include-partial-messages,
+    // --replay-user-messages), trimmed to the fields the wrapper reads. Each tool_use
+    // block arrives twice: first on `content_block_start` with an empty input, then as
+    // an `assistant` event carrying the same id and the full input. The results come
+    // back inside `user` messages.
+    const twoToolTurn = [
+      { type: 'user', message: { role: 'user', content: [{ type: 'text', text: 'run two commands' }] } },
+      { type: 'stream_event', event: { type: 'message_start' } },
+      {
         type: 'stream_event',
         event: {
           type: 'content_block_start',
-          content_block: { type: 'tool_use', name: 'Read' },
+          content_block: { type: 'tool_use', id: 'toolu_1', name: 'Bash', input: {} },
         },
+      },
+      {
+        type: 'assistant',
+        message: { content: [{ type: 'tool_use', id: 'toolu_1', name: 'Bash', input: { command: 'echo one' } }] },
+      },
+      {
+        type: 'user',
+        message: {
+          role: 'user',
+          content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: 'one', is_error: false }],
+        },
+      },
+      { type: 'stream_event', event: { type: 'message_start' } },
+      {
+        type: 'stream_event',
+        event: {
+          type: 'content_block_start',
+          content_block: { type: 'tool_use', id: 'toolu_2', name: 'Bash', input: {} },
+        },
+      },
+      {
+        type: 'assistant',
+        message: { content: [{ type: 'tool_use', id: 'toolu_2', name: 'Bash', input: { command: 'exit 3' } }] },
+      },
+      {
+        type: 'user',
+        message: {
+          role: 'user',
+          content: [{ type: 'tool_result', tool_use_id: 'toolu_2', content: 'Exit code 3', is_error: true }],
+        },
+      },
+      { type: 'assistant', message: { content: [{ type: 'text', text: 'DONE' }] } },
+      { type: 'result', subtype: 'success', result: 'DONE' },
+    ];
+
+    it('reports each tool call once, with its input, and counts failed tool results', () => {
+      const seen: unknown[] = [];
+      session.on(SESSION_EVENT.TOOL_USE, (e: unknown) => seen.push(e));
+      for (const event of twoToolTurn) mockProc.stdout.emit('data', Buffer.from(JSON.stringify(event) + '\n'));
+      expect(session.stats.toolCalls).toBe(2);
+      expect(seen).toEqual([
+        { tool: { name: 'Bash', input: { command: 'echo one' } } },
+        { tool: { name: 'Bash', input: { command: 'exit 3' } } },
+      ]);
+      expect(session.stats.toolErrors).toBe(1);
+      expect(session.stats.turnsSucceeded).toBe(1);
+    });
+
+    it('does not hand a waiting send the reply of a turn it did not send', async () => {
+      const waiting = session.send('second message', { waitForComplete: true, timeout: 60_000 });
+      // A background workflow finishing while this send is in flight: its own turn
+      // ends in a result tagged with an origin (recorded on 2.1.274).
+      const late = {
+        type: 'result',
+        subtype: 'success',
+        result: 'The workflow finished: PONG',
+        origin: { kind: 'task-notification' },
+        total_cost_usd: 0.12,
       };
+      mockProc.stdout.emit('data', Buffer.from(JSON.stringify(late) + '\n'));
+      const own = { type: 'result', subtype: 'success', result: 'reply to the second message', total_cost_usd: 0.13 };
+      mockProc.stdout.emit('data', Buffer.from(JSON.stringify(own) + '\n'));
+      const reply = (await waiting) as { text: string };
+      expect(reply.text).toBe('reply to the second message');
+      expect(session.stats.turnsSucceeded).toBe(1);
+    });
+
+    const lastSentUuid = (): string => {
+      const written = mockProc.stdin.write.mock.calls.at(-1)![0] as string;
+      return JSON.parse(written.trim()).uuid as string;
+    };
+    const emit = (event: Record<string, unknown>) =>
       mockProc.stdout.emit('data', Buffer.from(JSON.stringify(event) + '\n'));
-      expect(session.stats.toolCalls).toBe(1);
+
+    it('resolves a send the CLI folded into a turn it started itself', async () => {
+      const waiting = session.send('question', { waitForComplete: true, timeout: 60_000 });
+      const uuid = lastSentUuid();
+      expect(uuid).toMatch(/^[0-9a-f-]{36}$/);
+      // Background-task turn that absorbed the message: tagged with an origin, but
+      // it names the message it answers.
+      emit({ type: 'result', result: 'answer', origin: { kind: 'task-notification' }, user_message_uuids: [uuid] });
+      expect(((await waiting) as { text: string }).text).toBe('answer');
+      expect(session.stats.turnsSucceeded).toBe(1);
+    });
+
+    it('ignores a result that names only messages this session did not send', async () => {
+      const waiting = session.send('question', { waitForComplete: true, timeout: 60_000 });
+      const uuid = lastSentUuid();
+      emit({ type: 'result', result: 'someone else', user_message_uuids: ['00000000-0000-0000-0000-000000000000'] });
+      emit({ type: 'result', result: 'mine', user_message_uuids: [uuid] });
+      expect(((await waiting) as { text: string }).text).toBe('mine');
+      expect(session.stats.turnsSucceeded).toBe(1);
+    });
+
+    it('does not hand a waiting send the reply to a message sent without waiting', async () => {
+      // An inbox delivery writes without waiting; a caller then sends and waits.
+      await session.send('inbox message', { waitForComplete: false });
+      const inbox = lastSentUuid();
+      const waiting = session.send('question', { waitForComplete: true, timeout: 60_000 });
+      const mine = lastSentUuid();
+      emit({ type: 'result', result: 'reply to the inbox message', user_message_uuids: [inbox] });
+      emit({ type: 'result', result: 'reply to the question', user_message_uuids: [mine] });
+      expect(((await waiting) as { text: string }).text).toBe('reply to the question');
+      expect(session.stats.turnsSucceeded).toBe(2);
+    });
+
+    it('does not hand the next send the late reply to a send that timed out', async () => {
+      const first = session.send('first', { waitForComplete: true, timeout: 1000 });
+      const firstUuid = lastSentUuid();
+      const firstOutcome = first.catch((e: Error) => e.message);
+      vi.advanceTimersByTime(1001);
+      expect(await firstOutcome).toMatch(/Timeout/);
+      const second = session.send('second', { waitForComplete: true, timeout: 60_000 });
+      const secondUuid = lastSentUuid();
+      emit({ type: 'result', result: 'late reply to first', user_message_uuids: [firstUuid] });
+      emit({ type: 'result', result: 'reply to second', user_message_uuids: [secondUuid] });
+      expect(((await second) as { text: string }).text).toBe('reply to second');
+      // The late turn is not the second send's success; counting it would mark a
+      // failed second turn ok in the run ledger.
+      expect(session.stats.turnsSucceeded).toBe(1);
+    });
+
+    it("does not build a reply's fallback text from a turn it did not send", async () => {
+      const waiting = session.send('question', { waitForComplete: true, timeout: 60_000 });
+      const uuid = lastSentUuid();
+      emit({
+        type: 'stream_event',
+        event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'NOT MINE' } },
+      });
+      emit({ type: 'result', result: 'workflow done', origin: { kind: 'task-notification' } });
+      emit({
+        type: 'stream_event',
+        event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'mine' } },
+      });
+      emit({ type: 'result', result: '', user_message_uuids: [uuid] });
+      expect(((await waiting) as { text: string }).text).toBe('mine');
+    });
+
+    it('names the model the CLI reported in init when the caller set none', async () => {
+      const unnamed = new PersistentClaudeSession(makeConfig({ model: undefined }));
+      expect(unnamed.getCost().model).toBe('default');
+      const started = unnamed.start();
+      const init = { type: 'system', subtype: 'init', session_id: 'sess_456', model: 'claude-haiku-4-5-20251001' };
+      mockProc.stdout.emit('data', Buffer.from(JSON.stringify(init) + '\n'));
+      await started;
+      expect(unnamed.getCost().model).toBe('claude-haiku-4-5-20251001');
+      // A model the caller chose still wins over what init says.
+      const named = new PersistentClaudeSession(makeConfig());
+      const namedStarted = named.start();
+      mockProc.stdout.emit('data', Buffer.from(JSON.stringify(init) + '\n'));
+      await namedStarted;
+      expect(named.getCost().model).toBe('claude-sonnet-4-6');
     });
 
     it('emits text from content_block_delta', () => {

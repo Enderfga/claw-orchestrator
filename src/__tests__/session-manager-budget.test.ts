@@ -42,6 +42,9 @@ class CostingSession extends EventEmitter implements ISession {
   failNext?: string;
   /** USD added by each completed turn. */
   costPerTurn = 0.5;
+  /** Engine-side turns per send — claude counts one per tool-result batch. */
+  turnsPerSend = 1;
+  model = 'mock-model';
 
   get isReady() {
     return true;
@@ -65,7 +68,7 @@ class CostingSession extends EventEmitter implements ISession {
     message: string | unknown[],
     options?: SessionSendOptions,
   ): Promise<TurnResult | { requestId: number; sent: boolean }> {
-    this.turns++;
+    this.turns += this.turnsPerSend;
     this.toolCalls += 2;
     this.costUsd += this.costPerTurn;
     if (this.failNext) {
@@ -80,7 +83,7 @@ class CostingSession extends EventEmitter implements ISession {
   getStats(): SessionStats & { sessionId?: string; uptime: number } {
     return {
       turns: this.turns,
-      turnsSucceeded: this.turns,
+      turnsSucceeded: this.turns / this.turnsPerSend,
       toolCalls: this.toolCalls,
       toolErrors: 0,
       tokensIn: this.turns * 100,
@@ -102,7 +105,7 @@ class CostingSession extends EventEmitter implements ISession {
   }
   getCost(): CostBreakdown {
     return {
-      model: 'mock-model',
+      model: this.model,
       tokensIn: this.turns * 100,
       tokensOut: this.turns * 40,
       cachedTokens: 0,
@@ -209,6 +212,30 @@ describe('run ledger integration', () => {
     engines[0].tokensEstimated = true;
     await mgr.sendMessage('ledger-est', 'hi');
     expect(readRunLedger({ session: 'ledger-est' })[0].tokensEstimated).toBe(true);
+    await mgr.shutdown();
+  });
+
+  it("indexes rows by send, not by the engine's own turn counter", async () => {
+    const mgr = makeManager();
+    await mgr.startSession({ name: 'ledger-idx', engine: 'claude', cwd: tmpDir });
+    engines[0].turnsPerSend = 4;
+    await mgr.sendMessage('ledger-idx', 'first');
+    await mgr.sendMessage('ledger-idx', 'second');
+    const rows = readRunLedger({ session: 'ledger-idx' });
+    expect(rows.map((r) => r.turn)).toEqual([1, 2]);
+    expect(rows.every((r) => r.ok)).toBe(true);
+    await mgr.shutdown();
+  });
+
+  it("does not record getCost()'s 'default' placeholder as the model", async () => {
+    const mgr = makeManager();
+    await mgr.startSession({ name: 'ledger-nomodel', engine: 'claude', cwd: tmpDir });
+    engines[0].model = 'default';
+    await mgr.sendMessage('ledger-nomodel', 'hi');
+    expect(readRunLedger({ session: 'ledger-nomodel' })[0].model).toBeUndefined();
+    engines[0].model = 'claude-haiku-4-5-20251001';
+    await mgr.sendMessage('ledger-nomodel', 'again');
+    expect(readRunLedger({ session: 'ledger-nomodel' })[1].model).toBe('claude-haiku-4-5-20251001');
     await mgr.shutdown();
   });
 
