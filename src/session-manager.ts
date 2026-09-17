@@ -1353,6 +1353,10 @@ export class SessionManager {
     }
   }
 
+  hasSession(name: string): boolean {
+    return this.sessions.has(name);
+  }
+
   listSessions(): SessionInfo[] {
     return Array.from(this.sessions.entries()).map(([name, managed]) => this._toSessionInfo(name, managed));
   }

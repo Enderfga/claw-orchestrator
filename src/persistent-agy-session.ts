@@ -252,7 +252,8 @@ export class PersistentAgySession extends BaseOneShotSession {
       const timer = setTimeout(() => {
         if (!settled) {
           settled = true;
-          proc.kill('SIGTERM');
+          this._cleanupProc();
+          this.agyConversationId = undefined;
           reject(new Error('Timeout waiting for Antigravity response'));
         }
       }, timeout);

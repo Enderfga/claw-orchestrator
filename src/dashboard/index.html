@@ -1764,6 +1764,7 @@
           const j = await r.json();
           if (j.ok) {
             state.autoloop.state = j.state;
+            state.autoloop.live = j.live !== false;
             paintAutoloopState();
           }
           const logR = await fetch(`/autoloop/${encodeURIComponent(id)}/push_log`);
@@ -1804,10 +1805,15 @@
               paintReviewer();
             }
           }
-          // For terminated runs, surface a Resume affordance under the
+          // For terminated, paused, or inactive runs, surface a Resume affordance under the
           // top bar. The button kicks off /autoloop/<id>/resume and then
           // re-runs openAutoloop so SSE reconnects with the live state.
-          if (state.autoloop.state && state.autoloop.state.status === 'terminated') {
+          if (
+            state.autoloop.state &&
+            (!state.autoloop.live ||
+              state.autoloop.state.status === 'terminated' ||
+              state.autoloop.state.status === 'paused')
+          ) {
             const bar = document.querySelector('.topbar');
             if (bar && !document.getElementById('auto-resume')) {
               const btn = document.createElement('button');
@@ -1819,6 +1825,11 @@
                 btn.disabled = true;
                 btn.textContent = 'Resuming…';
                 try {
+                  const body = {};
+                  if (state.autoloop.state && state.autoloop.state.pending_dispatch) {
+                    body.pending_dispatch_id = state.autoloop.state.pending_dispatch.dispatch_id;
+                    body.send_timeout_ms = (state.autoloop.state.pending_dispatch.timeout_ms || 600000) + 60000;
+                  }
                   // A run whose roles used a custom engine cannot be resumed
                   // from an empty body: the config carries credentials, so it is
                   // never persisted and has to be supplied again. What is sent
@@ -1826,7 +1837,6 @@
                   // (CLAWO_CUSTOM_ENGINE_<REF>) — no credential goes over the
                   // wire, and this button stops being the one caller that
                   // cannot resume such a run.
-                  const body = {};
                   const reqRes = await fetch(`/autoloop/${encodeURIComponent(id)}/resume-requirements`);
                   const reqJson = reqRes.ok ? await reqRes.json().catch(() => null) : null;
                   for (const role of (reqJson && reqJson.rolesNeedingCustomEngine) || []) {
@@ -1869,6 +1879,26 @@
           /* ignore */
         }
         // SSE
+        if (state.autoloop.eventSource) {
+          state.autoloop.eventSource.close();
+          state.autoloop.eventSource = null;
+        }
+        if (
+          state.autoloop.state &&
+          (state.autoloop.state.status === 'terminated' || state.autoloop.state.status === 'crashed')
+        ) {
+          const reasonText = `[${state.autoloop.state.status}] ${state.autoloop.state.status_reason ?? ''}`;
+          const lastMsg = state.autoloop.plannerLog[state.autoloop.plannerLog.length - 1];
+          if (state.autoloop.state.status_reason && (!lastMsg || lastMsg.text !== reasonText)) {
+            state.autoloop.plannerLog.push({
+              who: 'system',
+              text: reasonText,
+              ts: new Date().toISOString(),
+            });
+            paintPlanner();
+          }
+          return;
+        }
         const es = new EventSource(`/autoloop/${encodeURIComponent(id)}/events`);
         state.autoloop.eventSource = es;
         es.addEventListener('snapshot', (e) => {
@@ -1928,13 +1958,32 @@
         });
         es.addEventListener('terminated', (e) => {
           const data = JSON.parse(e.data);
-          state.autoloop.plannerLog.push({
-            who: 'system',
-            text: `[terminated] ${data.reason ?? ''}`,
-            ts: new Date().toISOString(),
-          });
-          paintPlanner();
+          const reasonText = `[terminated] ${data.reason ?? ''}`;
+          const lastMsg = state.autoloop.plannerLog[state.autoloop.plannerLog.length - 1];
+          if (!lastMsg || lastMsg.text !== reasonText) {
+            state.autoloop.plannerLog.push({
+              who: 'system',
+              text: reasonText,
+              ts: new Date().toISOString(),
+            });
+            paintPlanner();
+          }
+          es.close();
+          if (state.autoloop.eventSource === es) {
+            state.autoloop.eventSource = null;
+          }
         });
+        es.onerror = () => {
+          if (
+            state.autoloop.state &&
+            (state.autoloop.state.status === 'terminated' || state.autoloop.state.status === 'crashed')
+          ) {
+            es.close();
+            if (state.autoloop.eventSource === es) {
+              state.autoloop.eventSource = null;
+            }
+          }
+        };
         es.addEventListener('compact', (e) => {
           const data = JSON.parse(e.data);
           const entry = {
@@ -1958,10 +2007,32 @@
       function paintAutoloopState() {
         const s = state.autoloop.state;
         if (!s) return;
-        $('auto-status').innerHTML = `<span class="badge ${s.status}">${s.status}</span>`;
+        const isLive = state.autoloop.live !== false;
+        const statusBadge = isLive
+          ? `<span class="badge ${s.status}">${s.status}</span>`
+          : `<span class="badge paused">${s.status} (inactive)</span>`;
+        $('auto-status').innerHTML = statusBadge;
         $('auto-iter').textContent = s.iter;
         $('auto-sub').textContent = s.subagents_spawned ? 'yes' : 'no';
         $('auto-push').textContent = s.push_log_count;
+
+        const isTerminated = s.status === 'terminated' || s.status === 'crashed';
+        const needsResume = !isLive || isTerminated;
+        const input = $('auto-input');
+        const sendBtn = $('auto-send');
+        if (input && sendBtn) {
+          if (needsResume) {
+            input.disabled = true;
+            sendBtn.disabled = true;
+            input.placeholder = isTerminated
+              ? `Run is ${s.status}. Click "Resume run" on the top bar to continue.`
+              : 'Run is inactive (server restarted). Click "Resume run" on the top bar to resume.';
+          } else {
+            input.disabled = false;
+            sendBtn.disabled = false;
+            input.placeholder = 'Chat with the Planner… (Enter to send)';
+          }
+        }
       }
 
       function paintPlanner() {
@@ -2095,9 +2166,14 @@
           });
           paintPlanner();
         } finally {
-          btn.disabled = false;
-          ta.disabled = false;
-          ta.focus();
+          const isTerm =
+            state.autoloop.state &&
+            (state.autoloop.state.status === 'terminated' || state.autoloop.state.status === 'crashed');
+          if (!isTerm) {
+            btn.disabled = false;
+            ta.disabled = false;
+            ta.focus();
+          }
         }
       }
 

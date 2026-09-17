@@ -790,7 +790,7 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
   // ─── Planner-specific ────────────────────────────────────────────────────
 
   private async ensurePlanner(): Promise<void> {
-    if (this.plannerStarted) return;
+    if (this.plannerStarted && (this.config.manager.hasSession?.(this.plannerName) ?? true)) return;
     this.validateSelection('planner', this.plannerSelection);
     await this.config.manager.startSession({
       name: this.plannerName,
@@ -1037,7 +1037,7 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
   // ─── Coder ──────────────────────────────────────────────────────────────
 
   private async ensureCoder(): Promise<void> {
-    if (this.coderStarted) return;
+    if (this.coderStarted && (this.config.manager.hasSession?.(this.coderName) ?? true)) return;
     this.validateSelection('coder', this.coderSelection);
     await this.config.manager.startSession({
       name: this.coderName,
@@ -1252,7 +1252,7 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
   }
 
   private async ensureReviewer(): Promise<void> {
-    if (this.reviewerStarted) return;
+    if (this.reviewerStarted && (this.config.manager.hasSession?.(this.reviewerName) ?? true)) return;
     this.validateSelection('reviewer', this.reviewerSelection);
     fs.mkdirSync(this.reviewerSandboxDir, { recursive: true });
     const sessionPrompt = this.buildReviewerSystemPrompt();
