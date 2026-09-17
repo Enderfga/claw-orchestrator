@@ -5,7 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [7.5.0] - 2026-09-17
+
+Weekly engine sweep: Claude Code 2.1.271 → 2.1.274, Antigravity 1.2.2 → 1.2.5, Grok Build 1.0.30 →
+1.0.34; Codex and OpenCode were already current. Every live turn passed through the real wrapper and
+the model registry matched both vendors' published prices. Most of this release fixes accounting and
+concurrency that the run ledger and the session cap had been getting wrong, and it adds protection for
+the tests an acceptance contract runs.
 
 ### Added
 
@@ -48,9 +54,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   message the CLI folds into a turn it started itself — and neither the reply to a message sent
   without waiting nor a late reply to a send that timed out is handed to the next one. Without ids, a
   result tagged with a non-human `origin` resolves none. Such turns do not count toward
-  `turnsSucceeded`; their cost does. The
-  `ultracode` docs now say a workflow's send returns at launch, and no longer claim the CLI rejects
-  `--effort ultracode`.
+  `turnsSucceeded`; their cost does. The `ultracode` docs now say a workflow's send returns at
+  launch, and no longer claim the CLI rejects `--effort ultracode`.
 - **Ledger rows.** A Claude Code session with no explicit model recorded `model: "default"`; it now
   records the model named in the CLI's `init` event, and never the placeholder. `turn` is now the
   index of the send — it was Claude Code's count of `user` events, which advances once per tool-result
@@ -64,7 +69,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   corrupted.
 - **The test suite wrote into the real home directory**: ledger rows, council transcripts, and the
   persisted-session and PID files a running orchestrator restores from. Every test file now runs
-  with a private `HOME`.
+  with a private `HOME`, and test workers run with a bounded heap.
+- **The weekly sweep could pass without knowing the upstream version.** Its Codex lookup scanned the
+  newest 15 GitHub releases, which Codex's prereleases had filled, so the upstream column read "?" and
+  the run still passed. It now reads a full page, takes Grok Build's upstream from its updater's
+  check-only mode, and treats an empty lookup as a regression.
 
 ## [7.4.1] - 2026-09-15
 
