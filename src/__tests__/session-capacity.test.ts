@@ -26,7 +26,16 @@ import { mapBounded } from '../concurrency.js';
 import { SessionManager } from '../session-manager.js';
 import { Fanout } from '../fanout.js';
 import { Council } from '../council.js';
-import { legacyFanoutWorkflow } from '../kernel/templates/index.js';
+import {
+  legacyFanoutWorkflow,
+  legacyCouncilWorkflow,
+  fanoutWorkflow,
+  councilWorkflow,
+  solveWorkflow,
+  fanoutNodeBudget,
+  councilNodeBudget,
+} from '../kernel/templates/index.js';
+import { RunKernel } from '../kernel/engine.js';
 
 const tick = (ms = 5) => new Promise((r) => setTimeout(r, ms));
 
@@ -232,7 +241,48 @@ describe('multi-agent runners wait for a slot', () => {
     });
     const node = spec.nodes[0] as { timeoutMs?: number; agentTimeoutMs?: number };
     expect(node.agentTimeoutMs).toBe(1000);
-    expect(node.timeoutMs).toBe(4000);
+    expect(node.timeoutMs).toBe(fanoutNodeBudget(3, true, 1000));
+    expect(node.timeoutMs).toBeGreaterThanOrEqual(4 * 1000);
+  });
+
+  it("keeps an agent's own default timeout when the caller gives none, in every template", () => {
+    // Left unset, the executor falls back to the node timeout — the whole mode's
+    // budget — and one hung agent would hold its slot for hours.
+    const agents = [{ name: 'a' }, { name: 'b' }];
+    const nodesOf = (spec: { nodes: unknown[] }) =>
+      spec.nodes as Array<{ kind: string; agentTimeoutMs?: number; timeoutMs?: number; synthesize?: boolean }>;
+    const fanouts = [
+      ...nodesOf(legacyFanoutWorkflow({ task: 't', cwd: '/x', agents })),
+      ...nodesOf(fanoutWorkflow({ task: 't', agents })),
+      ...nodesOf(solveWorkflow({ task: 't', scouts: agents, reviewers: agents })).filter((n) => n.kind === 'fanout'),
+    ];
+    const councils = [
+      ...nodesOf(legacyCouncilWorkflow({ task: 't', cwd: '/x', agents, maxRounds: 3 })),
+      ...nodesOf(councilWorkflow({ task: 't', agents })),
+    ];
+    expect(fanouts).toHaveLength(4);
+    for (const n of fanouts) {
+      expect(n.agentTimeoutMs).toBe(600_000);
+      expect(n.timeoutMs).toBe(fanoutNodeBudget(2, n.synthesize));
+    }
+    for (const n of councils) {
+      expect(n.agentTimeoutMs).toBe(1_800_000);
+      expect(n.timeoutMs).toBeGreaterThanOrEqual(3 * 2 * 1_800_000);
+    }
+    expect(councilNodeBudget(2, 3)).toBe(councils[0].timeoutMs);
+  });
+
+  it('does not let a node timeout past the 32-bit timer limit fire at once', async () => {
+    const kernel = new RunKernel({ nodeTimeoutMs: 8000 });
+    kernel.setExecutor('agent', async () => {
+      await tick(30);
+      return { ok: true };
+    });
+    const rec = await kernel.start({
+      name: 'long',
+      nodes: [{ id: 'a', kind: 'agent', prompt: 'go', timeoutMs: 3_000_000_000 }],
+    });
+    expect((await kernel.wait(rec.runId))!.state).toBe('completed');
   });
 
   it('starts no queued agent after the fan-out is aborted', async () => {
@@ -273,6 +323,43 @@ describe('multi-agent runners wait for a slot', () => {
     // `b` may already be past its check when the node times out; `c` must not start.
     expect(started.filter((s) => s.at > gaveUpAt + 50).length).toBe(0);
   });
+
+  it('council opens no further round once its signal is set', async () => {
+    const dir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'council-signal-'));
+    try {
+      execSync('git init -b main && git config user.email t@example.com && git config user.name t', {
+        cwd: dir,
+        stdio: 'pipe',
+      });
+      fs.writeFileSync(path.join(dir, 'README.md'), '# t\n');
+      execSync('git add -A && git commit -m init', { cwd: dir, stdio: 'pipe' });
+      const signal = { aborted: false };
+      let starts = 0;
+      const manager = {
+        startSession: async () => {
+          starts++;
+          return {} as never;
+        },
+        sendMessage: async () => {
+          await tick(20);
+          // The kernel gives up on the node during round one.
+          signal.aborted = true;
+          return { output: `${'a thorough report '.repeat(20)}\n[CONSENSUS: NO]`, events: [] } as never;
+        },
+        stopSession: async () => {},
+      };
+      const config: CouncilConfig = {
+        agents: ['A', 'B'].map((name) => ({ name, emoji: '*', persona: 'reviewer', engine: 'codex' })),
+        maxRounds: 3,
+        projectDir: dir,
+        signal,
+      };
+      await new Council(config, manager).run('review the readme');
+      expect(starts).toBe(2);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
 
   it('council runs a round no wider than the free slots', async () => {
     const dir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'council-cap-'));

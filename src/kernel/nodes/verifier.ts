@@ -65,14 +65,9 @@ export async function executeVerifierNode(node: NodeSpec, ctx: NodeContext): Pro
       cwd,
       artifactDir: evidenceDir(dir, evidenceId),
       baseSha: ctx.record.baseSha,
-      // A run from before start-of-run snapshots has a baseline and no record of
-      // the tests then; comparing it against the base commit would blame the run
-      // for whatever the developer had already changed.
-      // A verifier with its own cwd is checking a tree the snapshot never saw.
-      baseTests:
-        (ctx.record.baseSha && !ctx.record.baseTests) || (spec.cwd && spec.cwd !== ctx.cwd)
-          ? null
-          : ctx.record.baseTests,
+      // A run in a repository always gets the check; without a snapshot (a run from
+      // before snapshots, or one git could not take) it is reported as not checked.
+      baseTests: ctx.record.baseSha ? (ctx.record.baseTests ?? null) : undefined,
       logger: ctx.logger,
       signal: ctx.signal,
     },

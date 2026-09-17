@@ -47,7 +47,7 @@ import crypto from 'node:crypto';
 import { createConsoleLogger, type Logger } from '../logger.js';
 import { normalizeContract, type AcceptanceContract } from '../verify/contract.js';
 import { captureBaseline, treeFingerprint } from '../verify/baseline.js';
-import { snapshotChangedTests } from '../verify/protected-tests.js';
+import { snapshotTests, type TestSnapshot } from '../verify/protected-tests.js';
 import type { SessionManagerLike } from './agent-step.js';
 import {
   acquireLease,
@@ -82,6 +82,8 @@ import {
 } from './types.js';
 
 export const DEFAULT_NODE_TIMEOUT_MS = 30 * 60_000;
+/** setTimeout fires at once for a delay past a signed 32-bit millisecond count. */
+const MAX_TIMER_MS = 2_147_483_647;
 export const DEFAULT_MAX_NODE_VISITS = 50;
 /**
  * How long a run about to claim `verified` waits for abandoned attempts to stop.
@@ -328,6 +330,12 @@ export interface StartOptions {
    * them again rather than reading them back, which is the point.
    */
   secrets?: Record<string, unknown>;
+  /**
+   * The tests as a parent run found them. A subflow child shares its parent's
+   * tree, so a snapshot of its own, taken mid-run, would record the parent's
+   * agents' edits as the starting point.
+   */
+  baseTests?: TestSnapshot;
 }
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -556,9 +564,11 @@ export class RunKernel extends EventEmitter {
     // again.
     const guard = createAndAcquire(runId, spec, this.ownerId);
     record.baseSha = await captureBaseline(cwd);
-    // Only a verifier reads it, and hashing every test file is not free in a large repository.
-    if (spec.nodes.some((n) => n.kind === 'verifier')) {
-      record.baseTests = await snapshotChangedTests(cwd, record.baseSha);
+    // Only a verifier reads it (a subflow may hold one), and hashing every test
+    // file is not free in a large repository.
+    if (opts.baseTests) record.baseTests = opts.baseTests;
+    else if (record.baseSha && spec.nodes.some((n) => n.kind === 'verifier' || n.kind === 'subflow')) {
+      record.baseTests = await snapshotTests(cwd);
     }
     const { txn, signal } = this._open(guard, record);
     if (!txn.apply(() => undefined, [{ ts: now, type: 'run_created', runId, workflow: spec.name }])) {
@@ -859,14 +869,17 @@ export class RunKernel extends EventEmitter {
       timeoutMs === undefined
         ? undefined
         : new Promise<NodeResult>((resolve) => {
-            timer = setTimeout(() => {
-              // Aborts this attempt only. A timeout is a node failure — it still gets
-              // its retries and still honours `onFailure` — whereas cancelling the run
-              // is a separate, user-initiated thing. Conflating the two made a hung
-              // node report the whole run as `cancelled`.
-              attemptSignal.aborted = true;
-              resolve({ ok: false, error: `node timed out after ${timeoutMs}ms` });
-            }, timeoutMs);
+            timer = setTimeout(
+              () => {
+                // Aborts this attempt only. A timeout is a node failure — it still gets
+                // its retries and still honours `onFailure` — whereas cancelling the run
+                // is a separate, user-initiated thing. Conflating the two made a hung
+                // node report the whole run as `cancelled`.
+                attemptSignal.aborted = true;
+                resolve({ ok: false, error: `node timed out after ${timeoutMs}ms` });
+              },
+              Math.min(timeoutMs, MAX_TIMER_MS),
+            );
             if (typeof timer.unref === 'function') timer.unref();
           });
     // The executor promise is tracked, not just raced. A timeout abandons the

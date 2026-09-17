@@ -43,6 +43,8 @@ export async function executeCouncilNode(node: NodeSpec, ctx: NodeContext): Prom
       maxTurnsPerAgent: spec.maxTurnsPerAgent,
       maxBudgetUsd: spec.maxBudgetUsd,
       defaultPermissionMode: spec.defaultPermissionMode as never,
+      // A cancelled run, or an attempt the kernel timed out, must not keep opening rounds.
+      signal: ctx.signal,
     },
     ctx.manager,
     ctx.logger,

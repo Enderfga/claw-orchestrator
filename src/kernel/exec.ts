@@ -17,6 +17,7 @@
  */
 
 import { spawn } from 'node:child_process';
+import { StringDecoder } from 'node:string_decoder';
 
 export interface ExecResult {
   code: number | null;
@@ -109,15 +110,27 @@ export function exec(cmd: string, args: string[] = [], opts: ExecOptions = {}): 
       if (typeof timer.unref === 'function') timer.unref();
     }
 
-    child.stdout?.on('data', (d: Buffer) => (out = appendCapped(out, d.toString(), cap)));
-    child.stderr?.on('data', (d: Buffer) => (err = appendCapped(err, d.toString(), cap)));
+    // One decoder per stream: a multi-byte character split across two chunks
+    // decoded chunk by chunk came out as two replacement characters.
+    const outDecoder = new StringDecoder('utf8');
+    const errDecoder = new StringDecoder('utf8');
+    child.stdout?.on('data', (d: Buffer) => (out = appendCapped(out, outDecoder.write(d), cap)));
+    child.stderr?.on('data', (d: Buffer) => (err = appendCapped(err, errDecoder.write(d), cap)));
     child.on('error', (e: Error) => {
       err = appendCapped(err, e.message, cap);
       finish(null);
     });
-    child.on('close', (code: number | null) => finish(code));
+    child.on('close', (code: number | null) => {
+      out = appendCapped(out, outDecoder.end(), cap);
+      err = appendCapped(err, errDecoder.end(), cap);
+      finish(code);
+    });
 
     if (opts.input !== undefined && child.stdin) {
+      // A child that exits before reading all of its input closes the pipe, and an
+      // unhandled EPIPE on the write would take this whole process down. The exit
+      // code already says what happened.
+      child.stdin.on('error', () => undefined);
       child.stdin.end(opts.input);
     }
   });

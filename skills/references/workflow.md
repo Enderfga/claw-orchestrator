@@ -205,8 +205,10 @@ Every node takes `retry: { max, backoffMs }`, `timeoutMs`, and
 On `fanout` and `council`, `timeoutMs` bounds the whole node and `agentTimeoutMs` one
 agent's send. They differ because agents beyond the free session slots wait for one, so
 the node can run several agents' worth of time. Without `agentTimeoutMs`, `timeoutMs`
-serves as both, as it did before the field existed. `fanout_start`, `ultrareview_start`
-and `council_start` set the node bound to the one-agent-at-a-time worst case.
+serves as both, as it did before the field existed. `fanout_start`, `ultrareview_start`,
+`council_start` and the built-in `fanout`, `council` and `solve` workflows set both: the
+agent's own default, and a node bound for the worst case — one agent at a time, every
+retry taken.
 
 Parallelism is the `fanout` node rather than a general parallel/join construct.
 Fan-out is the shape every existing mode actually needed, and a join barrier would

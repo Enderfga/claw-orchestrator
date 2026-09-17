@@ -584,6 +584,34 @@ describe('PersistentClaudeSession', () => {
       expect(session.stats.turnsSucceeded).toBe(1);
     });
 
+    it('does not hand a waiting send the reply to a message sent without waiting', async () => {
+      // An inbox delivery writes without waiting; a caller then sends and waits.
+      await session.send('inbox message', { waitForComplete: false });
+      const inbox = lastSentUuid();
+      const waiting = session.send('question', { waitForComplete: true, timeout: 60_000 });
+      const mine = lastSentUuid();
+      emit({ type: 'result', result: 'reply to the inbox message', user_message_uuids: [inbox] });
+      emit({ type: 'result', result: 'reply to the question', user_message_uuids: [mine] });
+      expect(((await waiting) as { text: string }).text).toBe('reply to the question');
+      expect(session.stats.turnsSucceeded).toBe(2);
+    });
+
+    it('does not hand the next send the late reply to a send that timed out', async () => {
+      const first = session.send('first', { waitForComplete: true, timeout: 1000 });
+      const firstUuid = lastSentUuid();
+      const firstOutcome = first.catch((e: Error) => e.message);
+      vi.advanceTimersByTime(1001);
+      expect(await firstOutcome).toMatch(/Timeout/);
+      const second = session.send('second', { waitForComplete: true, timeout: 60_000 });
+      const secondUuid = lastSentUuid();
+      emit({ type: 'result', result: 'late reply to first', user_message_uuids: [firstUuid] });
+      emit({ type: 'result', result: 'reply to second', user_message_uuids: [secondUuid] });
+      expect(((await second) as { text: string }).text).toBe('reply to second');
+      // The late turn is not the second send's success; counting it would mark a
+      // failed second turn ok in the run ledger.
+      expect(session.stats.turnsSucceeded).toBe(1);
+    });
+
     it("does not build a reply's fallback text from a turn it did not send", async () => {
       const waiting = session.send('question', { waitForComplete: true, timeout: 60_000 });
       const uuid = lastSentUuid();

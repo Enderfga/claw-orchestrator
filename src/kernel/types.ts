@@ -13,6 +13,7 @@
  * `unverified` — it says it does not know, which is not the same as success.
  */
 
+import type { TestSnapshot } from '../verify/protected-tests.js';
 import type { AcceptanceContract } from '../verify/contract.js';
 import type { EngineType } from '../types.js';
 
@@ -308,10 +309,10 @@ export interface RunRecord {
   /** `git rev-parse HEAD` captured at run start, when cwd is a repo. */
   baseSha?: string;
   /**
-   * Test files and test scripts that already differed from `baseSha` when the run
-   * started, with their state then — so a verifier does not blame the run for them.
+   * The test files and test configuration as the run found them, for the
+   * protected-tests check. Taken only when the spec has a verifier or a subflow.
    */
-  baseTests?: Record<string, string | null>;
+  baseTests?: TestSnapshot;
   /** Recorded for the record. Never consulted to decide completion. */
   consensusVotes?: ConsensusVote[];
   costUsd?: number;

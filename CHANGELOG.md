@@ -9,16 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Protected tests.** A contract with a `command` check now refutes a run whose test files or test
-  configuration changed during it — a loosened assertion, a deleted test, or a `scripts.test` pointed
-  at something that exits 0 no longer turns a failing run into a verified one. It is recorded as the
-  required check `protected-tests`. A kernel run records the tests as it found them, so a developer's
-  uncommitted edits, and a new test not yet committed, are protected in that state rather than blamed
-  on the run. Adding tests stays allowed, and `"protectTests": false` opts out when changing tests is
-  the task. The comparison is on blob ids rather than `git diff`, and a baseline git cannot read fails
-  the check. It applies to kernel runs and to `verify_run` with a `baseSha`; tests inside source
-  files, test settings in general config files, and source that special-cases the test environment
-  are not caught.
+- **Protected tests.** In a workflow run, a contract with a `command` check now refutes the run when
+  its test files or test configuration changed during it — a loosened assertion, a deleted test, a
+  new `conftest.py`, or a `scripts.test` pointed at something that exits 0 no longer turns a failing
+  run into a verified one. The run records its tests when it starts, by hashing their bytes, and the
+  required check `protected-tests` compares against that record before the other checks run, so a
+  developer's uncommitted test edits stay theirs and a test that restores itself is still caught.
+  Adding tests stays allowed, and `"protectTests": false` opts out when changing tests is the task.
+  Tests inside source files, test settings in general config files, files hidden by `.gitignore`,
+  and source that special-cases the test environment are not caught.
 
 ### Fixed
 
@@ -30,8 +29,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   waits rather than failing. Because queued agents take longer in total, `fanout` and `council` nodes
   gained `agentTimeoutMs`, and `fanout_start`, `ultrareview_start` and `council_start` size the node
   timeout for the worst case instead of reusing one agent's timeout, which had also been cutting
-  multi-round councils short. An aborted or timed-out fan-out starts none of the agents still
-  waiting.
+  multi-round councils short; the built-in `fanout`, `council` and `solve` workflows get the same
+  bounds. An aborted or timed-out fan-out starts none of the agents still waiting, and a timed-out
+  council opens no further round.
 - **Claude Code tool calls were reported twice.** Each `tool_use` block arrives on
   `content_block_start` with an empty input and again as an `assistant` event with its input, and both
   were counted and emitted: `toolCalls` doubled, and ACP clients received two `tool_call` updates per
@@ -43,8 +43,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   background workflow finishes, or a message from another Claude Code session arrives, the CLI runs a
   turn of its own, and its result resolved whichever send was waiting. Each message now carries an id
   that the CLI echoes on the result answering it, so a result resolves only its own send — including a
-  message the CLI folds into a turn it started itself — and without ids, a result tagged with a
-  non-human `origin` resolves none. Such turns do not count toward `turnsSucceeded`; their cost does. The
+  message the CLI folds into a turn it started itself — and neither the reply to a message sent
+  without waiting nor a late reply to a send that timed out is handed to the next one. Without ids, a
+  result tagged with a non-human `origin` resolves none. Such turns do not count toward
+  `turnsSucceeded`; their cost does. The
   `ultracode` docs now say a workflow's send returns at launch, and no longer claim the CLI rejects
   `--effort ultracode`.
 - **Ledger rows.** A Claude Code session with no explicit model recorded `model: "default"`; it now
@@ -55,6 +57,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Claude Code's `[1m]` model suffix** (`claude-opus-5[1m]`, `opus[1m]`) is read as the model itself
   for pricing and as a 1M window, instead of falling back to Sonnet pricing with a warning on every
   lookup.
+- **A child process that exits without reading its input no longer crashes the orchestrator**, and
+  output is decoded as a stream, so a multi-byte character split across chunks is no longer
+  corrupted.
 - **The test suite wrote into the real home directory**: ledger rows, council transcripts, and the
   persisted-session and PID files a running orchestrator restores from. Every test file now runs
   with a private `HOME`.

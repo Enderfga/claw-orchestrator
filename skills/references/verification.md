@@ -121,37 +121,42 @@ ignored; only the re-run decides. Set it to 0 (the default) to disable.
 
 A `command` check runs in the tree the agent just worked in, so an agent could make
 it pass by changing the test instead of the code: loosen an assertion, delete the
-test, or point `scripts.test` at something that exits 0. When a contract has a
-`command` check and the run has a baseline, the runtime refutes the run if any test
-file or test configuration differs from what it was **when the run started**. The
-result is recorded in the bundle as the required check `protected-tests`, whether it
-passed or not, and it applies to the fixer's rounds too.
+test, or point `scripts.test` at something that exits 0. A kernel run therefore
+records every test file and test configuration in its tree **when it starts**, and
+before the checks run, each must still be exactly as recorded. A difference refutes
+the run through the required check `protected-tests`, which is recorded in the
+bundle whether it passed or not and runs again before every fixer round.
 
-- **What "when the run started" means:** a kernel run records, at start, every test
-  file that already differed from the base commit, including new tests that were not
-  committed yet. Those are protected in that state, so a developer who writes a
-  failing test and hands the fix to an agent keeps it. `verify_run` with a `baseSha`
-  has no such record and compares against the base commit.
+- **Before the checks, not after:** it judges the tree the agent handed over, so a
+  test command that rewrites the file back cannot hide the change.
+- **As the run found them:** a developer's uncommitted edits, and a new test not yet
+  committed, are recorded in that state and stay protected in it — writing a failing
+  test and handing the fix to an agent works.
+- **Compared by bytes, not through git:** file contents are hashed directly (a
+  symlink by its target), so the index, git attributes and filters, line-ending
+  conversion and path quoting have no say.
 - **Counted as tests:** files under `__tests__/`, `__snapshots__/`, `test/`, `tests/`;
   `*.test.*` and `*.spec.*` scripts; `test_*.py`, `*_test.py`, `*_test.go`, `*_spec.rb`,
   `spec/spec_helper.rb`, `spec/rails_helper.rb`, `spec/support/`, `.rspec`;
-  `*Test.java`/`.kt`/`.cs`; vitest/jest/playwright/cypress config (including `.json`),
-  `karma.conf.*`, `vitest.setup.*`/`jest.setup.*`/`setupTests.*`, `.mocharc*`,
-  `pytest.ini`, `conftest.py`, `tox.ini`, `phpunit.xml`; and in a `package.json`, the
-  `test*`/`pretest*`/`posttest*` scripts and the `jest` key (its other fields may change).
-- **Allowed:** adding new test files, committed or not.
+  `*Test.java`/`.kt`/`.cs`.
+- **Counted as test configuration:** vitest/jest/playwright/cypress config (including
+  `.json`), `karma.conf.*`, `vitest.setup.*`/`jest.setup.*`/`setupTests.*`,
+  `.mocharc*`, `pytest.ini`, `conftest.py`, `tox.ini`, `phpunit.xml`; and in a
+  `package.json`, the whole `scripts` object and the `jest`, `mocha`, `ava`, `vitest`,
+  `c8` and `nyc` keys (dependencies and other fields may change; a `package.json`
+  inside a test directory is a test file).
+- **Allowed:** adding test files and packages. Adding test _configuration_ is not — a
+  new `conftest.py` changes what the existing tests do.
 - **Opting out:** set `"protectTests": false` when changing existing tests is the task.
-- **How it compares:** blob ids from the base tree against `git hash-object` of the
-  working tree, not `git diff` — index flags, path quoting and replace refs cannot hide
-  an edit. When git cannot read the baseline, the check fails.
-- **Where it applies:** kernel runs and `verify_run` with a `baseSha`. A kernel run
-  created before this check existed, or a verifier node with its own `cwd`, records the
-  check as not run (not required) instead of guessing. UltraApp's build gate and
-  Autoloop's gate run without a baseline and are not covered.
+- **Where it applies:** kernel runs in a git repository with a `command` check,
+  including a subflow's verifier, which uses its parent run's record. A run created
+  before this check existed, or a verifier running in a different repository, records
+  it as not checked (not required). `verify_run`, UltraApp's build gate and Autoloop's
+  gate have no record of the tree before the work and are not covered.
 - **What it does not catch:** tests inside source files (Rust `#[cfg(test)]`), test
-  settings inside general config (`vite.config.*`, `pyproject.toml`, `setup.cfg`), and
-  source code that special-cases the test environment. It closes the direct route, not
-  every route.
+  settings inside general config (`vite.config.*`, `pyproject.toml`, `setup.cfg`),
+  files hidden by `.gitignore`, and source code that special-cases the test
+  environment. It closes the direct route, not every route.
 
 ## Per-mode defaults
 

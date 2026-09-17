@@ -47,9 +47,9 @@ export interface VerifyContext {
   artifactDir: string;
   baseSha?: string;
   /**
-   * Protected test files as the run found them (`snapshotChangedTests`). `null`:
-   * the run has a baseline but no snapshot, so the tests are reported unchecked.
-   * Omitted: the base commit is the reference.
+   * The tests as a kernel run found them (`snapshotTests`), which turns on the
+   * protected-tests check. `null`: the run has no snapshot, reported as not checked.
+   * Omitted (`verify_run`, autoloop, ultraapp): the check does not apply.
    */
   baseTests?: TestSnapshot | null;
   exec?: ExecFn;
@@ -359,6 +359,16 @@ export async function runChecks(
   opts: { stopOnRequiredFailure?: boolean } = {},
 ): Promise<CheckResult[]> {
   const results: CheckResult[] = [];
+  // First, so it judges the tree the agent handed over rather than one a test
+  // command may have rewritten. Only a command check runs the repository's tests,
+  // so only then can editing them change the verdict.
+  if (
+    contract.protectTests !== false &&
+    ctx.baseTests !== undefined &&
+    contract.checks.some((c) => c.spec.type === 'command')
+  ) {
+    results.push(await checkProtectedTests(ctx.cwd, ctx.baseTests));
+  }
   for (let i = 0; i < contract.checks.length; i++) {
     if (ctx.signal?.aborted) break;
     const check = contract.checks[i];
@@ -383,27 +393,6 @@ export async function runChecks(
         passed: false,
         durationMs: 0,
         detail: `check threw: ${(e as Error).message}`,
-      });
-    }
-  }
-  // Only a command check runs the repository's tests, so only then can editing
-  // them change the verdict. It needs a baseline to know what existed before.
-  if (
-    contract.protectTests !== false &&
-    !ctx.signal?.aborted &&
-    contract.checks.some((c) => c.spec.type === 'command')
-  ) {
-    try {
-      const protectedTests = await checkProtectedTests(ctx.cwd, ctx.baseSha, ctx.baseTests);
-      if (protectedTests) results.push(protectedTests);
-    } catch (e) {
-      results.push({
-        id: 'protected-tests',
-        type: 'diff_policy',
-        required: true,
-        passed: false,
-        durationMs: 0,
-        detail: `could not check the tests against the baseline: ${(e as Error).message}`,
       });
     }
   }

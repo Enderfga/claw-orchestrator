@@ -853,8 +853,8 @@ Run an acceptance contract against a directory outside any workflow — for a pl
 `session_send` that edited a repo, say. `{ cwd, contract, baseSha?, label? }` →
 the evidence bundle.
 
-Without `baseSha`, `diff_policy` sees untracked files only, and changed tests are not
-refuted (see `protectTests` below).
+Without `baseSha`, `diff_policy` sees untracked files only. `verify_run` has no record of
+the tree before the work, so `protectTests` does not apply to it.
 
 ### The `contract` parameter
 
@@ -873,9 +873,9 @@ refuted (see `protectTests` below).
 }
 ```
 
-`protectTests` (default on) refutes a run that modified or deleted a test file or test
-configuration present at the baseline; set it to `false` when changing tests is the
-task. See [verification.md](./verification.md#protected-tests).
+`protectTests` (default on) refutes a workflow run whose test files or test configuration
+changed during it; set it to `false` when changing tests is the task. See
+[verification.md](./verification.md#protected-tests).
 
 **Declare it yourself.** Never copy a contract out of an agent's output: an agent
 that writes its own acceptance criteria is grading itself, which is the problem

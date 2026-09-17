@@ -1,6 +1,6 @@
 /**
- * Tests the contract runs are not the agent's to change. Real repositories and
- * real git, because the rule is about what git says existed at the baseline.
+ * Tests the contract runs are not the agent's to change. Real repositories, real
+ * git and the real kernel, because the rule is about the tree as a run found it.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'node:fs';
@@ -9,251 +9,260 @@ import path from 'node:path';
 import { execSync } from 'node:child_process';
 import { runChecks, runContract } from '../../verify/runner.js';
 import { normalizeContract } from '../../verify/contract.js';
-import { isTestPath, snapshotChangedTests } from '../../verify/protected-tests.js';
+import { isTestPath, snapshotTests, type TestSnapshot } from '../../verify/protected-tests.js';
 import { RunKernel } from '../../kernel/engine.js';
 import { registerDefaultExecutors } from '../../kernel/nodes/index.js';
 
 let repo: string;
-let base: string;
 
-const git = (cmd: string) => execSync(`git ${cmd}`, { cwd: repo, stdio: 'pipe' }).toString().trim();
+const git = (cmd: string, cwd = repo) => execSync(`git ${cmd}`, { cwd, stdio: 'pipe' }).toString().trim();
 const write = (file: string, body: string) => {
   fs.mkdirSync(path.dirname(path.join(repo, file)), { recursive: true });
   fs.writeFileSync(path.join(repo, file), body);
 };
+const pkg = (extra: Record<string, unknown> = {}) =>
+  JSON.stringify({ name: 'p', scripts: { test: 'vitest run', build: 'tsc' }, dependencies: {}, ...extra }, null, 2);
+
+function makeRepo(): string {
+  const dir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'clawo-protect-'));
+  git('init -b main', dir);
+  git('config user.email t@example.com', dir);
+  git('config user.name t', dir);
+  return dir;
+}
 
 // The repository's "test suite": exits 0 only while the assertion file says so.
-const contract = (extra: Record<string, unknown> = {}) =>
-  normalizeContract({
-    checks: [{ type: 'command', cmd: 'sh', args: ['-c', 'grep -q "expect(sum).toBe(3)" test/sum.test.js'] }],
-    ...extra,
-  })!;
+const GREP = 'grep -q "expect(sum).toBe(3)" test/sum.test.js';
+const contract = (extra: Record<string, unknown> = {}, cmd = GREP) =>
+  normalizeContract({ checks: [{ type: 'command', cmd: 'sh', args: ['-c', cmd] }], ...extra })!;
 
 beforeEach(() => {
-  repo = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'clawo-protect-'));
-  git('init -b main');
-  git('config user.email t@example.com');
-  git('config user.name t');
+  repo = makeRepo();
   write('src/sum.js', 'module.exports = (a, b) => a - b;\n');
   write('test/sum.test.js', 'expect(sum).toBe(3)\n');
-  write('package.json', JSON.stringify({ name: 'p', scripts: { test: 'vitest run' }, dependencies: {} }, null, 2));
+  write('package.json', pkg());
   git('add -A');
   git('commit -m base');
-  base = git('rev-parse HEAD');
 });
 
 afterEach(() => {
   fs.rmSync(repo, { recursive: true, force: true });
 });
 
-const ctx = () => ({ cwd: repo, artifactDir: path.join(repo, '.artifacts'), baseSha: base });
-const guard = async (c = contract()) => (await runChecks(c, ctx())).find((r) => r.id === 'protected-tests');
+const ctx = (baseTests: TestSnapshot | null | undefined) => ({
+  cwd: repo,
+  artifactDir: path.join(repo, '.artifacts'),
+  baseTests,
+});
+const guard = async (snap: TestSnapshot | null | undefined, c = contract()) =>
+  (await runChecks(c, ctx(snap))).find((r) => r.id === 'protected-tests');
 
 describe('protected tests', () => {
   it('passes, and says so, when only source changed', async () => {
+    const snap = await snapshotTests(repo);
     write('src/sum.js', 'module.exports = (a, b) => a + b;\n');
-    const r = await guard();
+    const r = await guard(snap);
     expect(r?.passed).toBe(true);
-  });
-
-  it('refutes a run that edited a test present at the baseline', async () => {
-    write('test/sum.test.js', 'expect(sum).toBe(3)\nexpect(true).toBe(true)\n');
-    const r = await guard();
-    expect(r?.passed).toBe(false);
     expect(r?.required).toBe(true);
-    expect(r?.detail).toContain('test/sum.test.js');
   });
 
-  it('refutes an edit that was committed, not just left in the tree', async () => {
-    write('test/sum.test.js', 'expect(sum).toBe(3) // relaxed\n');
-    git('commit -am "loosen"');
-    expect((await guard())?.passed).toBe(false);
-  });
-
-  it('refutes deleting a test', async () => {
+  it('refutes editing, committing an edit to, or deleting an existing test', async () => {
+    const snap = await snapshotTests(repo);
+    write('test/sum.test.js', 'expect(sum).toBe(3)\nexpect(true).toBe(true)\n');
+    expect((await guard(snap))?.detail).toContain('test/sum.test.js');
+    git('commit -am loosen');
+    expect((await guard(snap))?.passed).toBe(false);
     fs.rmSync(path.join(repo, 'test/sum.test.js'));
-    expect((await guard())?.passed).toBe(false);
+    expect((await guard(snap))?.passed).toBe(false);
   });
 
-  it('allows adding tests, committed or not', async () => {
+  it('allows adding tests and packages, committed or not', async () => {
+    const snap = await snapshotTests(repo);
     write('test/extra.test.js', 'expect(1).toBe(1)\n');
     write('test/more.test.js', 'expect(2).toBe(2)\n');
+    write('packages/new/package.json', pkg());
     git('add test/more.test.js');
     git('commit -m more');
-    expect((await guard())?.passed).toBe(true);
+    expect((await guard(snap))?.passed).toBe(true);
   });
 
-  it('refutes a change to the test scripts but not to the rest of package.json', async () => {
-    write('package.json', JSON.stringify({ name: 'p', scripts: { test: 'vitest run' }, dependencies: { a: '1' } }));
-    expect((await guard())?.passed).toBe(true);
-    write('package.json', JSON.stringify({ name: 'p', scripts: { test: 'exit 0' }, dependencies: { a: '1' } }));
-    const r = await guard();
+  it('refutes test configuration added during the run', async () => {
+    const snap = await snapshotTests(repo);
+    write('conftest.py', 'import pytest\n');
+    const r = await guard(snap);
     expect(r?.passed).toBe(false);
-    expect(r?.detail).toContain('package.json (test scripts)');
+    expect(r?.detail).toContain('conftest.py');
   });
 
-  it('makes the whole contract fail when the checks themselves pass on an edited test', async () => {
-    write('test/sum.test.js', 'expect(sum).toBe(3) // now trivially satisfied\n');
-    const results = await runChecks(contract(), ctx());
-    expect(results.find((r) => r.id !== 'protected-tests')?.passed).toBe(true);
-    const { passed } = await runContract(contract(), ctx());
-    expect(passed).toBe(false);
+  it('refutes a change to package.json scripts or runner settings, not to dependencies or key order', async () => {
+    const snap = await snapshotTests(repo);
+    write(
+      'package.json',
+      JSON.stringify({ dependencies: { a: '1' }, scripts: { build: 'tsc', test: 'vitest run' }, name: 'p' }),
+    );
+    expect((await guard(snap))?.passed).toBe(true);
+    // Indirection: `test` names another script, which is where the change is.
+    write('package.json', pkg({ scripts: { test: 'npm run check', check: 'exit 0', build: 'tsc' } }));
+    expect((await guard(snap))?.detail).toContain('package.json (scripts or test settings)');
+    write('package.json', pkg({ jest: { testPathIgnorePatterns: ['test'] } }));
+    expect((await guard(snap))?.passed).toBe(false);
   });
 
-  it('keeps a fixer from going green by rewriting the test', async () => {
+  it('judges the tree before the checks run, so a test that restores itself is still caught', async () => {
+    const snap = await snapshotTests(repo);
+    write('test/sum.test.js', 'expect(true).toBe(true)\n');
+    const restoring = contract({}, `git checkout -- test/sum.test.js && ${GREP}`);
+    const results = await runChecks(restoring, ctx(snap));
+    expect(results[0].id).toBe('protected-tests');
+    expect(results[0].passed).toBe(false);
+    expect(results[1].passed).toBe(true);
+  });
+
+  it('makes the contract fail when its checks pass on an edited test, fixer rounds included', async () => {
+    const snap = await snapshotTests(repo);
     write('test/sum.test.js', 'expect(sum).toBe(4)\n');
     const fixer = async () => write('test/sum.test.js', 'expect(sum).toBe(3)\n// fixed?\n');
-    const out = await runContract(contract({ fixOnFailureRounds: 2 }), ctx(), fixer);
+    const out = await runContract(contract({ fixOnFailureRounds: 2 }), ctx(snap), fixer);
+    expect(out.results.find((r) => r.id !== 'protected-tests')?.passed).toBe(true);
     expect(out.passed).toBe(false);
-    expect(out.results.find((r) => r.id === 'protected-tests')?.passed).toBe(false);
   });
 
-  it('does not blame the run for test edits already in the tree when it started', async () => {
-    write('test/sum.test.js', 'expect(sum).toBe(3) // the developer was already editing this\n');
-    write('package.json', JSON.stringify({ name: 'p', scripts: { test: 'vitest run --bail' } }));
-    const baseTests = await snapshotChangedTests(repo, base);
-    const withStart = () => runChecks(contract(), { ...ctx(), baseTests });
-
-    write('src/sum.js', 'module.exports = (a, b) => a + b;\n');
-    expect((await withStart()).find((r) => r.id === 'protected-tests')?.passed).toBe(true);
-
-    // Changing them further during the run is still the run's doing.
-    write('test/sum.test.js', 'expect(sum).toBe(3) // and then the agent\n');
-    const r = (await withStart()).find((x) => x.id === 'protected-tests');
-    expect(r?.passed).toBe(false);
-    expect(r?.detail).toContain('test/sum.test.js');
-    expect(r?.detail).not.toContain('package.json');
-  });
-
-  it('protects a test that was new and uncommitted when the run started', async () => {
+  it('keeps edits that were in the tree when the run started, including an uncommitted new test', async () => {
     // The TDD case: the developer writes the failing test, then hands the fix to an agent.
+    write('test/sum.test.js', 'expect(sum).toBe(3) // the developer was editing this\n');
     write('test/bug.test.js', 'expect(sum(1, 2)).toBe(3)\n');
     write('test/staged.test.js', 'expect(sum(2, 2)).toBe(4)\n');
     git('add test/staged.test.js');
-    const baseTests = await snapshotChangedTests(repo, base);
-    expect(Object.keys(baseTests!).sort()).toEqual(['test/bug.test.js', 'test/staged.test.js']);
-    const check = async () =>
-      (await runChecks(contract(), { ...ctx(), baseTests })).find((r) => r.id === 'protected-tests');
+    const snap = await snapshotTests(repo);
 
-    expect((await check())?.passed).toBe(true);
+    write('src/sum.js', 'module.exports = (a, b) => a + b;\n');
+    expect((await guard(snap))?.passed).toBe(true);
     write('test/bug.test.js', 'expect(true).toBe(true)\n');
-    expect((await check())?.detail).toContain('test/bug.test.js');
+    expect((await guard(snap))?.detail).toContain('test/bug.test.js');
     write('test/bug.test.js', 'expect(sum(1, 2)).toBe(3)\n');
     fs.rmSync(path.join(repo, 'test/staged.test.js'));
-    expect((await check())?.detail).toContain('test/staged.test.js');
+    expect((await guard(snap))?.detail).toContain('test/staged.test.js');
   });
 
-  it('sees an edit the index was told to ignore', async () => {
-    git('update-index --assume-unchanged test/sum.test.js');
-    write('test/sum.test.js', 'expect(sum).toBe(3) // hidden from git diff\n');
-    expect(git('diff --name-only')).toBe('');
-    expect((await guard())?.passed).toBe(false);
-  });
-
-  it('sees an edit to a test whose path git quotes', async () => {
+  it('is not fooled by the index, git attributes, or a quoted path', async () => {
     write('test/sümme.test.js', 'expect(sum).toBe(3)\n');
     git('add -A');
     git('commit -m unicode');
-    base = git('rev-parse HEAD');
+    const snap = await snapshotTests(repo);
+    git('update-index --assume-unchanged test/sum.test.js');
+    fs.writeFileSync(path.join(repo, '.git/info/attributes'), '*.js filter=hide\n');
+    git('config filter.hide.clean "sed s/true/3/"');
+    write('test/sum.test.js', 'expect(sum).toBe(true)\n');
+    expect(git('diff --name-only')).toBe('');
+    expect((await guard(snap))?.detail).toContain('test/sum.test.js');
+    write('test/sum.test.js', 'expect(sum).toBe(3)\n');
     write('test/sümme.test.js', 'expect(true).toBe(true)\n');
-    expect((await guard())?.detail).toContain('sümme');
+    expect((await guard(snap))?.detail).toContain('sümme');
   });
 
-  it('refutes a change to the jest settings in package.json', async () => {
-    write(
-      'package.json',
-      JSON.stringify({ name: 'p', scripts: { test: 'vitest run' }, jest: { testPathIgnorePatterns: ['test'] } }),
-    );
-    expect((await guard())?.passed).toBe(false);
+  it('follows a symlinked test by its target, and leaves line endings alone when nothing changed', async () => {
+    write('fixtures/real.test.js', 'expect(sum).toBe(3)\r\n');
+    fs.symlinkSync('../fixtures/real.test.js', path.join(repo, 'test/link.test.js'));
+    git('add -A');
+    git('commit -m links');
+    git('config core.autocrlf true');
+    const snap = await snapshotTests(repo);
+    expect((await guard(snap))?.passed).toBe(true);
+    fs.unlinkSync(path.join(repo, 'test/link.test.js'));
+    fs.symlinkSync('../fixtures/other.test.js', path.join(repo, 'test/link.test.js'));
+    expect((await guard(snap))?.detail).toContain('test/link.test.js');
   });
 
-  it('fails, rather than passes, when the baseline cannot be read', async () => {
-    const gone = await runChecks(contract(), { ...ctx(), baseSha: 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef' });
-    const r = gone.find((x) => x.id === 'protected-tests');
-    expect(r?.passed).toBe(false);
-    expect(r?.required).toBe(true);
-    expect(r?.detail).toContain('cannot be read');
-    const option = await runChecks(contract(), { ...ctx(), baseSha: '--output=/tmp/x' });
-    expect(option.find((x) => x.id === 'protected-tests')?.detail).toContain('not a commit id');
-  });
-
-  it('reports the tests unchecked, without refuting, when a run has no start snapshot', async () => {
+  it('reports not checked, without refuting, when a run has no snapshot', async () => {
     write('test/sum.test.js', 'expect(sum).toBe(3) // could be the developer\n');
-    const r = (await runChecks(contract(), { ...ctx(), baseTests: null })).find((x) => x.id === 'protected-tests');
+    const r = await guard(null);
     expect(r?.passed).toBe(false);
     expect(r?.required).toBe(false);
     expect(r?.detail).toContain('not checked');
   });
 
-  it('is off when the caller says changing tests is the task', async () => {
-    write('test/sum.test.js', 'expect(sum).toBe(3)\n// rewritten on purpose\n');
-    expect(await guard(contract({ protectTests: false }))).toBeUndefined();
+  it('does not apply when the caller opts out, without a command check, or outside a kernel run', async () => {
+    const snap = await snapshotTests(repo);
+    write('test/sum.test.js', 'changed\n');
+    expect(await guard(snap, contract({ protectTests: false }))).toBeUndefined();
+    expect(await guard(snap, normalizeContract({ checks: [{ type: 'file', path: 'src/sum.js' }] })!)).toBeUndefined();
+    expect(await guard(undefined)).toBeUndefined();
   });
 
-  it('does not apply without a command check or without a baseline', async () => {
-    write('test/sum.test.js', 'changed\n');
-    const fileOnly = normalizeContract({ checks: [{ type: 'file', path: 'src/sum.js' }] })!;
-    expect((await runChecks(fileOnly, ctx())).find((r) => r.id === 'protected-tests')).toBeUndefined();
-    const noBase = await runChecks(contract(), { cwd: repo, artifactDir: path.join(repo, '.artifacts') });
-    expect(noBase.find((r) => r.id === 'protected-tests')).toBeUndefined();
+  it('has no snapshot to take outside a repository', async () => {
+    const plain = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'clawo-plain-'));
+    try {
+      expect(await snapshotTests(plain)).toBeUndefined();
+    } finally {
+      fs.rmSync(plain, { recursive: true, force: true });
+    }
   });
 });
 
 describe('protected tests in a kernel run', () => {
-  const verifyRun = async (agentEdit: () => void) => {
+  const grepCheck = { type: 'command', cmd: 'sh', args: ['-c', 'grep -q "toBe(3)" test/sum.test.js'] };
+
+  const run = async (spec: Record<string, unknown>, agentEdit: () => void, opts: Record<string, unknown> = {}) => {
     const kernel = registerDefaultExecutors(new RunKernel({ nodeTimeoutMs: 8000 }));
     kernel.setExecutor('agent', async () => {
       agentEdit();
       return { ok: true };
     });
-    const rec = await kernel.start(
-      { name: 'p', cwd: repo, nodes: [{ id: 'work', kind: 'agent', prompt: 'fix sum' }] },
-      { contract: { checks: [{ type: 'command', cmd: 'sh', args: ['-c', 'grep -q "toBe(3)" test/sum.test.js'] }] } },
-    );
+    const rec = await kernel.start({ name: 'p', cwd: repo, ...spec } as never, opts as never);
     return (await kernel.wait(rec.runId))!;
   };
+  const agentOnly = { nodes: [{ id: 'work', kind: 'agent', prompt: 'fix sum' }] };
 
   it('verifies a run in a tree whose tests were already being edited when it started', async () => {
     write('test/sum.test.js', 'expect(sum).toBe(3) // uncommitted, before the run\n');
-    const done = await verifyRun(() => write('src/sum.js', 'module.exports = (a, b) => a + b;\n'));
+    const done = await run(agentOnly, () => write('src/sum.js', 'module.exports = (a, b) => a + b;\n'), {
+      contract: { checks: [grepCheck] },
+    });
     expect(done.outcome).toBe('verified');
   });
 
-  it('does not refute a verifier that checks another repository', async () => {
-    const other = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'clawo-protect-other-'));
-    try {
-      execSync('git init -b main && git config user.email t@example.com && git config user.name t', {
-        cwd: other,
-        stdio: 'pipe',
-      });
-      fs.mkdirSync(path.join(other, 'test'));
-      fs.writeFileSync(path.join(other, 'test/sum.test.js'), 'expect(sum).toBe(3)\n');
-      execSync('git add -A && git commit -m other', { cwd: other, stdio: 'pipe' });
-      const kernel = registerDefaultExecutors(new RunKernel({ nodeTimeoutMs: 8000 }));
-      const rec = await kernel.start({
-        name: 'p',
-        cwd: repo,
+  it('refutes a run whose agent edited the test', async () => {
+    const done = await run(agentOnly, () => write('test/sum.test.js', 'expect(sum).toBe(3) // agent\n'), {
+      contract: { checks: [grepCheck] },
+    });
+    expect(done.outcome).not.toBe('verified');
+  });
+
+  it("holds a subflow's verifier to the tree as the parent run found it", async () => {
+    const done = await run(
+      {
         nodes: [
+          { id: 'work', kind: 'agent', prompt: 'fix sum' },
           {
             id: 'check',
-            kind: 'verifier',
-            cwd: other,
-            contract: {
-              checks: [{ spec: { type: 'command', cmd: 'sh', args: ['-c', 'grep -q "toBe(3)" test/sum.test.js'] } }],
+            kind: 'subflow',
+            workflow: {
+              name: 'child',
+              nodes: [{ id: 'v', kind: 'verifier', contract: { checks: [{ spec: grepCheck }] } }],
             },
-          } as never,
+          },
         ],
-      });
-      const done = (await kernel.wait(rec.runId))!;
+      },
+      () => write('test/sum.test.js', 'expect(sum).toBe(3) // agent, before the child started\n'),
+    );
+    expect(done.state).not.toBe('completed');
+  });
+
+  it('does not refute a verifier that checks another repository', async () => {
+    const other = makeRepo();
+    try {
+      fs.mkdirSync(path.join(other, 'test'));
+      fs.writeFileSync(path.join(other, 'test/sum.test.js'), 'expect(sum).toBe(3)\n');
+      git('add -A', other);
+      git('commit -m other', other);
+      const done = await run(
+        { nodes: [{ id: 'check', kind: 'verifier', cwd: other, contract: { checks: [{ spec: grepCheck }] } }] },
+        () => undefined,
+      );
       expect(done.state).toBe('completed');
     } finally {
       fs.rmSync(other, { recursive: true, force: true });
     }
-  });
-
-  it('refutes a run whose agent edited the test', async () => {
-    const done = await verifyRun(() => write('test/sum.test.js', 'expect(sum).toBe(3) // agent\n'));
-    expect(done.outcome).not.toBe('verified');
   });
 });
 

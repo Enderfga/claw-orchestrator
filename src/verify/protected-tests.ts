@@ -8,28 +8,26 @@
  * measurements put that behaviour at half of the attempts on unsolvable tasks for
  * several frontier models (ImpossibleBench, arXiv 2510.20270).
  *
- * The rule: a test file or test configuration may not differ from what it was
- * when the run started. For a kernel run, "when it started" is a snapshot taken
- * then, so a developer's uncommitted test edits — including a new test they had
- * not committed yet — are theirs and stay protected in that state. Without a
- * snapshot (`verify_run` with a `baseSha`) the base commit is the reference.
- * Adding new tests stays allowed. When changing existing tests *is* the task, the
- * caller sets `protectTests: false`.
+ * The rule: when a kernel run starts, every test file and test configuration in
+ * the tree is recorded as it is — bytes hashed here, not through git, so clean
+ * filters, attributes, line-ending conversion and the index have no say. Before
+ * the checks run, each of them must still be exactly that. New test files may be
+ * added; new test *configuration* may not, since a `conftest.py` or `pytest.ini`
+ * that appears mid-run changes what the existing tests do. When changing tests is
+ * the task, the caller sets `protectTests: false`.
  *
- * It compares blob ids: the base tree's, from `git ls-tree`, against the working
- * tree's, from `git hash-object`. Nothing goes through `git diff`, so the index
- * (assume-unchanged, skip-worktree), path quoting, `diff.relative` and replace
- * refs cannot hide a change. When git cannot answer, the check fails rather than
- * passing.
+ * It runs before the checks, so it judges the tree the agent handed over rather
+ * than one a test command may have rewritten.
  *
  * What this does not catch, stated so nobody reads it as tamper-proof: tests
- * inside source files (Rust `#[cfg(test)]`), test settings embedded in general
- * config (`vite.config.*`, `pyproject.toml`, `setup.cfg`), and source code that
- * special-cases the test environment.
+ * inside source files (Rust `#[cfg(test)]`), test settings inside general config
+ * (`vite.config.*`, `pyproject.toml`, `setup.cfg`), files hidden by `.gitignore`,
+ * and source code that special-cases the test environment.
  */
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { exec, type ExecResult } from '../kernel/exec.js';
+import { exec } from '../kernel/exec.js';
 import type { CheckResult } from './contract.js';
 
 const GIT_TIMEOUT_MS = 60_000;
@@ -59,155 +57,96 @@ const TEST_CONFIG = [
 ];
 const MANIFEST = /(^|\/)package\.json$/;
 
+const isTestConfig = (file: string): boolean => TEST_CONFIG.some((re) => re.test(file));
+
 /** True for a path that holds tests or configures how they run. */
 export function isTestPath(file: string): boolean {
-  return TEST_DIR.test(file) || TEST_FILE.some((re) => re.test(file)) || TEST_CONFIG.some((re) => re.test(file));
+  return TEST_DIR.test(file) || TEST_FILE.some((re) => re.test(file)) || isTestConfig(file);
 }
 
 const isProtected = (file: string): boolean => MANIFEST.test(file) || isTestPath(file);
 
-/** Protected paths and their state at the start of a run; `null` means absent then. */
-export type TestSnapshot = Record<string, string | null>;
+/** The tests as a run found them: repository root, and each protected path's state (`null` = absent). */
+export interface TestSnapshot {
+  root: string;
+  files: Record<string, string | null>;
+}
 
-class GitUnavailable extends Error {}
+/** Stable JSON: object keys sorted, so reordering a package.json is not a change. */
+function canonical(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
+  if (value && typeof value === 'object') {
+    const obj = value as Record<string, unknown>;
+    return `{${Object.keys(obj)
+      .sort()
+      .map((k) => `${JSON.stringify(k)}:${canonical(obj[k])}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value ?? null);
+}
 
-async function git(cwd: string, args: string[], input?: string): Promise<ExecResult> {
-  // Replace refs could make the base tree say something the object store does not.
-  const r = await exec('git', ['--no-replace-objects', '-C', cwd, ...args], {
+const digest = (data: string | Buffer): string => crypto.createHash('sha256').update(data).digest('hex').slice(0, 32);
+
+/**
+ * A protected path's state: absent, a symlink's target, a package.json's scripts
+ * and test-runner keys (the rest of it may change), or the file's bytes.
+ * A package.json inside a test directory is a test file like any other.
+ */
+function stateOf(root: string, file: string): string | null {
+  const abs = path.join(root, file);
+  let stat: fs.Stats;
+  try {
+    stat = fs.lstatSync(abs);
+  } catch {
+    return null;
+  }
+  if (stat.isSymbolicLink()) return `link:${fs.readlinkSync(abs)}`;
+  if (!stat.isFile()) return null;
+  const body = fs.readFileSync(abs);
+  if (MANIFEST.test(file) && !isTestPath(file)) {
+    try {
+      const pkg = JSON.parse(body.toString('utf8')) as Record<string, unknown>;
+      const runners = ['scripts', 'jest', 'mocha', 'ava', 'vitest', 'c8', 'nyc'];
+      return `pkg:${digest(canonical(Object.fromEntries(runners.map((k) => [k, pkg[k] ?? null]))))}`;
+    } catch {
+      return `pkg-unparseable:${digest(body)}`;
+    }
+  }
+  return digest(body);
+}
+
+async function listProtected(cwd: string): Promise<{ root: string; files: string[] }> {
+  const top = await exec('git', ['-C', cwd, 'rev-parse', '--show-toplevel'], { timeoutMs: GIT_TIMEOUT_MS });
+  if (top.code !== 0) throw new Error(`${cwd} is not inside a git repository`);
+  const root = top.out.trim();
+  const listed = await exec('git', ['-C', root, 'ls-files', '-z', '--cached', '--others', '--exclude-standard'], {
     timeoutMs: GIT_TIMEOUT_MS,
-    input,
     maxCaptureBytes: GIT_CAPTURE_BYTES,
   });
   // exec keeps the tail of an oversized stream; a listing missing its head would
   // silently drop files from the comparison.
-  if (Buffer.byteLength(r.out) >= GIT_CAPTURE_BYTES) throw new GitUnavailable(`git ${args[0]} output too large`);
-  return r;
+  if (listed.code !== 0 || Buffer.byteLength(listed.out) >= GIT_CAPTURE_BYTES) {
+    throw new Error('git could not list the files in the repository');
+  }
+  return { root, files: [...new Set(listed.out.split('\0').filter((f) => f && isProtected(f)))] };
 }
 
-/** The parts of a package.json that decide what `npm test` runs, or undefined when it does not parse. */
-function testScripts(body: string): string | undefined {
+/** Record the tests as the run finds them. Undefined when there is no repository to read. */
+export async function snapshotTests(cwd: string): Promise<TestSnapshot | undefined> {
   try {
-    const pkg = JSON.parse(body) as { scripts?: Record<string, unknown>; jest?: unknown };
-    const scripts = pkg.scripts ?? {};
-    const picked = Object.keys(scripts)
-      .filter((k) => k === 'test' || k.startsWith('test:') || k.startsWith('pretest') || k.startsWith('posttest'))
-      .sort()
-      .map((k) => [k, scripts[k]]);
-    return JSON.stringify({ scripts: picked, jest: pkg.jest ?? null });
-  } catch {
-    return undefined;
-  }
-}
-
-interface Repo {
-  top: string;
-  /** Protected paths in the base tree → blob id. */
-  base: Map<string, string>;
-}
-
-async function openRepo(cwd: string, baseSha: string): Promise<Repo> {
-  // A base comes from a run record or a tool call; refuse anything git could read as an option.
-  if (!/^[0-9a-f]{7,64}$/i.test(baseSha)) {
-    throw new GitUnavailable(`baseline ${JSON.stringify(baseSha)} is not a commit id`);
-  }
-  const top = await git(cwd, ['rev-parse', '--show-toplevel']);
-  if (top.code !== 0) throw new GitUnavailable(`${cwd} is not inside a git repository`);
-  const root = top.out.trim();
-  const tree = await git(root, ['ls-tree', '-r', '-z', '--full-tree', `${baseSha}^{commit}`]);
-  if (tree.code !== 0) throw new GitUnavailable(`baseline ${baseSha} cannot be read from ${root}`);
-  const base = new Map<string, string>();
-  for (const entry of tree.out.split('\0')) {
-    // "<mode> <type> <id>\t<path>"
-    const tab = entry.indexOf('\t');
-    if (tab < 0) continue;
-    const [, type, id] = entry.slice(0, tab).split(' ');
-    const file = entry.slice(tab + 1);
-    if (type === 'blob' && isProtected(file)) base.set(file, id);
-  }
-  return { top: root, base };
-}
-
-/**
- * State now, in the form snapshots and the base are compared in: the blob id git
- * would store (clean filters applied), or for a package.json only its test
- * configuration. `null` when absent.
- */
-async function statesNow(repo: Repo, files: string[]): Promise<Map<string, string | null>> {
-  const out = new Map<string, string | null>();
-  const toHash: string[] = [];
-  for (const file of files) {
-    const abs = path.join(repo.top, file);
-    let isFile = false;
-    try {
-      isFile = fs.statSync(abs).isFile();
-    } catch {
-      isFile = false;
-    }
-    if (!isFile) out.set(file, null);
-    else if (MANIFEST.test(file)) out.set(file, testScripts(fs.readFileSync(abs, 'utf8')) ?? 'unparseable');
-    else toHash.push(file);
-  }
-  if (toHash.length > 0) {
-    const r = await git(repo.top, ['hash-object', '--stdin-paths'], toHash.join('\n') + '\n');
-    const ids = r.out.split('\n').filter(Boolean);
-    if (r.code !== 0 || ids.length !== toHash.length) {
-      throw new GitUnavailable('git hash-object could not hash the test files');
-    }
-    toHash.forEach((file, i) => out.set(file, ids[i]));
-  }
-  return out;
-}
-
-async function baseState(repo: Repo, file: string): Promise<string | null> {
-  const id = repo.base.get(file);
-  if (id === undefined) return null;
-  if (!MANIFEST.test(file)) return id;
-  const blob = await git(repo.top, ['cat-file', 'blob', id]);
-  if (blob.code !== 0) throw new GitUnavailable(`cannot read ${file} at the baseline`);
-  return testScripts(blob.out) ?? 'unparseable';
-}
-
-/**
- * Taken when a run starts: every protected path whose state then differs from the
- * base commit, including test files that were new and not committed yet.
- * Undefined when git cannot say; the verifier then reports the check as not run.
- */
-export async function snapshotChangedTests(
-  cwd: string,
-  baseSha: string | undefined,
-): Promise<TestSnapshot | undefined> {
-  if (!baseSha) return undefined;
-  try {
-    const repo = await openRepo(cwd, baseSha);
-    const listed = await git(repo.top, ['ls-files', '-z', '--cached', '--others', '--exclude-standard']);
-    if (listed.code !== 0) return undefined;
-    const present = listed.out.split('\0').filter((f) => f && isProtected(f));
-    const candidates = [...new Set([...repo.base.keys(), ...present])];
-    const now = await statesNow(repo, candidates);
-    const snapshot: TestSnapshot = {};
-    for (const file of candidates) {
-      const state = now.get(file) ?? null;
-      if (state !== (await baseState(repo, file))) snapshot[file] = state;
-    }
-    return snapshot;
+    const { root, files } = await listProtected(cwd);
+    return { root, files: Object.fromEntries(files.map((f) => [f, stateOf(root, f)])) };
   } catch {
     return undefined;
   }
 }
 
 /**
- * The `protected-tests` check; undefined when it does not apply (no baseline).
- * `atStart` is the run's snapshot. `null` means the run has a baseline but no
- * snapshot — a run created before snapshots existed, or one whose snapshot git
- * could not take — and is reported as not checked rather than compared against
- * a base commit that may hold the developer's own edits.
+ * The `protected-tests` check against a run's snapshot. `null` means the run has
+ * no snapshot — it predates them, or git could not take one — and is reported as
+ * not checked rather than guessed at.
  */
-export async function checkProtectedTests(
-  cwd: string,
-  baseSha: string | undefined,
-  atStart?: TestSnapshot | null,
-): Promise<CheckResult | undefined> {
-  if (!baseSha) return undefined;
+export async function checkProtectedTests(cwd: string, atStart: TestSnapshot | null): Promise<CheckResult> {
   const startedAt = Date.now();
   const result = (passed: boolean, detail: string, extra: Partial<CheckResult> = {}): CheckResult => ({
     id: 'protected-tests',
@@ -218,28 +157,33 @@ export async function checkProtectedTests(
     detail,
     ...extra,
   });
+  const notChecked = (why: string) => result(false, `not checked: ${why}`, { required: false });
 
-  if (atStart === null) {
-    return result(false, 'not checked: there is no record of the tests as the run found them', { required: false });
-  }
-
+  if (!atStart) return notChecked('there is no record of the tests as the run found them');
+  let now: { root: string; files: string[] };
   try {
-    const repo = await openRepo(cwd, baseSha);
-    const candidates = [...new Set([...repo.base.keys(), ...Object.keys(atStart ?? {})])];
-    const now = await statesNow(repo, candidates);
-    const touched: string[] = [];
-    for (const file of candidates) {
-      const expected = atStart && file in atStart ? atStart[file] : await baseState(repo, file);
-      if ((now.get(file) ?? null) !== expected) touched.push(MANIFEST.test(file) ? `${file} (test scripts)` : file);
-    }
-    if (touched.length === 0) return result(true, 'no test file or test configuration changed during the run');
-    return result(
-      false,
-      `tests changed during the run, so the checks no longer test what they tested: ` +
-        `${touched.slice(0, 10).join(', ')}. Set protectTests: false if changing them is the task.`,
-      { tail: touched.length > 10 ? touched.join('\n') : undefined },
-    );
+    now = await listProtected(cwd);
   } catch (e) {
-    return result(false, `could not check the tests against the baseline: ${(e as Error).message}`);
+    return result(false, `could not check the tests: ${(e as Error).message}`);
   }
+  // A verifier with its own cwd in another repository checks a tree the snapshot never saw.
+  if (now.root !== atStart.root) return notChecked('the checks run in a different repository from the one recorded');
+
+  const touched: string[] = [];
+  for (const file of new Set([...Object.keys(atStart.files), ...now.files])) {
+    const expected = file in atStart.files ? atStart.files[file] : null;
+    const current = stateOf(now.root, file);
+    if (current === expected) continue;
+    // A test or a package added during the run is allowed; test configuration added
+    // during the run is not, since it changes what the existing tests do.
+    if (expected === null && !isTestConfig(file)) continue;
+    touched.push(MANIFEST.test(file) && !isTestPath(file) ? `${file} (scripts or test settings)` : file);
+  }
+  if (touched.length === 0) return result(true, 'no test file or test configuration changed during the run');
+  return result(
+    false,
+    `tests changed during the run, so the checks no longer test what they tested: ` +
+      `${touched.slice(0, 10).join(', ')}. Set protectTests: false if changing them is the task.`,
+    { tail: touched.length > 10 ? touched.join('\n') : undefined },
+  );
 }

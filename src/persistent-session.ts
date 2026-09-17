@@ -764,7 +764,7 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
     if (options.waitForComplete) {
       this._isBusy = true;
       try {
-        return await this._waitForTurnComplete(options.timeout || TURN_TIMEOUT_MS);
+        return await this._waitForTurnComplete(options.timeout || TURN_TIMEOUT_MS, uuid);
       } finally {
         this._isBusy = false;
         if (options.callbacks) this._streamCallbacks = null;
@@ -802,7 +802,7 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
     return !origin || origin.kind === 'human';
   }
 
-  private _waitForTurnComplete(timeout: number): Promise<TurnResult> {
+  private _waitForTurnComplete(timeout: number, uuid: string): Promise<TurnResult> {
     return new Promise((resolve, reject) => {
       let settled = false;
       let streamedText = '';
@@ -836,6 +836,10 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
         allAssistantText = '';
         toolNames.length = 0;
       };
+
+      // No longer waiting, so a result that arrives for it later is not this
+      // session's to hand to the next send.
+      const abandon = () => this._unanswered.delete(uuid);
       this.on(SESSION_EVENT.UNSOLICITED_RESULT, onUnsolicited);
 
       const cleanup = () => {
@@ -853,11 +857,24 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
         if (settled) return;
         settled = true;
         cleanup();
+        abandon();
         reject(new Error('Timeout waiting for response'));
       }, timeout);
 
       const onTurnComplete = (event: StreamEvent) => {
         if (settled) return;
+        // The answer to another message this session wrote — one sent without
+        // waiting, such as an inbox delivery — is not this send's reply.
+        const e = event as Record<string, unknown>;
+        const ids = Array.isArray(e.user_message_uuids)
+          ? e.user_message_uuids
+          : typeof e.user_message_uuid === 'string'
+            ? [e.user_message_uuid]
+            : [];
+        if (ids.length > 0 && !ids.includes(uuid)) {
+          onUnsolicited();
+          return;
+        }
         settled = true;
         cleanup();
         let text =
@@ -873,6 +890,7 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
         if (settled) return;
         settled = true;
         cleanup();
+        abandon();
         reject(err);
       };
 
@@ -880,6 +898,7 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
         if (settled) return;
         settled = true;
         cleanup();
+        abandon();
         const text = streamedText || allAssistantText.trim() || '';
         resolve({
           text,
@@ -892,7 +911,7 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
         });
       };
 
-      this.once(SESSION_EVENT.TURN_COMPLETE, onTurnComplete);
+      this.on(SESSION_EVENT.TURN_COMPLETE, onTurnComplete);
       this.once(SESSION_EVENT.ERROR, onError);
       this.once(SESSION_EVENT.CLOSE, onClose);
     });

@@ -439,6 +439,10 @@ export class Council extends EventEmitter {
   private manager: SessionManagerLike;
   private agentTimeoutMs: number;
   private _aborted = false;
+
+  private _stopped(): boolean {
+    return this._aborted || this.config.signal?.aborted === true;
+  }
   private _activeSessions = new Set<string>();
   private _session: CouncilSession | null = null;
   private _pendingInjection: string | null = null;
@@ -521,7 +525,7 @@ export class Council extends EventEmitter {
     let content = '';
     try {
       for (let attempt = 0; attempt <= EMPTY_RESPONSE_MAX_RETRIES; attempt++) {
-        if (this._aborted) throw new Error('Council aborted');
+        if (this._stopped()) throw new Error('Council aborted');
         if (attempt > 0) {
           this.emitEvent({
             type: 'agent-chunk',
@@ -572,9 +576,9 @@ export class Council extends EventEmitter {
 
       // Follow-up if response is too short and has no consensus marker
       const strippedContent = content.replace(/^\[Agent completed[^\]]*\]\s*/i, '').trim();
-      if (!this._aborted && strippedContent.length < MIN_COMPLETE_RESPONSE_LENGTH && !hasConsensusMarker(content)) {
+      if (!this._stopped() && strippedContent.length < MIN_COMPLETE_RESPONSE_LENGTH && !hasConsensusMarker(content)) {
         for (let i = 0; i < FOLLOWUP_MAX_RETRIES; i++) {
-          if (this._aborted) break;
+          if (this._stopped()) break;
           try {
             const followup = await this.manager.sendMessage(
               sessionName,
@@ -684,7 +688,7 @@ export class Council extends EventEmitter {
 
     try {
       for (let round = 1; round <= this.config.maxRounds; round++) {
-        if (this._aborted) break;
+        if (this._stopped()) break;
 
         this.logger.info(`Round ${round} (${this.config.agents.length} agents parallel)`);
         this.emitEvent({ type: 'round-start', sessionId: session.id, round });
@@ -756,7 +760,7 @@ export class Council extends EventEmitter {
         }
       }
 
-      if (this._aborted) {
+      if (this._stopped()) {
         session.status = 'error';
         // An abort that lands while setupWorktrees is still running finds an
         // empty `_worktreeMap` — it is not assigned until setup returns — so

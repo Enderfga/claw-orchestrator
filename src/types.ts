@@ -846,6 +846,8 @@ export interface CouncilConfig {
   maxTurnsPerAgent?: number;
   maxBudgetUsd?: number;
   defaultPermissionMode?: PermissionMode;
+  /** Polled like `abort()`; set by the kernel so a cancelled or timed-out run stops opening sessions. */
+  signal?: { aborted: boolean };
 }
 
 export interface AgentResponse {

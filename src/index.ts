@@ -1278,7 +1278,7 @@ const plugin = {
               protectTests: {
                 type: 'boolean',
                 description:
-                  'Default true. With a command check, refute the run when a test file or test config that existed when it started was modified or deleted. Set false when changing tests is the task.',
+                  'Default true. In a workflow run with a command check, refute the run when a test file or test configuration changed during it. Set false when changing tests is the task. Not applied by verify_run.',
               },
               checks: {
                 type: 'array',
@@ -1522,7 +1522,7 @@ const plugin = {
               protectTests: {
                 type: 'boolean',
                 description:
-                  'Default true. With a command check, refute the run when a test file or test config that existed when it started was modified or deleted. Set false when changing tests is the task.',
+                  'Default true. In a workflow run with a command check, refute the run when a test file or test configuration changed during it. Set false when changing tests is the task. Not applied by verify_run.',
               },
               checks: {
                 type: 'array',
