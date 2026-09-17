@@ -9,14 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Protected tests.** A contract with a `command` check now refutes a run that modified or deleted a
-  test file or test configuration present at the baseline — a loosened assertion, a deleted test, or a
-  `scripts.test` pointed at something that exits 0 no longer turns a failing run into a verified one.
-  The result is recorded as the required check `protected-tests`. Test edits already in the tree when
-  a kernel run starts are recorded then and not blamed on it. Adding tests stays allowed, and
-  `"protectTests": false` opts out when changing tests is the task. It applies to kernel runs and to
-  `verify_run` with a `baseSha`; tests inside source files and source that special-cases the test
-  environment are not caught.
+- **Protected tests.** A contract with a `command` check now refutes a run whose test files or test
+  configuration changed during it — a loosened assertion, a deleted test, or a `scripts.test` pointed
+  at something that exits 0 no longer turns a failing run into a verified one. It is recorded as the
+  required check `protected-tests`. A kernel run records the tests as it found them, so a developer's
+  uncommitted edits, and a new test not yet committed, are protected in that state rather than blamed
+  on the run. Adding tests stays allowed, and `"protectTests": false` opts out when changing tests is
+  the task. The comparison is on blob ids rather than `git diff`, and a baseline git cannot read fails
+  the check. It applies to kernel runs and to `verify_run` with a `baseSha`; tests inside source
+  files, test settings in general config files, and source that special-cases the test environment
+  are not caught.
 
 ### Fixed
 
@@ -25,7 +27,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fan-out's agents, a council round — passed the check: eight agents meant eight engine processes
   whatever `maxConcurrentSessions` said. A start in flight now holds its slot. Fan-out and Council run
   no more agents at once than there are free slots and queue the rest, so a run wider than the cap
-  waits rather than failing.
+  waits rather than failing. Because queued agents take longer in total, `fanout` and `council` nodes
+  gained `agentTimeoutMs`, and `fanout_start`, `ultrareview_start` and `council_start` size the node
+  timeout for the worst case instead of reusing one agent's timeout, which had also been cutting
+  multi-round councils short. An aborted or timed-out fan-out starts none of the agents still
+  waiting.
 - **Claude Code tool calls were reported twice.** Each `tool_use` block arrives on
   `content_block_start` with an empty input and again as an `assistant` event with its input, and both
   were counted and emitted: `toolCalls` doubled, and ACP clients received two `tool_call` updates per
@@ -35,8 +41,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   top-level events; failed results are counted from there.
 - **A turn the session did not send could be returned as the reply to the next send.** When a
   background workflow finishes, or a message from another Claude Code session arrives, the CLI runs a
-  turn of its own, and its result resolved whichever send was waiting. Results carrying a non-human
-  `origin` no longer resolve a send or count toward `turnsSucceeded`; their cost is still counted. The
+  turn of its own, and its result resolved whichever send was waiting. Each message now carries an id
+  that the CLI echoes on the result answering it, so a result resolves only its own send — including a
+  message the CLI folds into a turn it started itself — and without ids, a result tagged with a
+  non-human `origin` resolves none. Such turns do not count toward `turnsSucceeded`; their cost does. The
   `ultracode` docs now say a workflow's send returns at launch, and no longer claim the CLI rejects
   `--effort ultracode`.
 - **Ledger rows.** A Claude Code session with no explicit model recorded `model: "default"`; it now
@@ -44,6 +52,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   index of the send — it was Claude Code's count of `user` events, which advances once per tool-result
   batch. `getRunLedger` with both `verified` and `limit` applied the limit first and could return
   fewer rows than asked while matching rows existed.
+- **Claude Code's `[1m]` model suffix** (`claude-opus-5[1m]`, `opus[1m]`) is read as the model itself
+  for pricing and as a 1M window, instead of falling back to Sonnet pricing with a warning on every
+  lookup.
 - **The test suite wrote into the real home directory**: ledger rows, council transcripts, and the
   persisted-session and PID files a running orchestrator restores from. Every test file now runs
   with a private `HOME`.

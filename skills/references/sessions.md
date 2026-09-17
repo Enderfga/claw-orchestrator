@@ -147,7 +147,7 @@ Mid-turn and thread control via Codex 0.137 v2 RPCs, surfaced as tools: `codex_i
 
 `fanout_start` runs one task across N engine/model agents in parallel and collects their answers (optional synthesis) — the best-of-N / diverse-perspective primitive. Unlike Council, no rounds/votes/worktrees; use Council for isolated parallel edits. See [tools.md](./tools.md#fan-out-3).
 
-Each agent is a session and counts against `maxConcurrentSessions`. Fan-out and Council run no more agents at once than there are free slots when they start; the rest wait for one. On a memory-constrained host, the cap is the knob that bounds how many engine processes run at once.
+Each agent is a session and counts against `maxConcurrentSessions`. Fan-out and Council run no more agents at once than there are free slots when they start, and the rest wait for an agent to finish. When no slot is free at all, the agents fail on the cap rather than wait for sessions they do not own. On a memory-constrained host, the cap is the knob that bounds how many engine processes run at once. An aborted fan-out starts none of the agents still waiting.
 
 ## Runtime Operations
 

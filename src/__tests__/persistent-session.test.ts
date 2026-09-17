@@ -557,6 +557,49 @@ describe('PersistentClaudeSession', () => {
       expect(session.stats.turnsSucceeded).toBe(1);
     });
 
+    const lastSentUuid = (): string => {
+      const written = mockProc.stdin.write.mock.calls.at(-1)![0] as string;
+      return JSON.parse(written.trim()).uuid as string;
+    };
+    const emit = (event: Record<string, unknown>) =>
+      mockProc.stdout.emit('data', Buffer.from(JSON.stringify(event) + '\n'));
+
+    it('resolves a send the CLI folded into a turn it started itself', async () => {
+      const waiting = session.send('question', { waitForComplete: true, timeout: 60_000 });
+      const uuid = lastSentUuid();
+      expect(uuid).toMatch(/^[0-9a-f-]{36}$/);
+      // Background-task turn that absorbed the message: tagged with an origin, but
+      // it names the message it answers.
+      emit({ type: 'result', result: 'answer', origin: { kind: 'task-notification' }, user_message_uuids: [uuid] });
+      expect(((await waiting) as { text: string }).text).toBe('answer');
+      expect(session.stats.turnsSucceeded).toBe(1);
+    });
+
+    it('ignores a result that names only messages this session did not send', async () => {
+      const waiting = session.send('question', { waitForComplete: true, timeout: 60_000 });
+      const uuid = lastSentUuid();
+      emit({ type: 'result', result: 'someone else', user_message_uuids: ['00000000-0000-0000-0000-000000000000'] });
+      emit({ type: 'result', result: 'mine', user_message_uuids: [uuid] });
+      expect(((await waiting) as { text: string }).text).toBe('mine');
+      expect(session.stats.turnsSucceeded).toBe(1);
+    });
+
+    it("does not build a reply's fallback text from a turn it did not send", async () => {
+      const waiting = session.send('question', { waitForComplete: true, timeout: 60_000 });
+      const uuid = lastSentUuid();
+      emit({
+        type: 'stream_event',
+        event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'NOT MINE' } },
+      });
+      emit({ type: 'result', result: 'workflow done', origin: { kind: 'task-notification' } });
+      emit({
+        type: 'stream_event',
+        event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'mine' } },
+      });
+      emit({ type: 'result', result: '', user_message_uuids: [uuid] });
+      expect(((await waiting) as { text: string }).text).toBe('mine');
+    });
+
     it('names the model the CLI reported in init when the caller set none', async () => {
       const unnamed = new PersistentClaudeSession(makeConfig({ model: undefined }));
       expect(unnamed.getCost().model).toBe('default');

@@ -39,7 +39,7 @@ export async function executeCouncilNode(node: NodeSpec, ctx: NodeContext): Prom
       })),
       maxRounds: spec.maxRounds ?? 8,
       projectDir: spec.projectDir || ctx.cwd,
-      agentTimeoutMs: spec.timeoutMs,
+      agentTimeoutMs: spec.agentTimeoutMs ?? spec.timeoutMs,
       maxTurnsPerAgent: spec.maxTurnsPerAgent,
       maxBudgetUsd: spec.maxBudgetUsd,
       defaultPermissionMode: spec.defaultPermissionMode as never,

@@ -226,6 +226,24 @@ describe('getContextWindow', () => {
   });
 });
 
+describe("Claude Code's [1m] model suffix", () => {
+  // Claude Code reports a 1M-context selection as `claude-opus-5[1m]` in its init
+  // event; the model is the same, only the window differs.
+  it('prices the suffixed id as the model itself, without the unknown-model fallback', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect(getModelPricing('claude-opus-5[1m]')).toEqual(getModelPricing('claude-opus-5'));
+    expect(getModelPricing('opus[1m]')).toEqual(getModelPricing('opus'));
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it('reads the suffix as a 1M window, and leaves an unsuffixed id alone', () => {
+    expect(getContextWindow('claude-sonnet-4-5')).toBe(200_000);
+    expect(getContextWindow('claude-sonnet-4-5[1m]')).toBe(1_000_000);
+    expect(getContextWindow('claude-opus-5[1m]')).toBe(1_000_000);
+  });
+});
+
 describe('getModelPricing', () => {
   it('returns pricing for known models', () => {
     const p = getModelPricing('claude-opus-4-6');

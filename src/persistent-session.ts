@@ -6,6 +6,7 @@
  */
 
 import { spawn, ChildProcess } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import * as readline from 'node:readline';
 import * as fs from 'node:fs';
@@ -100,6 +101,8 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
   private _engineContextWindow: number | null = null;
   /** Model id the CLI reported in its init event — what answers when no `model` was set. */
   private _engineModel: string | undefined;
+  /** Ids of messages this session wrote whose result has not arrived yet. */
+  private _unanswered = new Set<string>();
   /** Full prompt size of the last turn: input + cached reads + cache writes. */
   private _lastTurnPromptTokens = 0;
 
@@ -400,6 +403,8 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
     }
 
     // Spawn
+    // A new process answers none of the old one's messages.
+    this._unanswered.clear();
     this.proc = spawn(resolvedBin, args, {
       cwd: this.options.cwd,
       env: spawnEnv,
@@ -654,14 +659,12 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
         if (usage) this._applyTurnUsage(usage, true);
         this._applyReportedCost((event as Record<string, unknown>).total_cost_usd);
         this._captureContextWindow((event as Record<string, unknown>).modelUsage);
-        // A turn this session did not send ends with a result too, tagged with an
-        // `origin`: a background workflow reporting back (`task-notification`, seen
-        // on 2.1.274 after a Workflow launch), or a message from another session.
-        // It answers no send, so it must not resolve the one waiting — which would
-        // hand that caller the other turn's reply — nor count as that send's success.
-        // Its usage and cost above are real and stay counted.
-        const origin = (event as Record<string, unknown>).origin as { kind?: unknown } | undefined;
-        const unsolicited = !!origin && origin.kind !== 'human';
+        // A turn this session did not send ends with a result too: a background
+        // workflow reporting back, or a message from another session. It answers no
+        // send, so it must not resolve the one waiting — which would hand that caller
+        // the other turn's reply — nor count as that send's success. Its usage and
+        // cost above are real and stay counted.
+        const unsolicited = !this._answersOwnMessage(event);
         // The result event is the only place the outcome is known, and it arrives once
         // per send — unlike the `user` echo that drives `turns`, which the CLI also
         // emits per tool-result batch. `is_error` is read as truthy on purpose: for a
@@ -670,7 +673,8 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
           this.stats.turnsSucceeded++;
         }
         this.emit(SESSION_EVENT.RESULT, event);
-        if (!unsolicited) this.emit(SESSION_EVENT.TURN_COMPLETE, event);
+        if (unsolicited) this.emit(SESSION_EVENT.UNSOLICITED_RESULT, event);
+        else this.emit(SESSION_EVENT.TURN_COMPLETE, event);
         this._fireHook('onTurnComplete', {
           text: event.result,
           usage,
@@ -732,8 +736,13 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
       }
     }
 
+    // The CLI echoes this id back on the result that answers the message
+    // (`user_message_uuids`), which is how a result is matched to its send.
+    const uuid = randomUUID();
+    this._unanswered.add(uuid);
     const payload = {
       type: 'user',
+      uuid,
       message: {
         role: 'user',
         content: typeof finalMessage === 'string' ? [{ type: 'text', text: finalMessage }] : finalMessage,
@@ -767,6 +776,32 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
 
   // ─── Wait for Turn Complete ──────────────────────────────────────────────
 
+  /**
+   * Whether a result answers a message this session wrote.
+   *
+   * Measured on 2.1.274: a result carries the ids of the messages it answers in
+   * `user_message_uuids`, and a turn the CLI started on its own (a finished
+   * background workflow, `origin: {kind: 'task-notification'}`) carries none. The
+   * ids decide when present — including a message the CLI folds into a turn it
+   * started itself. Without them, which is what an older CLI or a custom engine
+   * emits, a non-human `origin` is the only sign of a turn nobody sent.
+   */
+  private _answersOwnMessage(event: StreamEvent): boolean {
+    const e = event as Record<string, unknown>;
+    const ids = Array.isArray(e.user_message_uuids)
+      ? e.user_message_uuids.filter((id): id is string => typeof id === 'string')
+      : typeof e.user_message_uuid === 'string'
+        ? [e.user_message_uuid]
+        : [];
+    if (ids.length > 0) {
+      let own = false;
+      for (const id of ids) own = this._unanswered.delete(id) || own;
+      return own;
+    }
+    const origin = e.origin as { kind?: unknown } | undefined;
+    return !origin || origin.kind === 'human';
+  }
+
   private _waitForTurnComplete(timeout: number): Promise<TurnResult> {
     return new Promise((resolve, reject) => {
       let settled = false;
@@ -794,11 +829,21 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
       };
       this.on(SESSION_EVENT.TOOL_USE, onToolUse);
 
+      // Text and tools streamed before a turn this send did not start are that
+      // turn's, not this reply's fallback.
+      const onUnsolicited = () => {
+        streamedText = '';
+        allAssistantText = '';
+        toolNames.length = 0;
+      };
+      this.on(SESSION_EVENT.UNSOLICITED_RESULT, onUnsolicited);
+
       const cleanup = () => {
         clearTimeout(timer);
         this.removeListener(SESSION_EVENT.TEXT, onText);
         this.removeListener(SESSION_EVENT.ASSISTANT, onAssistant);
         this.removeListener(SESSION_EVENT.TOOL_USE, onToolUse);
+        this.removeListener(SESSION_EVENT.UNSOLICITED_RESULT, onUnsolicited);
         this.removeListener(SESSION_EVENT.TURN_COMPLETE, onTurnComplete);
         this.removeListener(SESSION_EVENT.ERROR, onError);
         this.removeListener(SESSION_EVENT.CLOSE, onClose);

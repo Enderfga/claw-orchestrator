@@ -1275,6 +1275,11 @@ const plugin = {
                 description:
                   'On red, spawn a repair session and re-run the whole list, up to N times. Only the re-run decides.',
               },
+              protectTests: {
+                type: 'boolean',
+                description:
+                  'Default true. With a command check, refute the run when a test file or test config that existed when it started was modified or deleted. Set false when changing tests is the task.',
+              },
               checks: {
                 type: 'array',
                 minItems: 1,
@@ -1513,6 +1518,11 @@ const plugin = {
                 type: 'number',
                 description:
                   'On red, spawn a repair session and re-run the whole list, up to N times. Only the re-run decides.',
+              },
+              protectTests: {
+                type: 'boolean',
+                description:
+                  'Default true. With a command check, refute the run when a test file or test config that existed when it started was modified or deleted. Set false when changing tests is the task.',
               },
               checks: {
                 type: 'array',

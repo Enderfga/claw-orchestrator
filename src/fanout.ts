@@ -75,6 +75,8 @@ export interface FanoutConfig {
    * One execution, one identity.
    */
   runId?: string;
+  /** Polled before each queued agent starts and before synthesis; set by the kernel. */
+  signal?: { aborted: boolean };
 }
 
 export interface FanoutAgentResult {
@@ -101,7 +103,7 @@ export interface FanoutSession {
   error?: string;
 }
 
-const DEFAULT_AGENT_TIMEOUT_MS = 600_000;
+export const DEFAULT_AGENT_TIMEOUT_MS = 600_000;
 const DEFAULT_MAX_TURNS = 30;
 
 export class Fanout {
@@ -141,7 +143,7 @@ export class Fanout {
       const agents = this.config.agents;
       const slots = this.manager.freeSessionSlots?.() ?? agents.length;
       this.session.results = await mapBounded(agents, slots, (a) => this._runAgent(a));
-      if (!this._aborted && this.config.synthesize) {
+      if (!this._stopped() && this.config.synthesize) {
         const ok = this.session.results.filter((r) => r.ok);
         if (ok.length >= 2) this.session.synthesis = await this._synthesize(ok);
       }
@@ -157,8 +159,24 @@ export class Fanout {
     return this.session;
   }
 
+  private _stopped(): boolean {
+    return this._aborted || this.config.signal?.aborted === true;
+  }
+
   private async _runAgent(spec: FanoutAgentSpec): Promise<FanoutAgentResult> {
     const engine: EngineType = spec.engine || 'claude';
+    // An agent still queued for a slot when the run was aborted never starts.
+    if (this._stopped()) {
+      return {
+        agent: spec.name,
+        engine,
+        model: spec.model,
+        ok: false,
+        output: '',
+        error: 'aborted before start',
+        durationMs: 0,
+      };
+    }
     const sessionName = `${this.session.id}-${spec.name}`;
     const start = Date.now();
     try {

@@ -122,26 +122,36 @@ ignored; only the re-run decides. Set it to 0 (the default) to disable.
 A `command` check runs in the tree the agent just worked in, so an agent could make
 it pass by changing the test instead of the code: loosen an assertion, delete the
 test, or point `scripts.test` at something that exits 0. When a contract has a
-`command` check and the run has a baseline, the runtime refutes it if any test file
-or test configuration **that existed at the baseline** was modified or deleted. The
+`command` check and the run has a baseline, the runtime refutes the run if any test
+file or test configuration differs from what it was **when the run started**. The
 result is recorded in the bundle as the required check `protected-tests`, whether it
-passed or not. It applies to the fixer's rounds too.
+passed or not, and it applies to the fixer's rounds too.
 
-- **Counted as tests:** files under `__tests__/`, `test/`, `tests/`, `spec/`, `specs/`;
+- **What "when the run started" means:** a kernel run records, at start, every test
+  file that already differed from the base commit, including new tests that were not
+  committed yet. Those are protected in that state, so a developer who writes a
+  failing test and hands the fix to an agent keeps it. `verify_run` with a `baseSha`
+  has no such record and compares against the base commit.
+- **Counted as tests:** files under `__tests__/`, `__snapshots__/`, `test/`, `tests/`;
   `*.test.*` and `*.spec.*` scripts; `test_*.py`, `*_test.py`, `*_test.go`, `*_spec.rb`,
-  `*Test.java`/`.kt`/`.cs`; vitest/jest/playwright/karma/cypress config, `.mocharc*`,
-  `pytest.ini`, `conftest.py`, `tox.ini`, `phpunit.xml`; and the `test*`/`pretest*`/
-  `posttest*` scripts of a `package.json` (its other fields may change).
-- **Allowed:** adding new test files, committed or not. Test edits already in the working tree
-  when a kernel run started are recorded then and not blamed on the run; editing those files
-  further during the run is.
+  `spec/spec_helper.rb`, `spec/rails_helper.rb`, `spec/support/`, `.rspec`;
+  `*Test.java`/`.kt`/`.cs`; vitest/jest/playwright/cypress config (including `.json`),
+  `karma.conf.*`, `vitest.setup.*`/`jest.setup.*`/`setupTests.*`, `.mocharc*`,
+  `pytest.ini`, `conftest.py`, `tox.ini`, `phpunit.xml`; and in a `package.json`, the
+  `test*`/`pretest*`/`posttest*` scripts and the `jest` key (its other fields may change).
+- **Allowed:** adding new test files, committed or not.
 - **Opting out:** set `"protectTests": false` when changing existing tests is the task.
-- **Where it applies:** kernel runs (the baseline is recorded at start) and `verify_run`
-  with a `baseSha`. UltraApp's build gate and Autoloop's gate run without a baseline
-  and are not covered.
-- **What it does not catch:** tests inside source files (Rust `#[cfg(test)]`), and
-  source code that special-cases the test environment. It closes the direct route,
-  not every route.
+- **How it compares:** blob ids from the base tree against `git hash-object` of the
+  working tree, not `git diff` — index flags, path quoting and replace refs cannot hide
+  an edit. When git cannot read the baseline, the check fails.
+- **Where it applies:** kernel runs and `verify_run` with a `baseSha`. A kernel run
+  created before this check existed, or a verifier node with its own `cwd`, records the
+  check as not run (not required) instead of guessing. UltraApp's build gate and
+  Autoloop's gate run without a baseline and are not covered.
+- **What it does not catch:** tests inside source files (Rust `#[cfg(test)]`), test
+  settings inside general config (`vite.config.*`, `pyproject.toml`, `setup.cfg`), and
+  source code that special-cases the test environment. It closes the direct route, not
+  every route.
 
 ## Per-mode defaults
 

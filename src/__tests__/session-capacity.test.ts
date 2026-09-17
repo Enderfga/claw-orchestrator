@@ -26,10 +26,13 @@ import { mapBounded } from '../concurrency.js';
 import { SessionManager } from '../session-manager.js';
 import { Fanout } from '../fanout.js';
 import { Council } from '../council.js';
+import { legacyFanoutWorkflow } from '../kernel/templates/index.js';
 
 const tick = (ms = 5) => new Promise((r) => setTimeout(r, ms));
 
 const live = { now: 0, peak: 0 };
+const sendMs = { value: 5 };
+const started: Array<{ at: number }> = [];
 
 class SlowStartSession extends EventEmitter implements ISession {
   sessionId?: string;
@@ -46,6 +49,7 @@ class SlowStartSession extends EventEmitter implements ISession {
   async start(): Promise<this> {
     // The window every concurrent start used to slip through.
     await tick();
+    started.push({ at: Date.now() });
     live.now++;
     live.peak = Math.max(live.peak, live.now);
     this.sessionId = 'slow';
@@ -57,7 +61,7 @@ class SlowStartSession extends EventEmitter implements ISession {
   pause(): void {}
   resume(): void {}
   async send(): Promise<TurnResult> {
-    await tick();
+    await tick(sendMs.value);
     this.turns++;
     return { text: 'answer', event: { type: 'result', result: 'answer' } };
   }
@@ -124,7 +128,18 @@ afterEach(async () => {
   for (const m of managers.splice(0)) await m.shutdown();
   live.now = 0;
   live.peak = 0;
+  sendMs.value = 5;
+  started.length = 0;
 });
+
+const settle = async (mgr: SessionManager, id: string) => {
+  for (let i = 0; i < 400; i++) {
+    const s = mgr.fanoutStatus(id);
+    if (s.status !== 'running') return s;
+    await tick(10);
+  }
+  throw new Error('fan-out did not settle');
+};
 
 describe('mapBounded', () => {
   it('keeps input order and never exceeds the limit', async () => {
@@ -188,6 +203,75 @@ describe('multi-agent runners wait for a slot', () => {
     const session = await fan.run();
     expect(session.results.map((r) => r.ok)).toEqual([true, true, true, true, true]);
     expect(live.peak).toBeLessThanOrEqual(2);
+  });
+
+  it('does not time a queued fan-out out on one agent budget', async () => {
+    // Four 300ms agents through two slots take two waves, ~600ms, under a
+    // 500ms per-agent timeout. Sized as one agent's budget, the node timed out
+    // mid-way and returned no results at all.
+    const mgr = makeManager(2);
+    sendMs.value = 300;
+    const run = await mgr.fanoutStart({
+      task: 'answer',
+      projectDir: os.tmpdir(),
+      agentTimeoutMs: 500,
+      agents: ['a', 'b', 'c', 'd'].map((name) => ({ name, engine: 'codex' as const })),
+    });
+    const done = await settle(mgr, run.id);
+    expect(done.status).toBe('done');
+    expect(done.results.map((r) => r.ok)).toEqual([true, true, true, true]);
+  });
+
+  it('sizes the legacy node timeout for the worst case and keeps the per-agent one', () => {
+    const spec = legacyFanoutWorkflow({
+      task: 't',
+      cwd: os.tmpdir(),
+      agents: [{ name: 'a' }, { name: 'b' }, { name: 'c' }],
+      synthesize: true,
+      timeoutMs: 1000,
+    });
+    const node = spec.nodes[0] as { timeoutMs?: number; agentTimeoutMs?: number };
+    expect(node.agentTimeoutMs).toBe(1000);
+    expect(node.timeoutMs).toBe(4000);
+  });
+
+  it('starts no queued agent after the fan-out is aborted', async () => {
+    const mgr = makeManager(1);
+    sendMs.value = 150;
+    const run = await mgr.fanoutStart({
+      task: 'answer',
+      projectDir: os.tmpdir(),
+      agents: ['a', 'b', 'c'].map((name) => ({ name, engine: 'codex' as const })),
+    });
+    await tick(80);
+    const abortedAt = Date.now();
+    mgr.fanoutAbort(run.id);
+    await tick(600);
+    expect(started.filter((s) => s.at > abortedAt)).toHaveLength(0);
+  });
+
+  it('stops starting queued agents once the kernel gives up on the node', async () => {
+    const mgr = makeManager(1);
+    sendMs.value = 250;
+    await mgr.workflowStart({
+      name: 'slow-fanout',
+      cwd: os.tmpdir(),
+      nodes: [
+        {
+          id: 'fan',
+          kind: 'fanout',
+          prompt: 'answer',
+          timeoutMs: 300,
+          agentTimeoutMs: 5000,
+          agents: [{ name: 'a' }, { name: 'b' }, { name: 'c' }].map((a) => ({ ...a, engine: 'codex' as const })),
+        },
+      ],
+    });
+    await tick(320);
+    const gaveUpAt = Date.now();
+    await tick(900);
+    // `b` may already be past its check when the node times out; `c` must not start.
+    expect(started.filter((s) => s.at > gaveUpAt + 50).length).toBe(0);
   });
 
   it('council runs a round no wider than the free slots', async () => {

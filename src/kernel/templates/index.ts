@@ -195,6 +195,14 @@ export function solveWorkflow(args: SolveArgs): WorkflowSpec {
 
 import type { EngineType, EffortLevel, PermissionMode } from '../../types.js';
 import { LEGACY_NODE } from '../projections.js';
+import { DEFAULT_AGENT_TIMEOUT_MS as FANOUT_AGENT_TIMEOUT_MS } from '../../fanout.js';
+import { DEFAULT_AGENT_TIMEOUT_MS as COUNCIL_AGENT_TIMEOUT_MS, DEFAULT_MAX_ROUNDS } from '../../constants.js';
+
+// The node timeout is a backstop for the whole mode, not a second per-agent limit.
+// Agents past the free session slots wait for one, so a node sized for a single
+// agent timed out while the first wave was still running and dropped every result.
+// These bounds assume the worst case, one agent at a time; each agent is still
+// held to its own timeout.
 
 export interface LegacyCouncilArgs {
   task: string;
@@ -219,7 +227,11 @@ export function legacyCouncilWorkflow(args: LegacyCouncilArgs): WorkflowSpec {
         agents: args.agents,
         projectDir: args.cwd,
         maxRounds: args.maxRounds,
-        timeoutMs: args.timeoutMs,
+        agentTimeoutMs: args.timeoutMs,
+        timeoutMs:
+          (args.timeoutMs ?? COUNCIL_AGENT_TIMEOUT_MS) *
+          (args.maxRounds ?? DEFAULT_MAX_ROUNDS) *
+          Math.max(1, args.agents.length),
         maxTurnsPerAgent: args.maxTurnsPerAgent,
         maxBudgetUsd: args.maxBudgetUsd,
         defaultPermissionMode: args.defaultPermissionMode,
@@ -259,7 +271,9 @@ export function legacyFanoutWorkflow(args: LegacyFanoutArgs): WorkflowSpec {
         maxTurnsPerAgent: args.maxTurnsPerAgent,
         maxBudgetUsd: args.maxBudgetUsd,
         cwd: args.cwd,
-        timeoutMs: args.timeoutMs,
+        agentTimeoutMs: args.timeoutMs,
+        timeoutMs:
+          (args.timeoutMs ?? FANOUT_AGENT_TIMEOUT_MS) * (Math.max(1, args.agents.length) + (args.synthesize ? 1 : 0)),
       },
     ],
   };

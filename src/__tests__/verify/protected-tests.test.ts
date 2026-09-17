@@ -125,6 +125,66 @@ describe('protected tests', () => {
     expect(r?.detail).not.toContain('package.json');
   });
 
+  it('protects a test that was new and uncommitted when the run started', async () => {
+    // The TDD case: the developer writes the failing test, then hands the fix to an agent.
+    write('test/bug.test.js', 'expect(sum(1, 2)).toBe(3)\n');
+    write('test/staged.test.js', 'expect(sum(2, 2)).toBe(4)\n');
+    git('add test/staged.test.js');
+    const baseTests = await snapshotChangedTests(repo, base);
+    expect(Object.keys(baseTests!).sort()).toEqual(['test/bug.test.js', 'test/staged.test.js']);
+    const check = async () =>
+      (await runChecks(contract(), { ...ctx(), baseTests })).find((r) => r.id === 'protected-tests');
+
+    expect((await check())?.passed).toBe(true);
+    write('test/bug.test.js', 'expect(true).toBe(true)\n');
+    expect((await check())?.detail).toContain('test/bug.test.js');
+    write('test/bug.test.js', 'expect(sum(1, 2)).toBe(3)\n');
+    fs.rmSync(path.join(repo, 'test/staged.test.js'));
+    expect((await check())?.detail).toContain('test/staged.test.js');
+  });
+
+  it('sees an edit the index was told to ignore', async () => {
+    git('update-index --assume-unchanged test/sum.test.js');
+    write('test/sum.test.js', 'expect(sum).toBe(3) // hidden from git diff\n');
+    expect(git('diff --name-only')).toBe('');
+    expect((await guard())?.passed).toBe(false);
+  });
+
+  it('sees an edit to a test whose path git quotes', async () => {
+    write('test/sümme.test.js', 'expect(sum).toBe(3)\n');
+    git('add -A');
+    git('commit -m unicode');
+    base = git('rev-parse HEAD');
+    write('test/sümme.test.js', 'expect(true).toBe(true)\n');
+    expect((await guard())?.detail).toContain('sümme');
+  });
+
+  it('refutes a change to the jest settings in package.json', async () => {
+    write(
+      'package.json',
+      JSON.stringify({ name: 'p', scripts: { test: 'vitest run' }, jest: { testPathIgnorePatterns: ['test'] } }),
+    );
+    expect((await guard())?.passed).toBe(false);
+  });
+
+  it('fails, rather than passes, when the baseline cannot be read', async () => {
+    const gone = await runChecks(contract(), { ...ctx(), baseSha: 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef' });
+    const r = gone.find((x) => x.id === 'protected-tests');
+    expect(r?.passed).toBe(false);
+    expect(r?.required).toBe(true);
+    expect(r?.detail).toContain('cannot be read');
+    const option = await runChecks(contract(), { ...ctx(), baseSha: '--output=/tmp/x' });
+    expect(option.find((x) => x.id === 'protected-tests')?.detail).toContain('not a commit id');
+  });
+
+  it('reports the tests unchecked, without refuting, when a run has no start snapshot', async () => {
+    write('test/sum.test.js', 'expect(sum).toBe(3) // could be the developer\n');
+    const r = (await runChecks(contract(), { ...ctx(), baseTests: null })).find((x) => x.id === 'protected-tests');
+    expect(r?.passed).toBe(false);
+    expect(r?.required).toBe(false);
+    expect(r?.detail).toContain('not checked');
+  });
+
   it('is off when the caller says changing tests is the task', async () => {
     write('test/sum.test.js', 'expect(sum).toBe(3)\n// rewritten on purpose\n');
     expect(await guard(contract({ protectTests: false }))).toBeUndefined();
@@ -159,6 +219,38 @@ describe('protected tests in a kernel run', () => {
     expect(done.outcome).toBe('verified');
   });
 
+  it('does not refute a verifier that checks another repository', async () => {
+    const other = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'clawo-protect-other-'));
+    try {
+      execSync('git init -b main && git config user.email t@example.com && git config user.name t', {
+        cwd: other,
+        stdio: 'pipe',
+      });
+      fs.mkdirSync(path.join(other, 'test'));
+      fs.writeFileSync(path.join(other, 'test/sum.test.js'), 'expect(sum).toBe(3)\n');
+      execSync('git add -A && git commit -m other', { cwd: other, stdio: 'pipe' });
+      const kernel = registerDefaultExecutors(new RunKernel({ nodeTimeoutMs: 8000 }));
+      const rec = await kernel.start({
+        name: 'p',
+        cwd: repo,
+        nodes: [
+          {
+            id: 'check',
+            kind: 'verifier',
+            cwd: other,
+            contract: {
+              checks: [{ spec: { type: 'command', cmd: 'sh', args: ['-c', 'grep -q "toBe(3)" test/sum.test.js'] } }],
+            },
+          } as never,
+        ],
+      });
+      const done = (await kernel.wait(rec.runId))!;
+      expect(done.state).toBe('completed');
+    } finally {
+      fs.rmSync(other, { recursive: true, force: true });
+    }
+  });
+
   it('refutes a run whose agent edited the test', async () => {
     const done = await verifyRun(() => write('test/sum.test.js', 'expect(sum).toBe(3) // agent\n'));
     expect(done.outcome).not.toBe('verified');
@@ -179,10 +271,24 @@ describe('isTestPath', () => {
     'web/jest.config.mjs',
     'conftest.py',
     '.mocharc.yml',
+    'karma.conf.js',
+    'jest.config.json',
+    'jest.setup.ts',
+    'src/setupTests.tsx',
+    'spec/spec_helper.rb',
+    'spec/support/factories.rb',
+    '.rspec',
+    'src/__snapshots__/app.test.ts.snap',
   ])('treats %s as a test path', (p) => expect(isTestPath(p)).toBe(true));
 
-  it.each(['src/index.ts', 'README.md', 'latest/notes.md', 'src/contest.ts', 'docs/testing-guide.md'])(
-    'does not treat %s as a test path',
-    (p) => expect(isTestPath(p)).toBe(false),
-  );
+  it.each([
+    'src/index.ts',
+    'README.md',
+    'latest/notes.md',
+    'src/contest.ts',
+    'docs/testing-guide.md',
+    'specs/001-feature/tasks.md',
+    '.kiro/specs/feat/tasks.md',
+    'docs/spec/api.yaml',
+  ])('does not treat %s as a test path', (p) => expect(isTestPath(p)).toBe(false));
 });

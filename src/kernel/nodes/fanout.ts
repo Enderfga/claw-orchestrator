@@ -44,7 +44,10 @@ export async function executeFanoutNode(node: NodeSpec, ctx: NodeContext): Promi
       synthesisPermissionMode: spec.synthesisPermissionMode as never,
       maxTurnsPerAgent: spec.maxTurnsPerAgent,
       maxBudgetUsd: spec.maxBudgetUsd,
-      agentTimeoutMs: spec.timeoutMs,
+      agentTimeoutMs: spec.agentTimeoutMs ?? spec.timeoutMs,
+      // A cancelled run, or an attempt the kernel timed out, must stop taking
+      // queued agents off the queue rather than keep starting paid turns.
+      signal: ctx.signal,
     },
     ctx.manager,
     ctx.logger,

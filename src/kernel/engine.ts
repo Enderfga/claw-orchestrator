@@ -556,7 +556,10 @@ export class RunKernel extends EventEmitter {
     // again.
     const guard = createAndAcquire(runId, spec, this.ownerId);
     record.baseSha = await captureBaseline(cwd);
-    record.baseTests = await snapshotChangedTests(cwd, record.baseSha);
+    // Only a verifier reads it, and hashing every test file is not free in a large repository.
+    if (spec.nodes.some((n) => n.kind === 'verifier')) {
+      record.baseTests = await snapshotChangedTests(cwd, record.baseSha);
+    }
     const { txn, signal } = this._open(guard, record);
     if (!txn.apply(() => undefined, [{ ts: now, type: 'run_created', runId, workflow: spec.name }])) {
       throw new Error(`Run '${runId}' could not be checkpointed: the claim was lost before it started`);

@@ -46,8 +46,12 @@ export interface VerifyContext {
   /** Directory for check-produced files (screenshots). Created on demand. */
   artifactDir: string;
   baseSha?: string;
-  /** Protected test files already changed when the run started (`snapshotChangedTests`). */
-  baseTests?: TestSnapshot;
+  /**
+   * Protected test files as the run found them (`snapshotChangedTests`). `null`:
+   * the run has a baseline but no snapshot, so the tests are reported unchecked.
+   * Omitted: the base commit is the reference.
+   */
+  baseTests?: TestSnapshot | null;
   exec?: ExecFn;
   fetchFn?: typeof fetch;
   logger?: Logger;
