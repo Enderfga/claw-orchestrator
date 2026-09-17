@@ -3,6 +3,7 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     include: ['src/__tests__/**/*.test.ts'],
+    setupFiles: ['src/__tests__/setup-isolate-home.ts'],
     globals: false,
     environment: 'node',
     testTimeout: 10_000,

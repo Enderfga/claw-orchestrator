@@ -476,16 +476,101 @@ describe('PersistentClaudeSession', () => {
       await startPromise;
     });
 
-    it('tracks tool calls from stream_event content_block_start', () => {
-      const event = {
+    // The event order of a real two-tool turn (claude 2.1.274, --include-partial-messages,
+    // --replay-user-messages), trimmed to the fields the wrapper reads. Each tool_use
+    // block arrives twice: first on `content_block_start` with an empty input, then as
+    // an `assistant` event carrying the same id and the full input. The results come
+    // back inside `user` messages.
+    const twoToolTurn = [
+      { type: 'user', message: { role: 'user', content: [{ type: 'text', text: 'run two commands' }] } },
+      { type: 'stream_event', event: { type: 'message_start' } },
+      {
         type: 'stream_event',
         event: {
           type: 'content_block_start',
-          content_block: { type: 'tool_use', name: 'Read' },
+          content_block: { type: 'tool_use', id: 'toolu_1', name: 'Bash', input: {} },
         },
+      },
+      {
+        type: 'assistant',
+        message: { content: [{ type: 'tool_use', id: 'toolu_1', name: 'Bash', input: { command: 'echo one' } }] },
+      },
+      {
+        type: 'user',
+        message: {
+          role: 'user',
+          content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: 'one', is_error: false }],
+        },
+      },
+      { type: 'stream_event', event: { type: 'message_start' } },
+      {
+        type: 'stream_event',
+        event: {
+          type: 'content_block_start',
+          content_block: { type: 'tool_use', id: 'toolu_2', name: 'Bash', input: {} },
+        },
+      },
+      {
+        type: 'assistant',
+        message: { content: [{ type: 'tool_use', id: 'toolu_2', name: 'Bash', input: { command: 'exit 3' } }] },
+      },
+      {
+        type: 'user',
+        message: {
+          role: 'user',
+          content: [{ type: 'tool_result', tool_use_id: 'toolu_2', content: 'Exit code 3', is_error: true }],
+        },
+      },
+      { type: 'assistant', message: { content: [{ type: 'text', text: 'DONE' }] } },
+      { type: 'result', subtype: 'success', result: 'DONE' },
+    ];
+
+    it('reports each tool call once, with its input, and counts failed tool results', () => {
+      const seen: unknown[] = [];
+      session.on(SESSION_EVENT.TOOL_USE, (e: unknown) => seen.push(e));
+      for (const event of twoToolTurn) mockProc.stdout.emit('data', Buffer.from(JSON.stringify(event) + '\n'));
+      expect(session.stats.toolCalls).toBe(2);
+      expect(seen).toEqual([
+        { tool: { name: 'Bash', input: { command: 'echo one' } } },
+        { tool: { name: 'Bash', input: { command: 'exit 3' } } },
+      ]);
+      expect(session.stats.toolErrors).toBe(1);
+      expect(session.stats.turnsSucceeded).toBe(1);
+    });
+
+    it('does not hand a waiting send the reply of a turn it did not send', async () => {
+      const waiting = session.send('second message', { waitForComplete: true, timeout: 60_000 });
+      // A background workflow finishing while this send is in flight: its own turn
+      // ends in a result tagged with an origin (recorded on 2.1.274).
+      const late = {
+        type: 'result',
+        subtype: 'success',
+        result: 'The workflow finished: PONG',
+        origin: { kind: 'task-notification' },
+        total_cost_usd: 0.12,
       };
-      mockProc.stdout.emit('data', Buffer.from(JSON.stringify(event) + '\n'));
-      expect(session.stats.toolCalls).toBe(1);
+      mockProc.stdout.emit('data', Buffer.from(JSON.stringify(late) + '\n'));
+      const own = { type: 'result', subtype: 'success', result: 'reply to the second message', total_cost_usd: 0.13 };
+      mockProc.stdout.emit('data', Buffer.from(JSON.stringify(own) + '\n'));
+      const reply = (await waiting) as { text: string };
+      expect(reply.text).toBe('reply to the second message');
+      expect(session.stats.turnsSucceeded).toBe(1);
+    });
+
+    it('names the model the CLI reported in init when the caller set none', async () => {
+      const unnamed = new PersistentClaudeSession(makeConfig({ model: undefined }));
+      expect(unnamed.getCost().model).toBe('default');
+      const started = unnamed.start();
+      const init = { type: 'system', subtype: 'init', session_id: 'sess_456', model: 'claude-haiku-4-5-20251001' };
+      mockProc.stdout.emit('data', Buffer.from(JSON.stringify(init) + '\n'));
+      await started;
+      expect(unnamed.getCost().model).toBe('claude-haiku-4-5-20251001');
+      // A model the caller chose still wins over what init says.
+      const named = new PersistentClaudeSession(makeConfig());
+      const namedStarted = named.start();
+      mockProc.stdout.emit('data', Buffer.from(JSON.stringify(init) + '\n'));
+      await namedStarted;
+      expect(named.getCost().model).toBe('claude-sonnet-4-6');
     });
 
     it('emits text from content_block_delta', () => {

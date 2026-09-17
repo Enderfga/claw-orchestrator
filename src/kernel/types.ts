@@ -299,6 +299,11 @@ export interface RunRecord {
   evidenceId?: string;
   /** `git rev-parse HEAD` captured at run start, when cwd is a repo. */
   baseSha?: string;
+  /**
+   * Test files and test scripts that already differed from `baseSha` when the run
+   * started, with their state then — so a verifier does not blame the run for them.
+   */
+  baseTests?: Record<string, string | null>;
   /** Recorded for the record. Never consulted to decide completion. */
   consensusVotes?: ConsensusVote[];
   costUsd?: number;

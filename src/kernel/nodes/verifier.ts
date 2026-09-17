@@ -65,6 +65,7 @@ export async function executeVerifierNode(node: NodeSpec, ctx: NodeContext): Pro
       cwd,
       artifactDir: evidenceDir(dir, evidenceId),
       baseSha: ctx.record.baseSha,
+      baseTests: ctx.record.baseTests,
       logger: ctx.logger,
       signal: ctx.signal,
     },

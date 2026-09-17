@@ -5,6 +5,49 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Protected tests.** A contract with a `command` check now refutes a run that modified or deleted a
+  test file or test configuration present at the baseline — a loosened assertion, a deleted test, or a
+  `scripts.test` pointed at something that exits 0 no longer turns a failing run into a verified one.
+  The result is recorded as the required check `protected-tests`. Test edits already in the tree when
+  a kernel run starts are recorded then and not blamed on it. Adding tests stays allowed, and
+  `"protectTests": false` opts out when changing tests is the task. It applies to kernel runs and to
+  `verify_run` with a `baseSha`; tests inside source files and source that special-cases the test
+  environment are not caught.
+
+### Fixed
+
+- **The session cap held only for sessions started one at a time.** It was checked against the live
+  sessions, and a session joins them once its process is up, so every start launched together — a
+  fan-out's agents, a council round — passed the check: eight agents meant eight engine processes
+  whatever `maxConcurrentSessions` said. A start in flight now holds its slot. Fan-out and Council run
+  no more agents at once than there are free slots and queue the rest, so a run wider than the cap
+  waits rather than failing.
+- **Claude Code tool calls were reported twice.** Each `tool_use` block arrives on
+  `content_block_start` with an empty input and again as an `assistant` event with its input, and both
+  were counted and emitted: `toolCalls` doubled, and ACP clients received two `tool_call` updates per
+  call, the first without arguments. A call is now reported once, with its input. The same applied to
+  persistent custom engines.
+- **Claude Code `toolErrors` was always 0.** Tool results arrive inside `user` messages rather than as
+  top-level events; failed results are counted from there.
+- **A turn the session did not send could be returned as the reply to the next send.** When a
+  background workflow finishes, or a message from another Claude Code session arrives, the CLI runs a
+  turn of its own, and its result resolved whichever send was waiting. Results carrying a non-human
+  `origin` no longer resolve a send or count toward `turnsSucceeded`; their cost is still counted. The
+  `ultracode` docs now say a workflow's send returns at launch, and no longer claim the CLI rejects
+  `--effort ultracode`.
+- **Ledger rows.** A Claude Code session with no explicit model recorded `model: "default"`; it now
+  records the model named in the CLI's `init` event, and never the placeholder. `turn` is now the
+  index of the send — it was Claude Code's count of `user` events, which advances once per tool-result
+  batch. `getRunLedger` with both `verified` and `limit` applied the limit first and could return
+  fewer rows than asked while matching rows existed.
+- **The test suite wrote into the real home directory**: ledger rows, council transcripts, and the
+  persisted-session and PID files a running orchestrator restores from. Every test file now runs
+  with a private `HOME`.
+
 ## [7.4.1] - 2026-09-15
 
 Weekly engine sweep: Claude Code 2.1.269 → 2.1.271, OpenCode 1.18.30 → 1.18.31. Every live turn
@@ -121,6 +164,7 @@ registry 25 models with no drift.
 The weekly sweep now checks the model registry, and its first run found two more wrong prices.
 
 ### Fixed
+
 - **`o4-mini` was priced at half its real cost.** OpenAI publishes four identically shaped tables
   per model — Standard, Batch, Flex, Fast — and this entry had been copied from the Batch column:
   `0.55 / 4.4` against a Standard `1.1 / 4.4`. Every run on it under-reported spend by 2x.
@@ -128,10 +172,11 @@ The weekly sweep now checks the model registry, and its first run found two more
   full input price instead of a quarter of it.
 
 ### Added
+
 - **The sweep diffs `src/models.ts` against both vendors' published price tables.** Until now it
   only checked engines, so a repriced model was invisible to it: a wrong cost does not crash, it
   just stays wrong. Both vendors publish their tables as markdown, so this needs no model to read
-  them. A model is reported as missing only when the vendor prices it *and* the engine binary can
+  them. A model is reported as missing only when the vendor prices it _and_ the engine binary can
   select it, which is the same test used by hand to keep `gpt-5.6-pro` and `gpt-5.6-cyber` out.
   A price source that cannot be fetched is reported as a regression rather than skipped — an
   unverified pass is what let a spent Grok quota carry a pin for a week.
@@ -341,7 +386,7 @@ bump, OpenCode's `run` flags likewise, and both ran a live turn at their new ver
 - **Priced 5.1's cache reads at their own rate.** Fable 5.1 and Mythos 5.1 read cache at **0.025x
   base input** — $0.25 per Mtok against a $10 input price — where every other Claude model is 0.1x.
   Copying Fable 5's $1, or deriving the number from the input rate, over-reports those two by 4x.
-  Cache *writes* keep the usual 1.25x / 2x multipliers, so only the read is exceptional. A test
+  Cache _writes_ keep the usual 1.25x / 2x multipliers, so only the read is exceptional. A test
   asserts the exception together with the rule it breaks, so a blanket edit in either direction
   fails.
 
@@ -433,7 +478,7 @@ report turned up four ways this project was measuring their turns wrong.
 - **Every Claude turn's tokens were counted twice.** The CLI reports one turn's usage on the
   streaming `message_delta` and again on the terminal `result`, and both were added to the running
   totals. Measured against 2.1.246 on a live turn: the engine reported `in=2 / out=4 /
-  cache_read=47371` and `getStats()` returned `4 / 8 / 94742`. A turn's usage is now folded in once —
+cache_read=47371` and `getStats()` returned `4 / 8 / 94742`. A turn's usage is now folded in once —
   streamed deltas apply provisionally so a long turn still moves, and the authoritative `result`
   replaces rather than repeats them. A turn spanning several assistant messages (one per tool round)
   keeps every message, since each carries its own delta series.

@@ -35,7 +35,7 @@ export interface RunLedgerRow {
   /** Resolved model, when the session has one. */
   model?: string;
   cwd: string;
-  /** 1-based index of this turn within the session. */
+  /** 1-based index of this send within the session, as counted by the process that recorded it. */
   turn: number;
   /** Per-turn deltas, not session totals. */
   tokensIn: number;

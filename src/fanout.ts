@@ -23,6 +23,7 @@ import type {
   SessionStats,
 } from './types.js';
 import { type Logger } from './logger.js';
+import { mapBounded } from './concurrency.js';
 
 /** Minimal SessionManager surface used by Fanout (avoids a circular import). */
 interface SessionManagerLike {
@@ -31,6 +32,8 @@ interface SessionManagerLike {
   stopSession(name: string): Promise<void>;
   /** Optional so lightweight fakes stay valid; `ok` falls back to throw/no-throw without it. */
   getStatus?(name: string): SessionInfo & { stats: SessionStats };
+  /** Optional for the same reason; without it every agent starts at once. */
+  freeSessionSlots?(): number;
 }
 
 export interface FanoutAgentSpec {
@@ -133,8 +136,11 @@ export class Fanout {
 
   async run(): Promise<FanoutSession> {
     try {
-      // Each agent isolates its own failure (never throws); collect all.
-      this.session.results = await Promise.all(this.config.agents.map((a) => this._runAgent(a)));
+      // Each agent isolates its own failure (never throws); collect all. No more
+      // agents run at once than there are session slots, so the rest wait for one.
+      const agents = this.config.agents;
+      const slots = this.manager.freeSessionSlots?.() ?? agents.length;
+      this.session.results = await mapBounded(agents, slots, (a) => this._runAgent(a));
       if (!this._aborted && this.config.synthesize) {
         const ok = this.session.results.filter((r) => r.ok);
         if (ok.length >= 2) this.session.synthesis = await this._synthesize(ok);

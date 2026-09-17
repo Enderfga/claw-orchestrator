@@ -18,6 +18,7 @@ import path from 'node:path';
 import type { Logger } from '../logger.js';
 import { exec as realExec, lastLines, type ExecResult } from '../kernel/exec.js';
 import { changedFilesSince, isUnder, resolveIn } from './baseline.js';
+import { checkProtectedTests, type TestSnapshot } from './protected-tests.js';
 import {
   contractPassed,
   DEFAULT_CHECK_TIMEOUT_MS,
@@ -45,6 +46,8 @@ export interface VerifyContext {
   /** Directory for check-produced files (screenshots). Created on demand. */
   artifactDir: string;
   baseSha?: string;
+  /** Protected test files already changed when the run started (`snapshotChangedTests`). */
+  baseTests?: TestSnapshot;
   exec?: ExecFn;
   fetchFn?: typeof fetch;
   logger?: Logger;
@@ -376,6 +379,27 @@ export async function runChecks(
         passed: false,
         durationMs: 0,
         detail: `check threw: ${(e as Error).message}`,
+      });
+    }
+  }
+  // Only a command check runs the repository's tests, so only then can editing
+  // them change the verdict. It needs a baseline to know what existed before.
+  if (
+    contract.protectTests !== false &&
+    !ctx.signal?.aborted &&
+    contract.checks.some((c) => c.spec.type === 'command')
+  ) {
+    try {
+      const protectedTests = await checkProtectedTests(ctx.cwd, ctx.baseSha, ctx.baseTests);
+      if (protectedTests) results.push(protectedTests);
+    } catch (e) {
+      results.push({
+        id: 'protected-tests',
+        type: 'diff_policy',
+        required: true,
+        passed: false,
+        durationMs: 0,
+        detail: `could not check the tests against the baseline: ${(e as Error).message}`,
       });
     }
   }

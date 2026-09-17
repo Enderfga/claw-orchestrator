@@ -98,6 +98,8 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
   private _engineCostUsd = 0;
   /** Context window the engine reported for the model it actually used. */
   private _engineContextWindow: number | null = null;
+  /** Model id the CLI reported in its init event — what answers when no `model` was set. */
+  private _engineModel: string | undefined;
   /** Full prompt size of the last turn: input + cached reads + cache writes. */
   private _lastTurnPromptTokens = 0;
 
@@ -151,8 +153,9 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
    * expressed as settings keys rather than flags.
    *
    * Two live here today:
-   *   - `ultracode` enables dynamic workflows. It is a settings key, NOT an
-   *     `--effort` value (the CLI rejects `--effort ultracode`).
+   *   - `ultracode` enables dynamic workflows. Passed as the settings key rather
+   *     than `--effort ultracode` (accepted since 2.1.203), so it composes with a
+   *     separately chosen `effort`.
    *   - `crossSessionInbound` sets this session's policy for peer messages from
    *     other Claude Code sessions on the machine.
    *
@@ -519,6 +522,8 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
         if (event.subtype === 'init') {
           this.sessionId = event.session_id;
           this.stats.startTime = new Date().toISOString();
+          const initModel = (event as Record<string, unknown>).model;
+          if (typeof initModel === 'string' && initModel) this._engineModel = initModel;
           const pluginErrors = (event as Record<string, unknown>).plugin_errors;
           if (Array.isArray(pluginErrors) && pluginErrors.length > 0) {
             this.stats.pluginErrors = pluginErrors as Array<{ plugin: string; reason: string }>;
@@ -544,19 +549,11 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
           // zero. Reset the per-message baseline so the next delta is measured
           // against this message, not the previous one.
           this._msgProvisional = { in: 0, out: 0, cacheRead: 0, cacheCreate: 0, cacheCreate1h: 0 };
-        } else if (innerType === 'content_block_start') {
-          const block = (inner as Record<string, unknown>).content_block as Record<string, unknown> | undefined;
-          if (block?.type === 'tool_use') {
-            this.stats.toolCalls++;
-            const toolEvent = { tool: { name: block.name, input: {} } };
-            try {
-              this._streamCallbacks?.onToolUse?.(toolEvent);
-            } catch (err) {
-              this.emit(SESSION_EVENT.LOG, `[stream callback error] onToolUse: ${(err as Error).message}`);
-            }
-            this.emit(SESSION_EVENT.TOOL_USE, toolEvent);
-          }
         } else if (innerType === 'content_block_delta') {
+          // No tool_use handling on `content_block_start`: the same block arrives
+          // again, with the same id and its full input, as an `assistant` event
+          // (measured on 2.1.274). Reporting it from both counted every tool call
+          // twice and sent ACP clients two tool_call updates, the first with no input.
           const delta = (inner as Record<string, unknown>).delta as Record<string, unknown> | undefined;
           if (delta?.type === 'text_delta' && delta.text) {
             try {
@@ -583,6 +580,16 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
 
       case 'user':
         this.stats.turns++;
+        // Tool results come back inside a user message, not as a top-level
+        // `tool_result` event, so a failed tool is only visible here.
+        if (Array.isArray(event.message?.content)) {
+          for (const block of event.message.content as Array<Record<string, unknown>>) {
+            if (block?.type === 'tool_result' && block.is_error === true) {
+              this.stats.toolErrors++;
+              this._fireHook('onToolError', { tool: block.tool_use_id, error: block.content });
+            }
+          }
+        }
         this.emit(SESSION_EVENT.USER_ECHO, event);
         break;
 
@@ -647,15 +654,23 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
         if (usage) this._applyTurnUsage(usage, true);
         this._applyReportedCost((event as Record<string, unknown>).total_cost_usd);
         this._captureContextWindow((event as Record<string, unknown>).modelUsage);
+        // A turn this session did not send ends with a result too, tagged with an
+        // `origin`: a background workflow reporting back (`task-notification`, seen
+        // on 2.1.274 after a Workflow launch), or a message from another session.
+        // It answers no send, so it must not resolve the one waiting — which would
+        // hand that caller the other turn's reply — nor count as that send's success.
+        // Its usage and cost above are real and stay counted.
+        const origin = (event as Record<string, unknown>).origin as { kind?: unknown } | undefined;
+        const unsolicited = !!origin && origin.kind !== 'human';
         // The result event is the only place the outcome is known, and it arrives once
         // per send — unlike the `user` echo that drives `turns`, which the CLI also
         // emits per tool-result batch. `is_error` is read as truthy on purpose: for a
         // persistent `custom` engine this event comes from an arbitrary CLI.
-        if (!(event.is_error || event.stop_reason === 'error')) {
+        if (!unsolicited && !(event.is_error || event.stop_reason === 'error')) {
           this.stats.turnsSucceeded++;
         }
         this.emit(SESSION_EVENT.RESULT, event);
-        this.emit(SESSION_EVENT.TURN_COMPLETE, event);
+        if (!unsolicited) this.emit(SESSION_EVENT.TURN_COMPLETE, event);
         this._fireHook('onTurnComplete', {
           text: event.result,
           usage,
@@ -879,10 +894,11 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
   }
 
   getCost(): CostBreakdown {
-    const pricing = getModelPricing(this.options.model);
+    const model = this.options.model || this._engineModel;
+    const pricing = getModelPricing(model);
     const nonCachedIn = Math.max(0, this.stats.tokensIn - this.stats.cachedTokens);
     return {
-      model: this.options.model || 'default',
+      model: model || 'default',
       tokensIn: this.stats.tokensIn,
       tokensOut: this.stats.tokensOut,
       cachedTokens: this.stats.cachedTokens,

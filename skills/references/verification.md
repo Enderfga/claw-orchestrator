@@ -117,6 +117,32 @@ results, so a bundle that fails to land loses the record, never the answer.
 **re-runs the whole check list**. The fixer's own claim to have fixed it is
 ignored; only the re-run decides. Set it to 0 (the default) to disable.
 
+## Protected tests
+
+A `command` check runs in the tree the agent just worked in, so an agent could make
+it pass by changing the test instead of the code: loosen an assertion, delete the
+test, or point `scripts.test` at something that exits 0. When a contract has a
+`command` check and the run has a baseline, the runtime refutes it if any test file
+or test configuration **that existed at the baseline** was modified or deleted. The
+result is recorded in the bundle as the required check `protected-tests`, whether it
+passed or not. It applies to the fixer's rounds too.
+
+- **Counted as tests:** files under `__tests__/`, `test/`, `tests/`, `spec/`, `specs/`;
+  `*.test.*` and `*.spec.*` scripts; `test_*.py`, `*_test.py`, `*_test.go`, `*_spec.rb`,
+  `*Test.java`/`.kt`/`.cs`; vitest/jest/playwright/karma/cypress config, `.mocharc*`,
+  `pytest.ini`, `conftest.py`, `tox.ini`, `phpunit.xml`; and the `test*`/`pretest*`/
+  `posttest*` scripts of a `package.json` (its other fields may change).
+- **Allowed:** adding new test files, committed or not. Test edits already in the working tree
+  when a kernel run started are recorded then and not blamed on the run; editing those files
+  further during the run is.
+- **Opting out:** set `"protectTests": false` when changing existing tests is the task.
+- **Where it applies:** kernel runs (the baseline is recorded at start) and `verify_run`
+  with a `baseSha`. UltraApp's build gate and Autoloop's gate run without a baseline
+  and are not covered.
+- **What it does not catch:** tests inside source files (Rust `#[cfg(test)]`), and
+  source code that special-cases the test environment. It closes the direct route,
+  not every route.
+
 ## Per-mode defaults
 
 | Mode                     | Contract          | Notes                                                                                                                                                       |

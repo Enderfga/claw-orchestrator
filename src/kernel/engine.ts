@@ -47,6 +47,7 @@ import crypto from 'node:crypto';
 import { createConsoleLogger, type Logger } from '../logger.js';
 import { normalizeContract, type AcceptanceContract } from '../verify/contract.js';
 import { captureBaseline, treeFingerprint } from '../verify/baseline.js';
+import { snapshotChangedTests } from '../verify/protected-tests.js';
 import type { SessionManagerLike } from './agent-step.js';
 import {
   acquireLease,
@@ -555,6 +556,7 @@ export class RunKernel extends EventEmitter {
     // again.
     const guard = createAndAcquire(runId, spec, this.ownerId);
     record.baseSha = await captureBaseline(cwd);
+    record.baseTests = await snapshotChangedTests(cwd, record.baseSha);
     const { txn, signal } = this._open(guard, record);
     if (!txn.apply(() => undefined, [{ ts: now, type: 'run_created', runId, workflow: spec.name }])) {
       throw new Error(`Run '${runId}' could not be checkpointed: the claim was lost before it started`);

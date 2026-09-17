@@ -57,6 +57,7 @@ import {
   DEFAULT_MAX_ROUNDS,
 } from './constants.js';
 import { type Logger, createConsoleLogger } from './logger.js';
+import { mapBounded } from './concurrency.js';
 
 // Forward-declare SessionManager to avoid circular imports at the type level.
 // The actual instance is injected via constructor.
@@ -64,6 +65,8 @@ interface SessionManagerLike {
   startSession(config: Partial<SessionConfig> & { name?: string }): Promise<SessionInfo>;
   sendMessage(name: string, message: string, options?: Partial<SendOptions>): Promise<SendResult>;
   stopSession(name: string): Promise<void>;
+  /** Optional so lightweight fakes stay valid; without it every agent starts at once. */
+  freeSessionSlots?(): number;
 }
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -701,11 +704,15 @@ export class Council extends EventEmitter {
           return { agent, prompt, systemPrompt, workDir };
         });
 
-        // Execute all agents in parallel
-        const results = await Promise.allSettled(
-          agentTasks.map(({ agent, prompt, systemPrompt, workDir }) =>
-            this.runSingleAgent(agent, prompt, systemPrompt, workDir, round, session.id),
-          ),
+        // Execute the agents in parallel, no more at once than there are session slots.
+        const results = await mapBounded(
+          agentTasks,
+          this.manager.freeSessionSlots?.() ?? agentTasks.length,
+          ({ agent, prompt, systemPrompt, workDir }): Promise<PromiseSettledResult<AgentResponse>> =>
+            this.runSingleAgent(agent, prompt, systemPrompt, workDir, round, session.id).then(
+              (value) => ({ status: 'fulfilled', value }),
+              (reason: unknown) => ({ status: 'rejected', reason }),
+            ),
         );
 
         // Collect results
