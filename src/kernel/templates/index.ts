@@ -271,8 +271,9 @@ export function legacyCouncilWorkflow(args: LegacyCouncilArgs): WorkflowSpec {
         maxRounds: args.maxRounds,
         // Explicit even when the caller set none: the executor falls back to the
         // node timeout, which is the whole council's budget, not one agent's.
-        agentTimeoutMs: args.timeoutMs ?? COUNCIL_AGENT_TIMEOUT_MS,
-        timeoutMs: councilNodeBudget(args.agents.length, args.maxRounds, args.timeoutMs),
+        // `||`: a zero or negative timeout means "use the default" to Council itself.
+        agentTimeoutMs: args.timeoutMs || COUNCIL_AGENT_TIMEOUT_MS,
+        timeoutMs: councilNodeBudget(args.agents.length, args.maxRounds, args.timeoutMs || COUNCIL_AGENT_TIMEOUT_MS),
         maxTurnsPerAgent: args.maxTurnsPerAgent,
         maxBudgetUsd: args.maxBudgetUsd,
         defaultPermissionMode: args.defaultPermissionMode,
@@ -312,8 +313,9 @@ export function legacyFanoutWorkflow(args: LegacyFanoutArgs): WorkflowSpec {
         maxTurnsPerAgent: args.maxTurnsPerAgent,
         maxBudgetUsd: args.maxBudgetUsd,
         cwd: args.cwd,
-        agentTimeoutMs: args.timeoutMs ?? FANOUT_AGENT_TIMEOUT_MS,
-        timeoutMs: fanoutNodeBudget(args.agents.length, args.synthesize, args.timeoutMs),
+        // `||`: a zero timeout reaches the send as "use the default", so budget for that.
+        agentTimeoutMs: args.timeoutMs || FANOUT_AGENT_TIMEOUT_MS,
+        timeoutMs: fanoutNodeBudget(args.agents.length, args.synthesize, args.timeoutMs || FANOUT_AGENT_TIMEOUT_MS),
       },
     ],
   };

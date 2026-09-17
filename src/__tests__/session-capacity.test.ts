@@ -356,6 +356,8 @@ describe('multi-agent runners wait for a slot', () => {
       };
       await new Council(config, manager).run('review the readme');
       expect(starts).toBe(2);
+      // Stopped by the kernel, not aborted: a retry of the node may be using these.
+      expect(fs.readdirSync(path.join(dir, '.worktrees')).sort()).toEqual(['A', 'B']);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }

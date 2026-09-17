@@ -65,9 +65,10 @@ export async function executeVerifierNode(node: NodeSpec, ctx: NodeContext): Pro
       cwd,
       artifactDir: evidenceDir(dir, evidenceId),
       baseSha: ctx.record.baseSha,
-      // A run in a repository always gets the check; without a snapshot (a run from
-      // before snapshots, or one git could not take) it is reported as not checked.
-      baseTests: ctx.record.baseSha ? (ctx.record.baseTests ?? null) : undefined,
+      // With a snapshot the check runs. A run in a repository without one (from
+      // before snapshots, or one git could not take) reports it as not checked;
+      // outside a repository it does not apply.
+      baseTests: ctx.record.baseTests ?? (ctx.record.baseSha ? null : undefined),
       logger: ctx.logger,
       signal: ctx.signal,
     },

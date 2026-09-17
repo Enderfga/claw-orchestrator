@@ -47,7 +47,7 @@ import crypto from 'node:crypto';
 import { createConsoleLogger, type Logger } from '../logger.js';
 import { normalizeContract, type AcceptanceContract } from '../verify/contract.js';
 import { captureBaseline, treeFingerprint } from '../verify/baseline.js';
-import { snapshotTests, type TestSnapshot } from '../verify/protected-tests.js';
+import { needsTestSnapshot, snapshotTests, type TestSnapshot } from '../verify/protected-tests.js';
 import type { SessionManagerLike } from './agent-step.js';
 import {
   acquireLease,
@@ -564,12 +564,11 @@ export class RunKernel extends EventEmitter {
     // again.
     const guard = createAndAcquire(runId, spec, this.ownerId);
     record.baseSha = await captureBaseline(cwd);
-    // Only a verifier reads it (a subflow may hold one), and hashing every test
-    // file is not free in a large repository.
+    // Only a protected-tests check reads it (a subflow may hold one), and reading
+    // every test file is not free in a large repository. It needs a repository,
+    // not a commit: a project with no commits yet is protected too.
     if (opts.baseTests) record.baseTests = opts.baseTests;
-    else if (record.baseSha && spec.nodes.some((n) => n.kind === 'verifier' || n.kind === 'subflow')) {
-      record.baseTests = await snapshotTests(cwd);
-    }
+    else if (needsTestSnapshot(spec)) record.baseTests = await snapshotTests(cwd);
     const { txn, signal } = this._open(guard, record);
     if (!txn.apply(() => undefined, [{ ts: now, type: 'run_created', runId, workflow: spec.name }])) {
       throw new Error(`Run '${runId}' could not be checkpointed: the claim was lost before it started`);

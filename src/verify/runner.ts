@@ -18,7 +18,7 @@ import path from 'node:path';
 import type { Logger } from '../logger.js';
 import { exec as realExec, lastLines, type ExecResult } from '../kernel/exec.js';
 import { changedFilesSince, isUnder, resolveIn } from './baseline.js';
-import { checkProtectedTests, type TestSnapshot } from './protected-tests.js';
+import { checkProtectedTests, contractScripts, type TestSnapshot } from './protected-tests.js';
 import {
   contractPassed,
   DEFAULT_CHECK_TIMEOUT_MS,
@@ -367,7 +367,7 @@ export async function runChecks(
     ctx.baseTests !== undefined &&
     contract.checks.some((c) => c.spec.type === 'command')
   ) {
-    results.push(await checkProtectedTests(ctx.cwd, ctx.baseTests));
+    results.push(await checkProtectedTests(ctx.cwd, ctx.baseTests, contractScripts(contract)));
   }
   for (let i = 0; i < contract.checks.length; i++) {
     if (ctx.signal?.aborted) break;

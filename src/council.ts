@@ -762,6 +762,12 @@ export class Council extends EventEmitter {
 
       if (this._stopped()) {
         session.status = 'error';
+      }
+      // Worktrees go only on an explicit abort. A kernel timeout stops this attempt
+      // through the signal while a retry of the same node may already be running
+      // in the same `.worktrees/<agent>` paths, so discarding them here would pull
+      // the tree out from under it.
+      if (this._aborted) {
         // An abort that lands while setupWorktrees is still running finds an
         // empty `_worktreeMap` — it is not assigned until setup returns — so
         // abort() skips its own cleanup, setup then completes and creates every

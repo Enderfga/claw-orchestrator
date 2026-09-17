@@ -10,14 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Protected tests.** In a workflow run, a contract with a `command` check now refutes the run when
-  its test files or test configuration changed during it — a loosened assertion, a deleted test, a
-  new `conftest.py`, or a `scripts.test` pointed at something that exits 0 no longer turns a failing
-  run into a verified one. The run records its tests when it starts, by hashing their bytes, and the
-  required check `protected-tests` compares against that record before the other checks run, so a
-  developer's uncommitted test edits stay theirs and a test that restores itself is still caught.
-  Adding tests stays allowed, and `"protectTests": false` opts out when changing tests is the task.
-  Tests inside source files, test settings in general config files, files hidden by `.gitignore`,
-  and source that special-cases the test environment are not caught.
+  something that decides what its tests do changed during it — a loosened assertion, a deleted test,
+  a `conftest.py` added beside existing tests, or a script the checks run pointed at something that
+  exits 0. The run records its tests when it starts by hashing their bytes, and the required check
+  `protected-tests` compares against that record before the other checks run, so a developer's
+  uncommitted test edits stay theirs and a test that restores itself is still caught. Adding tests,
+  packages and unrelated scripts stays allowed, installed dependencies are not considered, and
+  `"protectTests": false` opts out when changing tests is the task. Tests inside source files, test
+  settings in general config files, files hidden by `.gitignore`, and source that special-cases the
+  test environment are not caught.
 
 ### Fixed
 
@@ -31,7 +32,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   timeout for the worst case instead of reusing one agent's timeout, which had also been cutting
   multi-round councils short; the built-in `fanout`, `council` and `solve` workflows get the same
   bounds. An aborted or timed-out fan-out starts none of the agents still waiting, and a timed-out
-  council opens no further round.
+  council — including UltraApp's synthesis council, which a cancelled build now reaches — opens no
+  further round.
 - **Claude Code tool calls were reported twice.** Each `tool_use` block arrives on
   `content_block_start` with an empty input and again as an `assistant` event with its input, and both
   were counted and emitted: `toolCalls` doubled, and ACP clients received two `tool_call` updates per

@@ -11,10 +11,9 @@
  * The rule: when a kernel run starts, every test file and test configuration in
  * the tree is recorded as it is — bytes hashed here, not through git, so clean
  * filters, attributes, line-ending conversion and the index have no say. Before
- * the checks run, each of them must still be exactly that. New test files may be
- * added; new test *configuration* may not, since a `conftest.py` or `pytest.ini`
- * that appears mid-run changes what the existing tests do. When changing tests is
- * the task, the caller sets `protectTests: false`.
+ * the checks run, each must still be exactly that. What may change is what cannot
+ * alter an existing test: new test files, new packages, unrelated npm scripts,
+ * and new configuration that governs no test the run started with.
  *
  * It runs before the checks, so it judges the tree the agent handed over rather
  * than one a test command may have rewritten.
@@ -28,11 +27,13 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { exec } from '../kernel/exec.js';
-import type { CheckResult } from './contract.js';
+import { mapBounded } from '../concurrency.js';
+import type { AcceptanceContract, CheckResult } from './contract.js';
 
 const GIT_TIMEOUT_MS = 60_000;
 /** Listings of a large repository run far past exec's default capture. */
 const GIT_CAPTURE_BYTES = 64 * 1024 * 1024;
+const READ_CONCURRENCY = 32;
 
 const TEST_DIR = /(^|\/)(__tests__|__snapshots__|tests?)\//;
 const TEST_FILE = [
@@ -56,6 +57,9 @@ const TEST_CONFIG = [
   /(^|\/)phpunit\.xml(\.dist)?$/,
 ];
 const MANIFEST = /(^|\/)package\.json$/;
+/** Installed dependencies ship their own tests and configs; they are not this repository's. */
+const DEPENDENCY_DIR = /(^|\/)(node_modules|vendor|site-packages|\.venv)\//;
+const RUNNER_KEYS = ['jest', 'mocha', 'ava', 'vitest', 'c8', 'nyc'];
 
 const isTestConfig = (file: string): boolean => TEST_CONFIG.some((re) => re.test(file));
 
@@ -64,7 +68,8 @@ export function isTestPath(file: string): boolean {
   return TEST_DIR.test(file) || TEST_FILE.some((re) => re.test(file)) || isTestConfig(file);
 }
 
-const isProtected = (file: string): boolean => MANIFEST.test(file) || isTestPath(file);
+const isManifest = (file: string): boolean => MANIFEST.test(file) && !isTestPath(file);
+const isProtected = (file: string): boolean => !DEPENDENCY_DIR.test(file) && (MANIFEST.test(file) || isTestPath(file));
 
 /** The tests as a run found them: repository root, and each protected path's state (`null` = absent). */
 export interface TestSnapshot {
@@ -87,32 +92,99 @@ function canonical(value: unknown): string {
 
 const digest = (data: string | Buffer): string => crypto.createHash('sha256').update(data).digest('hex').slice(0, 32);
 
+interface ManifestState {
+  runners: string;
+  scripts: Record<string, string>;
+}
+
 /**
- * A protected path's state: absent, a symlink's target, a package.json's scripts
- * and test-runner keys (the rest of it may change), or the file's bytes.
- * A package.json inside a test directory is a test file like any other.
+ * A protected path's state: absent, a symlink's target, unreadable, the file's bytes —
+ * or, for a package.json outside a test directory, its scripts (kept verbatim, so
+ * references between them can be followed) and a digest of its test-runner keys.
  */
-function stateOf(root: string, file: string): string | null {
+async function stateOf(root: string, file: string): Promise<string | null> {
   const abs = path.join(root, file);
-  let stat: fs.Stats;
   try {
-    stat = fs.lstatSync(abs);
-  } catch {
-    return null;
-  }
-  if (stat.isSymbolicLink()) return `link:${fs.readlinkSync(abs)}`;
-  if (!stat.isFile()) return null;
-  const body = fs.readFileSync(abs);
-  if (MANIFEST.test(file) && !isTestPath(file)) {
+    const stat = await fs.promises.lstat(abs);
+    if (stat.isSymbolicLink()) return `link:${await fs.promises.readlink(abs)}`;
+    if (!stat.isFile()) return null;
+    const body = await fs.promises.readFile(abs);
+    if (!isManifest(file)) return digest(body);
     try {
       const pkg = JSON.parse(body.toString('utf8')) as Record<string, unknown>;
-      const runners = ['scripts', 'jest', 'mocha', 'ava', 'vitest', 'c8', 'nyc'];
-      return `pkg:${digest(canonical(Object.fromEntries(runners.map((k) => [k, pkg[k] ?? null]))))}`;
+      const scripts = pkg.scripts && typeof pkg.scripts === 'object' ? (pkg.scripts as Record<string, unknown>) : {};
+      const state: ManifestState = {
+        runners: digest(canonical(Object.fromEntries(RUNNER_KEYS.map((k) => [k, pkg[k] ?? null])))),
+        scripts: Object.fromEntries(Object.entries(scripts).map(([k, v]) => [k, String(v)])),
+      };
+      return `pkg:${canonical(state)}`;
     } catch {
       return `pkg-unparseable:${digest(body)}`;
     }
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    return code === 'ENOENT' ? null : `unreadable:${code ?? 'error'}`;
   }
-  return digest(body);
+}
+
+function parseManifest(state: string | null): ManifestState | undefined {
+  if (!state?.startsWith('pkg:')) return undefined;
+  try {
+    return JSON.parse(state.slice(4)) as ManifestState;
+  } catch {
+    return undefined;
+  }
+}
+
+const SCRIPT_REF =
+  /\b(?:npm|pnpm|yarn|bun)\s+(?:run(?:-script)?\s+)?([A-Za-z0-9:._-]+)|\b(?:npm-run-all|run-s|run-p)\s+((?:[A-Za-z0-9:._*-]+\s*)+)/g;
+
+/** Script names a command line runs through a package manager. */
+function referencedScripts(command: string): string[] {
+  const names: string[] = [];
+  for (const m of command.matchAll(SCRIPT_REF)) {
+    if (m[1]) names.push(m[1] === 't' ? 'test' : m[1]);
+    if (m[2])
+      names.push(
+        ...m[2]
+          .trim()
+          .split(/\s+/)
+          .filter((n) => !n.startsWith('-')),
+      );
+  }
+  return names;
+}
+
+/** The scripts a contract's command checks run by name. */
+export function contractScripts(contract: AcceptanceContract): string[] {
+  return contract.checks.flatMap((c) =>
+    c.spec.type === 'command' ? referencedScripts([c.spec.cmd, ...(c.spec.args ?? [])].join(' ')) : [],
+  );
+}
+
+/**
+ * Whether a package.json changed in a way a check could run into: its test-runner
+ * keys, or any script reachable from the test scripts or the contract's own —
+ * following references and pre/post hooks in both versions.
+ */
+function manifestChanged(before: string | null, after: string | null, roots: string[]): boolean {
+  const a = parseManifest(before);
+  const b = parseManifest(after);
+  if (!a || !b) return before !== after;
+  if (a.runners !== b.runners) return true;
+  const names = new Set([...Object.keys(a.scripts), ...Object.keys(b.scripts)]);
+  const queue = [...roots, ...[...names].filter((n) => /^(pre|post)?test(:|$)/.test(n))];
+  const reachable = new Set<string>();
+  while (queue.length > 0) {
+    const name = queue.pop()!;
+    // Only names that exist in either version: a hook of a hook of a hook is a
+    // different string every time, and following those never ends.
+    if (reachable.has(name) || !names.has(name)) continue;
+    reachable.add(name);
+    queue.push(`pre${name}`, `post${name}`);
+    for (const body of [a.scripts[name], b.scripts[name]]) if (body) queue.push(...referencedScripts(body));
+  }
+  return [...reachable].some((n) => a.scripts[n] !== b.scripts[n]);
 }
 
 async function listProtected(cwd: string): Promise<{ root: string; files: string[] }> {
@@ -135,18 +207,32 @@ async function listProtected(cwd: string): Promise<{ root: string; files: string
 export async function snapshotTests(cwd: string): Promise<TestSnapshot | undefined> {
   try {
     const { root, files } = await listProtected(cwd);
-    return { root, files: Object.fromEntries(files.map((f) => [f, stateOf(root, f)])) };
+    const states = await mapBounded(files, READ_CONCURRENCY, (f) => stateOf(root, f));
+    return { root, files: Object.fromEntries(files.map((f, i) => [f, states[i]])) };
   } catch {
     return undefined;
   }
 }
 
+/** Whether a configuration file added during the run sits over a test the run started with. */
+function governsRecordedTests(config: string, atStart: TestSnapshot): boolean {
+  const dir = path.posix.dirname(config);
+  return Object.entries(atStart.files).some(
+    ([f, state]) => state !== null && isTestPath(f) && !isTestConfig(f) && (dir === '.' || f.startsWith(`${dir}/`)),
+  );
+}
+
 /**
  * The `protected-tests` check against a run's snapshot. `null` means the run has
  * no snapshot — it predates them, or git could not take one — and is reported as
- * not checked rather than guessed at.
+ * not checked rather than guessed at. `scriptRoots` are the npm scripts the
+ * contract runs by name (`contractScripts`).
  */
-export async function checkProtectedTests(cwd: string, atStart: TestSnapshot | null): Promise<CheckResult> {
+export async function checkProtectedTests(
+  cwd: string,
+  atStart: TestSnapshot | null,
+  scriptRoots: string[] = [],
+): Promise<CheckResult> {
   const startedAt = Date.now();
   const result = (passed: boolean, detail: string, extra: Partial<CheckResult> = {}): CheckResult => ({
     id: 'protected-tests',
@@ -160,25 +246,39 @@ export async function checkProtectedTests(cwd: string, atStart: TestSnapshot | n
   const notChecked = (why: string) => result(false, `not checked: ${why}`, { required: false });
 
   if (!atStart) return notChecked('there is no record of the tests as the run found them');
+  // A verifier with its own cwd may be checking a tree the snapshot never saw.
+  let real: string;
+  try {
+    real = fs.realpathSync(cwd);
+  } catch {
+    real = cwd;
+  }
+  const rel = path.relative(atStart.root, real);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) {
+    return notChecked('the checks run outside the repository recorded when the run started');
+  }
+  // Inside that repository a listing failure fails the check: deleting `.git` must
+  // not be a way around it.
   let now: { root: string; files: string[] };
   try {
     now = await listProtected(cwd);
   } catch (e) {
     return result(false, `could not check the tests: ${(e as Error).message}`);
   }
-  // A verifier with its own cwd in another repository checks a tree the snapshot never saw.
-  if (now.root !== atStart.root) return notChecked('the checks run in a different repository from the one recorded');
 
+  const candidates = [...new Set([...Object.keys(atStart.files), ...now.files])].filter((file) => {
+    if (file in atStart.files) return true;
+    // Added during the run: only configuration over a test the run started with can matter.
+    return isTestConfig(file) && governsRecordedTests(file, atStart);
+  });
+  const states = await mapBounded(candidates, READ_CONCURRENCY, (f) => stateOf(now.root, f));
   const touched: string[] = [];
-  for (const file of new Set([...Object.keys(atStart.files), ...now.files])) {
+  candidates.forEach((file, i) => {
     const expected = file in atStart.files ? atStart.files[file] : null;
-    const current = stateOf(now.root, file);
-    if (current === expected) continue;
-    // A test or a package added during the run is allowed; test configuration added
-    // during the run is not, since it changes what the existing tests do.
-    if (expected === null && !isTestConfig(file)) continue;
-    touched.push(MANIFEST.test(file) && !isTestPath(file) ? `${file} (scripts or test settings)` : file);
-  }
+    const current = states[i];
+    const changed = isManifest(file) ? manifestChanged(expected, current, scriptRoots) : current !== expected;
+    if (changed) touched.push(isManifest(file) ? `${file} (a script the checks run, or test settings)` : file);
+  });
   if (touched.length === 0) return result(true, 'no test file or test configuration changed during the run');
   return result(
     false,
@@ -186,4 +286,22 @@ export async function checkProtectedTests(cwd: string, atStart: TestSnapshot | n
       `${touched.slice(0, 10).join(', ')}. Set protectTests: false if changing them is the task.`,
     { tail: touched.length > 10 ? touched.join('\n') : undefined },
   );
+}
+
+/** Whether a spec's checks could need the snapshot: a command check that protects tests, or a subflow. */
+export function needsTestSnapshot(spec: {
+  contract?: AcceptanceContract;
+  nodes: Array<{ kind: string; contract?: unknown }>;
+}): boolean {
+  const protects = (c: unknown): boolean => {
+    const contract = c as AcceptanceContract | undefined;
+    return (
+      !!contract &&
+      Array.isArray(contract.checks) &&
+      contract.protectTests !== false &&
+      contract.checks.some((check) => check?.spec?.type === 'command')
+    );
+  };
+  if (protects(spec.contract)) return true;
+  return spec.nodes.some((n) => n.kind === 'subflow' || (n.kind === 'verifier' && protects(n.contract)));
 }

@@ -9,7 +9,7 @@ import path from 'node:path';
 import { execSync } from 'node:child_process';
 import { runChecks, runContract } from '../../verify/runner.js';
 import { normalizeContract } from '../../verify/contract.js';
-import { isTestPath, snapshotTests, type TestSnapshot } from '../../verify/protected-tests.js';
+import { isTestPath, needsTestSnapshot, snapshotTests, type TestSnapshot } from '../../verify/protected-tests.js';
 import { RunKernel } from '../../kernel/engine.js';
 import { registerDefaultExecutors } from '../../kernel/nodes/index.js';
 
@@ -76,35 +76,71 @@ describe('protected tests', () => {
     expect((await guard(snap))?.passed).toBe(false);
   });
 
-  it('allows adding tests and packages, committed or not', async () => {
+  it('allows adding tests and packages, committed or not, including a package with its own test config', async () => {
     const snap = await snapshotTests(repo);
     write('test/extra.test.js', 'expect(1).toBe(1)\n');
     write('test/more.test.js', 'expect(2).toBe(2)\n');
     write('packages/new/package.json', pkg());
+    write('packages/new/jest.config.ts', 'export default {};\n');
+    write('packages/new/tests/conftest.py', 'import pytest\n');
+
     git('add test/more.test.js');
     git('commit -m more');
     expect((await guard(snap))?.passed).toBe(true);
   });
 
-  it('refutes test configuration added during the run', async () => {
+  it('leaves installed dependencies alone', async () => {
+    write('node_modules/some-dep/test/index.test.js', 'old\n');
     const snap = await snapshotTests(repo);
-    write('conftest.py', 'import pytest\n');
-    const r = await guard(snap);
-    expect(r?.passed).toBe(false);
-    expect(r?.detail).toContain('conftest.py');
+    expect(Object.keys(snap!.files).some((f) => f.startsWith('node_modules/'))).toBe(false);
+    write('node_modules/some-dep/test/index.test.js', 'upgraded\n');
+    expect((await guard(snap))?.passed).toBe(true);
   });
 
-  it('refutes a change to package.json scripts or runner settings, not to dependencies or key order', async () => {
+  it('refutes test configuration added during the run over a test the run started with', async () => {
     const snap = await snapshotTests(repo);
+    write('test/conftest.py', 'import pytest\n');
+    const r = await guard(snap);
+    expect(r?.passed).toBe(false);
+    expect(r?.detail).toContain('test/conftest.py');
+  });
+
+  it('does not crash on, or refute, a new file it cannot read', async () => {
+    const snap = await snapshotTests(repo);
+    write('test/output/secret.log', 'x');
+    fs.chmodSync(path.join(repo, 'test/output/secret.log'), 0o000);
+    try {
+      expect((await guard(snap))?.passed).toBe(true);
+    } finally {
+      fs.chmodSync(path.join(repo, 'test/output/secret.log'), 0o644);
+    }
+  });
+
+  it('refutes a change to a script the checks run or to runner settings, not to other scripts or dependencies', async () => {
     write(
       'package.json',
-      JSON.stringify({ dependencies: { a: '1' }, scripts: { build: 'tsc', test: 'vitest run' }, name: 'p' }),
+      pkg({ scripts: { test: 'npm run unit', unit: 'vitest run', verify: 'tsc --noEmit', build: 'tsc' } }),
     );
+    git('commit -am scripts');
+    const snap = await snapshotTests(repo);
+    const withScripts = (scripts: Record<string, string>, extra: Record<string, unknown> = {}) =>
+      write('package.json', pkg({ scripts, ...extra }));
+    const base = { test: 'npm run unit', unit: 'vitest run', verify: 'tsc --noEmit', build: 'tsc' };
+
+    // Unrelated: a new lint script, a changed build, new dependencies, reordered keys.
+    withScripts({ lint: 'eslint .', ...base, build: 'vite build' }, { dependencies: { a: '1' } });
     expect((await guard(snap))?.passed).toBe(true);
-    // Indirection: `test` names another script, which is where the change is.
-    write('package.json', pkg({ scripts: { test: 'npm run check', check: 'exit 0', build: 'tsc' } }));
-    expect((await guard(snap))?.detail).toContain('package.json (scripts or test settings)');
-    write('package.json', pkg({ jest: { testPathIgnorePatterns: ['test'] } }));
+    // Reached through `test`: the script it runs by name.
+    withScripts({ ...base, unit: 'exit 0' });
+    expect((await guard(snap))?.detail).toContain('package.json (a script the checks run, or test settings)');
+    // A pre-hook of a reachable script.
+    withScripts({ ...base, preunit: 'cp /dev/null test/sum.test.js' });
+    expect((await guard(snap))?.passed).toBe(false);
+    // Named by the contract's own command.
+    withScripts({ ...base, verify: 'true' });
+    expect((await guard(snap))?.passed).toBe(true);
+    expect((await guard(snap, contract({}, `npm run verify && ${GREP}`)))?.passed).toBe(false);
+    withScripts(base, { jest: { testPathIgnorePatterns: ['test'] } });
     expect((await guard(snap))?.passed).toBe(false);
   });
 
@@ -199,6 +235,20 @@ describe('protected tests', () => {
   });
 });
 
+describe('needsTestSnapshot', () => {
+  const command = { spec: { type: 'command', cmd: 'true' } };
+  it('asks for a snapshot only when a command check protects tests, or a subflow might', () => {
+    expect(needsTestSnapshot({ contract: { checks: [command] } as never, nodes: [] })).toBe(true);
+    expect(needsTestSnapshot({ contract: { checks: [command], protectTests: false } as never, nodes: [] })).toBe(false);
+    expect(
+      needsTestSnapshot({ contract: { checks: [{ spec: { type: 'file', path: 'x' } }] } as never, nodes: [] }),
+    ).toBe(false);
+    expect(needsTestSnapshot({ nodes: [{ kind: 'verifier', contract: { checks: [command] } }] })).toBe(true);
+    expect(needsTestSnapshot({ nodes: [{ kind: 'subflow' }] })).toBe(true);
+    expect(needsTestSnapshot({ nodes: [{ kind: 'agent' }] })).toBe(false);
+  });
+});
+
 describe('protected tests in a kernel run', () => {
   const grepCheck = { type: 'command', cmd: 'sh', args: ['-c', 'grep -q "toBe(3)" test/sum.test.js'] };
 
@@ -246,6 +296,45 @@ describe('protected tests in a kernel run', () => {
       () => write('test/sum.test.js', 'expect(sum).toBe(3) // agent, before the child started\n'),
     );
     expect(done.state).not.toBe('completed');
+  });
+
+  it('protects a project with no commits yet', async () => {
+    const fresh = makeRepo();
+    const prev = repo;
+    repo = fresh;
+    try {
+      write('test/sum.test.js', 'expect(sum).toBe(3)\n');
+      const done = await run(agentOnly, () => write('test/sum.test.js', 'expect(sum).toBe(3) // agent\n'), {
+        contract: { checks: [grepCheck] },
+      });
+      expect(done.baseSha).toBeUndefined();
+      expect(done.outcome).not.toBe('verified');
+    } finally {
+      repo = prev;
+      fs.rmSync(fresh, { recursive: true, force: true });
+    }
+  });
+
+  it('does not refute a verifier that checks a directory outside any repository', async () => {
+    const plain = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'clawo-plain-'));
+    try {
+      const done = await run(
+        {
+          nodes: [
+            {
+              id: 'check',
+              kind: 'verifier',
+              cwd: plain,
+              contract: { checks: [{ spec: { type: 'command', cmd: 'true' } }] },
+            },
+          ],
+        },
+        () => undefined,
+      );
+      expect(done.state).toBe('completed');
+    } finally {
+      fs.rmSync(plain, { recursive: true, force: true });
+    }
   });
 
   it('does not refute a verifier that checks another repository', async () => {

@@ -39,6 +39,8 @@ export interface CouncilSynthArgs {
       `<runDir>/council-project/` (fresh git repo) and `<runDir>/versions/v1/codebase/`. */
   runDir: string;
   sessionManager: SessionManagerLike;
+  /** Set by the kernel. A cancelled build, or one past its node timeout, opens no further round. */
+  signal?: { aborted: boolean };
   /** Injectable for tests. In production, defaults to running the real Council. */
   councilRun?: (cfg: CouncilConfig, sm: SessionManagerLike, task: string) => Promise<CouncilSession>;
 }
@@ -86,7 +88,7 @@ export async function runCouncilSynth(args: CouncilSynthArgs): Promise<CouncilSy
   const projectDir = path.join(args.runDir, 'council-project');
   await initFreshGitRepo(projectDir);
 
-  const cfg = buildCouncilConfig(projectDir, args.spec.meta.name);
+  const cfg = { ...buildCouncilConfig(projectDir, args.spec.meta.name), signal: args.signal };
   const task = composeCouncilPrompt(args.spec);
   const runner = args.councilRun ?? defaultCouncilRun;
 
