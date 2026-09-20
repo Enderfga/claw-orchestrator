@@ -97,6 +97,8 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
   private _lastReportedCost: number | null = null;
   /** Spend accumulated from the engine's own per-process running totals. */
   private _engineCostUsd = 0;
+  /** Set when the process was spawned with `--resume`: its first total is inherited, not ours. */
+  private _costBaselinePending = false;
   /** Context window the engine reported for the model it actually used. */
   private _engineContextWindow: number | null = null;
   /** Model id the CLI reported in its init event — what answers when no `model` was set. */
@@ -218,6 +220,10 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
 
     // Resume / fork
     const resumeId = this.options.claudeResumeId || this.options.resumeSessionId;
+    // A resumed process inherits the spend of the turns it is resuming, so the
+    // first `total_cost_usd` it reports is not this process's own. See
+    // `_applyReportedCost`.
+    this._costBaselinePending = !!resumeId;
     if (resumeId) {
       args.push('--resume', resumeId);
       if (this.options.forkSession) args.push('--fork-session');
@@ -1106,8 +1112,19 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
    * turn with 31,435 one-hour cache writes the CLI reported $0.322428 while the
    * formula produced $0.016 — a 20x under-report, on the number `maxBudgetUsd`
    * gates against. It is also the session running total rather than the turn's
-   * cost, so spend advances by the difference; a drop means the CLI process was
-   * replaced (a resume) and its counter restarted from zero.
+   * cost, so spend advances by the difference.
+   *
+   * What that total covers changed in Claude Code 2.1.277: a headless process
+   * started with `--resume` used to begin at zero, and now restores the totals
+   * the resumed session saved at exit. Measured on 2.1.278 — a turn reporting
+   * $0.363044, resumed in a new process, reported $0.386463 for a turn whose
+   * own usage was $0.023419. Reading that first figure as this process's spend
+   * charges the whole history again, on every model switch and every session
+   * recovery, and `maxBudgetUsd` then trips against a number the session never
+   * spent. So a resumed process's first report is taken as a baseline, and the
+   * turn carrying it keeps the registry estimate `_applyTurnUsage` already
+   * computed: that is off by the cache-write premium for one turn, where the
+   * alternative is off by everything the session spent before this process.
    */
   private _applyReportedCost(reported: unknown): void {
     if (typeof reported !== 'number' || !Number.isFinite(reported) || reported < 0) return;
@@ -1117,6 +1134,17 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
     // knows which model was really asked for.
     if (this._realModel) return;
     const previous = this._lastReportedCost;
+    if (this._costBaselinePending) {
+      this._costBaselinePending = false;
+      // Only the first report of the resumed process is ambiguous. A later
+      // respawn already has a figure to subtract, so its difference is this
+      // turn's cost and needs no special case.
+      if (previous === null) {
+        this._lastReportedCost = reported;
+        this._engineCostUsd = this.stats.costUsd;
+        return;
+      }
+    }
     const delta = previous === null || reported < previous ? reported : reported - previous;
     this._lastReportedCost = reported;
     this._engineCostUsd += delta;

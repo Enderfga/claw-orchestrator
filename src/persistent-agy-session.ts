@@ -19,8 +19,9 @@
  *     so cost is measured rather than guessed. Earlier versions of this wrapper
  *     read plain text and estimated ~4 chars/token, which is now only the
  *     fallback path when no result event arrives.
- *   - Timeout coherence: agy enforces its own --print-timeout (default 5m);
- *     we derive it from the send timeout so the two never disagree.
+ *   - Timeout coherence: we derive --print-timeout from the send timeout so the
+ *     two never disagree. Since 1.2.6 a headless run has no default timeout at
+ *     all unless that flag is passed, so it is now the only bound there is.
  *
  * Unknown --model values are NOT reliably harmless. On 1.0.16 an unknown slug
  * fell back to the default silently; on 1.1.25 a slug agy has stopped serving
@@ -181,8 +182,10 @@ export class PersistentAgySession extends BaseOneShotSession {
 
     if (this.agyConversationId) args.push('--conversation', this.agyConversationId);
 
-    // agy enforces its own print-mode timeout (default 5m). Derive it from the
-    // send timeout (+5s margin) so our timer, not agy's, decides the outcome.
+    // Derive agy's print-mode timeout from the send timeout (+5s margin) so our
+    // timer, not agy's, decides the outcome. 1.2.6 changed the default for a
+    // headless run from 5 minutes to unlimited, so passing this is what keeps a
+    // stuck turn from running forever.
     args.push('--print-timeout', `${Math.ceil(timeoutMs / 1000) + 5}s`);
 
     return args;

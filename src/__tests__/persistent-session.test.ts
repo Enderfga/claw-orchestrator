@@ -848,6 +848,45 @@ describe('PersistentClaudeSession', () => {
     });
   });
 
+  // Regression: claude 2.1.277 made a headless process started with --resume
+  // restore the totals the resumed session saved at exit, where it used to
+  // begin at zero. Measured on 2.1.278: a turn reported $0.363044, and the same
+  // session resumed in a new process reported $0.386463 for a turn whose own
+  // usage was $0.023419. Reading that as this process's spend re-charges the
+  // whole history on every model switch and every session recovery, and
+  // `maxBudgetUsd` gates against that number.
+  describe('cost on a process started with --resume', () => {
+    const emit = (obj: unknown) => mockProc.stdout.emit('data', Buffer.from(JSON.stringify(obj) + '\n'));
+
+    async function startWith(overrides: Partial<SessionConfig>) {
+      session = new PersistentClaudeSession(makeConfig(overrides));
+      const startPromise = session.start();
+      emitInitEvent(mockProc);
+      await startPromise;
+    }
+
+    it('treats the inherited total as a baseline, not as this process spend', async () => {
+      await startWith({ resumeSessionId: 'resume_abc' });
+
+      emit({ type: 'result', usage: { input_tokens: 2, output_tokens: 3 }, total_cost_usd: 0.386463 });
+      const afterFirst = session.stats.costUsd;
+      // The turn keeps the registry estimate for its own two tokens, which is
+      // under a cent — the point is that it is not the inherited $0.386463.
+      expect(afterFirst).toBeLessThan(0.001);
+
+      // From the baseline on, the difference is this process's own spend.
+      emit({ type: 'result', usage: { input_tokens: 2, output_tokens: 3 }, total_cost_usd: 0.4 });
+      expect(session.stats.costUsd).toBeCloseTo(afterFirst + (0.4 - 0.386463), 10);
+    });
+
+    it('still takes the first total in full when the process was not resumed', async () => {
+      await startWith({});
+
+      emit({ type: 'result', usage: { input_tokens: 2, output_tokens: 3 }, total_cost_usd: 0.02377 });
+      expect(session.stats.costUsd).toBeCloseTo(0.02377, 10);
+    });
+  });
+
   describe('_updateCost', () => {
     beforeEach(async () => {
       const startPromise = session.start();
