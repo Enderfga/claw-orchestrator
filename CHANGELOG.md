@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.5.1] - 2026-09-20
+
+Weekly engine sweep: Claude Code 2.1.274 → 2.1.278, Codex 0.154.0 → 0.155.1, Antigravity 1.2.5 →
+1.2.7; Grok Build and OpenCode were already current. Every live turn passed through the real
+wrapper, the ACP and MCP handshakes are clean, and the model registry matched both vendors'
+published prices (26 models, no drift). No engine's flag surface changed.
+
+### Fixed
+
+- **A resumed Claude session no longer charges its whole history to the next turn.** Claude Code
+  2.1.277 made a headless process started with `--resume` restore the totals the resumed session
+  saved at exit, where it used to begin at zero. The wrapper reads `total_cost_usd` as a running
+  total and advances spend by the difference, so with no earlier figure to subtract it billed the
+  first report of a resumed process in full. Measured on 2.1.278: a turn reported $0.363044, and
+  the same session resumed in a new process reported $0.386463 for a turn whose own usage was
+  $0.023419 — a 16x over-report, on every model switch and every session recovered after a
+  restart, against the number `maxBudgetUsd` gates on. A resumed process's first report is now
+  taken as a baseline, and the turn carrying it keeps the registry estimate.
+
+### Changed
+
+- **Antigravity's headless timeout is now entirely ours to set.** 1.2.6 changed the default for a
+  `-p` run from five minutes to unlimited. The wrapper already derives `--print-timeout` from the
+  send timeout, so no behaviour changes here — but that flag is now the only bound on a stuck turn
+  rather than a tightening of one agy would have applied anyway.
+
 ## [7.5.0] - 2026-09-17
 
 Weekly engine sweep: Claude Code 2.1.271 → 2.1.274, Antigravity 1.2.2 → 1.2.5, Grok Build 1.0.30 →
