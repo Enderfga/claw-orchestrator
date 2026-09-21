@@ -14,6 +14,10 @@ published prices (26 models, no drift). No engine's flag surface changed.
 
 ### Fixed
 
+- **Antigravity empty-response errors now name the denied tools.** When a turn fails with an
+  empty response after a tool permission denial, the error message includes the denied tool
+  names parsed from the log; the generic fallback is preserved when no names are parseable.
+
 - **A resumed Claude session no longer charges its whole history to the next turn.** Claude Code
   2.1.277 made a headless process started with `--resume` restore the totals the resumed session
   saved at exit, where it used to begin at zero. The wrapper reads `total_cost_usd` as a running

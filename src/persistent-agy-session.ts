@@ -401,11 +401,13 @@ export class PersistentAgySession extends BaseOneShotSession {
         } else if (code !== 0) {
           reject(new Error(stderr || `Antigravity exited with code ${code}`));
         } else if (emptyResponse) {
-          reject(
-            new Error(
-              hasAgyToolPermissionDenial(turnLog ?? '') ? TOOL_DENIAL_EMPTY_RESPONSE_ERROR : EMPTY_RESPONSE_ERROR,
-            ),
-          );
+          const emptyResponseError =
+            permissionDenials.length > 0
+              ? `Antigravity returned an empty response after denying tool confirmation for ${permissionDenials.map((name) => `"${name}"`).join(', ')}; the turn failed but the session remains available for retry`
+              : hasAgyToolPermissionDenial(turnLog ?? '')
+                ? TOOL_DENIAL_EMPTY_RESPONSE_ERROR
+                : EMPTY_RESPONSE_ERROR;
+          reject(new Error(emptyResponseError));
         } else {
           resolve({ text, event });
         }

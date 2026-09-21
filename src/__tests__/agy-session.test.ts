@@ -466,9 +466,8 @@ describe('PersistentAgySession', () => {
       const firstError = await firstSend.catch((error: Error) => error);
       expect(firstError).toBeInstanceOf(Error);
       expect((firstError as Error).message).toBe(
-        'Antigravity returned an empty response after a tool permission denial; the turn failed but the session remains available for retry',
+        'Antigravity returned an empty response after denying tool confirmation for "RunCommand"; the turn failed but the session remains available for retry',
       );
-      expect((firstError as Error).message).not.toContain('RunCommand');
       expect(session.conversationId).toBe('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
 
       const secondProc = createMockProcess();
