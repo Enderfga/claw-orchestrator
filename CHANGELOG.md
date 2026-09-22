@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Antigravity empty-response errors now name the denied tools.** When a turn fails with an
+  empty response after a tool permission denial, the error message includes the denied tool
+  names parsed from the log; the generic fallback is preserved when no names are parseable.
+
 ## [7.5.1] - 2026-09-20
 
 Weekly engine sweep: Claude Code 2.1.274 → 2.1.278, Codex 0.154.0 → 0.155.1, Antigravity 1.2.5 →

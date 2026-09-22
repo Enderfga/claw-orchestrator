@@ -466,9 +466,8 @@ describe('PersistentAgySession', () => {
       const firstError = await firstSend.catch((error: Error) => error);
       expect(firstError).toBeInstanceOf(Error);
       expect((firstError as Error).message).toBe(
-        'Antigravity returned an empty response after a tool permission denial; the turn failed but the session remains available for retry',
+        'Antigravity returned an empty response after denying tool confirmation for "RunCommand"; the turn failed but the session remains available for retry',
       );
-      expect((firstError as Error).message).not.toContain('RunCommand');
       expect(session.conversationId).toBe('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
 
       const secondProc = createMockProcess();
@@ -494,6 +493,37 @@ describe('PersistentAgySession', () => {
 
       await expect(secondSend).resolves.toMatchObject({ text: 'Recovered' });
       expect(session.getStats()).toMatchObject({ turns: 2, turnsSucceeded: 1 });
+    });
+
+    it('uses the generic denial diagnosis when the denied tool name is not an identifier', async () => {
+      const session = new PersistentAgySession({
+        name: 'test',
+        cwd: '/tmp',
+        permissionMode: 'manual',
+        sandboxMode: 'read-only',
+      });
+      await session.start();
+
+      const sendPromise = session.send('first turn', { waitForComplete: true });
+      const logFile = logPathFromSpawn();
+      tmpLogs.push(logFile);
+      const invalidToolName = 'not a tool';
+      fs.writeFileSync(
+        logFile,
+        `E0904 tool_confirmation_manager.go:188] mode: soft-denying tool confirmation "${invalidToolName}"\n`,
+      );
+      feedText(
+        mockProc,
+        JSON.stringify({ event: 'init', conversation_id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' }) + '\n',
+      );
+      setTimeout(() => closeProc(mockProc, 0), 10);
+
+      const error = await sendPromise.catch((err: Error) => err);
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toBe(
+        'Antigravity returned an empty response after a tool permission denial; the turn failed but the session remains available for retry',
+      );
+      expect((error as Error).message).not.toContain(invalidToolName);
     });
 
     it('emits an agy 1.2.2 soft-denied tool on a successful turn with a non-empty reply', async () => {
