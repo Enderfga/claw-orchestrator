@@ -1,6 +1,7 @@
-# CLAUDE.md — claw-orchestrator
+# AGENTS.md — claw-orchestrator
 
-This file provides context for Claude Code when working on this project.
+This file provides context for coding agents (Claude Code, Codex, OpenCode, and others) working on
+this project. `CLAUDE.md` only imports it, so there is one copy to keep current.
 
 ## Architecture
 
