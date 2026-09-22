@@ -114,6 +114,10 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
    */
   private opencodeSessionId?: string;
 
+  protected override _continuesConversation(): boolean {
+    return !!this.opencodeSessionId;
+  }
+
   constructor(config: SessionConfig, opencodeBin?: string) {
     super(config, opencodeBin || process.env.OPENCODE_BIN || 'opencode', {
       enginePrefix: 'opencode',

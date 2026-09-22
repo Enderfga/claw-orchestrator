@@ -358,3 +358,49 @@ describe('PersistentCodexAppServerSession v2 RPCs', () => {
     expect(stats.contextPercent).toBe(50);
   });
 });
+
+// Nothing passes `appendSystemPrompt` to `thread/start`, so it used to be
+// dropped — including the charter of a council seat on this engine. It now
+// leads the first turn of a fresh thread, and only that turn.
+describe('PersistentCodexAppServerSession — appendSystemPrompt', () => {
+  beforeEach(() => mockSpawn.mockReset());
+
+  const turnTexts = (proc: ReturnType<typeof createMockProc>): string[] =>
+    proc.written
+      .filter((m) => m.method === 'turn/start')
+      .map((m) => (m.params?.input as Array<{ text: string }>)[0].text);
+
+  it('leads the first turn of a fresh thread, and only that turn', async () => {
+    const proc = createMockProc(defaultResponder());
+    mockSpawn.mockReturnValue(proc);
+    const session = new PersistentCodexAppServerSession({
+      name: 't',
+      cwd: '/tmp',
+      engine: 'codex-app',
+      appendSystemPrompt: 'SEAT RULES',
+    });
+    await session.start();
+    await session.send('hi');
+    await session.send('again');
+    await new Promise((r) => setTimeout(r, 5));
+    expect(turnTexts(proc)).toEqual(['SEAT RULES\n\n---\n\nhi', 'again']);
+  });
+
+  it('is not repeated on a resumed thread, which already carries it', async () => {
+    const proc = createMockProc(
+      defaultResponder((m) => (m.method === 'thread/resume' ? { thread: { id: 't9' } } : undefined)),
+    );
+    mockSpawn.mockReturnValue(proc);
+    const session = new PersistentCodexAppServerSession({
+      name: 't',
+      cwd: '/tmp',
+      engine: 'codex-app',
+      appendSystemPrompt: 'SEAT RULES',
+      resumeSessionId: 't9',
+    });
+    await session.start();
+    await session.send('continue');
+    await new Promise((r) => setTimeout(r, 5));
+    expect(turnTexts(proc)).toEqual(['continue']);
+  });
+});

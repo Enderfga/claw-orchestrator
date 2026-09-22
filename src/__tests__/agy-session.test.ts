@@ -655,6 +655,40 @@ describe('PersistentAgySession', () => {
       expect(secondArgs[idx + 1]).toBe('4ebc13c0-4cd3-4f59-b19d-2ee98ad883b2');
     });
 
+    // agy has no system-prompt flag, so `appendSystemPrompt` (a council seat's
+    // whole charter) used to be dropped. It leads the turn that opens the
+    // conversation; later turns resume a conversation that already holds it.
+    it('puts appendSystemPrompt only on the turn that opens the conversation', async () => {
+      const session = new PersistentAgySession({
+        name: 'test',
+        cwd: '/tmp',
+        permissionMode: 'bypassPermissions',
+        appendSystemPrompt: 'SEAT RULES',
+      });
+      await session.start();
+
+      const send1 = session.send('first turn', { waitForComplete: true });
+      const logFile = logPathFromSpawn();
+      tmpLogs.push(logFile);
+      setTimeout(() => {
+        fs.writeFileSync(logFile, 'I0705 server.go:825] Created conversation 4ebc13c0-4cd3-4f59-b19d-2ee98ad883b2\n');
+        feedText(mockProc, 'STORED\n');
+        closeProc(mockProc, 0);
+      }, 10);
+      await send1;
+      const firstArgs = mockSpawn.mock.calls[0][1] as string[];
+      expect(firstArgs[firstArgs.indexOf('-p') + 1]).toBe('SEAT RULES\n\n---\n\nfirst turn');
+
+      const proc2 = createMockProcess();
+      mockSpawn.mockReturnValue(proc2);
+      const send2 = session.send('second turn', { waitForComplete: true });
+      setTimeout(() => succeedProc(proc2), 10);
+      await send2;
+      const secondArgs = mockSpawn.mock.calls[1][1] as string[];
+      expect(secondArgs).toContain('--conversation');
+      expect(secondArgs[secondArgs.indexOf('-p') + 1]).toBe('second turn');
+    });
+
     it('seeds the conversation ID from resumeSessionId', async () => {
       const session = new PersistentAgySession({
         name: 'test',

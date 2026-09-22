@@ -66,6 +66,7 @@ export class PersistentGrokSession extends BaseOneShotSession {
       // excludes the cached reads and must not have them subtracted out.
       inputIncludesCachedTokens: false,
       engineDisplayName: 'Grok Build',
+      appendsSystemPromptNatively: true,
     });
     // Same shape cursor and opencode use: the real id is surfaced through
     // `sessionId` behind a `grok-live-` prefix so SessionManager can persist it,

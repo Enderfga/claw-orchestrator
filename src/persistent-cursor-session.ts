@@ -60,6 +60,10 @@ export class PersistentCursorSession extends BaseOneShotSession {
    */
   private cursorChatId?: string;
 
+  protected override _continuesConversation(): boolean {
+    return !!this.cursorChatId;
+  }
+
   constructor(config: SessionConfig, cursorBin?: string) {
     // `cursor-agent` before `agent`: Cursor's installer provides both names, but
     // `agent` is generic enough that another vendor can claim it — xAI's Grok

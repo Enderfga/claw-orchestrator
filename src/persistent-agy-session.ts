@@ -110,6 +110,10 @@ export class PersistentAgySession extends BaseOneShotSession {
     return this.agyConversationId;
   }
 
+  protected override _continuesConversation(): boolean {
+    return !!this.agyConversationId;
+  }
+
   /**
    * One log file per session (agy re-creates it each run; the harvest regex
    * only needs the latest `Created conversation` line). Deterministic path so

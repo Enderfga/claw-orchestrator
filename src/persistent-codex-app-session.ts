@@ -126,6 +126,12 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
 
   // Per-session state populated by notifications
   private threadId?: string;
+  /**
+   * Set when `start()` opened a fresh thread and `appendSystemPrompt` is set.
+   * Nothing passes it to `thread/start`, so the instructions ride on the first
+   * turn instead, as for the one-shot engines; a resumed thread already has them.
+   */
+  private _instructionsPending = false;
   private currentTurnId?: string;
   private currentGoal: ThreadGoal | null = null;
 
@@ -236,11 +242,13 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
     // the whole session.
     const resumeId = this.options.resumeSessionId;
     let threadResp: { thread?: { id?: string } };
+    let resumed = false;
     if (resumeId) {
       try {
         threadResp = (await this._request('thread/resume', { threadId: resumeId, ...startParams })) as {
           thread?: { id?: string };
         };
+        resumed = true;
       } catch (err) {
         this.emit(SESSION_EVENT.LOG, `[codex-app] thread/resume failed (${(err as Error).message}); starting fresh`);
         threadResp = (await this._request('thread/start', startParams)) as { thread?: { id?: string } };
@@ -254,6 +262,7 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
     if (!this.threadId) {
       throw new Error('codex app-server did not return a thread id from thread/start');
     }
+    this._instructionsPending = !resumed && !!this.options.appendSystemPrompt?.trim();
 
     this.sessionId = `codex-app-${this.threadId.slice(0, 8)}-${Date.now().toString(36)}`;
     this._startTime = new Date().toISOString();
@@ -297,7 +306,10 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
   ): Promise<TurnResult | { requestId: number; sent: boolean }> {
     if (!this._isReady) throw new Error('Session not ready. Call start() first.');
     if (!this.threadId) throw new Error('Session has no thread id (start() did not complete?)');
-    const text = typeof message === 'string' ? message : JSON.stringify(message);
+    let text = typeof message === 'string' ? message : JSON.stringify(message);
+    const instructions = this._instructionsPending ? this.options.appendSystemPrompt?.trim() : undefined;
+    this._instructionsPending = false;
+    if (instructions) text = `${instructions}\n\n---\n\n${text}`;
 
     if (!options.waitForComplete) {
       this._fireAndForgetTurn(text).catch((err) => this.emit(SESSION_EVENT.ERROR, err));
