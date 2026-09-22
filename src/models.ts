@@ -594,10 +594,18 @@ export function resolveProvider(model: string): { provider: ProviderName; apiMod
 }
 
 /** Get context window size for a model. Returns 200k default for unknown models. */
+/**
+ * Claude Code names a 1M-context selection with a `[1m]` suffix (`claude-opus-5[1m]`,
+ * `opus[1m]`) and reports it that way in its init event. The suffix selects a window,
+ * not a different model, so lookups drop it.
+ */
+const ONE_M_SUFFIX = /\[1m\]$/i;
+
 export function getContextWindow(model: string): number {
   const clean = model.replace(/^(anthropic|openai|openai-codex|google|gemini|agy|cursor|grok|xai)\//g, '');
-  const known = lookupModel(clean);
-  return known?.contextWindow ?? 200_000;
+  const known = lookupModel(resolveAlias(clean.replace(ONE_M_SUFFIX, '')));
+  const window = known?.contextWindow ?? 200_000;
+  return ONE_M_SUFFIX.test(clean) ? Math.max(window, 1_000_000) : window;
 }
 
 /**
@@ -607,7 +615,11 @@ export function getContextWindow(model: string): number {
  * (and vice versa).
  */
 function pricingKey(model: string): string {
-  return resolveAlias(model.replace(/^(anthropic|openai|openai-codex|google|gemini|agy|cursor|grok|xai)\//g, ''));
+  return resolveAlias(
+    model
+      .replace(/^(anthropic|openai|openai-codex|google|gemini|agy|cursor|grok|xai)\//g, '')
+      .replace(ONE_M_SUFFIX, ''),
+  );
 }
 
 /** Effective pricing for an already-canonical key: a runtime override wins over the registry. */

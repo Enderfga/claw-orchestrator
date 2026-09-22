@@ -1,10 +1,10 @@
 /**
  * Unit tests for PersistentClaudeSession `--settings` / `ultracode` argv construction.
  *
- * ultracode (dynamic workflows) is enabled via the `ultracode: true` settings key — NOT a
- * --effort value (the CLI rejects `--effort ultracode`). These tests lock the merge logic so
- * user-supplied settings are never dropped. The binary-level behaviour (that
- * `--settings '{"ultracode":true}'` actually activates workflows) is verified out-of-band.
+ * ultracode (dynamic workflows) is enabled via the `ultracode: true` settings key rather than
+ * `--effort ultracode`, so it composes with a separately chosen effort. These tests lock the
+ * merge logic so user-supplied settings are never dropped. The binary-level behaviour (that
+ * `--settings '{"ultracode":true}'` actually launches a workflow headless) was verified on 2.1.274.
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';

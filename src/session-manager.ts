@@ -254,6 +254,12 @@ interface ManagedSession {
    */
   budgetExhausted?: boolean;
   /**
+   * Sends recorded in the run ledger for this session in this process — the
+   * row's `turn` index. Not `stats.turns`: on claude that counts every `user`
+   * event, one per tool-result batch, so it is not an index of anything.
+   */
+  ledgerTurns?: number;
+  /**
    * The conversation as sent and answered, kept for `handoffSession()`. Not the
    * engine's history buffer, which is capped by event count and loses the
    * opening request first on a long session. Created on first send.
@@ -547,6 +553,13 @@ function readPermissionDenials(evt: Record<string, unknown> | undefined): Permis
 export class SessionManager {
   private sessions = new Map<string, ManagedSession>();
   private _pendingSessions = new Map<string, Promise<SessionInfo>>();
+  /**
+   * Starts that passed the capacity check and are not in `sessions` yet. The
+   * check runs before the first await and a session enters the map only after
+   * its process is up, so without this every start launched in the same tick —
+   * a fan-out's agents — passed it, and the cap limited nothing.
+   */
+  private _startsInFlight = 0;
   private cleanupTimer: ReturnType<typeof setInterval> | null = null;
   private pluginConfig: PluginConfig;
   private persistedSessions: Map<string, PersistedSession>;
@@ -669,14 +682,40 @@ export class SessionManager {
     }
   }
 
+  /** Session slots a new start could take right now. */
+  freeSessionSlots(): number {
+    return Math.max(0, this.pluginConfig.maxConcurrentSessions - this.sessions.size - this._startsInFlight);
+  }
+
   private async _doStartSession(
     name: string,
     config: Partial<SessionConfig> & { name?: string },
   ): Promise<SessionInfo> {
-    if (this.sessions.size >= this.pluginConfig.maxConcurrentSessions) {
+    if (this.freeSessionSlots() === 0) {
       throw new Error(`Max concurrent sessions (${this.pluginConfig.maxConcurrentSessions}) reached`);
     }
+    this._startsInFlight++;
+    let reserved = true;
+    // Released at the moment the session enters the map, in the same tick, so no
+    // other start ever sees it counted twice; or when the start fails.
+    const release = () => {
+      if (reserved) {
+        reserved = false;
+        this._startsInFlight--;
+      }
+    };
+    try {
+      return await this._startReservedSession(name, config, release);
+    } finally {
+      release();
+    }
+  }
 
+  private async _startReservedSession(
+    name: string,
+    config: Partial<SessionConfig> & { name?: string },
+    release: () => void,
+  ): Promise<SessionInfo> {
     // Auto-resume: if we have a persisted claudeSessionId for this name, inject it.
     // Skip when the caller asked for no persistence — either spelling. This read
     // used to be `skipPersistence` alone, through a cast, and that field is set
@@ -765,6 +804,7 @@ export class SessionManager {
       skipPersistence: skipPersist,
     };
 
+    release();
     this.sessions.set(name, managed);
 
     // Persist registry after session is live (skip for ephemeral sessions
@@ -1091,7 +1131,7 @@ export class SessionManager {
       session: name,
       engine: (managed.config.engine || 'claude') as EngineType,
       cwd: managed.cwd,
-      turn: after.turns || before.turns + 1,
+      turn: (managed.ledgerTurns = (managed.ledgerTurns ?? 0) + 1),
       tokensIn: delta(after.tokensIn, before.tokensIn),
       tokensOut: delta(after.tokensOut, before.tokensOut),
       cachedTokens: delta(after.cachedTokens, before.cachedTokens),
@@ -1145,7 +1185,10 @@ export class SessionManager {
 
   private _reportedModel(managed: ManagedSession): string | undefined {
     try {
-      return managed.session.getCost()?.model || undefined;
+      // 'default' is getCost()'s placeholder when neither the caller nor the
+      // engine named a model — recording it would name a model that does not exist.
+      const model = managed.session.getCost()?.model;
+      return model && model !== 'default' ? model : undefined;
     } catch {
       return undefined;
     }
@@ -1172,6 +1215,12 @@ export class SessionManager {
     // filter on a field no row carries yet and return nothing. It is applied
     // after the join instead.
     const { verified, ...readQuery } = query;
+    // For the same reason the row limit cannot be applied during the read: it
+    // would cut the newest N rows first and filter them afterwards, returning
+    // fewer than asked while older matching rows exist. Read every row in the
+    // window, filter, then keep the newest N.
+    const limit = query.limit && query.limit > 0 ? query.limit : 200;
+    if (verified !== undefined) readQuery.limit = Number.MAX_SAFE_INTEGER;
     const rows = annotateVerdicts(readRunLedger(readQuery, this.logger), (parent) => {
       const record = loadRun(parent);
       if (!record || record.outcome === 'unverified') return undefined;
@@ -1181,7 +1230,7 @@ export class SessionManager {
         contractId: record.spec?.contract?.id,
       };
     });
-    const filtered = verified === undefined ? rows : rows.filter((r) => r.verified === verified);
+    const filtered = verified === undefined ? rows : rows.filter((r) => r.verified === verified).slice(-limit);
     return { rows: filtered, summary: summarizeRuns(filtered) };
   }
 

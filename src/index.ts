@@ -283,7 +283,11 @@ const plugin = {
           maxTurns: { type: 'number', description: 'Max agent loop turns' },
           maxBudgetUsd: { type: 'number', description: 'Max API spend (USD)' },
           systemPrompt: { type: 'string', description: 'Replace system prompt' },
-          appendSystemPrompt: { type: 'string', description: 'Append to system prompt' },
+          appendSystemPrompt: {
+            type: 'string',
+            description:
+              'Append to the system prompt. Claude Code and Grok take it natively; Codex, Antigravity and OpenCode have no such flag and receive it at the top of the first message of a conversation',
+          },
           agents: { type: 'object', description: 'Custom sub-agents JSON' },
           agent: { type: 'string', description: 'Default agent to use' },
           bare: { type: 'boolean', description: 'Minimal mode: skip hooks, LSP, auto-memory, CLAUDE.md' },
@@ -1275,6 +1279,11 @@ const plugin = {
                 description:
                   'On red, spawn a repair session and re-run the whole list, up to N times. Only the re-run decides.',
               },
+              protectTests: {
+                type: 'boolean',
+                description:
+                  'Default true. In a workflow run with a command check, refute the run when a test file or test configuration changed during it. Set false when changing tests is the task. Not applied by verify_run.',
+              },
               checks: {
                 type: 'array',
                 minItems: 1,
@@ -1513,6 +1522,11 @@ const plugin = {
                 type: 'number',
                 description:
                   'On red, spawn a repair session and re-run the whole list, up to N times. Only the re-run decides.',
+              },
+              protectTests: {
+                type: 'boolean',
+                description:
+                  'Default true. In a workflow run with a command check, refute the run when a test file or test configuration changed during it. Set false when changing tests is the task. Not applied by verify_run.',
               },
               checks: {
                 type: 'array',

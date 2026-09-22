@@ -35,7 +35,7 @@ https://github.com/user-attachments/assets/fbd2b0ea-28d8-4387-9894-c29cf15ba030
 | **Embedded Dashboard**      | Three-tab UI for Autoloop, Council, and Forge with sidebar lifecycle controls, per-run live event streaming, and cookie-based auth via a `/login` redirect.                                                                                                                                                                                                                                                                               | [`dashboard.md`](./skills/references/dashboard.md)         |
 | **OpenAI-Compatible Proxy** | `POST /v1/chat/completions` translates OpenAI requests into native Anthropic, OpenAI, and Google calls and streams responses back in OpenAI shape. Point any OpenAI-SDK client at the orchestrator without changing call sites.                                                                                                                                                                                                           | [`openai-compat.md`](./skills/references/openai-compat.md) |
 | **Durable Run Kernel**      | Declarative workflows over `agent` / `fanout` / `council` / `verifier` / `human_gate` / `router` / `subflow` / `autoloop` / `ultraapp_*` nodes. Every state transition is checkpointed, so a run survives a process restart and resumes at the node boundary. Retry, per-node timeout, cancel, steer, and bounded loops come from the kernel instead of from five hand-rolled state machines.                                             | [`workflow.md`](./skills/references/workflow.md)           |
-| **Verification Plane**      | Acceptance contracts the runtime executes itself — commands, HTTP probes, screenshots, diff policy, file assertions — producing an evidence bundle on disk. A run carrying a contract cannot reach `completed` unless it passes, and one without a contract completes as `unverified` rather than claiming success.                                                                                                                       | [`verification.md`](./skills/references/verification.md)   |
+| **Verification Plane**      | Acceptance contracts the runtime executes itself — commands, HTTP probes, screenshots, diff policy, file assertions — producing an evidence bundle on disk. A run carrying a contract cannot reach `completed` unless it passes, and one without a contract completes as `unverified` rather than claiming success. The tests a contract runs are held to what the run started with, so a run cannot pass by editing them.                | [`verification.md`](./skills/references/verification.md)   |
 | **Run Ledger & Spend Caps** | Every turn on every engine is appended to a durable JSONL ledger — engine, model, tokens, cost, duration, and the council/fanout/autoloop it belonged to — queryable with `clawo runs` after a restart. Rows carry both the engine's self-report (`ok`) and the runtime's own measurement (`verified`), kept apart. `maxBudgetUsd` is enforced by the runtime, so a cap holds on Codex, Grok, agy and OpenCode too, not just Claude Code. | [`observability.md`](./skills/references/observability.md) |
 
 The full 78-tool surface is enumerated in [`tools.md`](./skills/references/tools.md).
@@ -111,10 +111,10 @@ block, and the cancellation and permission limitations are in
 
 | Engine      | CLI        | Tested Version |
 | ----------- | ---------- | -------------- |
-| Claude Code | `claude`   | 2.1.271        |
-| Codex       | `codex`    | 0.154.0        |
-| Antigravity | `agy`      | 1.2.2          |
-| Grok Build  | `grok`     | 1.0.30         |
+| Claude Code | `claude`   | 2.1.278        |
+| Codex       | `codex`    | 0.155.1        |
+| Antigravity | `agy`      | 1.2.7          |
+| Grok Build  | `grok`     | 1.0.34         |
 | OpenCode    | `opencode` | 1.18.31        |
 | Custom CLI  | any        | —              |
 

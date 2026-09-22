@@ -91,6 +91,12 @@ export interface AcceptanceContract {
    * Ported from ultraapp's fix-on-failure loop. 0 disables.
    */
   fixOnFailureRounds?: number;
+  /**
+   * Refute the run when a test file or test configuration that existed at the
+   * baseline was modified or deleted (see `protected-tests.ts`). On by default for
+   * a contract with a command check; set `false` when changing tests is the task.
+   */
+  protectTests?: boolean;
 }
 
 export interface CheckResult {
@@ -222,6 +228,7 @@ export function normalizeContract(raw: unknown): AcceptanceContract | undefined 
     id: str(r.id),
     checks,
     fixOnFailureRounds: num(r.fixOnFailureRounds),
+    ...(r.protectTests === false ? { protectTests: false } : {}),
   };
 }
 

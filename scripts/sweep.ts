@@ -103,7 +103,7 @@ const ENGINES: Engine[] = [
     bin: 'grok',
     wrapper: 'src/persistent-grok-session.ts',
     helpArgv: ['--help'],
-    upstream: null, // `grok update` upgrades in place, and has reported "up to date" wrongly before.
+    upstream: grokLatest,
     session: { file: 'persistent-grok-session.js', cls: 'PersistentGrokSession' },
     liveCwd: 'empty',
     // Free tier. Once its limit is hit, `grok -p` has been observed to hang
@@ -183,19 +183,29 @@ async function npmLatest(pkg: string): Promise<string | null> {
   return v && /^\d+\.\d+\.\d+/.test(v) ? v : null;
 }
 
+// The newest stable release whose tag matches. It reads a full page: codex put
+// 26 prereleases in front of 0.154.0 in eight days, a 15-release window came
+// back empty, and the column read "?". GitHub's own `releases/latest` is no
+// shortcut — the codex repo also cuts stable `python-v*` releases.
 async function ghLatestStable(repo: string, tagRe: RegExp): Promise<string | null> {
   const r = await run(
     'gh',
-    ['api', `repos/${repo}/releases?per_page=15`, '--jq', '.[] | select(.prerelease==false) | .tag_name'],
-    {
-      timeoutMs: 60_000,
-    },
+    ['api', `repos/${repo}/releases?per_page=100`, '--jq', '.[] | select(.prerelease==false) | .tag_name'],
+    { timeoutMs: 60_000 },
   );
   for (const line of r.out.split('\n')) {
     const m = line.trim().match(tagRe);
     if (m) return m[1];
   }
   return null;
+}
+
+// The updater's own check-only mode. A self-report — grok's updater has said
+// "up to date" wrongly before — so the weekly pass still runs `grok update`.
+async function grokLatest(): Promise<string | null> {
+  const r = await run('grok', ['update', '--check', '--json'], { timeoutMs: 60_000 });
+  const v = safeJson(r.out)?.latestVersion;
+  return typeof v === 'string' && /^\d+\.\d+\.\d+/.test(v) ? v : null;
 }
 
 /** Every `--flag` the CLI's help advertises. */
@@ -213,9 +223,9 @@ function flagsFromWrapper(file: string): Set<string> {
   return out;
 }
 
-/** The "Tested Version" column of the engine table in CLAUDE.md. */
+/** The "Tested Version" column of the engine table in AGENTS.md. */
 function pins(): Record<string, string> {
-  const md = fs.readFileSync(path.join(ROOT, 'CLAUDE.md'), 'utf8');
+  const md = fs.readFileSync(path.join(ROOT, 'AGENTS.md'), 'utf8');
   const out: Record<string, string> = {};
   for (const line of md.split('\n')) {
     const m = line.match(/^\|\s*\S+\s*\|\s*`([a-z]+)`\s*\|\s*([\d.]+)\s*\|/);
@@ -618,6 +628,9 @@ async function main(): Promise<void> {
   for (const e of engines) {
     if (e.live !== 'skipped' && !e.live.ok && e.live.note !== 'usage limit')
       regressions.push(`${e.id}: live turn failed (${e.live.note})`);
+    // A lookup that exists and returns nothing did not check. Reading "?" as
+    // "nothing newer" is how an engine stays behind unnoticed.
+    if (e.upstream === null) regressions.push(`${e.id}: upstream version lookup returned nothing`);
   }
   if (!acp.ok) regressions.push(`acp: ${acp.note}`);
   if (!mcp.ok) regressions.push(`mcp: ${mcp.note}`);
@@ -652,7 +665,7 @@ async function main(): Promise<void> {
     console.log(
       `registry: ${registry.checked} model(s) checked against published prices, ${registry.drift.length} drifted`,
     );
-    console.log(`\n* installed differs from the CLAUDE.md pin    ! upstream is ahead of installed`);
+    console.log(`\n* installed differs from the AGENTS.md pin    ! upstream is ahead of installed`);
     for (const d of registry.drift)
       console.log(`  DRIFT ${d.id} ${d.field}: registry ${d.ours ?? 'not set'} vs published ${d.published}`);
     if (registry.unregistered.length)

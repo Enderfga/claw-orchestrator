@@ -110,6 +110,8 @@ export const SESSION_EVENT = {
   TOOL_USE: 'tool_use',
   TOOL_RESULT: 'tool_result',
   RESULT: 'result',
+  /** A result for a turn the session did not send (see PersistentClaudeSession). */
+  UNSOLICITED_RESULT: 'unsolicited_result',
   TURN_COMPLETE: 'turn_complete',
   ERROR: 'error',
   LOG: 'log',

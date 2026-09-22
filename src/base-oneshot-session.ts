@@ -65,6 +65,12 @@ export interface OneShotEngineConfig {
   inputIncludesCachedTokens?: boolean;
   /** Human-readable engine name for compact() no-op message */
   engineDisplayName: string;
+  /**
+   * Whether the CLI has its own flag for `appendSystemPrompt` (grok: `--rules`).
+   * An engine without one receives it at the top of the first message of each
+   * conversation instead — see `_withAppendedInstructions`.
+   */
+  appendsSystemPromptNatively?: boolean;
 }
 
 // ─── BaseOneShotSession ────────────────────────────────────────────────────
@@ -154,13 +160,39 @@ export abstract class BaseOneShotSession extends EventEmitter implements ISessio
 
   // ── send() ─────────────────────────────────────────────────────────────
 
+  /**
+   * Whether the next turn continues a conversation the engine already holds.
+   * Subclasses that resume a thread or conversation by id override this; an
+   * engine that starts fresh on every turn keeps the default.
+   */
+  protected _continuesConversation(): boolean {
+    return false;
+  }
+
+  /**
+   * Deliver `appendSystemPrompt` to an engine that has no flag for it.
+   *
+   * Codex, Antigravity and OpenCode take no system-prompt argument, so the
+   * option used to be dropped for them without a word — including every
+   * council seat on those engines, whose whole charter travels this way. It is
+   * put at the top of the first message of a conversation instead: a resumed
+   * conversation already carries it, and repeating it on every turn would only
+   * grow the thread. A user turn binds less firmly than a system prompt; it is
+   * the strongest channel these CLIs offer.
+   */
+  private _withAppendedInstructions(message: string): string {
+    const instructions = this.options.appendSystemPrompt?.trim();
+    if (!instructions || this.engineCfg.appendsSystemPromptNatively || this._continuesConversation()) return message;
+    return `${instructions}\n\n---\n\n${message}`;
+  }
+
   async send(
     message: string | unknown[],
     options: SessionSendOptions = {},
   ): Promise<TurnResult | { requestId: number; sent: boolean }> {
     if (!this._isReady) throw new Error('Session not ready. Call start() first.');
     const requestId = ++this.currentRequestId;
-    const textMessage = typeof message === 'string' ? message : JSON.stringify(message);
+    const textMessage = this._withAppendedInstructions(typeof message === 'string' ? message : JSON.stringify(message));
 
     // Per-turn flag: cleared here, set only if this turn takes the estimate
     // fallback. Reading it after the turn tells the ledger whether the numbers

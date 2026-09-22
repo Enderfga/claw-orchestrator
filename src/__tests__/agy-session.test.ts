@@ -466,9 +466,8 @@ describe('PersistentAgySession', () => {
       const firstError = await firstSend.catch((error: Error) => error);
       expect(firstError).toBeInstanceOf(Error);
       expect((firstError as Error).message).toBe(
-        'Antigravity returned an empty response after a tool permission denial; the turn failed but the session remains available for retry',
+        'Antigravity returned an empty response after denying tool confirmation for "RunCommand"; the turn failed but the session remains available for retry',
       );
-      expect((firstError as Error).message).not.toContain('RunCommand');
       expect(session.conversationId).toBe('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
 
       const secondProc = createMockProcess();
@@ -494,6 +493,37 @@ describe('PersistentAgySession', () => {
 
       await expect(secondSend).resolves.toMatchObject({ text: 'Recovered' });
       expect(session.getStats()).toMatchObject({ turns: 2, turnsSucceeded: 1 });
+    });
+
+    it('uses the generic denial diagnosis when the denied tool name is not an identifier', async () => {
+      const session = new PersistentAgySession({
+        name: 'test',
+        cwd: '/tmp',
+        permissionMode: 'manual',
+        sandboxMode: 'read-only',
+      });
+      await session.start();
+
+      const sendPromise = session.send('first turn', { waitForComplete: true });
+      const logFile = logPathFromSpawn();
+      tmpLogs.push(logFile);
+      const invalidToolName = 'not a tool';
+      fs.writeFileSync(
+        logFile,
+        `E0904 tool_confirmation_manager.go:188] mode: soft-denying tool confirmation "${invalidToolName}"\n`,
+      );
+      feedText(
+        mockProc,
+        JSON.stringify({ event: 'init', conversation_id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' }) + '\n',
+      );
+      setTimeout(() => closeProc(mockProc, 0), 10);
+
+      const error = await sendPromise.catch((err: Error) => err);
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toBe(
+        'Antigravity returned an empty response after a tool permission denial; the turn failed but the session remains available for retry',
+      );
+      expect((error as Error).message).not.toContain(invalidToolName);
     });
 
     it('emits an agy 1.2.2 soft-denied tool on a successful turn with a non-empty reply', async () => {
@@ -623,6 +653,40 @@ describe('PersistentAgySession', () => {
       const idx = secondArgs.indexOf('--conversation');
       expect(idx).toBeGreaterThan(-1);
       expect(secondArgs[idx + 1]).toBe('4ebc13c0-4cd3-4f59-b19d-2ee98ad883b2');
+    });
+
+    // agy has no system-prompt flag, so `appendSystemPrompt` (a council seat's
+    // whole charter) used to be dropped. It leads the turn that opens the
+    // conversation; later turns resume a conversation that already holds it.
+    it('puts appendSystemPrompt only on the turn that opens the conversation', async () => {
+      const session = new PersistentAgySession({
+        name: 'test',
+        cwd: '/tmp',
+        permissionMode: 'bypassPermissions',
+        appendSystemPrompt: 'SEAT RULES',
+      });
+      await session.start();
+
+      const send1 = session.send('first turn', { waitForComplete: true });
+      const logFile = logPathFromSpawn();
+      tmpLogs.push(logFile);
+      setTimeout(() => {
+        fs.writeFileSync(logFile, 'I0705 server.go:825] Created conversation 4ebc13c0-4cd3-4f59-b19d-2ee98ad883b2\n');
+        feedText(mockProc, 'STORED\n');
+        closeProc(mockProc, 0);
+      }, 10);
+      await send1;
+      const firstArgs = mockSpawn.mock.calls[0][1] as string[];
+      expect(firstArgs[firstArgs.indexOf('-p') + 1]).toBe('SEAT RULES\n\n---\n\nfirst turn');
+
+      const proc2 = createMockProcess();
+      mockSpawn.mockReturnValue(proc2);
+      const send2 = session.send('second turn', { waitForComplete: true });
+      setTimeout(() => succeedProc(proc2), 10);
+      await send2;
+      const secondArgs = mockSpawn.mock.calls[1][1] as string[];
+      expect(secondArgs).toContain('--conversation');
+      expect(secondArgs[secondArgs.indexOf('-p') + 1]).toBe('second turn');
     });
 
     it('seeds the conversation ID from resumeSessionId', async () => {

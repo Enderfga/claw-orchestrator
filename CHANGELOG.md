@@ -5,6 +5,127 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.5.2] - 2026-09-22
+
+### Fixed
+
+- **Antigravity empty-response errors now name the denied tools.** When a turn fails with an
+  empty response after a tool permission denial, the error message includes the denied tool
+  names parsed from the log. A name is echoed only when it is shaped like a tool identifier; the
+  generic message is kept when none is, so the error still carries no free text from agy's log.
+
+- **`appendSystemPrompt` now reaches Codex, Antigravity and OpenCode sessions.** None of the three
+  CLIs has a system-prompt flag, and the option was dropped for them without a word — on the
+  `session_start` tool, and for every council seat on those engines, whose whole charter travels
+  this way: identity, persona, the claim protocol, the report format, and "never push". It now leads
+  the first message of a conversation, and is not repeated on later turns or on a resumed
+  conversation, which already carries it. A user turn binds less firmly than a system prompt; it is
+  the strongest channel these CLIs offer. `codex-app` does the same on a fresh thread. Claude Code
+  (`--append-system-prompt`) and Grok (`--rules`) are unchanged.
+
+- **Council no longer writes `.claude/CLAUDE.md` into its worktrees.** Each seat's identity and
+  workspace boundary lived in a generated `<worktree>/.claude/CLAUDE.md` — a file only Claude Code
+  reads, which replaced a project's own `.claude/CLAUDE.md` inside the worktree, and which an agent's
+  `git add -A` could commit into the project. The workspace boundary is now part of the charter
+  (`configs/council-system-prompt.md`, with a new `{{projectDir}}` placeholder), which reaches every
+  engine.
+
+## [7.5.1] - 2026-09-20
+
+Weekly engine sweep: Claude Code 2.1.274 → 2.1.278, Codex 0.154.0 → 0.155.1, Antigravity 1.2.5 →
+1.2.7; Grok Build and OpenCode were already current. Every live turn passed through the real
+wrapper, the ACP and MCP handshakes are clean, and the model registry matched both vendors'
+published prices (26 models, no drift). No engine's flag surface changed.
+
+### Fixed
+
+- **A resumed Claude session no longer charges its whole history to the next turn.** Claude Code
+  2.1.277 made a headless process started with `--resume` restore the totals the resumed session
+  saved at exit, where it used to begin at zero. The wrapper reads `total_cost_usd` as a running
+  total and advances spend by the difference, so with no earlier figure to subtract it billed the
+  first report of a resumed process in full. Measured on 2.1.278: a turn reported $0.363044, and
+  the same session resumed in a new process reported $0.386463 for a turn whose own usage was
+  $0.023419 — a 16x over-report, on every model switch and every session recovered after a
+  restart, against the number `maxBudgetUsd` gates on. A resumed process's first report is now
+  taken as a baseline, and the turn carrying it keeps the registry estimate.
+
+### Changed
+
+- **Antigravity's headless timeout is now entirely ours to set.** 1.2.6 changed the default for a
+  `-p` run from five minutes to unlimited. The wrapper already derives `--print-timeout` from the
+  send timeout, so no behaviour changes here — but that flag is now the only bound on a stuck turn
+  rather than a tightening of one agy would have applied anyway.
+
+## [7.5.0] - 2026-09-17
+
+Weekly engine sweep: Claude Code 2.1.271 → 2.1.274, Antigravity 1.2.2 → 1.2.5, Grok Build 1.0.30 →
+1.0.34; Codex and OpenCode were already current. Every live turn passed through the real wrapper and
+the model registry matched both vendors' published prices. Most of this release fixes accounting and
+concurrency that the run ledger and the session cap had been getting wrong, and it adds protection for
+the tests an acceptance contract runs.
+
+### Added
+
+- **Protected tests.** In a workflow run, a contract with a `command` check now refutes the run when
+  something that decides what its tests do changed during it — a loosened assertion, a deleted test,
+  a `conftest.py` added beside existing tests, or a script the checks run pointed at something that
+  exits 0. The run records its tests when it starts by hashing their bytes, and the required check
+  `protected-tests` compares against that record before the other checks run, so a developer's
+  uncommitted test edits stay theirs and a test that restores itself is still caught. Adding tests,
+  packages and unrelated scripts stays allowed, installed dependencies are not considered, and
+  `"protectTests": false` opts out when changing tests is the task. Tests inside source files, test
+  settings in general config files, files hidden by `.gitignore`, and source that special-cases the
+  test environment are not caught.
+
+### Fixed
+
+- **The session cap held only for sessions started one at a time.** It was checked against the live
+  sessions, and a session joins them once its process is up, so every start launched together — a
+  fan-out's agents, a council round — passed the check: eight agents meant eight engine processes
+  whatever `maxConcurrentSessions` said. A start in flight now holds its slot. Fan-out and Council run
+  no more agents at once than there are free slots and queue the rest, so a run wider than the cap
+  waits rather than failing. Because queued agents take longer in total, `fanout` and `council` nodes
+  gained `agentTimeoutMs`, and `fanout_start`, `ultrareview_start` and `council_start` size the node
+  timeout for the worst case instead of reusing one agent's timeout, which had also been cutting
+  multi-round councils short; the built-in `fanout`, `council` and `solve` workflows get the same
+  bounds. An aborted or timed-out fan-out starts none of the agents still waiting, and a timed-out
+  council — including UltraApp's synthesis council, which a cancelled build now reaches — opens no
+  further round.
+- **Claude Code tool calls were reported twice.** Each `tool_use` block arrives on
+  `content_block_start` with an empty input and again as an `assistant` event with its input, and both
+  were counted and emitted: `toolCalls` doubled, and ACP clients received two `tool_call` updates per
+  call, the first without arguments. A call is now reported once, with its input. The same applied to
+  persistent custom engines.
+- **Claude Code `toolErrors` was always 0.** Tool results arrive inside `user` messages rather than as
+  top-level events; failed results are counted from there.
+- **A turn the session did not send could be returned as the reply to the next send.** When a
+  background workflow finishes, or a message from another Claude Code session arrives, the CLI runs a
+  turn of its own, and its result resolved whichever send was waiting. Each message now carries an id
+  that the CLI echoes on the result answering it, so a result resolves only its own send — including a
+  message the CLI folds into a turn it started itself — and neither the reply to a message sent
+  without waiting nor a late reply to a send that timed out is handed to the next one. Without ids, a
+  result tagged with a non-human `origin` resolves none. Such turns do not count toward
+  `turnsSucceeded`; their cost does. The `ultracode` docs now say a workflow's send returns at
+  launch, and no longer claim the CLI rejects `--effort ultracode`.
+- **Ledger rows.** A Claude Code session with no explicit model recorded `model: "default"`; it now
+  records the model named in the CLI's `init` event, and never the placeholder. `turn` is now the
+  index of the send — it was Claude Code's count of `user` events, which advances once per tool-result
+  batch. `getRunLedger` with both `verified` and `limit` applied the limit first and could return
+  fewer rows than asked while matching rows existed.
+- **Claude Code's `[1m]` model suffix** (`claude-opus-5[1m]`, `opus[1m]`) is read as the model itself
+  for pricing and as a 1M window, instead of falling back to Sonnet pricing with a warning on every
+  lookup.
+- **A child process that exits without reading its input no longer crashes the orchestrator**, and
+  output is decoded as a stream, so a multi-byte character split across chunks is no longer
+  corrupted.
+- **The test suite wrote into the real home directory**: ledger rows, council transcripts, and the
+  persisted-session and PID files a running orchestrator restores from. Every test file now runs
+  with a private `HOME`, and test workers run with a bounded heap.
+- **The weekly sweep could pass without knowing the upstream version.** Its Codex lookup scanned the
+  newest 15 GitHub releases, which Codex's prereleases had filled, so the upstream column read "?" and
+  the run still passed. It now reads a full page, takes Grok Build's upstream from its updater's
+  check-only mode, and treats an empty lookup as a regression.
+
 ## [7.4.1] - 2026-09-15
 
 Weekly engine sweep: Claude Code 2.1.269 → 2.1.271, OpenCode 1.18.30 → 1.18.31. Every live turn
@@ -121,6 +242,7 @@ registry 25 models with no drift.
 The weekly sweep now checks the model registry, and its first run found two more wrong prices.
 
 ### Fixed
+
 - **`o4-mini` was priced at half its real cost.** OpenAI publishes four identically shaped tables
   per model — Standard, Batch, Flex, Fast — and this entry had been copied from the Batch column:
   `0.55 / 4.4` against a Standard `1.1 / 4.4`. Every run on it under-reported spend by 2x.
@@ -128,10 +250,11 @@ The weekly sweep now checks the model registry, and its first run found two more
   full input price instead of a quarter of it.
 
 ### Added
+
 - **The sweep diffs `src/models.ts` against both vendors' published price tables.** Until now it
   only checked engines, so a repriced model was invisible to it: a wrong cost does not crash, it
   just stays wrong. Both vendors publish their tables as markdown, so this needs no model to read
-  them. A model is reported as missing only when the vendor prices it *and* the engine binary can
+  them. A model is reported as missing only when the vendor prices it _and_ the engine binary can
   select it, which is the same test used by hand to keep `gpt-5.6-pro` and `gpt-5.6-cyber` out.
   A price source that cannot be fetched is reported as a regression rather than skipped — an
   unverified pass is what let a spent Grok quota carry a pin for a week.
@@ -341,7 +464,7 @@ bump, OpenCode's `run` flags likewise, and both ran a live turn at their new ver
 - **Priced 5.1's cache reads at their own rate.** Fable 5.1 and Mythos 5.1 read cache at **0.025x
   base input** — $0.25 per Mtok against a $10 input price — where every other Claude model is 0.1x.
   Copying Fable 5's $1, or deriving the number from the input rate, over-reports those two by 4x.
-  Cache *writes* keep the usual 1.25x / 2x multipliers, so only the read is exceptional. A test
+  Cache _writes_ keep the usual 1.25x / 2x multipliers, so only the read is exceptional. A test
   asserts the exception together with the rule it breaks, so a blanket edit in either direction
   fails.
 
@@ -433,7 +556,7 @@ report turned up four ways this project was measuring their turns wrong.
 - **Every Claude turn's tokens were counted twice.** The CLI reports one turn's usage on the
   streaming `message_delta` and again on the terminal `result`, and both were added to the running
   totals. Measured against 2.1.246 on a live turn: the engine reported `in=2 / out=4 /
-  cache_read=47371` and `getStats()` returned `4 / 8 / 94742`. A turn's usage is now folded in once —
+cache_read=47371` and `getStats()` returned `4 / 8 / 94742`. A turn's usage is now folded in once —
   streamed deltas apply provisionally so a long turn still moves, and the authoritative `result`
   replaces rather than repeats them. A turn spanning several assistant messages (one per tool round)
   keeps every message, since each carries its own delta series.

@@ -79,3 +79,18 @@ describe('kernel exec', () => {
     expect(MAX_CAPTURE_BYTES).toBe(512 * 1024);
   });
 });
+
+describe('exec robustness', () => {
+  it('survives a child that exits without reading its input', async () => {
+    const r = await exec('sh', ['-c', 'exit 3'], { input: 'x'.repeat(8 * 1024 * 1024) });
+    expect(r.code).toBe(3);
+  });
+
+  it('decodes a multi-byte character split across output chunks', async () => {
+    // 70KB of 3-byte characters crosses the pipe's chunk boundary mid-character.
+    const script = "process.stdout.write('€'.repeat(35000))";
+    const r = await exec(process.execPath, ['-e', script], { maxCaptureBytes: 1024 * 1024 });
+    expect(r.out).not.toContain('\uFFFD');
+    expect(r.out.length).toBe(35000);
+  });
+});

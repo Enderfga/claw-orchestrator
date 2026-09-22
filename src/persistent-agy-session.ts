@@ -19,8 +19,9 @@
  *     so cost is measured rather than guessed. Earlier versions of this wrapper
  *     read plain text and estimated ~4 chars/token, which is now only the
  *     fallback path when no result event arrives.
- *   - Timeout coherence: agy enforces its own --print-timeout (default 5m);
- *     we derive it from the send timeout so the two never disagree.
+ *   - Timeout coherence: we derive --print-timeout from the send timeout so the
+ *     two never disagree. Since 1.2.6 a headless run has no default timeout at
+ *     all unless that flag is passed, so it is now the only bound there is.
  *
  * Unknown --model values are NOT reliably harmless. On 1.0.16 an unknown slug
  * fell back to the default silently; on 1.1.25 a slug agy has stopped serving
@@ -71,6 +72,7 @@ const EMPTY_RESPONSE_ERROR =
   'Antigravity returned an empty response; the turn failed but the session remains available for retry';
 const TOOL_DENIAL_EMPTY_RESPONSE_ERROR =
   'Antigravity returned an empty response after a tool permission denial; the turn failed but the session remains available for retry';
+const AGY_ECHOABLE_TOOL_NAME_RE = /^[A-Za-z][A-Za-z0-9_.:-]{0,63}$/;
 
 // ─── PersistentAgySession ───────────────────────────────────────────────────
 
@@ -106,6 +108,10 @@ export class PersistentAgySession extends BaseOneShotSession {
   /** Expose the captured conversation ID for resume tooling and stats overlay. */
   get conversationId(): string | undefined {
     return this.agyConversationId;
+  }
+
+  protected override _continuesConversation(): boolean {
+    return !!this.agyConversationId;
   }
 
   /**
@@ -181,8 +187,10 @@ export class PersistentAgySession extends BaseOneShotSession {
 
     if (this.agyConversationId) args.push('--conversation', this.agyConversationId);
 
-    // agy enforces its own print-mode timeout (default 5m). Derive it from the
-    // send timeout (+5s margin) so our timer, not agy's, decides the outcome.
+    // Derive agy's print-mode timeout from the send timeout (+5s margin) so our
+    // timer, not agy's, decides the outcome. 1.2.6 changed the default for a
+    // headless run from 5 minutes to unlimited, so passing this is what keeps a
+    // stuck turn from running forever.
     args.push('--print-timeout', `${Math.ceil(timeoutMs / 1000) + 5}s`);
 
     return args;
@@ -399,11 +407,14 @@ export class PersistentAgySession extends BaseOneShotSession {
         } else if (code !== 0) {
           reject(new Error(stderr || `Antigravity exited with code ${code}`));
         } else if (emptyResponse) {
-          reject(
-            new Error(
-              hasAgyToolPermissionDenial(turnLog ?? '') ? TOOL_DENIAL_EMPTY_RESPONSE_ERROR : EMPTY_RESPONSE_ERROR,
-            ),
-          );
+          const echoableDenials = permissionDenials.filter((name) => AGY_ECHOABLE_TOOL_NAME_RE.test(name));
+          const emptyResponseError =
+            echoableDenials.length > 0
+              ? `Antigravity returned an empty response after denying tool confirmation for ${echoableDenials.map((name) => `"${name}"`).join(', ')}; the turn failed but the session remains available for retry`
+              : hasAgyToolPermissionDenial(turnLog ?? '')
+                ? TOOL_DENIAL_EMPTY_RESPONSE_ERROR
+                : EMPTY_RESPONSE_ERROR;
+          reject(new Error(emptyResponseError));
         } else {
           resolve({ text, event });
         }

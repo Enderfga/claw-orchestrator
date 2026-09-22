@@ -117,6 +117,54 @@ results, so a bundle that fails to land loses the record, never the answer.
 **re-runs the whole check list**. The fixer's own claim to have fixed it is
 ignored; only the re-run decides. Set it to 0 (the default) to disable.
 
+## Protected tests
+
+A `command` check runs in the tree the agent just worked in, so an agent could make
+it pass by changing the test instead of the code: loosen an assertion, delete the
+test, or point `scripts.test` at something that exits 0. A kernel run therefore
+records every test file and test configuration in its repository **when it starts**,
+and before the checks run, each must still be as recorded. A difference refutes the
+run through the required check `protected-tests`, which is recorded in the bundle
+whether it passed or not and runs again before every fixer round.
+
+- **Before the checks, not after:** it judges the tree the agent handed over, so a
+  test command that rewrites the file back cannot hide the change.
+- **As the run found them:** a developer's uncommitted edits, and a new test not yet
+  committed, are recorded in that state and stay protected in it — writing a failing
+  test and handing the fix to an agent works. A project with no commits yet is covered.
+- **Compared by bytes, not through git:** file contents are hashed directly (a
+  symlink by its target), so the index, git attributes and filters, line-ending
+  conversion and path quoting have no say.
+- **Counted as tests:** files under `__tests__/`, `__snapshots__/`, `test/`, `tests/`;
+  `*.test.*` and `*.spec.*` scripts; `test_*.py`, `*_test.py`, `*_test.go`, `*_spec.rb`,
+  `spec/spec_helper.rb`, `spec/rails_helper.rb`, `spec/support/`, `.rspec`;
+  `*Test.java`/`.kt`/`.cs`.
+- **Counted as test configuration:** vitest/jest/playwright/cypress config (including
+  `.json`), `karma.conf.*`, `vitest.setup.*`/`jest.setup.*`/`setupTests.*`,
+  `.mocharc*`, `pytest.ini`, `conftest.py`, `tox.ini`, `phpunit.xml`.
+- **In a `package.json`:** the `jest`, `mocha`, `ava`, `vitest`, `c8` and `nyc` keys,
+  and every script the checks can reach — the `test`, `pretest` and `posttest` scripts,
+  any script a contract command runs by name (`npm run verify`), and whatever those run
+  in turn through `npm run`, `yarn`, `pnpm`, `run-s`/`run-p`, including their `pre`/`post`
+  hooks. Other scripts, dependencies and key order may change.
+- **Allowed:** adding test files, packages, and test configuration that governs no test
+  the run started with (a new package with its own `jest.config.ts`). New configuration
+  in a directory that holds such a test — a `conftest.py` beside existing tests — is
+  refuted, since it changes what they do.
+- **Not considered:** installed dependencies (`node_modules/`, `vendor/`,
+  `site-packages/`, `.venv/`), which ship their own tests and configs.
+- **Opting out:** set `"protectTests": false` when changing existing tests is the task.
+- **Where it applies:** kernel runs in a git repository with a `command` check that
+  protects tests, including a subflow's verifier, which uses its parent run's record.
+  The record is taken only for such runs. A run created before this check existed
+  reports it as not checked (not required), and so does a verifier running outside the
+  recorded repository. `verify_run`, UltraApp's build gate and Autoloop's gate have no
+  record of the tree before the work and are not covered.
+- **What it does not catch:** tests inside source files (Rust `#[cfg(test)]`), test
+  settings inside general config (`vite.config.*`, `pyproject.toml`, `setup.cfg`),
+  files hidden by `.gitignore`, and source code that special-cases the test
+  environment. It closes the direct route, not every route.
+
 ## Per-mode defaults
 
 | Mode                     | Contract          | Notes                                                                                                                                                       |

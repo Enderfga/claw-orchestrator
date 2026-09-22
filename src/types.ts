@@ -304,9 +304,12 @@ export interface SessionConfig {
   settings?: string;
   /**
    * Enable Claude Code "ultracode" / dynamic workflows for this session (Claude engine only).
-   * NOT a --effort value — the CLI rejects `--effort ultracode`. It is the `ultracode: true`
-   * settings key, merged into --settings (per Claude Code 2.1.x model-config docs). When on,
-   * Claude writes a JS orchestration script per substantive task and fans out to subagents.
+   * Passed as the `ultracode: true` settings key, merged into --settings. When on, Claude
+   * writes a JS orchestration script per substantive task and fans out to subagents.
+   *
+   * In this headless session a workflow runs in the background: the send resolves with the
+   * launch reply. Its completion arrives later as a turn this session did not send, which no
+   * send returns and `turnsSucceeded` does not count; its cost is counted.
    */
   ultracode?: boolean;
   /**
@@ -843,6 +846,8 @@ export interface CouncilConfig {
   maxTurnsPerAgent?: number;
   maxBudgetUsd?: number;
   defaultPermissionMode?: PermissionMode;
+  /** Polled like `abort()`; set by the kernel so a cancelled or timed-out run stops opening sessions. */
+  signal?: { aborted: boolean };
 }
 
 export interface AgentResponse {

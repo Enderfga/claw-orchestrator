@@ -618,19 +618,9 @@ export class PersistentCustomSession extends EventEmitter implements ISession {
         if (!inner) break;
         const innerType = inner.type as string;
 
-        if (innerType === 'content_block_start') {
-          const block = (inner as Record<string, unknown>).content_block as Record<string, unknown> | undefined;
-          if (block?.type === 'tool_use') {
-            this._stats.toolCalls++;
-            const toolEvent = { tool: { name: block.name, input: {} } };
-            try {
-              this._streamCallbacks?.onToolUse?.(toolEvent);
-            } catch {
-              /* ignore */
-            }
-            this.emit(SESSION_EVENT.TOOL_USE, toolEvent);
-          }
-        } else if (innerType === 'content_block_delta') {
+        // A tool_use block is reported from the `assistant` event that repeats it
+        // with its input, not from `content_block_start` too — see the claude wrapper.
+        if (innerType === 'content_block_delta') {
           const delta = (inner as Record<string, unknown>).delta as Record<string, unknown> | undefined;
           if (delta?.type === 'text_delta' && delta.text) {
             try {

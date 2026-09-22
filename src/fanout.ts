@@ -23,6 +23,7 @@ import type {
   SessionStats,
 } from './types.js';
 import { type Logger } from './logger.js';
+import { mapBounded } from './concurrency.js';
 
 /** Minimal SessionManager surface used by Fanout (avoids a circular import). */
 interface SessionManagerLike {
@@ -31,6 +32,8 @@ interface SessionManagerLike {
   stopSession(name: string): Promise<void>;
   /** Optional so lightweight fakes stay valid; `ok` falls back to throw/no-throw without it. */
   getStatus?(name: string): SessionInfo & { stats: SessionStats };
+  /** Optional for the same reason; without it every agent starts at once. */
+  freeSessionSlots?(): number;
 }
 
 export interface FanoutAgentSpec {
@@ -72,6 +75,8 @@ export interface FanoutConfig {
    * One execution, one identity.
    */
   runId?: string;
+  /** Polled before each queued agent starts and before synthesis; set by the kernel. */
+  signal?: { aborted: boolean };
 }
 
 export interface FanoutAgentResult {
@@ -98,7 +103,7 @@ export interface FanoutSession {
   error?: string;
 }
 
-const DEFAULT_AGENT_TIMEOUT_MS = 600_000;
+export const DEFAULT_AGENT_TIMEOUT_MS = 600_000;
 const DEFAULT_MAX_TURNS = 30;
 
 export class Fanout {
@@ -133,9 +138,12 @@ export class Fanout {
 
   async run(): Promise<FanoutSession> {
     try {
-      // Each agent isolates its own failure (never throws); collect all.
-      this.session.results = await Promise.all(this.config.agents.map((a) => this._runAgent(a)));
-      if (!this._aborted && this.config.synthesize) {
+      // Each agent isolates its own failure (never throws); collect all. No more
+      // agents run at once than there are session slots, so the rest wait for one.
+      const agents = this.config.agents;
+      const slots = this.manager.freeSessionSlots?.() ?? agents.length;
+      this.session.results = await mapBounded(agents, slots, (a) => this._runAgent(a));
+      if (!this._stopped() && this.config.synthesize) {
         const ok = this.session.results.filter((r) => r.ok);
         if (ok.length >= 2) this.session.synthesis = await this._synthesize(ok);
       }
@@ -151,8 +159,24 @@ export class Fanout {
     return this.session;
   }
 
+  private _stopped(): boolean {
+    return this._aborted || this.config.signal?.aborted === true;
+  }
+
   private async _runAgent(spec: FanoutAgentSpec): Promise<FanoutAgentResult> {
     const engine: EngineType = spec.engine || 'claude';
+    // An agent still queued for a slot when the run was aborted never starts.
+    if (this._stopped()) {
+      return {
+        agent: spec.name,
+        engine,
+        model: spec.model,
+        ok: false,
+        output: '',
+        error: 'aborted before start',
+        durationMs: 0,
+      };
+    }
     const sessionName = `${this.session.id}-${spec.name}`;
     const start = Date.now();
     try {

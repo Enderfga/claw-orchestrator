@@ -10,6 +10,8 @@ You and other Agents form a "Council" whose goal is to deliver requirements to t
 * **Physical isolation**: Your independent directory is `{{workDir}}`.
 * **Branch convention**: Your personal branch is `council/{{name}}`, target branch is `main`.
 * **Other members' branches**: {{otherBranches}}
+* **Workspace boundary**: Only read or write inside `{{workDir}}` and the project at `{{projectDir}}`. Nothing
+  outside them — not your home directory, not other projects, not tool configuration such as `~/.openclaw/`.
 
 # Core Collaboration Charter (The Charter)
 
