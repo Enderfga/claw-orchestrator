@@ -237,6 +237,29 @@ describe('PersistentOpencodeSession', () => {
       expect(args2).not.toContain('--continue');
     });
 
+    // `opencode run` has no system-prompt flag, so `appendSystemPrompt` used to
+    // be dropped. It leads the turn that opens the session, and only that turn.
+    it('puts appendSystemPrompt only on the turn that opens the session', async () => {
+      const session = new PersistentOpencodeSession({ name: 'test', cwd: '/tmp', appendSystemPrompt: 'SEAT RULES' });
+      await session.start();
+
+      const p1 = session.send('first', { waitForComplete: true });
+      setTimeout(() => {
+        feedLines(mockProc, [JSON.stringify({ type: 'step_start', sessionID: 'ses_abc123' })]);
+        closeProc(mockProc, 0);
+      }, 10);
+      await p1;
+
+      const proc2 = createMockProcess();
+      mockSpawn.mockReturnValue(proc2);
+      const p2 = session.send('second', { waitForComplete: true });
+      setTimeout(() => closeProc(proc2, 0), 10);
+      await p2;
+
+      expect((mockSpawn.mock.calls[0][1] as string[])[1]).toBe('SEAT RULES\n\n---\n\nfirst');
+      expect((mockSpawn.mock.calls[1][1] as string[])[1]).toBe('second');
+    });
+
     it('resumes a persisted opencode session id from config', async () => {
       const session = new PersistentOpencodeSession({
         name: 'test',

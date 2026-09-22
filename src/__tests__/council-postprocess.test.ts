@@ -403,3 +403,45 @@ describe('Council.abort — worktree cleanup', () => {
     expect(leftovers).toEqual([]);
   });
 });
+
+// A seat's identity and workspace boundary used to live only in
+// `<worktree>/.claude/CLAUDE.md` — a file only Claude Code reads, and one an
+// agent's `git add -A` could commit into the user's project. They now travel in
+// the charter, which reaches every engine through `appendSystemPrompt`.
+describe('Council seat charter', () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = createTempRepo();
+  });
+
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('carries the workspace boundary in the charter and writes nothing into the worktree', async () => {
+    const seats: Array<{ cwd: string; charter?: string; claudeMd: boolean }> = [];
+    const manager = {
+      startSession: async (cfg: { cwd: string; appendSystemPrompt?: string }) => {
+        seats.push({
+          cwd: cfg.cwd,
+          charter: cfg.appendSystemPrompt,
+          claudeMd: fs.existsSync(path.join(cfg.cwd, '.claude', 'CLAUDE.md')),
+        });
+        return { name: 'test', created: new Date().toISOString(), cwd: cfg.cwd, paused: false, stats: {} };
+      },
+      sendMessage: async () => ({ output: 'Plan written and merged. '.repeat(20) + '[CONSENSUS: YES]', events: [] }),
+      stopSession: async () => {},
+    };
+    const config: CouncilConfig = { ...getDefaultCouncilConfig(dir), maxRounds: 1 };
+    const council = new Council(config, manager as Parameters<(typeof Council)['prototype']['constructor']>[1]);
+
+    await council.run('do the thing');
+
+    expect(seats).toHaveLength(config.agents.length);
+    for (const seat of seats) {
+      expect(seat.claudeMd).toBe(false);
+      expect(seat.charter).toContain(`Only read or write inside \`${seat.cwd}\` and the project at \`${dir}\``);
+    }
+  });
+});

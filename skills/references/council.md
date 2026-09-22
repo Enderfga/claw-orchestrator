@@ -209,7 +209,13 @@ The council system prompt is loaded from `configs/council-system-prompt.md` and 
 | §7 Action Over Words        | Never ask permission, just work                |
 | §8 Efficient Tool Use       | Minimum necessary principle                    |
 
-Placeholders: `{{emoji}}`, `{{name}}`, `{{persona}}`, `{{workDir}}`, `{{otherBranches}}`
+Placeholders: `{{emoji}}`, `{{name}}`, `{{persona}}`, `{{workDir}}`, `{{projectDir}}`, `{{otherBranches}}`
+
+The charter is each seat's only instruction channel, and it reaches every engine through `appendSystemPrompt`:
+natively on Claude Code and Grok, as the top of the seat's first message on Codex, Antigravity and OpenCode.
+Nothing is written into the worktrees. Seats used to get their identity and workspace boundary from a
+generated `<worktree>/.claude/CLAUDE.md`, which only Claude Code reads and which an agent could commit
+into the project.
 
 ## Transcript Logging
 

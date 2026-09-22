@@ -5,13 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [7.5.2] - 2026-09-22
 
 ### Fixed
 
 - **Antigravity empty-response errors now name the denied tools.** When a turn fails with an
   empty response after a tool permission denial, the error message includes the denied tool
-  names parsed from the log; the generic fallback is preserved when no names are parseable.
+  names parsed from the log. A name is echoed only when it is shaped like a tool identifier; the
+  generic message is kept when none is, so the error still carries no free text from agy's log.
+
+- **`appendSystemPrompt` now reaches Codex, Antigravity and OpenCode sessions.** None of the three
+  CLIs has a system-prompt flag, and the option was dropped for them without a word — on the
+  `session_start` tool, and for every council seat on those engines, whose whole charter travels
+  this way: identity, persona, the claim protocol, the report format, and "never push". It now leads
+  the first message of a conversation, and is not repeated on later turns or on a resumed
+  conversation, which already carries it. A user turn binds less firmly than a system prompt; it is
+  the strongest channel these CLIs offer. `codex-app` does the same on a fresh thread. Claude Code
+  (`--append-system-prompt`) and Grok (`--rules`) are unchanged.
+
+- **Council no longer writes `.claude/CLAUDE.md` into its worktrees.** Each seat's identity and
+  workspace boundary lived in a generated `<worktree>/.claude/CLAUDE.md` — a file only Claude Code
+  reads, which replaced a project's own `.claude/CLAUDE.md` inside the worktree, and which an agent's
+  `git add -A` could commit into the project. The workspace boundary is now part of the charter
+  (`configs/council-system-prompt.md`, with a new `{{projectDir}}` placeholder), which reaches every
+  engine.
 
 ## [7.5.1] - 2026-09-20
 

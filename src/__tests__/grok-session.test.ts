@@ -171,6 +171,9 @@ describe('PersistentGrokSession — flags', () => {
 
     const a = spawnArgs();
     expect(a[a.indexOf('--rules') + 1]).toBe('extra rules');
+    // grok takes the instructions natively, so the message itself stays as sent —
+    // the one-shot fallback that prefixes the first message must not fire here.
+    expect(a[a.indexOf('-p') + 1]).toBe('hi');
     expect(a[a.indexOf('--tools') + 1]).toBe('read_file,grep');
     expect(a[a.indexOf('--disallowed-tools') + 1]).toBe('write');
     expect(a[a.indexOf('--json-schema') + 1]).toBe('{"type":"object"}');

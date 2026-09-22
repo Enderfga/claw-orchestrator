@@ -223,9 +223,9 @@ function flagsFromWrapper(file: string): Set<string> {
   return out;
 }
 
-/** The "Tested Version" column of the engine table in CLAUDE.md. */
+/** The "Tested Version" column of the engine table in AGENTS.md. */
 function pins(): Record<string, string> {
-  const md = fs.readFileSync(path.join(ROOT, 'CLAUDE.md'), 'utf8');
+  const md = fs.readFileSync(path.join(ROOT, 'AGENTS.md'), 'utf8');
   const out: Record<string, string> = {};
   for (const line of md.split('\n')) {
     const m = line.match(/^\|\s*\S+\s*\|\s*`([a-z]+)`\s*\|\s*([\d.]+)\s*\|/);
@@ -665,7 +665,7 @@ async function main(): Promise<void> {
     console.log(
       `registry: ${registry.checked} model(s) checked against published prices, ${registry.drift.length} drifted`,
     );
-    console.log(`\n* installed differs from the CLAUDE.md pin    ! upstream is ahead of installed`);
+    console.log(`\n* installed differs from the AGENTS.md pin    ! upstream is ahead of installed`);
     for (const d of registry.drift)
       console.log(`  DRIFT ${d.id} ${d.field}: registry ${d.ours ?? 'not set'} vs published ${d.published}`);
     if (registry.unregistered.length)

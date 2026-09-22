@@ -129,6 +129,10 @@ export class PersistentCodexSession extends BaseOneShotSession {
     return this.codexThreadId;
   }
 
+  protected override _continuesConversation(): boolean {
+    return !!this.codexThreadId;
+  }
+
   // ── Context accounting ─────────────────────────────────────────────────
 
   /** Codex's enforced limit when we know it, else the model registry's. */

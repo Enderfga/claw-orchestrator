@@ -283,7 +283,11 @@ const plugin = {
           maxTurns: { type: 'number', description: 'Max agent loop turns' },
           maxBudgetUsd: { type: 'number', description: 'Max API spend (USD)' },
           systemPrompt: { type: 'string', description: 'Replace system prompt' },
-          appendSystemPrompt: { type: 'string', description: 'Append to system prompt' },
+          appendSystemPrompt: {
+            type: 'string',
+            description:
+              'Append to the system prompt. Claude Code and Grok take it natively; Codex, Antigravity and OpenCode have no such flag and receive it at the top of the first message of a conversation',
+          },
           agents: { type: 'object', description: 'Custom sub-agents JSON' },
           agent: { type: 'string', description: 'Default agent to use' },
           bare: { type: 'boolean', description: 'Minimal mode: skip hooks, LSP, auto-memory, CLAUDE.md' },

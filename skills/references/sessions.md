@@ -35,7 +35,7 @@ Key options:
 | `effort`             | `low`, `medium`, `high`, `max`, `auto`                                                                                                 |
 | `bare`               | Skip hooks, LSP, auto-memory, CLAUDE.md                                                                                                |
 | `worktree`           | Run in isolated git worktree                                                                                                           |
-| `appendSystemPrompt` | Append custom instructions to the system prompt                                                                                        |
+| `appendSystemPrompt` | Append custom instructions to the system prompt. Claude Code and Grok take it natively; Codex, Antigravity and OpenCode have no such flag and receive it at the top of the first message of a conversation |
 
 ### Sending Messages
 

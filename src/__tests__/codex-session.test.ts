@@ -106,6 +106,44 @@ describe('PersistentCodexSession', () => {
     expect(spawnArgs).not.toContain('--output-schema');
   });
 
+  // `codex exec` has no system-prompt flag, so `appendSystemPrompt` used to be
+  // dropped without a word — including the whole charter of every council seat
+  // on this engine. It now leads the first message of a thread, and only that
+  // one: a resumed thread already carries it.
+  it('puts appendSystemPrompt at the top of the first message of a new thread only', async () => {
+    const session = new PersistentCodexSession({ name: 'test', cwd: '/tmp', appendSystemPrompt: 'SEAT RULES' });
+    await session.start();
+
+    const first = session.send('hi', { waitForComplete: true });
+    setTimeout(() => runTurn(mockProc, 'thread-7'), 10);
+    await first;
+    expect((mockSpawn.mock.calls[0][1] as string[]).at(-1)).toBe('SEAT RULES\n\n---\n\nhi');
+
+    const secondProc = createMockProcess();
+    mockSpawn.mockReturnValueOnce(secondProc);
+    const second = session.send('again', { waitForComplete: true });
+    setTimeout(() => runTurn(secondProc, 'thread-7'), 10);
+    await second;
+    const secondArgs = mockSpawn.mock.calls[1][1] as string[];
+    expect(secondArgs.slice(0, 3)).toEqual(['exec', 'resume', 'thread-7']);
+    expect(secondArgs.at(-1)).toBe('again');
+  });
+
+  it('does not repeat appendSystemPrompt when the session resumes an existing thread', async () => {
+    const session = new PersistentCodexSession({
+      name: 'test',
+      cwd: '/tmp',
+      appendSystemPrompt: 'SEAT RULES',
+      resumeSessionId: '019c6dcb-93ad-7dc1-b531-418d213b8761',
+    });
+    await session.start();
+
+    const sendPromise = session.send('continue', { waitForComplete: true });
+    setTimeout(() => runTurn(mockProc, '019c6dcb-93ad-7dc1-b531-418d213b8761'), 10);
+    await sendPromise;
+    expect((mockSpawn.mock.calls[0][1] as string[]).at(-1)).toBe('continue');
+  });
+
   it('starts with exec resume when resumeSessionId contains a Codex thread ID', async () => {
     const session = new PersistentCodexSession({
       name: 'test',
