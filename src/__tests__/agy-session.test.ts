@@ -767,6 +767,34 @@ describe('PersistentAgySession', () => {
       expect(session.conversationId).toBe('11111111-2222-3333-4444-555555555555');
     });
 
+    // A resumed conversation writes no "Created conversation" line, so the log
+    // cannot give the id back: if the timeout path dropped it, the next send
+    // would start a new conversation and an agy Planner would lose its chat.
+    it('keeps a resumed conversation across a turn killed by the timeout', async () => {
+      const session = new PersistentAgySession({
+        name: 'test',
+        cwd: '/tmp',
+        permissionMode: 'bypassPermissions',
+        resumeSessionId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      });
+      await session.start();
+
+      const observed = session.send('slow turn', { waitForComplete: true, timeout: 10 }).catch((err: Error) => err);
+      tmpLogs.push(logPathFromSpawn());
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      closeProc(mockProc, 143);
+      expect((await observed).message).toContain('Timeout waiting for Antigravity response');
+      expect(session.conversationId).toBe('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
+
+      const proc2 = createMockProcess();
+      mockSpawn.mockReturnValue(proc2);
+      const next = session.send('are you still there?', { waitForComplete: true });
+      setTimeout(() => succeedProc(proc2), 10);
+      await next;
+      const args = mockSpawn.mock.calls[1][1] as string[];
+      expect(args[args.indexOf('--conversation') + 1]).toBe('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
+    });
+
     it('logs a warning when the first turn cannot harvest a conversation ID', async () => {
       const session = new PersistentAgySession({
         name: 'test',

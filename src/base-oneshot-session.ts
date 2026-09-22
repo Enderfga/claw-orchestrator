@@ -420,9 +420,17 @@ export abstract class BaseOneShotSession extends EventEmitter implements ISessio
   protected _cleanupProc(): void {
     if (this.currentProc) {
       try {
+        // On Windows `kill` ends only the process it is given, and the engine
+        // CLI's own children keep running; taskkill /T takes the whole tree. It
+        // runs synchronously on the cleanup path, so it is bounded: a hung
+        // taskkill must not stall the server's event loop.
         if (process.platform === 'win32' && this.currentProc.pid) {
           try {
-            execFileSync('taskkill', ['/pid', String(this.currentProc.pid), '/T', '/F'], { stdio: 'ignore' });
+            execFileSync('taskkill', ['/pid', String(this.currentProc.pid), '/T', '/F'], {
+              stdio: 'ignore',
+              timeout: 5_000,
+              windowsHide: true,
+            });
           } catch {
             this.currentProc.kill('SIGTERM');
           }

@@ -1241,9 +1241,20 @@ export class EmbeddedServer {
         // Validate run exists synchronously so 404 surfaces cleanly. After
         // this point we hand the message off to the runner and return.
         if (!this.manager.getAutoloop(id)) {
+          // Only a run the store still holds can be resumed; anything else —
+          // a mistyped id included — is simply not found. MCP and CLI callers
+          // use this endpoint too, so the hint names the API, not a button.
+          let persisted = false;
+          try {
+            persisted = Boolean(this.manager.autoloopStatus(id));
+          } catch {
+            // A malformed id is refused by the store; that is "not found" too.
+          }
           json(404, {
             ok: false,
-            error: `Autoloop run '${id}' is not active in this process (server restarted). Click 'Resume run' to resume.`,
+            error: persisted
+              ? `Autoloop run '${id}' is not running in this process; resume it with POST /autoloop/${id}/resume`
+              : `Autoloop run '${id}' not found`,
           });
           return;
         }

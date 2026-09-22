@@ -1805,14 +1805,17 @@
               paintReviewer();
             }
           }
-          // For terminated, paused, or inactive runs, surface a Resume affordance under the
-          // top bar. The button kicks off /autoloop/<id>/resume and then
-          // re-runs openAutoloop so SSE reconnects with the live state.
+          // For terminated or inactive runs, and for a run paused on a timed-out
+          // send, surface a Resume affordance under the top bar. The button kicks
+          // off /autoloop/<id>/resume and then re-runs openAutoloop so SSE
+          // reconnects with the live state. A live run paused for any other
+          // reason (an expired activity lease, an explicit pause) gets no button:
+          // resume only acts on a pending dispatch there, so it would be a no-op.
           if (
             state.autoloop.state &&
             (!state.autoloop.live ||
               state.autoloop.state.status === 'terminated' ||
-              state.autoloop.state.status === 'paused')
+              (state.autoloop.state.status === 'paused' && state.autoloop.state.pending_dispatch))
           ) {
             const bar = document.querySelector('.topbar');
             if (bar && !document.getElementById('auto-resume')) {
