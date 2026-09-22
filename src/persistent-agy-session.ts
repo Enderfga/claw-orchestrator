@@ -72,6 +72,7 @@ const EMPTY_RESPONSE_ERROR =
   'Antigravity returned an empty response; the turn failed but the session remains available for retry';
 const TOOL_DENIAL_EMPTY_RESPONSE_ERROR =
   'Antigravity returned an empty response after a tool permission denial; the turn failed but the session remains available for retry';
+const AGY_ECHOABLE_TOOL_NAME_RE = /^[A-Za-z][A-Za-z0-9_.:-]{0,63}$/;
 
 // ─── PersistentAgySession ───────────────────────────────────────────────────
 
@@ -401,9 +402,10 @@ export class PersistentAgySession extends BaseOneShotSession {
         } else if (code !== 0) {
           reject(new Error(stderr || `Antigravity exited with code ${code}`));
         } else if (emptyResponse) {
+          const echoableDenials = permissionDenials.filter((name) => AGY_ECHOABLE_TOOL_NAME_RE.test(name));
           const emptyResponseError =
-            permissionDenials.length > 0
-              ? `Antigravity returned an empty response after denying tool confirmation for ${permissionDenials.map((name) => `"${name}"`).join(', ')}; the turn failed but the session remains available for retry`
+            echoableDenials.length > 0
+              ? `Antigravity returned an empty response after denying tool confirmation for ${echoableDenials.map((name) => `"${name}"`).join(', ')}; the turn failed but the session remains available for retry`
               : hasAgyToolPermissionDenial(turnLog ?? '')
                 ? TOOL_DENIAL_EMPTY_RESPONSE_ERROR
                 : EMPTY_RESPONSE_ERROR;
