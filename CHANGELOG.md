@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **An Autoloop left idle no longer fails its next message.** Past `sessionTtlMinutes` the manager
+  evicts the role sessions while the dispatcher still believed them started, so the next message
+  failed with "Session not found". The Planner, Coder and Reviewer are now started again under the
+  same name, which resumes the persisted conversation. From @caoxuandungecom in #110.
+
+- **Stopping a one-shot session on Windows ends the whole process tree.** `kill` ended only the
+  process it was given and left the engine CLI's own children running. Session cleanup, and an
+  Antigravity turn killed by its timeout, now use `taskkill /T /F`, bounded at five seconds so a
+  hung taskkill cannot stall the server, with `kill` as the fallback. (#110)
+
+- **Autoloop runs that are not running in this process say so.** `GET /autoloop/<id>/state`
+  returns `live`. An event stream for a run that has already ended closes at once instead of
+  staying open with nothing left to send, and tells `EventSource` not to reconnect.
+  `POST /autoloop/<id>/chat` to a stored but idle run names `POST /autoloop/<id>/resume`, while an
+  unknown id stays plain "not found". The dashboard marks such a run inactive, disables its input,
+  and offers Resume — for a paused run, only when it is paused on a timed-out send, the one pause
+  resume acts on. (#110)
+
 ## [7.5.2] - 2026-09-22
 
 ### Fixed

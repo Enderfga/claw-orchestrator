@@ -920,3 +920,55 @@ describe('ClaudeAgentDispatcher — ledger schema_version', () => {
     expect(written.schema_version).toBe(LEDGER_SCHEMA_VERSION);
   });
 });
+
+// An Autoloop left idle past `sessionTtlMinutes` has its role sessions evicted
+// by the manager, while the dispatcher still believed them started — so the
+// next message failed with "Session not found". It now checks, and starts the
+// role again under the same name, which picks the persisted conversation back up.
+describe('ClaudeAgentDispatcher — evicted role sessions', () => {
+  function makeTrackedDispatcher() {
+    const { manager, calls } = makeStubManager();
+    const live = new Set<string>();
+    calls.startSession.mockImplementation(async (config: { name: string }) => {
+      live.add(config.name);
+      return { name: config.name, state: 'ready' };
+    });
+    (manager as unknown as { hasSession: (name: string) => boolean }).hasSession = (name) => live.has(name);
+    const dispatcher = new ClaudeAgentDispatcher({ manager, runId: 'r1', workspace: tmpRoot });
+    const starts = (role: string) =>
+      calls.startSession.mock.calls.filter((c) => (c[0] as { name: string }).name === `autoloop-r1-${role}`).length;
+    return { dispatcher, live, starts, ledgerDir: path.join(tmpRoot, 'tasks', 'r1') };
+  }
+
+  it('starts the Planner again after its session was evicted', async () => {
+    const { dispatcher, live, starts } = makeTrackedDispatcher();
+    await dispatcher.deliver(Msg.chat(0, { text: 'hello' }));
+    await dispatcher.deliver(Msg.chat(0, { text: 'still there?' }));
+    expect(starts('planner')).toBe(1);
+
+    live.delete('autoloop-r1-planner');
+    await dispatcher.deliver(Msg.chat(0, { text: 'after a long idle' }));
+    expect(starts('planner')).toBe(2);
+  });
+
+  it('starts the Coder and the Reviewer again after their sessions were evicted', async () => {
+    const { dispatcher, live, starts, ledgerDir } = makeTrackedDispatcher();
+    const directive = () =>
+      dispatcher.deliver(
+        Msg.directive(0, { goal: 'change one file', constraints: [], success_criteria: [], max_attempts: 1 }),
+      );
+    const review = () =>
+      dispatcher.deliver(Msg.reviewRequest(0, { iter: 0, ledger_path: ledgerDir, prior_metrics: [] }));
+
+    await dispatcher.spawnSubagents();
+    await directive();
+    await review();
+    expect([starts('coder'), starts('reviewer')]).toEqual([1, 1]);
+
+    live.delete('autoloop-r1-coder');
+    live.delete('autoloop-r1-reviewer');
+    await directive();
+    await review();
+    expect([starts('coder'), starts('reviewer')]).toEqual([2, 2]);
+  });
+});

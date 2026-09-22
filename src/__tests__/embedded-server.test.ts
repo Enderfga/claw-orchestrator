@@ -639,3 +639,99 @@ describe('EmbeddedServer', () => {
     });
   });
 });
+
+// A run can be known to the store without running in this process — after a
+// restart, or once it has ended. These routes have to say which, and a stream
+// for a run that has already ended has to end rather than wait forever.
+describe('EmbeddedServer — autoloop runs that are not running here', () => {
+  let server: EmbeddedServer;
+  let manager: SessionManager;
+  let port: number;
+
+  const persistedState = { run_id: 'r1', status: 'terminated', status_reason: 'goal met', iter: 3 };
+
+  beforeEach(async () => {
+    process.env.OPENCLAW_SERVER_TOKEN = 'disabled';
+    delete process.env.OPENCLAW_RATE_LIMIT;
+    delete process.env.OPENCLAW_CORS_ORIGINS;
+    manager = createMockManager();
+    port = await getFreePort();
+    server = new EmbeddedServer(manager, port);
+  });
+
+  afterAll(() => {
+    delete process.env.OPENCLAW_SERVER_TOKEN;
+  });
+
+  afterEach(async () => {
+    await server.stop();
+  });
+
+  /** Fail fast instead of waiting out the test timeout on a stream that never ends. */
+  function within<T>(p: Promise<T>, ms = 2_000): Promise<T> {
+    return Promise.race([
+      p,
+      new Promise<T>((_, reject) => setTimeout(() => reject(new Error(`no response within ${ms}ms`)), ms)),
+    ]);
+  }
+
+  it('reports whether a run is live on /state', async () => {
+    const m = manager as unknown as Record<string, unknown>;
+    m.autoloopStatus = vi.fn().mockReturnValue(persistedState);
+    m.getAutoloop = vi.fn().mockReturnValue(undefined);
+    await server.start();
+
+    const persisted = await request(port, '/autoloop/r1/state');
+    expect(persisted.status).toBe(200);
+    expect(persisted.body).toMatchObject({ ok: true, live: false });
+
+    (m.getAutoloop as ReturnType<typeof vi.fn>).mockReturnValue({ runner: { state: persistedState } });
+    const live = await request(port, '/autoloop/r1/state');
+    expect(live.body).toMatchObject({ ok: true, live: true });
+  });
+
+  it('ends the event stream of a live run that has already terminated', async () => {
+    const m = manager as unknown as Record<string, unknown>;
+    m.getAutoloop = vi.fn().mockReturnValue({ runner: { state: persistedState, on: vi.fn(), off: vi.fn() } });
+    await server.start();
+
+    const res = await within(request(port, '/autoloop/r1/events'));
+    const text = String(res.body);
+    expect(text).toContain('event: snapshot');
+    expect(text).toContain('event: terminated');
+    expect(text).toContain('goal met');
+    // Tells EventSource not to reconnect to a stream that can only end again.
+    expect(text).toContain('retry: 864000000');
+  });
+
+  it('answers a chat to a stored but idle run with how to resume it', async () => {
+    const m = manager as unknown as Record<string, unknown>;
+    m.getAutoloop = vi.fn().mockReturnValue(undefined);
+    m.autoloopStatus = vi.fn().mockReturnValue(persistedState);
+    await server.start();
+
+    const res = await request(port, '/autoloop/r1/chat', { method: 'POST', body: { text: 'hi' } });
+    expect(res.status).toBe(404);
+    expect((res.body as { error: string }).error).toBe(
+      "Autoloop run 'r1' is not running in this process; resume it with POST /autoloop/r1/resume",
+    );
+  });
+
+  it('answers a chat to an unknown or malformed run id with a plain not found', async () => {
+    const m = manager as unknown as Record<string, unknown>;
+    m.getAutoloop = vi.fn().mockReturnValue(undefined);
+    m.autoloopStatus = vi.fn().mockReturnValue(undefined);
+    await server.start();
+
+    const unknown = await request(port, '/autoloop/nope/chat', { method: 'POST', body: { text: 'hi' } });
+    expect(unknown.status).toBe(404);
+    expect((unknown.body as { error: string }).error).toBe("Autoloop run 'nope' not found");
+
+    (m.autoloopStatus as ReturnType<typeof vi.fn>).mockImplementation(() => {
+      throw new Error('Invalid run id');
+    });
+    const malformed = await request(port, '/autoloop/bad..id/chat', { method: 'POST', body: { text: 'hi' } });
+    expect(malformed.status).toBe(404);
+    expect((malformed.body as { error: string }).error).toBe("Autoloop run 'bad..id' not found");
+  });
+});

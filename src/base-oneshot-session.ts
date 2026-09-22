@@ -6,7 +6,7 @@
  * and optionally override _cleanupProc() for extra cleanup (readline, streams).
  */
 
-import { ChildProcess } from 'node:child_process';
+import { ChildProcess, execFileSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -420,7 +420,23 @@ export abstract class BaseOneShotSession extends EventEmitter implements ISessio
   protected _cleanupProc(): void {
     if (this.currentProc) {
       try {
-        this.currentProc.kill('SIGTERM');
+        // On Windows `kill` ends only the process it is given, and the engine
+        // CLI's own children keep running; taskkill /T takes the whole tree. It
+        // runs synchronously on the cleanup path, so it is bounded: a hung
+        // taskkill must not stall the server's event loop.
+        if (process.platform === 'win32' && this.currentProc.pid) {
+          try {
+            execFileSync('taskkill', ['/pid', String(this.currentProc.pid), '/T', '/F'], {
+              stdio: 'ignore',
+              timeout: 5_000,
+              windowsHide: true,
+            });
+          } catch {
+            this.currentProc.kill('SIGTERM');
+          }
+        } else {
+          this.currentProc.kill('SIGTERM');
+        }
       } catch {
         // Process may have already exited
       }

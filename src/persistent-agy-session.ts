@@ -260,7 +260,12 @@ export class PersistentAgySession extends BaseOneShotSession {
       const timer = setTimeout(() => {
         if (!settled) {
           settled = true;
-          proc.kill('SIGTERM');
+          // Kill the whole process tree (on Windows `kill` would leave agy's own
+          // children running), but keep the conversation id: a turn killed by
+          // the timeout does not end the conversation, and the next send with the
+          // same `--conversation` still recalls what came before (verified on
+          // agy 1.2.4). Dropping the id would cost an agy Planner its whole chat.
+          this._cleanupProc();
           reject(new Error('Timeout waiting for Antigravity response'));
         }
       }, timeout);

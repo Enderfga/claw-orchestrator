@@ -1056,11 +1056,13 @@ export class EmbeddedServer {
 
       const v2StateMatch = path.match(/^\/autoloop\/([^/]+)\/state$/);
       if (v2StateMatch) {
-        const state = this.manager.autoloopStatus(v2StateMatch[1]);
+        const id = v2StateMatch[1];
+        const state = this.manager.autoloopStatus(id);
+        const live = Boolean(this.manager.getAutoloop(id));
         if (!state) {
           json(404, { ok: false, error: 'run not found' });
         } else {
-          json(200, { ok: true, state });
+          json(200, { ok: true, state, live });
         }
         return;
       }
@@ -1142,6 +1144,7 @@ export class EmbeddedServer {
             'Cache-Control': 'no-cache',
             Connection: 'keep-alive',
           });
+          res.write('retry: 864000000\n');
           res.write(`event: snapshot\ndata: ${JSON.stringify({ state: histState })}\n\n`);
           res.write(
             `event: terminated\ndata: ${JSON.stringify({ reason: histState.status_reason ?? 'historical' })}\n\n`,
@@ -1157,11 +1160,23 @@ export class EmbeddedServer {
         const send = sseSender(res);
         send('snapshot', { state: ctx.runner.state });
 
+        if (ctx.runner.state.status === 'terminated' || ctx.runner.state.status === 'crashed') {
+          res.write('retry: 864000000\n');
+          send('terminated', { reason: ctx.runner.state.status_reason ?? ctx.runner.state.status });
+          res.end();
+          return;
+        }
+
         const onMessage = (env: unknown): void => send('message', env);
         const onState = (s: unknown): void => send('state', s);
         const onPush = (e: unknown): void => send('push', e);
         const onIterDone = (e: unknown): void => send('iter_done', e);
         const onTerm = (r: unknown): void => {
+          try {
+            res.write('retry: 864000000\n');
+          } catch {
+            /* ignore */
+          }
           send('terminated', { reason: r });
           cleanup();
         };
@@ -1226,7 +1241,21 @@ export class EmbeddedServer {
         // Validate run exists synchronously so 404 surfaces cleanly. After
         // this point we hand the message off to the runner and return.
         if (!this.manager.getAutoloop(id)) {
-          json(404, { ok: false, error: `Autoloop run '${id}' not found` });
+          // Only a run the store still holds can be resumed; anything else —
+          // a mistyped id included — is simply not found. MCP and CLI callers
+          // use this endpoint too, so the hint names the API, not a button.
+          let persisted = false;
+          try {
+            persisted = Boolean(this.manager.autoloopStatus(id));
+          } catch {
+            // A malformed id is refused by the store; that is "not found" too.
+          }
+          json(404, {
+            ok: false,
+            error: persisted
+              ? `Autoloop run '${id}' is not running in this process; resume it with POST /autoloop/${id}/resume`
+              : `Autoloop run '${id}' not found`,
+          });
           return;
         }
         this.manager.autoloopChat(id, text).catch((err) => {
