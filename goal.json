@@ -1,1 +1,33 @@
-{"scalar":null,"gates":[{"name":"agy_session_test","cmd":"npx vitest run src/__tests__/agy-session.test.ts","must":"exit-0"},{"name":"full_verification","cmd":"npm run build && npm run lint && npm run format:check && npx vitest run --exclude '**/host-strategy.test.ts'","must":"exit-0"}],"termination":{"max_iters":3}}
+{
+  "scalar": null,
+  "gates": [
+    {
+      "name": "drop_autoloop_artifacts",
+      "cmd": "bash -c 'test -z \"$(git ls-files -- plan.md goal.json)\"'",
+      "must": "exit-0"
+    },
+    {
+      "name": "changelog_unreleased",
+      "cmd": "node -e \"const fs=require('fs');const t=fs.readFileSync('CHANGELOG.md','utf8');const needle='Antigravity empty-response errors now name the denied tools';const uStart=t.indexOf('## [Unreleased]');const vStart=t.indexOf('## [7.5.1]');if(uStart<0||vStart<0||uStart>vStart)process.exit(1);const u=t.slice(uStart,vStart);if(!u.includes('### Fixed')||!u.includes(needle))process.exit(1);const after=t.slice(vStart+10);const next=after.indexOf('## [');const v751=next<0?after:after.slice(0,next);if(v751.includes(needle))process.exit(1);\"",
+      "must": "exit-0"
+    },
+    {
+      "name": "echoable_tool_name_filter",
+      "cmd": "grep -F '/^[A-Za-z][A-Za-z0-9_.:-]{0,63}$/' src/persistent-agy-session.ts",
+      "must": "exit-0"
+    },
+    {
+      "name": "agy_session_tests",
+      "cmd": "./node_modules/.bin/vitest run src/__tests__/agy-session.test.ts",
+      "must": "exit-0"
+    },
+    {
+      "name": "full_verification",
+      "cmd": "npm run build && ./node_modules/.bin/eslint src/ bin/ && npm run format:check && ./node_modules/.bin/vitest run",
+      "must": "exit-0"
+    }
+  ],
+  "termination": {
+    "max_iters": 4
+  }
+}
