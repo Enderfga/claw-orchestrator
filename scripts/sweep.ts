@@ -188,11 +188,35 @@ async function npmLatest(pkg: string): Promise<string | null> {
 // back empty, and the column read "?". GitHub's own `releases/latest` is no
 // shortcut — the codex repo also cuts stable `python-v*` releases.
 async function ghLatestStable(repo: string, tagRe: RegExp): Promise<string | null> {
+  // `gh api repos/<repo>/releases?per_page=100` carries every release body with
+  // it. On openai/codex that payload is big enough that GitHub answers 504, so
+  // the lookup went blind for a structural reason rather than a flaky one —
+  // reproducibly, on 2026-09-23. `gh release list` asks for the three fields
+  // this needs and comes back in under two seconds.
   const r = await run(
     'gh',
-    ['api', `repos/${repo}/releases?per_page=100`, '--jq', '.[] | select(.prerelease==false) | .tag_name'],
+    [
+      'release',
+      'list',
+      '--repo',
+      repo,
+      '--limit',
+      '100',
+      '--json',
+      'tagName,isPrerelease,isDraft',
+      '--jq',
+      '.[] | select(.isPrerelease == false and .isDraft == false) | .tagName',
+    ],
     { timeoutMs: 60_000 },
   );
+  // An empty result is already a regression, but "the API call failed" and "no
+  // release matched" read identically in that message. Say which, or the next
+  // reader re-runs the whole sweep to find out.
+  if (r.code !== 0) {
+    const reason = r.err.trim().split('\n').pop() ?? `exit ${r.code}`;
+    console.warn(`[sweep] gh api ${repo} failed: ${reason}`);
+    return null;
+  }
   for (const line of r.out.split('\n')) {
     const m = line.trim().match(tagRe);
     if (m) return m[1];

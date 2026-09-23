@@ -103,7 +103,7 @@ In `~/.openclaw/openclaw.json`:
         "enabled": true,
         "config": {
           "claudeBin": "claude",
-          "defaultModel": "claude-opus-5",
+          "defaultModel": "claude-opus-5-5",
           "defaultPermissionMode": "acceptEdits",
           "defaultEffort": "auto",
           "maxConcurrentSessions": 5,

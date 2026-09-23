@@ -78,18 +78,30 @@ const MODELS: ModelDef[] = [
     pricing: { input: 10, output: 50, cached: 1 },
     contextWindow: 1_000_000,
   },
-  // Opus pricing is flat across 4.6 through 5: input:5 / output:25 / cached:0.5,
-  // each with a 1M-token context window. Fast mode (Opus 5 and 4.8) bills at 2×
-  // the standard rate, but it's a human-interactive `/fast` toggle the CLI never
-  // enables in our headless spawn path, so we model the standard rate only.
-  // The `opus` alias points at Opus 5 because that is what the CLI's own `opus`
-  // alias resolves to (verified against the binary, CLI 2.1.220).
+  // Opus pricing was flat across 4.6 through 5 — input:5 / output:25 / cached:0.5
+  // — and Opus 5.5 breaks that: it is cheaper per token (4/20) and its cache
+  // reads are 5% of input rather than the usual 10%, so 0.20 rather than 0.40.
+  // Every Opus has a 1M-token context window. Fast mode bills at 2× the standard
+  // rate, but it's a human-interactive `/fast` toggle the CLI never enables in
+  // our headless spawn path, so we model the standard rate only.
+  // The `opus` alias moved with the CLI's own: 2.1.280 made Opus 5.5 the default
+  // Opus, and `--model opus` resolves to `claude-opus-5-5` (verified against the
+  // binary, CLI 2.1.280). Leaving the alias on Opus 5 would have priced every
+  // alias session — the autoloop Planner, the ultraplan default — at the old,
+  // higher rate, which is the number `maxBudgetUsd` gates on.
+  {
+    id: 'claude-opus-5-5',
+    engine: 'claude',
+    provider: 'anthropic',
+    pricing: { input: 4, output: 20, cached: 0.2 },
+    aliases: ['opus'],
+    contextWindow: 1_000_000,
+  },
   {
     id: 'claude-opus-5',
     engine: 'claude',
     provider: 'anthropic',
     pricing: { input: 5, output: 25, cached: 0.5 },
-    aliases: ['opus'],
     contextWindow: 1_000_000,
   },
   {
@@ -248,6 +260,24 @@ const MODELS: ModelDef[] = [
     engine: 'codex',
     provider: 'openai',
     pricing: { input: 10, output: 50, cached: 1 },
+    contextWindow: 1_050_000,
+  },
+
+  // Codex 0.156.1 added both to the model picker, and recommends Luna when a
+  // rate limit forces a switch. Same 1.05M window as the rest of the generation;
+  // Luna is the cheap tier, two orders of magnitude under Astra on input.
+  {
+    id: 'gpt-6-sol',
+    engine: 'codex',
+    provider: 'openai',
+    pricing: { input: 2, output: 10, cached: 0.2 },
+    contextWindow: 1_050_000,
+  },
+  {
+    id: 'gpt-6-luna',
+    engine: 'codex',
+    provider: 'openai',
+    pricing: { input: 0.1, output: 0.5, cached: 0.01 },
     contextWindow: 1_050_000,
   },
 

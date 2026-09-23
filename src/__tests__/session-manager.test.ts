@@ -670,10 +670,10 @@ describe('SessionManager', () => {
   // ─── Model Resolution ───────────────────────────────────────────────
 
   describe('model resolution (_resolveModel)', () => {
-    it('resolves known aliases (opus -> claude-opus-5)', async () => {
+    it('resolves known aliases (opus -> claude-opus-5-5)', async () => {
       await mgr.startSession({ name: 'alias-test', model: 'opus', cwd: '/tmp' });
       const list = mgr.listSessions();
-      expect(list[0].model).toBe('claude-opus-5');
+      expect(list[0].model).toBe('claude-opus-5-5');
     });
 
     it('resolves sonnet alias', async () => {

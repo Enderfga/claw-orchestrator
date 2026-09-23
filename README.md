@@ -111,11 +111,11 @@ block, and the cancellation and permission limitations are in
 
 | Engine      | CLI        | Tested Version |
 | ----------- | ---------- | -------------- |
-| Claude Code | `claude`   | 2.1.278        |
-| Codex       | `codex`    | 0.155.1        |
-| Antigravity | `agy`      | 1.2.7          |
-| Grok Build  | `grok`     | 1.0.34         |
-| OpenCode    | `opencode` | 1.18.31        |
+| Claude Code | `claude`   | 2.1.280        |
+| Codex       | `codex`    | 0.156.1        |
+| Antigravity | `agy`      | 1.2.8          |
+| Grok Build  | `grok`     | 1.0.41         |
+| OpenCode    | `opencode` | 1.18.32        |
 | Custom CLI  | any        | —              |
 
 Any coding CLI that runs as a subprocess can be wired up as a custom engine — see [`multi-engine.md`](./skills/references/multi-engine.md#custom-engine-enginecustom).
