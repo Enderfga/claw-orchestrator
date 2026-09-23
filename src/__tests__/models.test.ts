@@ -35,7 +35,7 @@ describe('lookupModel', () => {
   it('finds model by alias', () => {
     const m = lookupModel('opus');
     expect(m).toBeDefined();
-    expect(m!.id).toBe('claude-opus-5');
+    expect(m!.id).toBe('claude-opus-5-5');
   });
 
   it('returns undefined for unknown model', () => {
@@ -45,6 +45,7 @@ describe('lookupModel', () => {
   it('finds all known models', () => {
     const ids = [
       'claude-fable-5',
+      'claude-opus-5-5',
       'claude-opus-5',
       'claude-opus-4-8',
       'claude-opus-4-7',
@@ -53,6 +54,8 @@ describe('lookupModel', () => {
       'claude-sonnet-4-6',
       'claude-haiku-4-5',
       'gpt-6-astra',
+      'gpt-6-sol',
+      'gpt-6-luna',
       'gpt-5.6-sol',
       'gpt-5.6-terra',
       'gpt-5.6-luna',
@@ -81,7 +84,7 @@ describe('lookupModel', () => {
 
 describe('resolveAlias', () => {
   it('resolves known aliases', () => {
-    expect(resolveAlias('opus')).toBe('claude-opus-5');
+    expect(resolveAlias('opus')).toBe('claude-opus-5-5');
     expect(resolveAlias('sonnet')).toBe('claude-sonnet-5');
     expect(resolveAlias('haiku')).toBe('claude-haiku-4-5');
     expect(resolveAlias('gemini-pro')).toBe('gemini-3.1-pro-preview');
@@ -111,7 +114,7 @@ describe('resolveEngineAndModel', () => {
   });
 
   it('resolves aliases to canonical id', () => {
-    expect(resolveEngineAndModel('opus')).toEqual({ engine: 'claude', model: 'claude-opus-5' });
+    expect(resolveEngineAndModel('opus')).toEqual({ engine: 'claude', model: 'claude-opus-5-5' });
     expect(resolveEngineAndModel('gemini-flash')).toEqual({ engine: 'gemini', model: 'gemini-3-flash-preview' });
     expect(resolveEngineAndModel('agy-pro')).toEqual({ engine: 'agy', model: 'gemini-3.1-pro' });
   });
@@ -200,7 +203,7 @@ describe('getContextWindow', () => {
   // after Anthropic moved the Opus line and Sonnet 4.6 to a 1M-token context,
   // which under-reported the context-used percentage by 5x.
   it('uses the documented 1M window across the Opus line and Sonnet 4.6', () => {
-    for (const id of ['claude-opus-5', 'claude-opus-4-8', 'claude-opus-4-7', 'claude-sonnet-4-6']) {
+    for (const id of ['claude-opus-5-5', 'claude-opus-5', 'claude-opus-4-8', 'claude-opus-4-7', 'claude-sonnet-4-6']) {
       expect(getContextWindow(id), id).toBe(1_000_000);
     }
     // Haiku 4.5 genuinely is 200K — guards against a blanket find-and-replace.
@@ -413,7 +416,7 @@ describe('isGeminiModel / isClaudeModel', () => {
 describe('getAliases', () => {
   it('returns all aliases as Record', () => {
     const aliases = getAliases();
-    expect(aliases.opus).toBe('claude-opus-5');
+    expect(aliases.opus).toBe('claude-opus-5-5');
     expect(aliases.sonnet).toBe('claude-sonnet-5');
     expect(aliases['gemini-pro']).toBe('gemini-3.1-pro-preview');
   });
@@ -428,7 +431,7 @@ describe('lookupModelStrict', () => {
 
   it('returns model for alias', () => {
     const m = lookupModelStrict('opus');
-    expect(m.id).toBe('claude-opus-5');
+    expect(m.id).toBe('claude-opus-5-5');
   });
 
   it('throws for unknown model', () => {
@@ -535,5 +538,35 @@ describe('registry covers what the engines actually offer', () => {
   it('registers gpt-4.1 at its published rates and window', () => {
     expect(getModelPricing('gpt-4.1')).toMatchObject({ input: 2, output: 8, cached: 0.5 });
     expect(getContextWindow('gpt-4.1')).toBe(1_047_576);
+  });
+});
+
+// Registered 2026-09-23: Claude Code 2.1.280 made Opus 5.5 the model `--model
+// opus` resolves to, and Codex 0.156.1 added GPT-6 Sol and Luna. Every number
+// here comes from the vendors' own price tables, and each has a reverse
+// assertion so a blanket edit across the family fails the suite.
+describe('models registered on 2026-09-23', () => {
+  it('prices Opus 5.5 below Opus 5, with its half-rate cache read', () => {
+    expect(lookupModel('claude-opus-5-5')!.pricing).toEqual({ input: 4, output: 20, cached: 0.2 });
+    expect(getContextWindow('claude-opus-5-5')).toBe(1_000_000);
+    // A cache read on 5.5 is 5% of input; the rest of the line pays the usual 10%.
+    const newer = lookupModel('claude-opus-5-5')!.pricing;
+    expect(newer.cached).toBeCloseTo(newer.input * 0.05, 10);
+    // Reverse: Opus 5 is still selectable and keeps its own, higher rate.
+    const older = lookupModel('claude-opus-5')!.pricing;
+    expect(older).toEqual({ input: 5, output: 25, cached: 0.5 });
+    expect(older.cached).toBeCloseTo(older.input * 0.1, 10);
+  });
+
+  it('registers both new GPT-6 tiers at the published 1.05M window', () => {
+    expect(lookupModel('gpt-6-sol')!.pricing).toEqual({ input: 2, output: 10, cached: 0.2 });
+    expect(lookupModel('gpt-6-luna')!.pricing).toEqual({ input: 0.1, output: 0.5, cached: 0.01 });
+    for (const id of ['gpt-6-sol', 'gpt-6-luna', 'gpt-6-astra']) {
+      expect(getContextWindow(id), id).toBe(1_050_000);
+    }
+    // Reverse: Astra stays the expensive tier of the same generation, and the
+    // 5.6 models of the same names are different, cheaper-windowed entries.
+    expect(lookupModel('gpt-6-astra')!.pricing).toEqual({ input: 10, output: 50, cached: 1 });
+    expect(lookupModel('gpt-6-sol')!.pricing).not.toEqual(lookupModel('gpt-5.6-sol')!.pricing);
   });
 });

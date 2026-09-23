@@ -5,7 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [7.5.3] - 2026-09-23
+
+### Changed
+
+- **Registered Claude Opus 5.5, GPT-6 Sol and GPT-6 Luna, and moved the `opus` alias.** Claude Code
+  2.1.280 made Opus 5.5 the model `--model opus` resolves to (confirmed against the binary), and
+  Codex 0.156.1 added both new GPT-6 tiers. Opus 5.5 breaks the flat Opus pricing this registry had
+  relied on: $4/$20 per Mtok against Opus 5's $5/$25, and its cache reads are 5% of input rather
+  than the usual 10%. Every alias session — the autoloop Planner, the ultraplan default — was being
+  priced at the older, higher rate, which is the number `maxBudgetUsd` gates on. All figures come
+  from the vendors' published price tables, and each has a reverse assertion in the tests.
 
 ### Fixed
 

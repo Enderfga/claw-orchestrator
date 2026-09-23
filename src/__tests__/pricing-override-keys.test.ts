@@ -86,13 +86,13 @@ describe('getModelPricing — the override table is consulted on every path', ()
 
 describe('overrideModelPricing — writes land on the same key reads use', () => {
   it('override on the canonical id is visible through the alias', () => {
-    overrideModelPricing({ 'claude-opus-5': SENTINEL });
+    overrideModelPricing({ 'claude-opus-5-5': SENTINEL });
     expect(getModelPricing('opus').input).toBe(777);
   });
 
   it('override on the alias is visible through the canonical id', () => {
     overrideModelPricing({ opus: SENTINEL });
-    expect(getModelPricing('claude-opus-5').input).toBe(777);
+    expect(getModelPricing('claude-opus-5-5').input).toBe(777);
   });
 
   it('a vendor-prefixed key merges onto the real list price instead of zeroing output', () => {
@@ -150,7 +150,7 @@ describe('SessionManager — an override applies however the session named its m
   }
 
   it("claude engine: canonical override + session started as 'opus' (unchanged behaviour)", async () => {
-    overrideModelPricing({ 'claude-opus-5': SENTINEL });
+    overrideModelPricing({ 'claude-opus-5-5': SENTINEL });
     await startClaude('c1', 'opus');
     expect(mgr.getCost('c1').pricing.inputPer1M).toBe(777);
   });
@@ -283,8 +283,10 @@ describe('PersistentCustomSession pricing — the guard as shipped, not a copy o
 
   it('reports an override under any spelling of the same model', () => {
     overrideModelPricing({ opus: { input: 0, output: 0 } });
-    expect(hasPricingOverride('claude-opus-5')).toBe(true);
-    expect(hasPricingOverride('anthropic/claude-opus-5')).toBe(true);
+    expect(hasPricingOverride('claude-opus-5-5')).toBe(true);
+    expect(hasPricingOverride('anthropic/claude-opus-5-5')).toBe(true);
+    // Reverse: the alias moved off Opus 5, so an `opus` override must not reach it.
+    expect(hasPricingOverride('claude-opus-5')).toBe(false);
     expect(hasPricingOverride('claude-sonnet-5')).toBe(false);
   });
 });
