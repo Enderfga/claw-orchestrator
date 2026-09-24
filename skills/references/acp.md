@@ -5,14 +5,18 @@ drives over JSON-RPC stdio. Zed, JetBrains IDEs, Neovim, Emacs and the VS Code A
 extension are clients; so is `dsh`, whose `@deepseek-ai/dsh-subagent-acp` provider
 spawns an arbitrary command as a subagent.
 
-Every other agent in the ACP ecosystem is a single agent. This one is a fleet: the
-model selector spans engines, and the session-mode picker is where orchestration
-shapes are chosen.
+The model selector spans several engines, and session modes select the
+orchestration shape: a single agent, a council, a planning pass, or a review.
 
 ```bash
 clawo acp          # or the dedicated binary:
 clawo-acp
+# without a global install:
+npx -y @enderfga/claw-orchestrator acp
 ```
+
+Requires Node ≥ 22 and at least one engine CLI (`claude`, `codex`, `agy`,
+`grok`) installed and logged in.
 
 Both read the protocol from stdin and write it to stdout. **Stdout carries nothing
 but protocol frames** — all logging goes to stderr.
@@ -94,13 +98,16 @@ cancelling one abandons the poll rather than stopping the work.
 
 `session/new` also returns a `category: "model"` config option whose values are
 **grouped by engine**, built from the shared registry in `src/models.ts`. One
-dropdown holds Claude, Codex and Grok models at once. Changing it restarts the
-underlying session on the new engine; the ACP session id is unaffected.
+dropdown holds four engine groups at once: Claude Code, Codex, Antigravity and
+Grok Build. Changing it restarts the underlying session on the new engine; the
+ACP session id is unaffected.
 
-Two engines are absent for different reasons:
+Other engines are absent for different reasons:
 
 - **`gemini`** — the Gemini CLI is sunset and superseded by Antigravity. It still
   works for callers that name it directly; it is not offered in a new picker.
+- **`cursor`** — a legacy engine, superseded by Grok Build in this lineup. Same
+  treatment: callers that name it still work.
 - **`opencode`** — its models are open-ended `provider/model` strings passed
   straight through, so there is nothing in the registry to enumerate. An opencode
   session is reachable by naming the model, just not by picking it from this list.
@@ -129,8 +136,7 @@ fresh engine thread.
 The session layer has **no mid-turn cancel** — `stopSession()` is the only lever and
 it destroys the session rather than pausing the turn. So the ACP turn returns
 promptly while the engine subprocess may take a moment longer to die, and any
-partial work in that turn is lost. This is a real limitation, not a detail of the
-current implementation.
+partial work in that turn is lost.
 
 ## Use from `dsh`
 
@@ -152,11 +158,11 @@ ignores tool calls and other updates — and runs a fresh subprocess per run wit
 parent context. The adapter therefore keeps the text stream self-sufficient: an
 engine that never streams still gets its whole answer emitted as one final chunk.
 
-## Verifying a change
+## Development notes
 
 Unit tests cover the translation helpers and the config-option shapes
-(`src/__tests__/acp-server.test.ts`). They cannot catch the failure this protocol
-actually dies of, so also drive the real binary:
+(`src/__tests__/acp-server.test.ts`). They cannot catch a corrupted frame
+stream, so also drive the real binary:
 
 ```bash
 npm run build
@@ -167,29 +173,6 @@ printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocol
 Then run a full session and assert **every stdout line parses as JSON**. A single
 stray `console.log` anywhere in the process corrupts the frame stream, and the
 client fails in a way that looks like a protocol bug. Two things prevent it, and
-doing only one is the trap: suppress the embedded HTTP server (whose `start()`
-prints), and hand `SessionManager` an explicit stderr logger — its default
+both are required: suppress the embedded HTTP server (whose `start()` prints),
+and hand `SessionManager` an explicit stderr logger — its default
 `createConsoleLogger` writes `info`/`debug` to stdout.
-
-Verified end to end against the real binary:
-
-- handshake, `session/new` (4 engine groups in the selector), a streamed `single`-mode
-  turn that read a workspace file under `plan` permission and relayed the answer;
-- the mode slash commands: a bare `/ultraplan` switches and reports, `/single <task>`
-  switches back and runs the task in one turn;
-- a cross-engine model switch (`claude-sonnet-4-6` → `gpt-5.5`) answered by Codex;
-- a full `council` run in a git repo — two engines, two rounds to consensus, emitting
-  2 `plan`, 4 `tool_call`, 4 `tool_call_update`, the synthesis as text, and the two
-  gate commands;
-- `usage_update` carrying cross-engine cost;
-- graceful exit on stdin EOF.
-
-Every stdout line parsed as JSON throughout. `/council_accept` and `/council_reject`
-are covered by unit tests against a fake manager but have not been exercised against a
-live parked council.
-
-It was also driven from **VS Code with the ACP Client extension 0.2.0** — the agent
-appears in the agents list beside Copilot, Claude Code and Codex CLI, connects, renders
-the grouped model dropdown and the permission selector, and answered a prompt about a
-workspace file with its tool calls shown as collapsible entries. That run is what
-established that this client does not render modes.

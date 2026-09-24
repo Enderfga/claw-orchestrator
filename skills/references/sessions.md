@@ -27,14 +27,14 @@ const info = await manager.startSession({
 
 Key options:
 
-| Option               | Description                                                                                                                            |
-| -------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `engine`             | `'claude'` (default), `'codex'`, `'codex-app'`, `'agy'`, `'grok'`, `'opencode'`, or `'custom'` — see [Multi-Engine](./multi-engine.md) |
-| `model`              | Model alias (`fable`, `opus`, `sonnet`, `haiku`, `agy-pro`) or full name                                                               |
-| `permissionMode`     | `acceptEdits`, `bypassPermissions`, `plan`, `auto`, `manual`, `dontAsk` (`default` = legacy alias for `manual`)                        |
-| `effort`             | `low`, `medium`, `high`, `max`, `auto`                                                                                                 |
-| `bare`               | Skip hooks, LSP, auto-memory, CLAUDE.md                                                                                                |
-| `worktree`           | Run in isolated git worktree                                                                                                           |
+| Option               | Description                                                                                                                                                                                                |
+| -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `engine`             | `'claude'` (default), `'codex'`, `'codex-app'`, `'agy'`, `'grok'`, `'opencode'`, or `'custom'` — see [Multi-Engine](./multi-engine.md)                                                                     |
+| `model`              | Model alias (`fable`, `opus`, `sonnet`, `haiku`, `agy-pro`) or full name                                                                                                                                   |
+| `permissionMode`     | `acceptEdits`, `bypassPermissions`, `plan`, `auto`, `manual`, `dontAsk` (`default` = legacy alias for `manual`)                                                                                            |
+| `effort`             | `low`, `medium`, `high`, `xhigh`, `max`, `ultra`, `auto` — each engine clamps to its own ladder (see [Multi-Engine](./multi-engine.md))                                                                    |
+| `bare`               | Skip hooks, LSP, auto-memory, CLAUDE.md                                                                                                                                                                    |
+| `worktree`           | Run in isolated git worktree                                                                                                                                                                               |
 | `appendSystemPrompt` | Append custom instructions to the system prompt. Claude Code and Grok take it natively; Codex, Antigravity and OpenCode have no such flag and receive it at the top of the first message of a conversation |
 
 ### Sending Messages
@@ -120,10 +120,6 @@ source's record, so handing it off again carries the whole conversation rather t
 part. The history is cleared only after a first send succeeds, so a first turn that fails on the
 new engine does not strand the conversation it was carrying.
 
-Verified end to end over MCP against the installed engines: a fact planted in a Claude session was
-recalled by Codex 0.154.0 after a handoff, and again by Claude after a second handoff back, which
-also named Codex as the engine it had taken over from.
-
 ### ultracode (Claude dynamic workflows)
 
 Set `ultracode: true` on a Claude `session_start` to have Claude orchestrate a JS workflow per substantive task and fan out to subagents. It is injected as the `ultracode: true` settings key merged into `--settings`:
@@ -141,7 +137,7 @@ Code session. Read the outcome by sending a follow-up once the workflow has had 
 
 ### Codex app-server turn control (`engine: 'codex-app'`)
 
-Mid-turn and thread control via Codex 0.137 v2 RPCs, surfaced as tools: `codex_interrupt` (cancel the in-flight turn), `codex_steer` (add input without restarting), `codex_fork` (branch the thread), `codex_rollback` (drop the last N turns), `codex_models` (list models + supported reasoning efforts).
+Mid-turn and thread control via the Codex app-server v2 RPCs, surfaced as tools: `codex_interrupt` (cancel the in-flight turn), `codex_steer` (add input without restarting), `codex_fork` (branch the thread), `codex_rollback` (drop the last N turns), `codex_models` (list models + supported reasoning efforts), `codex_thread_list` (list the threads the session can see).
 
 ### Fan-out (cross-engine parallel)
 
@@ -215,7 +211,7 @@ in cleanup), `gemini` succeeds on exit 53 because its turn limit resolves,
 read-only enforcement did not load.
 
 **A succeeded turn is not a turn that did the work.** When the engine refuses a
-tool call it usually does not fail the turn. Measured on Claude Code 2.1.269 with
+tool call it usually does not fail the turn. On Claude Code with
 `--permission-prompts none` — which a session gets whenever no prompt tool is
 configured — a turn asked to write a file came back `subtype: 'success'`,
 `is_error: false`, with the refused Bash call listed in the result event and no
@@ -246,7 +242,7 @@ Built-in format translation lets Claude Code CLI talk to non-Anthropic models:
 - **Gemini** thought signature caching (round-trip thinking)
 - Auto-detect provider from model name patterns
 
-See `src/proxy/` for implementation details.
+See [`src/proxy/`](https://github.com/Enderfga/claw-orchestrator/tree/main/src/proxy) for implementation details.
 
 ## Circuit Breaker
 
@@ -258,7 +254,7 @@ SessionManager tracks consecutive failures per engine type. After 3 consecutive 
 
 ## Orphaned Process Cleanup
 
-If the plugin crashes without calling `stop()`, child CLI processes (claude, codex, agy, agent, opencode) may become orphans. SessionManager tracks PIDs in `~/.openclaw/session-pids.json` and cleans up stale processes on startup:
+If the plugin crashes without calling `stop()`, child CLI processes (claude, codex, agy, grok, opencode, and legacy engines) may become orphans. SessionManager tracks PIDs in `~/.openclaw/session-pids.json` and cleans up stale processes on startup:
 
 1. Reads PID file from previous run
 2. For each PID, checks if process is alive (`kill -0`)
@@ -270,18 +266,13 @@ If the plugin crashes without calling `stop()`, child CLI processes (claude, cod
 
 Session stats are returned by `getStats()` and surfaced through `coding_session_status`.
 
-Fields added in plugin v2.13.0 (Claude CLI 2.1.111):
+Claude Code–specific stats:
 
-| Field            | Type                | Description                                        |
-| ---------------- | ------------------- | -------------------------------------------------- |
-| `retries`        | number              | Total API retries that occurred during the session |
-| `lastRetryError` | string \| undefined | Error message from the most recent retry (if any)  |
-
-Fields added in plugin v2.14.0 (Claude CLI 2.1.121):
-
-| Field          | Type                                   | Description                                                                                                                               |
-| -------------- | -------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| `pluginErrors` | `Array<{plugin, reason}>` \| undefined | Plugins that failed to load due to unmet dependencies, captured from the `system/init` event. `undefined` when no plugin errors occurred. |
+| Field            | Type                                   | Description                                                                                                                               |
+| ---------------- | -------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `retries`        | number                                 | Total API retries that occurred during the session                                                                                        |
+| `lastRetryError` | string \| undefined                    | Error message from the most recent retry (if any)                                                                                         |
+| `pluginErrors`   | `Array<{plugin, reason}>` \| undefined | Plugins that failed to load due to unmet dependencies, captured from the `system/init` event. `undefined` when no plugin errors occurred. |
 
 ### `system/api_retry` events
 
@@ -304,7 +295,7 @@ const session = manager.getSession('my-session');
 console.log(session.pid); // e.g., 12345 or undefined
 ```
 
-## Verifying what a session did (6.0.0)
+## Verifying what a session did
 
 A plain session leaves no verdict — it ran, and nothing checked the result. To
 check it, hand `verify_run` a contract and the directory:
@@ -319,5 +310,5 @@ verify_run({
 For work that should be checked as part of running it, use a workflow instead —
 see [`workflow.md`](./workflow.md).
 
-`SendOptions` also gained `nodeKind` and `taskKind`, both stamped onto the run
+`SendOptions` also accepts `nodeKind` and `taskKind`, both stamped onto the run
 ledger row. `taskKind` is caller-declared and never inferred from the prompt.

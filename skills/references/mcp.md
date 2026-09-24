@@ -1,6 +1,6 @@
 # MCP integration
 
-Claw Orchestrator ships a Model Context Protocol (MCP) server (`clawo-mcp`) so any MCP-compatible host can drive its 55 tools.
+Claw Orchestrator ships a Model Context Protocol (MCP) server (`clawo-mcp`) so any MCP-compatible host can drive its 78 tools.
 
 This document covers:
 
@@ -29,17 +29,22 @@ This document covers:
 
 Tools fall into a few groups:
 
-| Group                   | Examples                                                                                                                                           |
-| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Session lifecycle       | `session_start`, `session_send`, `session_stop`, `session_list`, `session_grep`, `session_compact`, `session_update_tools`, `session_switch_model` |
-| Cross-session messaging | `session_send_to`, `session_inbox`, `session_deliver_inbox`                                                                                        |
-| Status / introspection  | `sessions_overview`, `coding_session_status`, `coding_agents_list`                                                                                 |
-| Multi-agent council     | `council_start`, `council_status`, `council_abort`, `council_inject`, `council_review`, `council_accept`, `council_reject`                         |
-| Ultraplan / ultrareview | `ultraplan_start`, `ultraplan_status`, `ultrareview_start`, `ultrareview_status`                                                                   |
-| Autoloop                | `autoloop_start`, `autoloop_chat`, `autoloop_status`, `autoloop_list`, `autoloop_reset_agent`, `autoloop_stop`                                     |
-| Codex specifics         | `codex_resume`, `codex_review`, `codex_goal_set`, `codex_goal_get`, `codex_goal_pause`, `codex_goal_resume`, `codex_goal_clear`                    |
-| Agent teams             | `team_list`, `team_send`                                                                                                                           |
-| Maintenance             | `project_purge`                                                                                                                                    |
+| Group                   | Examples                                                                                                                                                              |
+| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Session lifecycle       | `session_start`, `session_send`, `session_handoff`, `session_stop`, `session_list`, `session_grep`, `session_compact`, `session_update_tools`, `session_switch_model` |
+| Cross-session messaging | `session_send_to`, `session_inbox`, `session_deliver_inbox`                                                                                                           |
+| Status / introspection  | `sessions_overview`, `coding_session_status`, `coding_agents_list`                                                                                                    |
+| Multi-agent council     | `council_start`, `council_status`, `council_abort`, `council_inject`, `council_review`, `council_accept`, `council_reject`                                            |
+| Ultraplan / ultrareview | `ultraplan_start`, `ultraplan_status`, `ultrareview_start`, `ultrareview_status`                                                                                      |
+| Autoloop                | `autoloop_start`, `autoloop_chat`, `autoloop_status`, `autoloop_list`, `autoloop_reset_agent`, `autoloop_stop`                                                        |
+| Codex specifics         | `codex_resume`, `codex_review`, `codex_goal_set`, `codex_goal_get`, `codex_goal_pause`, `codex_goal_resume`, `codex_goal_clear`                                       |
+| Codex app-server        | `codex_interrupt`, `codex_steer`, `codex_fork`, `codex_rollback`, `codex_models`, `codex_thread_list`                                                                 |
+| Claude specifics        | `claude_goal_set`, `claude_goal_status`, `claude_goal_clear`, `claude_agents_list`, `plugin_details`                                                                  |
+| Fan-out                 | `fanout_start`, `fanout_status`, `fanout_abort`                                                                                                                       |
+| Workflow & verification | `workflow_start`, `workflow_status`, `workflow_list`, `workflow_resume`, `workflow_cancel`, `workflow_steer`, `workflow_approve`, `verify_run`                        |
+| Ultraapp                | `ultraapp_*` (14 tools) — see [`ultraapp.md`](./ultraapp.md)                                                                                                          |
+| Agent teams             | `team_list`, `team_send`                                                                                                                                              |
+| Maintenance             | `project_purge`                                                                                                                                                       |
 
 Full per-tool parameter documentation lives in [`tools.md`](./tools.md).
 
@@ -47,7 +52,7 @@ Install once:
 
 ```bash
 npm install -g @enderfga/claw-orchestrator
-# `clawo-mcp` is on PATH; the OpenClaw `clawo` CLI is also installed
+# `clawo-mcp` is on PATH; the `clawo` CLI is also installed
 ```
 
 When invoked, `clawo-mcp`:
@@ -214,22 +219,22 @@ Check your host's MCP docs for the exact key names (`command`/`cmd`, `env`/`envs
 
 Hosts deliberately do not forward your full shell environment to MCP subprocesses. Pass every variable your engines need explicitly under the host's `env` block.
 
-| Variable                               | Used by                                                                    |
-| -------------------------------------- | -------------------------------------------------------------------------- |
-| `ANTHROPIC_API_KEY`                    | Claude Code engine                                                         |
-| `OPENAI_API_KEY`                       | Codex engine                                                               |
-| `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) | Gemini engine                                                              |
-| `GATEWAY_URL`, `GATEWAY_KEY`           | Routing through an OpenClaw / Anthropic-style gateway                      |
-| `CLAWO_MCP_TOOLS`                      | Comma-separated allowlist of tool names; unlisted tools are not advertised |
-| `CLAWO_NO_EMBEDDED_SERVER`             | Suppresses port 18796 binding. `clawo-mcp` sets this automatically         |
+| Variable                     | Used by                                                                    |
+| ---------------------------- | -------------------------------------------------------------------------- |
+| `ANTHROPIC_API_KEY`          | Claude Code engine                                                         |
+| `OPENAI_API_KEY`             | Codex engine                                                               |
+| `GEMINI_API_KEY`             | Multi-model proxy (Gemini models)                                          |
+| `GATEWAY_URL`, `GATEWAY_KEY` | Routing through an OpenClaw / Anthropic-style gateway                      |
+| `CLAWO_MCP_TOOLS`            | Comma-separated allowlist of tool names; unlisted tools are not advertised |
+| `CLAWO_NO_EMBEDDED_SERVER`   | Suppresses port 18796 binding. `clawo-mcp` sets this automatically         |
 
-The engines themselves (`claude`, `codex`, `gemini`, `agy`, `agent`, `opencode`) must also be installed and authenticated on the host machine — `clawo-mcp` spawns them as subprocesses, it does not bundle them.
+The engines themselves (`claude`, `codex`, `agy`, `grok`, `opencode`) must also be installed and authenticated on the host machine — `clawo-mcp` spawns them as subprocesses, it does not bundle them.
 
 ---
 
 ## Tool filtering
 
-55 tools is a lot for a small context window. Reduce noise either at the host level (most hosts have an `include` / `exclude` filter — see Hermes example above) or at the server level via `CLAWO_MCP_TOOLS`:
+78 tools is a lot for a small context window. Reduce noise either at the host level (most hosts have an `include` / `exclude` filter — see Hermes example above) or at the server level via `CLAWO_MCP_TOOLS`:
 
 ```bash
 CLAWO_MCP_TOOLS="session_start,session_send,session_stop,council_start,council_status" clawo-mcp
@@ -272,7 +277,7 @@ For "let the model commission an ultrareview before merging":
 
 **Engine starts but fails with `command not found`**
 
-- The underlying coding CLI (`claude`, `codex`, `gemini`, etc.) is not on PATH in the host's subprocess environment. Either install globally or set `claudeBin` / `codexBin` etc. via `customEngine.bin` per session, or pass an explicit `PATH` in the host's `env` block.
+- The underlying coding CLI (`claude`, `codex`, `agy`, etc.) is not on PATH in the host's subprocess environment. Either install globally, pass an explicit `PATH` in the host's `env` block, or point at the binary with `CLAUDE_BIN` / `CODEX_BIN` / `AGY_BIN` / `GROK_BIN` / `OPENCODE_BIN`.
 
 **`401` / `auth` errors from a session**
 
