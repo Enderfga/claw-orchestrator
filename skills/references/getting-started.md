@@ -7,7 +7,7 @@
 ```bash
 npm install -g @enderfga/claw-orchestrator
 
-# Start the embedded server
+# Start the embedded server (keeps running; use a second terminal for the commands below)
 clawo serve
 
 # Drive sessions from the command line
@@ -32,7 +32,7 @@ Agents automatically get access to all session, council, and management tools.
 ```typescript
 import { SessionManager } from '@enderfga/claw-orchestrator';
 
-const manager = new SessionManager({ defaultModel: 'claude-sonnet-4-6' });
+const manager = new SessionManager({ defaultModel: 'claude-sonnet-5' });
 
 const session = await manager.startSession({
   name: 'backend-fix',
@@ -53,6 +53,8 @@ await manager.stopSession('backend-fix');
 - **OpenClaw >= 2026.3.0** — for plugin mode (optional)
 - **OpenAI Codex CLI >= 0.112** — `npm install -g @openai/codex` (optional, for codex engine)
 - **Antigravity CLI** — `curl -fsSL https://antigravity.google/cli/install.sh | bash` (optional, for the `agy` engine — Google's successor to the sunset Gemini CLI)
+- **Grok Build CLI** — optional, for the `grok` engine
+- **OpenCode CLI** — `npm install -g opencode-ai` (optional, for the `opencode` engine)
 
 ### Engine Authentication
 
@@ -61,18 +63,20 @@ Each engine requires its own authentication before use:
 - **Claude Code** — run `claude /login` or set `ANTHROPIC_API_KEY`
 - **Codex** — run `codex login` or set `OPENAI_API_KEY`
 - **Antigravity** — run `agy` once and complete the Google OAuth login
+- **Grok** — run `grok` once and sign in (grok.com account or `XAI_API_KEY`)
+- **OpenCode** — run `opencode auth login`, or set a provider key such as `ANTHROPIC_API_KEY`
 
 The plugin does not manage authentication — it expects each CLI to be ready to run.
 
 ### Embedded Server Authentication
 
-The embedded HTTP server (used by CLI and standalone mode) optionally supports bearer token authentication:
+Authentication on the embedded HTTP server (used by the CLI and standalone mode) is on by default:
 
-| Variable                | Purpose                                                                                                       |
-| ----------------------- | ------------------------------------------------------------------------------------------------------------- |
-| `OPENCLAW_SERVER_TOKEN` | Set to enable bearer token auth. All requests (except `/health`) must include `Authorization: Bearer <token>` |
+| Variable                | Purpose                                                                                                                       |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `OPENCLAW_SERVER_TOKEN` | Unset: a random token is generated. Set to a value: use that token. Set to `disabled`: turn auth off (single-user hosts only) |
 
-When set, the token is also written to `~/.openclaw/server-token` for the CLI to read automatically. Default: no auth (localhost binding is the primary security boundary).
+On start the server writes the token to `~/.openclaw/server-token` (mode 0600) and reuses it across restarts; the CLI reads it automatically. Every request except `/health` must carry it as `Authorization: Bearer <token>` or the `clawo_auth` cookie. Browsers sign in once via `/login?token=<token>&redirect=/dashboard`, which sets the cookie.
 
 ### OpenAI-Compatible Endpoint
 
@@ -83,11 +87,11 @@ The server exposes an OpenAI-compatible API at `/v1/chat/completions`. It serves
 
 Quick config for any client:
 
-| Setting      | Value                                                                            |
-| ------------ | -------------------------------------------------------------------------------- |
-| API Base URL | `http://127.0.0.1:18796/v1`                                                      |
-| API Key      | The value of `OPENCLAW_SERVER_TOKEN`, or any string if auth is disabled          |
-| Model        | `claude-fable-5`, `claude-opus-5`, `claude-sonnet-5`, `gpt-5.5`, `agy-pro`, etc. |
+| Setting      | Value                                                                                 |
+| ------------ | ------------------------------------------------------------------------------------- |
+| API Base URL | `http://127.0.0.1:18796/v1`                                                           |
+| API Key      | The server token (from `~/.openclaw/server-token`), or any string if auth is disabled |
+| Model        | `claude-fable-5-1`, `claude-opus-5-5`, `claude-sonnet-5`, `gpt-5.5`, `agy-pro`, etc.  |
 
 See [openai-compat.md](./openai-compat.md) for the full session-keying rules, `X-Session-Reset` semantics, the legacy-heuristic env var, and the `/v1/sessions` inspection endpoint.
 
@@ -124,8 +128,10 @@ In `~/.openclaw/openclaw.json`:
 
 - [Sessions](./sessions.md) — persistent session lifecycle and management
 - [Session Inbox](./inbox.md) — cross-session messaging
-- [Multi-Engine](./multi-engine.md) — using Claude Code and Codex side by side
+- [Multi-Engine](./multi-engine.md) — one interface over Claude Code, Codex, Antigravity, Grok Build, OpenCode and custom CLIs
 - [Council](./council.md) — multi-agent collaboration with consensus voting
 - [Ultraplan & Ultrareview](./ultra.md) — deep planning and fleet code review
-- [Tools Reference](./tools.md) — complete tool API reference (27 tools)
+- [Tools Reference](./tools.md) — complete tool API reference (78 tools)
 - [CLI Reference](./cli.md) — command-line interface
+- [MCP Server](./mcp.md) — expose the tools to any MCP host
+- [ACP Agent](./acp.md) — run the orchestrator as an Agent Client Protocol agent

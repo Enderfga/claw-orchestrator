@@ -17,7 +17,7 @@ SessionManager
 ├── engine: 'grok'      → PersistentGrokSession
 │   └── Wraps: grok -p --output-format json (xAI Grok Build, per-message spawning)
 ├── engine: 'cursor'    → PersistentCursorSession (legacy)
-│   └── Wraps: agent -p --force --trust --output-format stream-json (per-message spawning)
+│   └── Wraps: cursor-agent -p --trust --output-format stream-json (per-message spawning)
 ├── engine: 'opencode'  → PersistentOpencodeSession
 │   └── Wraps: opencode run --format json (per-message spawning)
 └── engine: 'custom'    → PersistentCustomSession
@@ -28,33 +28,28 @@ SessionManager
 
 ### Claude Code (`engine: 'claude'`)
 
-Default engine. Long-running subprocess with streaming JSON I/O. Tested with Claude Code CLI **2.1.207**.
+Default engine. Long-running subprocess with streaming JSON I/O. Tested with Claude Code CLI **2.1.280**.
 
 - Persistent multi-turn conversations
 - Real-time streaming (text, tool_use, tool_result, system events)
 - Session resume via `--resume`
 - Full cost tracking from API usage data
-- Cross-session peer messaging (`crossSessionInbound`): sets this session's policy for messages sent from other Claude Code sessions on the same machine — `accept` delivers straight in, `hold` waits for a human to approve it in that session's terminal, `refuse` rejects it. There is no CLI flag for this; it is a settings key, delivered through the `--settings` merge. Worth setting explicitly for orchestrated sessions: with no value the CLI decides from the two sides' permission modes and holds when they differ, and an orchestrated session (`bypassPermissions` / `acceptEdits`) versus a human terminal (prompting) is exactly that case — so the message parks waiting for approval in a terminal nobody is watching. Sessions started by the orchestrator do register as addressable peers and do receive messages (verified against 2.1.232 by sending to a live one and getting a reply). Note that a user-level `~/.claude/settings.json` value may take precedence over the per-session one; only the `accept` path has been confirmed end-to-end here.
+- Cross-session peer messaging (`crossSessionInbound`): this session's policy for messages from
+  other Claude Code sessions on the same machine — `accept` delivers them, `hold` waits for approval
+  in that session's terminal, `refuse` rejects them. It is a settings key, passed through
+  `--settings`. Set it explicitly on orchestrated sessions: when it is unset, the CLI holds messages
+  whenever the two sides' permission modes differ, so a message can wait for approval in a terminal
+  nobody is watching. A user-level `~/.claude/settings.json` value may take precedence over the
+  per-session one.
 - Hook lifecycle events (`includeHookEvents`), subagent output forwarding (`forwardSubagentText`), permission delegation (`permissionPromptTool`), prompt cache optimization (`bare` + `excludeDynamicSystemPromptSections` + `enablePromptCaching1H`), debug control, `--from-pr` resume, and MCP channel subscriptions
-- `--permission-prompts none` is passed whenever no `permissionPromptTool` is configured (CLI
-  2.1.259+). This spawn shape has no TTY and, without a prompt tool, no host to answer a permission
-  prompt — so before this a tool call the permission mode did not already decide sat waiting for an
-  answer that could never come, until the turn timeout. `none` denies it instead; the model sees the
-  denial and can adapt, and the permission mode still decides everything else. With a prompt tool
-  configured the CLI's default (`host`) is left in place so the tool is asked
-- `restricted` → `--restricted` (CLI 2.1.249+): removes the command- and code-running tools and
-  `WebFetch` from the session, and ignores user/project/local settings files. Not folded into
-  `sandboxMode: 'read-only'`, which maps to plan mode — measured against 2.1.251, plan mode alone
-  refused a direct write, a shell write and a delegated subagent write, so this is defence in depth
-  rather than a fix, and switching it on implicitly would silently drop the caller's CLAUDE.md
-- Fork subagent (`forkSubagent`), tool search (`enableToolSearch`), OpenTelemetry logging toggles (`otelLogUserPrompts`, `otelLogRawApiBodies`), `xhigh` effort tier (Opus 4.7), and `stats.pluginErrors` capture — see [CLI 2.1.121 options in SKILL.md](../SKILL.md) and [tools.md](./tools.md)
-
-> **Behavior changes from upstream Claude CLI 2.1.121** (worth knowing if you set permission rules):
->
-> - `--agent` / `--print` now enforce agent frontmatter `permissionMode`, `tools`, `disallowedTools` (was advisory). Affects `council` agent personas.
-> - `Bash(find:*)` permission rule no longer auto-approves `find -exec` or `find -delete`. Add explicit rules if you depend on these.
-> - `--dangerously-skip-permissions` also skips prompts for `.claude/skills/` directory. Treat with care.
-> - Distributed tracing context (`TRACEPARENT` / `TRACESTATE`) is automatically forwarded to the child process — set them in the parent before starting the session.
+- `--permission-prompts none` is passed whenever no `permissionPromptTool` is configured. The
+  session has no TTY and no prompt tool, so a tool call the permission mode does not already decide
+  is denied (the model sees the denial and can adapt) instead of waiting until the turn timeout.
+  With a prompt tool configured, the CLI's default (`host`) is kept so the tool is asked
+- `restricted` → `--restricted`: removes the command- and code-running tools and `WebFetch` from
+  the session, and ignores user/project/local settings files (including CLAUDE.md). It is separate
+  from `sandboxMode: 'read-only'`, which maps to plan mode
+- Fork subagent (`forkSubagent`), tool search (`enableToolSearch`), OpenTelemetry logging toggles (`otelLogUserPrompts`, `otelLogRawApiBodies`), the `xhigh` effort tier, and `stats.pluginErrors` capture — see [SKILL.md](../SKILL.md#claude-engine-options) and [tools.md](./tools.md)
 
 ```typescript
 await manager.startSession({
@@ -67,26 +62,23 @@ await manager.startSession({
 
 ### OpenAI Codex (`engine: 'codex'`)
 
-Wraps the `codex exec` subcommand. Each `send()` spawns a new process. Tested with `codex` CLI **0.147.0**.
+Wraps the `codex exec` subcommand. Each `send()` spawns a new process. Tested with `codex` CLI **0.156.1**.
 
-- Non-interactive execution via `codex exec --sandbox workspace-write --json` (replaces the deprecated `--full-auto` flag from earlier Codex versions)
-- Real `usage` from the `turn.completed` JSON event (input, output, cached, reasoning tokens). **These are cumulative over the thread, not per turn** — three identical turns on 0.147.0 report `input_tokens` 13,856 → 27,727 → 41,613, each matching `total_token_usage` in that thread's rollout exactly. They are assigned to the session totals, never added; subtracting consecutive values recovers the turn's own prompt
-- `contextPercent` is that per-turn prompt (which, for a thread-resuming engine, is the live context occupancy) over **codex's own limit**, harvested from the thread's rollout file (`model_context_window`, 258,400 on 0.147.0). The model registry holds the published window — 1,050,000 for gpt-5.x — which codex does not honour, so measuring against it reads ~4x low. Resuming a thread also seeds the token baseline from the rollout, so the first send does not mistake the whole thread history for one prompt. All of this is best-effort: an unreadable or `--ephemeral` thread falls back to the registry window
+- Non-interactive execution via `codex exec --sandbox workspace-write --skip-git-repo-check --json`
+- Real `usage` from the `turn.completed` JSON event (input, output, cached, reasoning tokens). **These are cumulative over the thread, not per turn**, so they replace the session totals rather than being added to them; subtracting consecutive values gives one turn's prompt
+- `contextPercent` is the per-turn prompt measured against **codex's own context limit** (`model_context_window`, read from the thread's rollout file), not the model's published window in the registry. Resuming a thread also seeds the token baseline from the rollout, so the first send does not count the whole thread history as one prompt. This is best-effort: an unreadable or `--ephemeral` thread falls back to the registry window
 - `item.completed` parsing distinguishes `reasoning` / `todo_list` (logged, not counted) from real tool items (`command_execution`, `file_change`, `mcp_tool_call`, `web_search`, which increment `toolCalls`; a non-zero `command_execution.exit_code` increments `toolErrors`)
-- Reasoning effort: the engine-agnostic `effort` maps to `-c model_reasoning_effort=<level>` and passes straight through. Codex 0.149's ladder runs `low|medium|high|xhigh|max|ultra` — it is the only engine here that reaches `ultra`, and all three top levels were exercised against 0.149.1. `auto` and `ultracode` are omitted. Note `-c` values are not validated at spawn: codex prints `reasoning effort: <whatever>` and sends it, so an unknown level fails at the API rather than at the command line
-- `noSessionPersistence` → `--ephemeral` (accepted by `exec` and `exec resume`); `ignoreUserConfig` → `--ignore-user-config`, which stops `$CODEX_HOME/config.toml` from deciding an orchestrated run's model behind the caller's back (auth still resolves from `CODEX_HOME`); `addDir` → `--add-dir` on the first turn only, since `exec resume` rejects it and the resumed thread keeps the roots it opened with
-- `codexProfile` → `--profile <name>` (named config profile from `~/.codex/config.toml`)
-- `--worktree` (0.154.0, behind `--enable worktrees`) is deliberately not wired. Measured: the turn's
-  edits land in `~/.codex/worktrees/<hash>/<repo>` on a detached HEAD, not in the session's `cwd`, and
-  the JSON stream never reports that path except inside individual `file_change` items. Everything
-  here that checks work — acceptance contracts, evidence diffs, the baseline change set — reads the
-  session's `cwd`, so passing the flag would have them verify an untouched tree and report on it.
-  Council's own per-agent git worktrees cover the isolation use case with paths the orchestrator owns
+- Reasoning effort: the engine-agnostic `effort` maps to `-c model_reasoning_effort=<level>` for `low|medium|high|xhigh|max|ultra`; `auto` and `ultracode` pass nothing. `-c` values are not validated at spawn, so an unknown level fails at the API rather than at the command line
+- `appendSystemPrompt`: codex has no system-prompt flag, so it is placed at the top of the first message of each new conversation (a resumed thread already carries it)
+- `jsonSchema` → `--output-schema <file>` (written to a temp file, accepted by `exec` and `exec resume`)
+- `noSessionPersistence` → `--ephemeral` (accepted by `exec` and `exec resume`); `ignoreUserConfig` → `--ignore-user-config`, which stops `$CODEX_HOME/config.toml` from choosing the model for an orchestrated run (auth still resolves from `CODEX_HOME`); `addDir` → `--add-dir` on the first turn only, since `exec resume` rejects it and the resumed thread keeps the roots it opened with
+- `codexProfile` → `--profile <name>` (named config profile from `~/.codex/config.toml`), first turn only
+- `--worktree` is not passed. With it, codex writes the turn's edits to `~/.codex/worktrees/<hash>/<repo>` instead of the session's `cwd`, while acceptance contracts, evidence diffs and the baseline change set all read the session's `cwd`. Council's per-agent git worktrees cover the isolation use case
 - Per-session continuity: the `thread_id` from the first turn's `thread.started` event is captured and reused via `codex exec resume <id>` for subsequent sends, so the model sees prior turns
-- `sandboxMode` maps to `--sandbox <mode>` on the first turn. **A resumed thread does not inherit it**, and `codex exec resume` rejects `--sandbox`, so the policy is restated as `-c sandbox_mode="<mode>"` on every resume. Without that, a `read-only` session goes writable from its second turn onward — verified against 0.146.0, where such a session wrote to disk on turn 2 on every attempt. Re-probed on 0.147.0 (direct write, shell redirect and delegate-to-subagent, each on a resumed turn): no writes
+- `sandboxMode` maps to `--sandbox <mode>` on the first turn. A resumed thread does not keep it, and `codex exec resume` rejects `--sandbox`, so the policy is restated as `-c sandbox_mode="<mode>"` on every resumed turn
 - One-shot execution per message (no persistent subprocess between sends)
 - Captures the real Codex thread ID and persists it, so later sends and process-level session resume use `codex exec resume <thread_id>`
-- Working directory passed via `-C` flag
+- Working directory passed via `-C` on the first turn
 - Default model: `gpt-5.5`
 - Requires `codex` CLI >= 0.119 (for `exec resume`): `npm install -g @openai/codex`
 - **Does not support `/goal`** — for that, use `engine: 'codex-app'` below
@@ -108,13 +100,14 @@ Wraps `codex app-server --listen stdio:// --enable goals` as a long-running JSON
 - Long-running subprocess; one `codex app-server` per session
 - JSON-RPC 2.0 over stdio with v2 protocol method names (`initialize`, `thread/start`, `turn/start`, ...)
 - Real-time streaming via `item/agentMessage/delta` notifications
-- Cumulative token tracking from `thread/tokenUsage/updated` notifications. The same notification's `last` breakdown and `modelContextWindow` drive `contextPercent`, so it reports live occupancy against the window the server actually enforces (258,400 on 0.147.0) rather than a running total over the model's published window
+- Cumulative token tracking from `thread/tokenUsage/updated` notifications. The same notification's `last` breakdown and `modelContextWindow` drive `contextPercent`, so it reports live occupancy against the window the server enforces rather than a running total over the model's published window
+- `appendSystemPrompt` is placed at the top of the first message of a new thread (app-server has no system-prompt flag); a resumed thread already carries it
 - Goal lifecycle observation via `thread/goal/updated` and `thread/goal/cleared` notifications
 - Goal control via the `codex_goal_*` tools (which internally send the `/goal` slash command as user text — see [tools.md](./tools.md#codex-13))
 - v2 RPC tools (Codex 0.137): `codex_interrupt` (`turn/interrupt`), `codex_steer` (`turn/steer`), `codex_fork` (`thread/fork`), `codex_rollback` (`thread/rollback`), `codex_models` (`model/list`), `codex_thread_list` (`thread/list`). A `turn/completed` with `status: 'failed'` rejects the turn and increments `toolErrors`.
 - Thread resume: starting with `resumeSessionId` loads the existing thread via `thread/resume` instead of `thread/start`.
 
-> **Feature-flag risk.** The `goals` feature is marked "under development" in Codex 0.128.0 and has known bugs (e.g. issue #20591). The session class always passes `--enable goals` so it works the moment upstream stabilizes the feature, but during the transition period some goal commands may fail or be silently dropped on the server side. The wrapper layer is unaffected.
+> **Feature flag.** `goals` is an experimental Codex feature. The session always passes `--enable goals`; some goal commands may still fail or be ignored by the server.
 
 ```typescript
 await manager.startSession({
@@ -133,7 +126,7 @@ await manager.startSession({
 
 Wraps Google's **Antigravity CLI** (`agy`) — the successor to Gemini CLI (consumer
 Gemini CLI tiers stopped serving 2026-06-18). Each `send()` spawns a new process
-in print mode. Adapter behavior is covered through `agy` **1.2.2**.
+in print mode. Tested with `agy` **1.2.8**.
 
 - One-shot execution per message (no persistent subprocess)
 - **Structured output and real usage** — `--output-format stream-json` emits an
@@ -145,21 +138,18 @@ in print mode. Adapter behavior is covered through `agy` **1.2.2**.
   scrape remains as a fallback for turns that die before emitting `init`. Seed it
   externally via `resumeSessionId` (bare UUID only); read it back from
   `getStats().agyConversationId`.
-- **Empty responses fail adapter-wide and remain recoverable**: an exit-0 result
-  with a missing, blank, or whitespace-only response rejects instead of becoming
-  a successful empty reply, whether the caller is Autoloop, MCP, HTTP, or the
-  library API. agy 1.1.26 may do this after plan mode soft-denies a tool
-  confirmation. The adapter clears the per-session log before each spawn and
-  recognizes only the narrow current-turn `tool_confirmation_manager` marker,
-  returning a fixed sanitized diagnosis without exposing native log content. A
-  conversation id already emitted by `init` is retained for the caller's next
-  send; the failed turn is not retried automatically. On agy 1.2.2 the same
-  denial can accompany `status: SUCCESS` and a non-empty reply; the refused tool
-  names are emitted as `permission_denials`, which SessionManager exposes as
-  `SendResult.permissionDenials` without discarding the reply.
+- **Empty responses fail**: an exit-0 result with a missing or blank response
+  is treated as a failed turn, not a successful empty reply, and is not retried.
+  A conversation id already received from `init` is kept for the next send. When
+  the failure follows a tool confirmation refused in plan mode, the error says so
+  (a fixed message; native log content is not exposed).
+- **Refused tools**: when agy refuses tools but still replies, the refused tool
+  names are exposed as `SendResult.permissionDenials` alongside the reply.
+- `appendSystemPrompt`: agy has no system-prompt flag, so it is placed at the top
+  of the first message of each new conversation.
 - **Reasoning effort**: session `effort` and per-turn `session_send` overrides map
   to `--effort`. agy accepts `low`, `medium`, and `high`; everything above that
-  (`xhigh`, `max`, `ultra`) clamps to `high`. agy 1.1.25 requires an effort with unsuffixed base
+  (`xhigh`, `max`, `ultra`) clamps to `high`. agy requires an effort with unsuffixed base
   slugs such as `gemini-3.7-flash`, so `auto` resolves those to `high`; a model
   already ending in `-low`, `-medium`, or `-high` keeps that qualified effort.
   Per-turn overrides also work with qualified slugs: the adapter removes a
@@ -173,14 +163,15 @@ in print mode. Adapter behavior is covered through `agy` **1.2.2**.
   did not ask for; run `agy models` to see the tiers a slug actually exposes.
 
 - Permission modes: `bypassPermissions` → `--dangerously-skip-permissions`,
-  `default` → `--sandbox` (terminal-restricted), and
+  `default` and `manual` → `--sandbox` (terminal-restricted), and
   `sandboxMode: 'read-only'` → `--mode plan` (takes precedence). Other modes
   run agy's own approval flow, which can block in headless print mode. A caller
   must explicitly choose `bypassPermissions` for a write-enabled session; it is
   not a recovery mechanism. In particular, an Autoloop Planner stays on
   `--mode plan` when its preserved conversation is resumed.
-- agy enforces its own print timeout (default 5m); the engine derives
-  `--print-timeout` from the send timeout so the wrapper timer decides
+- The engine always passes `--print-timeout` (the send timeout plus 5s), so the
+  wrapper's timer decides when a turn ends; without it a stuck headless agy turn
+  can run indefinitely
 - Do not rely on an unknown `--model` falling back: current agy versions can
   report `status: ERROR` with no usable response. The adapter rejects result
   errors, non-success statuses, and empty responses. `agy-flash` and the engine
@@ -216,49 +207,35 @@ await manager.startSession({
 ### Grok Build (`engine: 'grok'`)
 
 Wraps xAI's **Grok Build** CLI. Each `send()` spawns `grok -p <msg> --output-format json`, which
-prints a single JSON object and exits. Verified against `grok` **1.0.5**.
+prints a single JSON object and exits. Tested with `grok` **1.0.41**.
 
-- **Cost comes from the engine, not from our price table.** The result object carries
-  `total_cost_usd`, and the wrapper writes it straight into the session's spend. Every other engine
-  here multiplies tokens by a rate in `models.ts` — the metadata most prone to going stale — so on
-  this engine the run ledger and the `maxBudgetUsd` gate both read what xAI actually charged.
-  `grok-4.6` is still registered, for its context window and an indicative breakdown; its two price
-  tiers ($2/$0.50/$6 under a 200K prompt, $4/$1/$12 at or above, charged across the whole request)
-  therefore never have to be modelled here.
+- **Cost comes from the engine, not from the price table.** The result object carries
+  `total_cost_usd`, and the wrapper writes it straight into the session's spend, so the run ledger
+  and the `maxBudgetUsd` gate both read what xAI charged. Other engines multiply tokens by a rate in
+  `models.ts`. `grok-4.6` is still registered, for its context window and an indicative breakdown.
 - **Real conversation continuity**: the `sessionId` from turn 1 is replayed as `--resume <id>`.
-  `--continue` is deliberately not used — it means "the most recent session for this cwd", which
-  collides between concurrent sessions. Confirmed with a two-turn recall test, not inferred.
+  `--continue` is not used — it means "the most recent session for this cwd", which collides
+  between concurrent sessions.
 - Real token counts from `usage` (`input_tokens`, `output_tokens`, `cache_read_input_tokens`).
-  These are **per-turn**, not cumulative over the thread — checked by resuming and reading turn 2,
-  because the same-looking field on codex is a running total.
+  These are **per-turn**, unlike codex, where the same field is cumulative.
 - Permission modes pass straight through: grok's `--permission-mode` takes the same vocabulary we
   use. The one exception is our `manual`, which grok spells `default`.
-- Reasoning effort maps to `--effort`; grok 1.0.13 accepts `low|medium|high|xhigh` (it names the set in
-  its own rejection message), so only `max` and `ultra` clamp — to `xhigh`.
-- Session options that reach grok since 1.0.13: `appendSystemPrompt` → `--rules` (appends, unlike
+- Reasoning effort maps to `--effort`; grok accepts `low|medium|high|xhigh`, so `max` and `ultra`
+  clamp to `xhigh`.
+- Session options that reach grok: `appendSystemPrompt` → `--rules` (appends, unlike
   `systemPrompt` → `--system-prompt-override`, which replaces), `allowedTools` → `--tools`,
   `disallowedTools` → `--disallowed-tools`, `jsonSchema` → `--json-schema` (inline, and it implies the
   JSON output format already asked for), `agent` → `--agent`, `agents` → `--agents`,
   `dangerouslySkipPermissions` → `--always-approve`, `customSessionId` → `--session-id`, `forkSession`
   → `--fork-session`. **grok validates neither tool list**: a name that does not exist is ignored
   rather than rejected, so a typo in a denylist leaves the tool enabled. Prefer an allowlist.
-- `-p` is now the short form of `--single`, not `--print`. The short form is what this wrapper passes,
-  so the 1.0.5 → 1.0.13 rename is invisible here; a call written against the long name is not.
-- **`sandboxMode: 'read-only'` is refused, not approximated — and against 1.0.13 that is measured.**
-  The obvious construction is a `--tools` allowlist of read-only built-ins plus `--permission-mode
-plan`. It refuses a direct write and a shell write, then loses to the third prompt in the matrix:
-  asked to delegate, the session spawns a subagent and the file appears. The subagent does not
-  inherit the parent's tool restriction — the same load-bearing hole found in OpenCode, where
-  denying the write tools without denying `task` left the delegation path open. grok also ships
-  `--no-subagents`, the obvious next probe, deliberately not wired: the run that would have
-  confirmed it hit the account's free-tier limit, and a probe that fails for lack of quota writes no
-  file either. A read-only grok session throws rather than running writable under a read-only label.
-- **On a spent free tier, `grok -p` can hang silently instead of erroring.** Earlier in the same
-  session it printed a usage-limit message to stderr and exited 1; later invocations produced nothing
-  on either stream and never exited — in any directory, with or without `--no-leader`. The session's
-  turn timeout is what ends such a turn, so a caller on that tier pays the full timeout before seeing
-  a failure. Nothing in this wrapper can distinguish that hang from a slow turn; check `grok -p` by
-  hand when a grok session times out with no output.
+- **`sandboxMode: 'read-only'` is refused.** A read-only `--tools` allowlist plus
+  `--permission-mode plan` does not stop a delegated subagent from writing, because the subagent
+  does not inherit the parent's tool restriction. A read-only grok session therefore throws at start instead of running
+  writable.
+- **On an exhausted free tier, `grok -p` may hang with no output instead of exiting with an error.**
+  The session's turn timeout is then the only thing that ends the turn. If a grok turn times out with
+  no output, run `grok -p` by hand to check your quota.
 - Binary: `grok` (set `GROK_BIN` to override). Not `agent`: xAI's installer claims that name too,
   and so did Cursor's.
 - Requires Grok Build: see `x.ai/cli`.
@@ -278,20 +255,21 @@ await manager.startSession({
 > The `cursor` engine still exists and still works — existing callers are not broken — but it is
 > no longer a documented option, is not version-tracked, and gets no new work.
 >
-> Note what this is and is not: Cursor itself is **not** discontinued. Anysphere was acquired by
-> SpaceX (closed 2026-08-15) and folded into the SpaceXAI team, and the CLI has shipped since. Two
-> practical things pushed it out of the tracked set. Cursor never reports which model actually ran
-> — its `system` init event says `"model": "Auto"` — so a router that spans Claude, GPT and Grok
-> leaves every cost row attributed to a hardcoded proxy rate. And xAI's Grok installer now claims
-> the bare `agent` name, so the binary that name resolves to depends on install order.
+> Cursor itself is still maintained. It left the tracked set because it does not report which
+> model ran (its `system` init event says `"model": "Auto"`), so costs cannot be attributed to a
+> model, and because xAI's Grok installer also claims the bare `agent` binary name.
 
-Wraps the Cursor Agent CLI with `--print --output-format stream-json`. Write-enabled sessions use `--force`. Each `send()` spawns a new process.
+Wraps the Cursor Agent CLI with `-p --output-format stream-json`. Write-enabled sessions use `--force`. Each `send()` spawns a new process.
 
 - Conversation continuity: the chat id from the first turn's `system` event is captured and passed back as `--resume <chatId>` on later sends, so the model sees prior turns. `--continue` is deliberately not used: it resumes "the latest chat", which collides between concurrent sessions.
 - One-shot execution per message (no persistent subprocess)
 - Working directory via `--workspace` flag
 - Real token counts from stream-json `result` events (camelCase: `inputTokens`, `outputTokens`, `cacheReadTokens`)
-- `--force` enables auto-approval of file changes. `sandboxMode: 'read-only'` does **not** use `--force`; it enforces read-only via a binding `.cursor/cli.json` deny config (`Write`/`Edit`/`Shell` denied) written into an isolated temp dir used as the process cwd, with `--workspace` pointing at the real project (the repo tree is never modified). `--mode plan` is passed too as model steering, but the deny config is the actual boundary — plan mode alone is model-cooperative and was verified to let an adversarial prompt write. Do not add `--sandbox` (it does not restrict in-workspace writes and overrides the mode). Read/grep/search remain available
+- `--force` enables auto-approval of file changes. `sandboxMode: 'read-only'` does **not** use `--force`:
+  - read-only is enforced by a `.cursor/cli.json` deny config (`Write`/`Edit`/`Shell` denied), written into an isolated temp dir used as the process cwd, with `--workspace` pointing at the real project (the repo tree is never modified)
+  - `--mode plan` is passed as well, but it only steers the model; the deny config is the boundary
+  - `--sandbox` is not added, since it does not restrict in-workspace writes and overrides the mode
+  - read/grep/search remain available
 - `--trust` auto-trusts the workspace without prompting
 - Cursor uses its own model routing (e.g., `sonnet-4`, `gpt-5`, `auto`)
 - Requires Cursor Agent CLI: `curl https://cursor.com/install -fsSL | bash`
@@ -314,27 +292,22 @@ await manager.startSession({
 bundled in `configs/engines/`. The preset form exists so a third-party CLI is
 described once and shipped, rather than retyped by every caller.
 
-Presets are **community** entries, and the tier line is verification rather than
-code quality:
+Engines fall into three tiers, decided by how they are verified. Bundled presets
+are always `community`:
 
-| Tier          | Maintainer  | What this project claims                                                                          |
+| Tier          | Maintainer  | What is verified                                                                                    |
 | ------------- | ----------- | --------------------------------------------------------------------------------------------------- |
-| **core**      | Maintainers | Wrapped here, exercised live weekly, pinned to a version someone here ran                          |
+| **core**      | Maintainers | Wrapped in code, exercised live weekly, pinned to a tested version                                  |
 | **community** | Contributor | The schema is validated and the preset ships. Whether it runs is the maintainer's dated attestation |
-| **legacy**    | —           | Still wired, no longer tracked                                                                     |
+| **legacy**    | —           | Still wired, no longer tracked                                                                      |
 
-Core requires that a maintainer can obtain and run the binary, because that tier
-promises the weekly live turn. Most CLIs worth supporting are behind credentials
-this project does not hold — a bar nobody can clear would keep the community tier
-permanently empty, and an empty tier looks the same as never having done the work.
-So the bar is an attributable, dated, falsifiable claim: `provenance.maintainer`,
-`provenance.verifiedAgainst` (the engine version), `provenance.verifiedOn`, and a
-link to the captured smoke transcript.
+A community preset must name its maintainer and the engine version and date it
+was verified against (`provenance.maintainer`, `provenance.verifiedAgainst`,
+`provenance.verifiedOn`), with a link to the captured smoke-test transcript.
 
 A preset never carries protocol translation. A CLI speaking its own wire format
 needs an adapter binary in its author's package, with the preset pointing `bin`
-at it — the split `@enderfga/dsh-clawo` already uses. That is what makes a preset
-something this project can ship without owning a protocol it cannot test.
+at it — as `@enderfga/dsh-clawo` does.
 
 Over HTTP — which includes the `clawo` CLI — a custom engine may be given **only**
 as a preset id. An inline config names a binary and its arguments and is refused
@@ -355,11 +328,17 @@ Wraps the [sst/opencode](https://github.com/sst/opencode) CLI with `run --format
 - NDJSON event stream with envelope `{ type, timestamp, sessionID, ... }`
 - Event types: `text`, `reasoning`, `tool_use`, `step_start`, `step_finish`, `error`
 - `text` and `tool_use` are **cumulative snapshots** keyed by `part.id` / `part.callID`; the wrapper diffs them to produce streaming deltas for `onText` callbacks and counts each tool invocation once
-- Real token counts from `step_finish.part.tokens.{input,output,cache.{read,write}}`. **`input` is the uncached remainder only** — opencode's own `total` is `input + output + cache.read + cache.write` — so the cached part is billed on top of it, not carved out of it, and `contextPercent` is measured against the whole input side. On a resumed turn the remainder is tiny next to the cached part (58 against 26,240), which is what makes the distinction matter
+- Real token counts from `step_finish.part.tokens.{input,output,cache.{read,write}}`. **`input` is the uncached remainder only** — opencode's own `total` is `input + output + cache.read + cache.write` — so the cached part is billed on top of it, not carved out of it, and `contextPercent` is measured against the whole input side. On a resumed turn the uncached remainder is usually a small fraction of the cached part
 - Reasoning effort maps to `--variant`, opencode's provider-specific effort knob. opencode does not validate the value: a level the provider does not offer runs the turn at its default rather than failing
+- `appendSystemPrompt`: opencode has no system-prompt flag, so it is placed at the top of the first message of each new conversation
 - The wrapper closes the subprocess's stdin immediately after spawn (opencode otherwise reads stdin and blocks on EOF, hanging the call)
 - Provider-agnostic: opencode's `--model` expects `provider/model` form (e.g. `anthropic/claude-sonnet-4`). The wrapper passes `--model` through only when the value contains a `/`; otherwise opencode's own default applies
-- `sandboxMode: 'read-only'` spawns a generated `clawo-readonly` agent (`--agent clawo-readonly` plus an `OPENCODE_CONFIG_CONTENT` env var defining it) that denies `edit` / `bash` / `external_directory` / `webfetch` / **`task`** at the permission level and additionally removes those tools outright via the agent's `tools` map. It deliberately does **not** use OpenCode's built-in `plan` agent: that is a user-overridable preset whose compiled rules start with `{"permission":"*","action":"allow"}` and deny neither `bash` nor `edit`, so a "read-only" session could still author files through a shell heredoc. **`task` is the load-bearing denial**: denying only the write tools leaves the delegation path open, and the agent will hand the write to a subagent that runs under the default writable agent — asked to delegate, a session denied only `edit`/`bash`/`external_directory` wrote to disk on every attempt. Verify this config only with adversarial writes, and include prompts that ask the agent to delegate; `opencode agent list` renders compiled permission rules that look identical for a safe and an unsafe agent, and a probe that only asks for a direct write passes even when the delegation path is wide open
+- `sandboxMode: 'read-only'` runs a generated `clawo-readonly` agent (`--agent clawo-readonly` plus an `OPENCODE_CONFIG_CONTENT` env var defining it):
+  - it denies `edit`, `bash`, `external_directory`, `webfetch` and `task` at the permission level, and also removes those tools via the agent's `tools` map
+  - denying `task` matters: otherwise the agent can hand a write to a subagent that runs under the default writable agent
+  - OpenCode's built-in `plan` agent is not used, because it permits both `bash` and `edit`
+  - if the `clawo-readonly` agent fails to load, the turn is refused rather than run with write access
+  - to test a change to this config, use adversarial prompts that include asking the agent to delegate; `opencode agent list` shows compiled rules that look the same for a safe and an unsafe agent
 - Requires opencode installed: `brew install sst/tap/opencode` or `npm install -g opencode-ai`. Auth via `opencode auth login` **or** any provider env var (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, etc.) — opencode picks up either path
 - Binary: `opencode` (set `OPENCODE_BIN` env var to override)
 
@@ -422,12 +401,14 @@ is not the answer on every engine. See "Stats & Monitoring" in `sessions.md`.
 
 Team tools (`team_list`, `team_send`) operate on the same virtual-team layer for **every** engine: the "team" is the set of all active sessions managed by SessionManager.
 
-| Engine      | `team_list`                                | `team_send`                    |
-| ----------- | ------------------------------------------ | ------------------------------ |
-| Claude      | Lists other active SessionManager sessions | Routes via cross-session inbox |
-| Codex       | Lists other active SessionManager sessions | Routes via cross-session inbox |
-| Antigravity | Lists other active SessionManager sessions | Routes via cross-session inbox |
-| Cursor      | Lists other active SessionManager sessions | Routes via cross-session inbox |
+| Engine              | `team_list`                                | `team_send`                    |
+| ------------------- | ------------------------------------------ | ------------------------------ |
+| Claude              | Lists other active SessionManager sessions | Routes via cross-session inbox |
+| Codex / `codex-app` | Lists other active SessionManager sessions | Routes via cross-session inbox |
+| Antigravity         | Lists other active SessionManager sessions | Routes via cross-session inbox |
+| Grok                | Lists other active SessionManager sessions | Routes via cross-session inbox |
+| OpenCode            | Lists other active SessionManager sessions | Routes via cross-session inbox |
+| Custom              | Lists other active SessionManager sessions | Routes via cross-session inbox |
 
 Messages are delivered via the inbox system — idle sessions receive immediately, busy sessions queue for later delivery.
 
@@ -591,37 +572,7 @@ await manager.startSession({
 
 ### Example: Google Antigravity CLI (`agy`)
 
-> **Note:** `agy` now has first-class support — use [`engine: 'agy'`](#google-antigravity-engine-agy)
-> instead, which adds conversation resume and timeout coherence the recipe below
-> lacks. This recipe remains as a reference for driving older agy builds or
-> forks with a diverged flag surface:
-
-```typescript
-await manager.startSession({
-  name: 'antigravity-task',
-  engine: 'custom',
-  cwd: '/project',
-  dangerouslySkipPermissions: true,
-  customEngine: {
-    name: 'antigravity',
-    bin: 'agy', // install: curl -fsSL https://antigravity.google/cli/install.sh | bash
-    binEnv: 'AGY_BIN',
-    persistent: false,
-    args: {
-      print: '-p', // single-prompt headless mode
-      skipPermissions: '--dangerously-skip-permissions',
-      workspace: '--add-dir',
-      // NOTE: agy 1.0.2 has NO --output-format flag — output is plain text only.
-      // Omitting outputFormat makes the wrapper parse plain text and *estimate*
-      // tokens (no real usage / tool-call events). Watch for a JSON output mode.
-    },
-  },
-});
-```
-
-Caveats with `agy` 1.0.2: (1) no structured/stream-json output → token counts are
-estimated, not real; (2) requires a one-time `agy` Google OAuth login; (3) resume
-by conversation ID isn't wired (no JSON stream to capture the ID from).
+Use the built-in [`engine: 'agy'`](#google-antigravity-engine-agy) instead of a custom config.
 
 ### Custom Engine in Council
 
@@ -649,9 +600,10 @@ manager.councilStart('Build feature X', {
 To add a built-in engine (for CLIs that need custom protocol handling beyond what `CustomEngineConfig` supports):
 
 1. Create `src/persistent-<engine>-session.ts` implementing `ISession`
-2. Add the engine name to `EngineType` in `src/types.ts`
-3. Add a case to `SessionManager._createSession()`
-4. Add model pricing to `MODELS[]` in `src/models.ts`
+2. Add the engine name to `ENGINE_TYPES` (from which `EngineType` is derived) and its binary to `ENGINE_BINARY_NAMES` in `src/types.ts`
+3. Add a case to `engineHasNativeConversation()` in `src/types.ts` and, if the engine resumes a conversation by id, to `nativeThreadIsLive()` in `src/openai-compat.ts`
+4. Add a case to `SessionManager._createSession()`
+5. Add model pricing to `MODELS[]` in `src/models.ts`
 
 The `ISession` interface is deliberately minimal — each engine handles its own subprocess bootstrapping, I/O protocol, and cleanup internally.
 

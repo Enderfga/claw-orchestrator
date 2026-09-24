@@ -162,7 +162,7 @@ const plugin = {
   id: 'claw-orchestrator',
   name: 'Claw Orchestrator',
   description:
-    'Run Claude Code, Codex, Gemini, Cursor Agent and custom coding CLIs as one unified runtime — persistent sessions, multi-agent council, worktree isolation, multi-model proxy',
+    'Run Claude Code, Codex, Antigravity, Grok Build, OpenCode and custom coding CLIs as one unified runtime — persistent sessions, multi-agent council, worktree isolation, multi-model proxy',
 
   register(api: PluginAPI): void {
     const rawConfig = (api.pluginConfig || {}) as Partial<PluginConfig>;
@@ -255,7 +255,7 @@ const plugin = {
     registerTool({
       name: 'session_start',
       description:
-        'Start a persistent coding session. Supports multiple engines: claude (default) for Claude Code CLI, codex for OpenAI Codex CLI, gemini for Google Gemini CLI, agy for Google Antigravity CLI, cursor for Cursor Agent CLI, opencode for sst/opencode CLI, or custom for any user-configured coding agent CLI.',
+        'Start a persistent coding session. Engines: claude (default) for the Claude Code CLI, codex for the OpenAI Codex CLI, agy for the Google Antigravity CLI, grok for the xAI Grok Build CLI, opencode for the sst/opencode CLI, or custom for any user-configured coding agent CLI.',
       parameters: {
         type: 'object',
         properties: {
@@ -267,7 +267,7 @@ const plugin = {
             description:
               'Engine to use (default: claude). codex = `codex exec` per send (no /goal). codex-app = long-running `codex app-server` with /goal support. agy = Google Antigravity CLI (Gemini CLI successor; plain-text output, tokens estimated, conversation resume handled automatically). opencode = sst/opencode CLI (provider-agnostic; pass model as `provider/model`). Use "custom" with customEngine config for any CLI.',
           },
-          model: { type: 'string', description: 'Model to use (opus, sonnet, haiku, gemini-pro, o4-mini, etc.)' },
+          model: { type: 'string', description: 'Model to use (opus, sonnet, haiku, gpt-5.5, agy-pro, etc.)' },
           permissionMode: {
             type: 'string',
             enum: ['acceptEdits', 'bypassPermissions', 'default', 'manual', 'dontAsk', 'plan', 'auto'],
@@ -319,6 +319,16 @@ const plugin = {
             type: 'string',
             description:
               'Codex engine only. Named config profile from ~/.codex/config.toml, passed as `codex exec --profile`. Reasoning effort is mapped from the engine-agnostic `effort` param to `-c model_reasoning_effort` automatically.',
+          },
+          ignoreUserConfig: {
+            type: 'boolean',
+            description:
+              "Codex engine only. Run without loading $CODEX_HOME/config.toml (`codex exec --ignore-user-config`), so the session is decided by what the caller passed rather than by the machine's own Codex config. Auth still resolves from CODEX_HOME.",
+          },
+          restricted: {
+            type: 'boolean',
+            description:
+              'Claude engine only. Restricted mode (`--restricted`): removes the tools that run commands or code (Bash, PowerShell, the REPL) and WebFetch unless `tools` names them, and ignores user, project and local settings files, including CLAUDE.md and hooks. Separate from sandboxMode read-only, which maps to plan mode.',
           },
           noSessionPersistence: { type: 'boolean', description: 'Do not save session to disk' },
           betas: { type: ['string', 'array'], items: { type: 'string' }, description: 'Custom beta headers' },
@@ -717,7 +727,7 @@ const plugin = {
         type: 'object',
         properties: {
           name: { type: 'string', description: 'Session name' },
-          model: { type: 'string', description: 'New model (opus, sonnet, haiku, gemini-pro, etc.)' },
+          model: { type: 'string', description: 'New model (opus, sonnet, haiku, gpt-5.5, agy-pro, etc.)' },
         },
         required: ['name', 'model'],
       },
@@ -1640,7 +1650,7 @@ const plugin = {
           },
           maxRounds: { type: 'number', description: 'Max collaboration rounds (default 15)' },
           agentTimeoutMs: { type: 'number', description: 'Per-agent timeout in ms (default 1800000)' },
-          maxTurnsPerAgent: { type: 'number', description: 'Max tool turns per agent per round (default 30)' },
+          maxTurnsPerAgent: { type: 'number', description: 'Max tool turns per agent per round (default 50)' },
           maxBudgetUsd: { type: 'number', description: 'Max API spend per agent (USD)' },
           defaultPermissionMode: {
             type: 'string',
@@ -1895,7 +1905,7 @@ const plugin = {
     registerTool({
       name: 'ultrareview_start',
       description:
-        'Start an Ultrareview: a fleet of bug-hunting agents (5-20) that review your codebase from different angles in parallel. Each agent specializes in a different area (security, performance, logic, types, etc.). Runs in background.',
+        'Start an Ultrareview: 1-20 read-only reviewer agents (default 5) that review your codebase in parallel, each from a different angle (security, performance, logic, types, etc.), merged into one report by a read-only synthesis pass. Runs in background.',
       parameters: {
         type: 'object',
         properties: {
@@ -1906,12 +1916,12 @@ const plugin = {
           focus: { type: 'string', description: 'Review focus area (default: bugs + security + quality)' },
           engines: {
             type: 'array',
-            // 'custom' is deliberately excluded: ultrareview spawns reviewer
-            // sessions without a customEngine config, so a custom reviewer
-            // would fail at session start.
-            items: { type: 'string', enum: ENGINE_TYPES.filter((e) => e !== 'custom') },
+            // Excluded: 'custom', because ultrareview spawns reviewers without a
+            // customEngine config; and 'grok', because reviewers run read-only
+            // and grok refuses a read-only session rather than approximate one.
+            items: { type: 'string', enum: ENGINE_TYPES.filter((e) => e !== 'custom' && e !== 'grok') },
             description:
-              'Engines to round-robin reviewers across (default ["claude"]). Reviewers fan out in parallel; per-agent failures are isolated.',
+              'Engines to round-robin reviewers across (default ["claude"]). Every reviewer runs read-only (sandboxMode read-only), so grok and custom are not accepted. Reviewers fan out in parallel; per-agent failures are isolated.',
           },
         },
         required: ['cwd'],

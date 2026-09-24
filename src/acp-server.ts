@@ -179,6 +179,7 @@ const ENGINE_LABELS: Record<string, string> = {
   codex: 'Codex',
   'codex-app': 'Codex (app-server)',
   agy: 'Antigravity',
+  grok: 'Grok Build',
   cursor: 'Cursor',
   opencode: 'OpenCode',
   custom: 'Custom',
@@ -187,22 +188,23 @@ const ENGINE_LABELS: Record<string, string> = {
 /**
  * Engines kept out of the picker.
  *
- * `gemini` still works for callers that already name it, but the Gemini CLI is
- * sunset and superseded by Antigravity, so offering it in a new user-facing
- * selector would be advertising a dead end.
+ * `gemini` and `cursor` still work for callers that already name them, but both
+ * are legacy engines — the Gemini CLI is sunset and superseded by Antigravity,
+ * and Cursor was superseded in this lineup by Grok Build — so offering them in
+ * a new user-facing selector would be advertising a dead end.
  *
  * `opencode` is absent for a different reason: its models are open-ended
  * `provider/model` strings passed straight through, so there is nothing in the
  * registry to enumerate. An opencode session is reachable by naming the model
  * at session start, just not by picking it from this list.
  */
-const HIDDEN_ENGINES = new Set<string>(['gemini']);
+const HIDDEN_ENGINES = new Set<string>(['gemini', 'cursor']);
 
 /**
  * The cross-engine model selector, grouped by engine.
  *
  * This is the cheapest thing that is impossible for a single-engine ACP agent:
- * one dropdown in the editor holding Claude, GPT, Composer and OpenCode models
+ * one dropdown in the editor holding Claude, GPT, Antigravity and Grok models
  * at once. The values come from the shared registry in `models.ts`, so a model
  * added there shows up here with no extra wiring.
  */

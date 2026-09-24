@@ -1,6 +1,6 @@
 # Session Inbox
 
-Cross-session messaging allows different sessions to communicate with each other. Inspired by Claude Code's UDS Inbox feature.
+Cross-session messaging allows different sessions to communicate with each other.
 
 ## How It Works
 
@@ -21,7 +21,9 @@ Session A (planner)          SessionManager           Session B (coder)
 - **Idle sessions** receive messages immediately as a new user turn
 - **Busy sessions** have messages queued in an inbox (max 200 messages)
 - Messages are wrapped in `<cross-session-message>` XML tags
-- Supports broadcast to all sessions via `to: "*"`
+- Supports broadcast to all sessions via `to: "*"`; a broadcast skips the sender
+- Sender and target must be existing sessions, otherwise the call fails
+- Returns `{ delivered, queued }`
 
 ## Usage
 
@@ -72,10 +74,10 @@ The auth module needs rate limiting. Please add a token bucket...
 </cross-session-message>
 ```
 
-Attributes are properly escaped to prevent XML injection.
+Attribute values are XML-escaped, and any `cross-session-message` tag inside the body is escaped, so a sender cannot forge a second envelope.
 
 ## Inbox Limits
 
 - **Max size**: 200 messages per session
 - **Eviction**: oldest read messages dropped first, then oldest unread
-- **No TTL**: messages persist until read or evicted (in-memory only, not persisted to disk)
+- **No TTL**: messages, read or unread, stay in memory until evicted or the process exits. They are not persisted to disk.

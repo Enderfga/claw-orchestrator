@@ -5,14 +5,14 @@ The CLI is an HTTP client that talks to the Claw Orchestrator embedded server. I
 ## Server
 
 ```bash
-clawo serve [-p, --port <port>]
+clawo serve [-p, --port <port>] [-H, --host <host>] [--ultraapp-runtime host|docker]
 ```
 
-Start standalone embedded server (default port 18796). Set `CLAWO_API_URL` to override the base URL.
+Start standalone embedded server (default port 18796, bound to `127.0.0.1`; pass `-H 0.0.0.0` for remote access). `--ultraapp-runtime` selects how ultraapp builds run: `host` (default, spawns Node directly) or `docker`. CLI commands reach the server at `CLAWO_API_URL` (default `http://127.0.0.1:18796`).
 
 ### Rate Limiting
 
-The embedded server enforces a sliding-window rate limit of 100 requests per minute per IP address. Requests exceeding the limit receive HTTP 429 (Too Many Requests). This prevents accidental runaway scripts from overwhelming the server.
+The embedded server limits each IP address to 300 requests per minute (sliding window; override with `OPENCLAW_RATE_LIMIT`). Requests over the limit receive HTTP 429 (Too Many Requests).
 
 ### OpenAI-Compatible API
 
@@ -29,7 +29,7 @@ The server exposes an OpenAI-compatible chat completions endpoint, enabling any 
 
 ```json
 {
-  "model": "claude-sonnet-4-6",
+  "model": "sonnet",
   "messages": [{ "role": "user", "content": "Hello!" }],
   "stream": true
 }
@@ -39,20 +39,30 @@ The server exposes an OpenAI-compatible chat completions endpoint, enabling any 
 
 1. `X-Session-Id` header
 2. `user` field in the request body
-3. Default singleton session
+3. A hash of the model, system prompt and tool definitions (`sys-<hash>`)
+4. `default`, when all of those are empty
 
 **Model routing:** The `model` field auto-routes to the correct engine:
 
 - `claude-*`, `opus`, `sonnet`, `haiku` → Claude engine
-- `gpt-*` → Codex engine
-- `grok-*` → Grok engine
-- `composer-*` → Cursor engine (legacy)
-- `gemini-3.5-flash`, `gemini-3.1-pro`, `agy-*`, `agy/*` → Antigravity (`agy`) engine
-- other `gemini-*` → the legacy `gemini` engine (Gemini CLI is sunset; prefer `agy`)
+- `gpt-*`, `o3*`, `o4*`, `codex*` → Codex engine
+- `grok*` → Grok engine
+- `composer*`, `cursor*`, `auto` → Cursor engine (legacy)
+- `agy/*`, the `agy-flash` / `agy-pro` aliases, and the registered Antigravity models (e.g. `gemini-3.8-flash`, `gemini-3.1-pro`) → Antigravity (`agy`) engine
+- other `gemini*` → the legacy `gemini` engine (Gemini CLI is sunset; prefer `agy`)
+- anything else → Claude engine
 
 **CORS:** `/v1/` paths allow cross-origin requests by default. Set `OPENCLAW_CORS_ORIGINS=*` to allow all origins on all paths.
 
 **Auto-compact:** When a session's context utilization exceeds 80%, the endpoint automatically compacts the session before sending the next message.
+
+## ACP agent
+
+```bash
+clawo acp
+```
+
+Run as an Agent Client Protocol agent over stdio (same as the `clawo-acp` binary). See [acp.md](./acp.md).
 
 ## Session Management
 
@@ -62,38 +72,37 @@ The server exposes an OpenAI-compatible chat completions endpoint, enabling any 
 clawo session-start [name] [options]
 ```
 
-| Flag                                             | Description                                                                                        |
-| ------------------------------------------------ | -------------------------------------------------------------------------------------------------- |
-| `-d, --cwd <dir>`                                | Working directory                                                                                  |
-| `-e, --engine <engine>`                          | Engine: `claude` (default), `codex`, `codex-app`, `agy`, `grok`, `opencode`, or `custom`           |
-| `-m, --model <model>`                            | Model name or alias                                                                                |
-| `--permission-mode <mode>`                       | `acceptEdits`, `plan`, `auto`, `bypassPermissions`, `manual`, `dontAsk`                            |
-| `--effort <level>`                               | `low`, `medium`, `high`, `max`, `auto`                                                             |
-| `--allowed-tools <tools>`                        | Comma-separated tool whitelist                                                                     |
-| `--max-turns <n>`                                | Max agent loop turns                                                                               |
-| `--max-budget <usd>`                             | API cost ceiling                                                                                   |
-| `--system-prompt <text>`                         | Replace system prompt                                                                              |
-| `--append-system-prompt <text>`                  | Append to system prompt                                                                            |
-| `--agents <json>`                                | Custom sub-agents JSON                                                                             |
-| `--agent <name>`                                 | Default agent                                                                                      |
-| `--bare`                                         | No CLAUDE.md, no git context                                                                       |
-| `-w, --worktree [name]`                          | Git worktree                                                                                       |
-| `--fallback-model <model>`                       | Fallback model                                                                                     |
-| `--json-schema <schema>`                         | JSON Schema for structured output                                                                  |
-| `--mcp-config <paths>`                           | MCP config files (comma-separated)                                                                 |
-| `--settings <path>`                              | Settings.json path                                                                                 |
-| `--skip-persistence`                             | Do not save the session — neither the engine's transcript nor the resume registry                  |
-| `--betas <headers>`                              | Beta headers (comma-separated)                                                                     |
-| `--enable-agent-teams`                           | Enable agent teams                                                                                 |
-| `--include-hook-events`                          | Stream hook lifecycle events (PreToolUse/PostToolUse)                                              |
-| `--permission-prompt-tool <tool>`                | Delegate permission prompts to an MCP tool (non-interactive use)                                   |
-| `--exclude-dynamic-system-prompt-sections`       | Move cwd/env/git context to user message for better prompt cache hits (auto-enabled with `--bare`) |
-| `--debug <categories>`                           | Enable targeted debug output by category (e.g. `"api,mcp"`)                                        |
-| `--debug-file <path>`                            | Write debug output to file                                                                         |
-| `--from-pr <n>`                                  | Resume a session linked to a GitHub PR number or URL                                               |
-| `--channels <spec>`                              | MCP channel subscription (research preview)                                                        |
-| `--dangerously-load-development-channels <spec>` | Development MCP channel subscriptions (research preview)                                           |
-| `ENABLE_PROMPT_CACHING_1H=1` (env var)           | Enable 1-hour prompt cache TTL (auto-set with `--bare`)                                            |
+| Flag                            | Description                                                                                 |
+| ------------------------------- | ------------------------------------------------------------------------------------------- |
+| `-d, --cwd <dir>`               | Working directory                                                                           |
+| `-e, --engine <engine>`         | Engine: `claude` (default), `codex`, `codex-app`, `agy`, `grok`, `opencode`, or `custom`    |
+| `-m, --model <model>`           | Model name or alias                                                                         |
+| `--permission-mode <mode>`      | `acceptEdits` (default), `plan`, `auto`, `bypassPermissions`, `manual`, `dontAsk`           |
+| `--effort <level>`              | `low`, `medium`, `high`, `xhigh`, `max`, `ultra`, `auto`                                    |
+| `--allowed-tools <tools>`       | Comma-separated tool whitelist                                                              |
+| `--disallowed-tools <tools>`    | Comma-separated tools to deny                                                               |
+| `--max-turns <n>`               | Max agent loop turns                                                                        |
+| `--max-budget <usd>`            | API cost ceiling                                                                            |
+| `--system-prompt <text>`        | Replace system prompt                                                                       |
+| `--append-system-prompt <text>` | Append to system prompt                                                                     |
+| `--agents <json>`               | Custom sub-agents JSON                                                                      |
+| `--agent <name>`                | Default agent                                                                               |
+| `--bare`                        | No CLAUDE.md, no git context                                                                |
+| `-w, --worktree [name]`         | Git worktree                                                                                |
+| `--fallback-model <model>`      | Fallback model                                                                              |
+| `--json-schema <schema>`        | JSON Schema for structured output                                                           |
+| `--mcp-config <paths>`          | MCP config files (comma-separated)                                                          |
+| `--settings <pathOrJson>`       | Settings.json path or inline JSON                                                           |
+| `--skip-persistence`            | Do not save the session — neither the engine's transcript nor the resume registry           |
+| `--betas <headers>`             | Beta headers (comma-separated)                                                              |
+| `--enable-agent-teams`          | Enable agent teams                                                                          |
+| `--enable-auto-mode`            | Enable auto permission mode                                                                 |
+| `--resume-session-id <id>`      | Resume an existing session by ID                                                            |
+| `--base-url <url>`              | Custom API endpoint (for proxy)                                                             |
+| `--add-dir <dirs>`              | Comma-separated additional working directories                                              |
+| `--custom-engine <preset>`      | With `-e custom`: the id of a bundled engine preset (see [`clawo engines`](#clawo-engines)) |
+
+The remaining `session_start` options (hook events, permission-prompt tool, debug output, `fromPr`, MCP channels, prompt-cache settings and others) are tool parameters only and have no CLI flag. See [Tools Reference](./tools.md#session_start).
 
 ### session-send
 
@@ -141,15 +150,17 @@ clawo session-compact <name> [--summary <text>]
 ## Run Ledger
 
 ```bash
-clawo runs [--since <window>] [-n, --limit <n>] [--session <name>] [--engine <engine>] [--parent <id>] [--json]
+clawo runs [-s, --since <window>] [-n, --limit <n>] [--session <name>] [--engine <engine>] [--parent <id>] [--verified | --refuted] [--json]
 ```
 
 Show the durable per-turn record kept at `~/.claw-orchestrator/runs/`. Unlike
 `session-status`, this survives restarts and covers sessions this process never
 owned. `--since` takes `30m` / `24h` / `7d` / `2w` or an ISO timestamp (default
-`24h`); `--parent` filters to one council / fanout / autoloop run. Costs marked
-with a trailing `~` came from estimated token counts. See
-[observability.md](observability.md).
+`24h`); `--parent` filters to one council / fanout / autoloop / workflow run;
+`--verified` / `--refuted` keep only turns whose acceptance contract passed /
+failed. Costs marked with a trailing `~` came from estimated token counts. The
+`VERIFIED` column reads `yes`, `NO`, or `—` ("no contract was declared, so
+nothing checked it"). See [observability.md](observability.md).
 
 ## Agent Management
 
@@ -179,30 +190,13 @@ clawo session-team-list <name>
 clawo session-team-send <name> <teammate> <message>
 ```
 
-## SDK-Only Tools (No CLI Wrapper)
+## Tools Without a CLI Command
 
-The following tools are available through the OpenClaw plugin SDK and TypeScript API but do not have CLI commands. Use the SDK directly or call them via OpenClaw's tool system.
+Tools without a CLI command are reachable through the OpenClaw plugin, the MCP
+server (`clawo-mcp`, see [mcp.md](./mcp.md)), or the `SessionManager` API. See
+[Tools Reference](./tools.md) for full parameter documentation.
 
-| Tool                    | Description                                       |
-| ----------------------- | ------------------------------------------------- |
-| `sessions_overview`     | Aggregate dashboard of all active sessions        |
-| `session_update_tools`  | Hot-swap allowed/disallowed tools via `--resume`  |
-| `session_switch_model`  | Switch model mid-session via `--resume`           |
-| `council_start`         | Start multi-agent council with worktree isolation |
-| `council_status`        | Poll council progress and agent responses         |
-| `council_abort`         | Abort a running council                           |
-| `council_inject`        | Inject a message into the next council round      |
-| `session_send_to`       | Cross-session messaging (immediate or queued)     |
-| `session_inbox`         | Read inbox messages for a session                 |
-| `session_deliver_inbox` | Deliver queued messages to an idle session        |
-| `ultraplan_start`       | Start background Opus planning session            |
-| `ultraplan_status`      | Poll ultraplan progress                           |
-| `ultrareview_start`     | Start fleet of parallel reviewer agents           |
-| `ultrareview_status`    | Poll ultrareview findings                         |
-
-See [Tools Reference](./tools.md) for full parameter documentation.
-
-## `clawo workflow` (6.0.0)
+## `clawo workflow`
 
 ```bash
 clawo workflow list [--state <s>] [--workflow <name>] [--limit N] [--json]
@@ -229,17 +223,6 @@ clawo verify <runId> [--evidence <id>] [--json]
 Prints the evidence bundle: per-check pass/fail with the failing command and its
 output tail, the base and head commits, and the files the run changed (created
 files included).
-
-## `clawo runs` additions
-
-```bash
-clawo runs --verified     # only turns whose acceptance contract passed
-clawo runs --refuted      # only turns whose acceptance contract failed
-```
-
-The table gains a `VERIFIED` column with three values: `yes`, `NO`, and `—` for
-"no contract was declared, so nothing checked it". See
-[`observability.md`](./observability.md).
 
 ## `clawo engines`
 

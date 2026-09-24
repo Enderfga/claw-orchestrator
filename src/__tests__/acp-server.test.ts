@@ -57,18 +57,29 @@ describe('buildModelConfigOption', () => {
     const engines = opt.options.map((g) => g.group);
     expect(engines).toContain('claude');
     expect(engines).toContain('codex');
-    expect(engines).toContain('cursor');
+    expect(engines).toContain('agy');
+    expect(engines).toContain('grok');
     // Every group must be non-empty, or the client renders an empty header.
     for (const group of opt.options) expect(group.options.length).toBeGreaterThan(0);
   });
 
-  // The Gemini CLI is sunset and kept only for callers that already name it.
-  // Listing it in a new picker would advertise a dead end.
-  it('omits the retired gemini engine', () => {
+  // Gemini and Cursor are legacy engines, kept only for callers that already
+  // name them. Listing them in a new picker would advertise a dead end.
+  it('omits the legacy gemini and cursor engines', () => {
     const opt = buildModelConfigOption('claude-sonnet-4-6') as unknown as {
       options: Array<{ group: string }>;
     };
-    expect(opt.options.map((g) => g.group)).not.toContain('gemini');
+    const engines = opt.options.map((g) => g.group);
+    expect(engines).not.toContain('gemini');
+    expect(engines).not.toContain('cursor');
+  });
+
+  it('names every group it shows, rather than falling back to the raw engine id', () => {
+    const opt = buildModelConfigOption('claude-sonnet-4-6') as unknown as {
+      options: Array<{ group: string; name: string }>;
+    };
+    for (const group of opt.options) expect(group.name, group.group).not.toBe(group.group);
+    expect(opt.options.find((g) => g.group === 'grok')?.name).toBe('Grok Build');
   });
 });
 

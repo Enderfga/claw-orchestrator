@@ -18,7 +18,7 @@ Runs in background — poll with `ultraplan_status`.
 ### Usage
 
 ```typescript
-const plan = manager.ultraplanStart('Add OAuth2 support with Google and GitHub providers', {
+const plan = await manager.ultraplanStart('Add OAuth2 support with Google and GitHub providers', {
   cwd: '/path/to/project',
   model: 'opus', // default
   timeout: 1800000, // 30 min default
@@ -48,20 +48,20 @@ if (status?.status === 'completed') {
 | `cwd`     | `process.cwd()`       | Project directory to explore |
 | `timeout` | 1,800,000 ms (30 min) | Maximum planning time        |
 
-Results remain queryable for 30 minutes after completion.
+Results are stored as a durable run and remain queryable after a restart.
 
 ---
 
 ## Ultrareview
 
-A fleet of specialized bug-hunting agents that review your codebase in parallel, each from a different angle. Built on top of the [Council](./council.md) system.
+A set of specialized reviewer agents that review your codebase in parallel, each from a different angle. Built on the fan-out primitive (see `fanout_start` in [tools.md](./tools.md)).
 
 ### How It Works
 
-1. Creates a council with N reviewer agents (5-20)
-2. Each agent specializes in a different review angle
-3. Agents run in parallel via git worktree isolation
-4. Findings from all agents are synthesized into a single report
+1. Starts a fan-out of N reviewer agents (1-20, default 5)
+2. Each agent reviews from a different angle in the project directory, read-only on every engine (`sandboxMode: 'read-only'`, and plan mode on Claude), so no reviewer can change the code it is reviewing
+3. Agents run in parallel; one failing reviewer does not stop the others
+4. A read-only synthesis pass merges all findings into one report
 
 ### Available Review Angles (20)
 
@@ -91,14 +91,14 @@ A fleet of specialized bug-hunting agents that review your codebase in parallel,
 ### Usage
 
 ```typescript
-const review = manager.ultrareviewStart('/path/to/project', {
+const review = await manager.ultrareviewStart('/path/to/project', {
   agentCount: 10, // use 10 of the 20 angles
   maxDurationMinutes: 15, // 15 min timeout per agent
   model: 'sonnet', // model for all reviewers
   focus: 'Find security and performance bugs',
 });
 
-console.log(`Review ID: ${review.id}, Council: ${review.councilId}`);
+console.log(`Review ID: ${review.id}`);
 
 // Poll for completion
 const status = manager.ultrareviewStatus(review.id);
@@ -116,11 +116,12 @@ if (status?.status === 'completed') {
 
 ### Configuration
 
-| Parameter            | Default                   | Range | Description               |
-| -------------------- | ------------------------- | ----- | ------------------------- |
-| `agentCount`         | 5                         | 1-20  | Number of reviewer agents |
-| `maxDurationMinutes` | 10                        | 5-25  | Per-agent timeout         |
-| `model`              | session default           | —     | Model for all reviewers   |
-| `focus`              | bugs + security + quality | —     | Review focus description  |
+| Parameter            | Default                   | Range | Description                                                                     |
+| -------------------- | ------------------------- | ----- | ------------------------------------------------------------------------------- |
+| `agentCount`         | 5                         | 1-20  | Number of reviewer agents                                                       |
+| `maxDurationMinutes` | 10                        | 5-25  | Per-agent timeout                                                               |
+| `model`              | session default           | —     | Model for all reviewers                                                         |
+| `focus`              | bugs + security + quality | —     | Review focus description                                                        |
+| `engines`            | `['claude']`              | —     | Engines assigned to reviewers round-robin. Not `grok`, which refuses a read-only session, or `custom` |
 
-The council runs with `maxRounds: 2` — one round to find bugs, one to cross-review. Results remain queryable for 30 minutes.
+Reviewers run once each (up to 20 turns); there is no cross-review round. Results are stored as a durable run and remain queryable after a restart.

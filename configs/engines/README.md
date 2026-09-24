@@ -7,18 +7,19 @@ retyping the configuration. The filename must match the preset's `id`.
 These are **community** entries. This project validates their schema and ships
 them; it does not claim they work. What stands behind a preset is its
 `provenance` block: a named maintainer, the engine version they ran it against,
-and the date. See `src/engine-presets.ts` for why the bar is an attributable
-claim rather than a run by a maintainer here — most of these CLIs are gated
-behind credentials this project does not hold, and a bar nobody can clear leaves
-the directory permanently empty.
+and the date. The bar is an attributable claim rather than a run by a maintainer
+here because most of these CLIs are gated behind credentials this project does
+not hold; see
+[`src/engine-presets.ts`](https://github.com/Enderfga/claw-orchestrator/blob/main/src/engine-presets.ts).
 
 A preset never contains protocol translation. If the CLI speaks its own wire
 format rather than something `CustomEngineConfig` can already describe, the
 adapter belongs in your own package as a binary, and the preset points `bin` at
-it. `@enderfga/dsh-clawo` is that shape.
+it. The `@enderfga/dsh-clawo` package, an adapter for DeepSeek's `dsh` CLI, is
+an example.
 
 Contribution steps, the smoke script, and the full field reference are in
-[CONTRIBUTING.md](../../CONTRIBUTING.md#contributing-an-engine).
+[CONTRIBUTING.md](https://github.com/Enderfga/claw-orchestrator/blob/main/CONTRIBUTING.md#contributing-an-engine).
 
 ## Shape
 

@@ -80,7 +80,7 @@ promises a weekly live exercise and a tested version pin. Most interesting CLIs
 are gated behind credentials this project does not hold, which is what the
 community tier is for.
 
-### Which shape is yours?
+### Preset shapes
 
 **A — preset only.** Your CLI already speaks something `CustomEngineConfig` can
 describe: a print/non-interactive flag, text or JSON on stdout, optionally a
@@ -98,13 +98,15 @@ Do not open a PR that puts protocol translation for an untestable engine into
 ### The smoke record
 
 A preset is accepted on a falsifiable claim, so `provenance` must carry one.
-Run this against your engine and link the captured output:
-
-Drop your preset into `configs/engines/` in a checkout, build, and run:
+Drop your preset into `configs/engines/` in a checkout
+(`configs/engines/zcode.json` is a working example; `configs/engines/README.md`
+shows the full shape), build, and run:
 
 ```bash
 # 0. your preset has to be loadable before it can be smoked
-npm run build && clawo engines          # your id should be listed
+npm run build && npm link              # put this checkout's clawo on PATH
+clawo engines                          # your id should be listed
+clawo serve &                          # the server from this checkout
 
 # 1. two turns, to prove the session actually carries context
 clawo session-start preset-smoke -e custom --custom-engine <your-preset-id>
@@ -120,33 +122,29 @@ Smoke the **preset**, not an inline config. They are not the same evidence: a
 preset additionally has to load from disk, match its filename, and resolve by
 id, and those are the parts a preset can get wrong.
 
-A preset id is the only form of custom engine the CLI can pass, and that is on
-purpose. `clawo` reaches the session through the HTTP control plane, which
-refuses an inline `customEngine` object because such an object names an
-executable and its arguments — only a local caller (the MCP tool, or the
-`SessionManager` API in-process) may configure one of those. A preset id carries
-neither a binary nor argv; it selects one of the descriptions this package
-ships, which is the same class as naming a built-in engine. If you need to
-iterate on a draft before it is a file, use the MCP `session_start` tool with an
-inline `customEngine` — that path is local and accepts one.
+The CLI accepts only a preset id, not an inline `customEngine` config (the HTTP
+control plane refuses configs that name an executable). To iterate on a draft
+before it is a file, pass an inline `customEngine` to the MCP `session_start`
+tool or `SessionManager.startSession`.
 
 Paste both into a gist and put its URL in `provenance.smokeUrl`, the engine
 version in `provenance.verifiedAgainst`, and the date in `provenance.verifiedOn`.
 
-Nobody here will reproduce that run — that is the honest position, not a
-loophole. It is dated, attributed and checkable by anyone who does hold the
-credentials, which is what makes it worth more than an assurance.
+Maintainers do not re-run community smoke tests. The record is dated and
+attributed so that anyone with the credentials can check it.
 
 ### What CI checks
 
 Schema only, because schema is all that can be checked without your engine's
-credentials: id shape and filename match, tier, a complete provenance block with
-an ISO date, and an `engine` block with a non-absolute `bin`. A preset that
+credentials: id shape and filename match, tier, a provenance block with
+`maintainer`, `verifiedAgainst` and an ISO `verifiedOn` date (`smokeUrl` is
+expected in review but not enforced by CI), and an `engine` block with a
+non-absolute `bin`. A preset that
 passes CI has not been shown to work.
 
 ## Issue Guidelines
 
 - Search existing issues before opening a new one
 - Use the provided templates (bug report / feature request)
-- Include OpenClaw version, Node.js version, and plugin version
+- Include the claw-orchestrator version, Node.js version, the engine CLI version, and the OpenClaw version if you use plugin mode
 - Redact any sensitive info from logs

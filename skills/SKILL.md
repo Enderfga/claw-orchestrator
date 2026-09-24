@@ -1,12 +1,12 @@
 ---
 name: claw-orchestrator
-description: Manage persistent coding sessions across Claude Code, Codex, Antigravity (agy), Grok Build, and OpenCode engines. Use when orchestrating multi-engine coding agents, starting/sending/stopping sessions, running multi-agent council collaborations, cross-session messaging, ultraplan deep planning, ultrareview parallel code review, autoloop autonomous workspace iteration, ultraapp building deployable web apps from a structured Q&A interview, switching models/tools at runtime, exposing the orchestrator's 78 tools as an MCP server to Hermes Agent / Claude Desktop / Cursor / Cline / Continue / Zed / Windsurf / Goose, or running as an Agent Client Protocol (ACP) agent that Zed / JetBrains / Neovim / Emacs / VS Code / dsh can drive directly. Triggers on "start a session", "send to session", "run council", "ultraplan", "ultrareview", "autoloop", "ultraapp", "Forge tab", "build a web app", "one-click app", "AppSpec", "autonomous iteration", "iterate until goal", "deep paper review", "auto research", "switch model", "hand off", "handoff", "switch engine", "continue on codex", "continue on claude", "move this session to another engine", "multi-agent", "coding session", "session inbox", "grok", "grok build", "opencode", "mcp server", "clawo-mcp", "hermes mcp", "model context protocol", "ultracode", "dynamic workflow", "fanout", "fan-out", "best-of-N", "steer turn", "interrupt turn", "fork thread", "rollback turns", "acp", "agent client protocol", "clawo acp", "zed agent", "jetbrains agent", "external agent", "dsh subagent", "deepseek harness", "clawo runs", "run ledger", "how much did it cost", "token usage", "spend cap", "budget limit", "maxBudgetUsd", "workflow", "durable workflow", "resume a run", "verify", "verification", "acceptance contract", "evidence", "evidence bundle", "did the tests actually pass", "prove it works", "protected tests", "agent edited the tests", "human gate", "repair loop", "clawo workflow", "clawo verify".
+description: Manage persistent coding sessions across Claude Code, Codex, Antigravity (agy), Grok Build, and OpenCode engines. Use when orchestrating multi-engine coding agents, starting/sending/stopping sessions, running multi-agent council collaborations, cross-session messaging, ultraplan deep planning, ultrareview parallel code review, autoloop autonomous workspace iteration, ultraapp building deployable web apps from a structured Q&A interview, switching models/tools at runtime, exposing the orchestrator's 78 tools as an MCP server to Hermes Agent / Claude Desktop / Cursor / Cline / Continue / Zed / Windsurf / Goose, or running as an Agent Client Protocol (ACP) agent that Zed / JetBrains / Neovim / Emacs / VS Code / dsh can drive directly. Triggers on "start a session", "send to session", "run council", "ultraplan", "ultrareview", "autoloop", "ultraapp", "Forge tab", "build a web app", "one-click app", "AppSpec", "autonomous iteration", "iterate until goal", "auto research", "switch model", "hand off a session", "session handoff", "switch engine", "continue on codex", "continue on claude", "move this session to another engine", "multi-agent coding", "coding session", "session inbox", "grok session", "grok build", "opencode", "mcp server", "clawo-mcp", "hermes mcp", "model context protocol", "ultracode", "dynamic workflow", "fanout", "fan-out", "best-of-N", "steer turn", "interrupt turn", "fork thread", "rollback turns", "acp", "agent client protocol", "clawo acp", "zed agent", "jetbrains agent", "external agent", "dsh subagent", "deepseek harness", "clawo runs", "run ledger", "session cost", "coding-agent token usage", "spend cap", "budget limit", "maxBudgetUsd", "durable workflow", "resume a run", "verify a coding run", "acceptance contract", "evidence bundle", "did the agent's tests actually pass", "protected tests", "agent edited the tests", "human gate", "repair loop", "clawo workflow", "clawo verify".
 metadata:
   {
     'openclaw':
       {
         'emoji': '🤖',
-        'requires': { 'anyBins': ['claude', 'codex', 'agy', 'agent'] },
+        'requires': { 'anyBins': ['claude', 'codex', 'agy', 'grok', 'opencode'] },
         'install':
           [
             {
@@ -60,7 +60,7 @@ session_start({
   name: 'opencode-task',
   cwd: '/path/to/project',
   engine: 'opencode',
-  model: 'anthropic/claude-sonnet-4',
+  model: 'anthropic/claude-sonnet-5',
 });
 
 // 2. Send messages
@@ -78,14 +78,14 @@ session_stop({ name: 'myproject' });
 
 | Parameter        | Description                                                                                                     |
 | ---------------- | --------------------------------------------------------------------------------------------------------------- |
-| `engine`         | `claude` (default), `codex`, `agy`, `cursor`, `opencode`                                                        |
-| `model`          | Model name or alias (`fable`, `opus`, `sonnet`, `haiku`, `gpt-5.5`, `agy-pro`, `composer-2`)                    |
+| `engine`         | `claude` (default), `codex`, `agy`, `grok`, `opencode`, `custom`                                                |
+| `model`          | Model name or alias (`fable`, `opus` → claude-opus-5-5, `sonnet`, `haiku`, `gpt-5.5`, `agy-pro`)                |
 | `permissionMode` | `acceptEdits`, `auto`, `plan`, `bypassPermissions`, `manual`, `dontAsk` (`default` = legacy alias for `manual`) |
 | `effort`         | `low`, `medium`, `high`, `xhigh`, `max`, `ultra`, `auto` (each engine clamps to its own ceiling)                |
 | `maxBudgetUsd`   | Cost limit in USD                                                                                               |
 | `allowedTools`   | List of allowed tool names                                                                                      |
 
-### CLI 2.1.111 options
+### Claude-engine options
 
 | Parameter                                         | Description                                                                                                                             |
 | ------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
@@ -98,17 +98,12 @@ session_stop({ name: 'myproject' });
 | `debug` / `debugFile`                             | Targeted debug output by category (e.g. `"api,mcp"`) and optional file path.                                                            |
 | `fromPr`                                          | Resume a session linked to a GitHub PR number or URL.                                                                                   |
 | `channels` / `dangerouslyLoadDevelopmentChannels` | MCP channel subscriptions (research preview).                                                                                           |
+| `forkSubagent`                                    | Fork subagent for non-interactive sessions (sets `CLAUDE_CODE_FORK_SUBAGENT=1`).                                                        |
+| `enableToolSearch`                                | Enable Vertex AI tool search (sets `ENABLE_TOOL_SEARCH=1`).                                                                             |
+| `otelLogUserPrompts`                              | OpenTelemetry: include user prompts in logs (sets `OTEL_LOG_USER_PROMPTS=1`).                                                           |
+| `otelLogRawApiBodies`                             | OpenTelemetry: include raw API bodies in logs (sets `OTEL_LOG_RAW_API_BODIES=1`). Debug only.                                           |
 
-### CLI 2.1.121 options
-
-| Parameter             | Description                                                                                   |
-| --------------------- | --------------------------------------------------------------------------------------------- |
-| `forkSubagent`        | Fork subagent for non-interactive sessions (sets `CLAUDE_CODE_FORK_SUBAGENT=1`).              |
-| `enableToolSearch`    | Enable Vertex AI tool search (sets `ENABLE_TOOL_SEARCH=1`).                                   |
-| `otelLogUserPrompts`  | OpenTelemetry: include user prompts in logs (sets `OTEL_LOG_USER_PROMPTS=1`).                 |
-| `otelLogRawApiBodies` | OpenTelemetry: include raw API bodies in logs (sets `OTEL_LOG_RAW_API_BODIES=1`). Debug only. |
-
-`stats.pluginErrors` is now populated from the `system/init` event when CLI plugins fail to load due to unmet dependencies.
+`stats.pluginErrors` lists CLI plugins that failed to load (from the `system/init` event).
 
 `TRACEPARENT` / `TRACESTATE` (W3C distributed tracing) are automatically forwarded from parent process env — set them before starting the session and they propagate to the child Claude CLI.
 
@@ -158,7 +153,7 @@ team_send({ name: 'myproject', teammate: 'teammate', message: 'Review this' });
 ## Ultraplan & Ultrareview
 
 - **Ultraplan**: Opus deep planning session (up to 30 min), produces detailed implementation plan
-- **Ultrareview**: Fleet of 5-20 bug-hunting agents reviewing in parallel (security, logic, perf, types, etc.)
+- **Ultrareview**: 1-20 read-only reviewer agents (default 5) running in parallel, each from one angle (security, logic, perf, types, etc.), merged by a synthesis pass
 
 Both are async — start then poll status.
 
@@ -186,17 +181,20 @@ For the full control protocol, registry/resume behavior, and ledger layout, see 
 
 ## Tools Overview
 
-| Category          | Tools                                                                                                                                                 |
-| ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Session Lifecycle | `session_start`, `session_send`, `session_handoff`, `session_stop`, `session_list`, `sessions_overview`                                               |
-| Session Ops       | `coding_session_status`, `session_grep`, `session_compact`, `session_update_tools`, `session_switch_model`                                            |
-| Inbox             | `session_send_to`, `session_inbox`, `session_deliver_inbox`                                                                                           |
-| Teams             | `coding_agents_list`, `team_list`, `team_send`                                                                                                        |
-| Codex             | `codex_resume`, `codex_review`, `codex_goal_*`, `codex_interrupt`, `codex_steer`, `codex_fork`, `codex_rollback`, `codex_models`, `codex_thread_list` |
-| Claude CLI        | `claude_goal_*`, `claude_agents_list`, `plugin_details`                                                                                               |
-| Fan-out           | `fanout_start`, `fanout_status`, `fanout_abort`                                                                                                       |
-| Council           | `council_start`, `council_status`, `council_abort`, `council_inject`, `council_review`, `council_accept`, `council_reject`                            |
-| Ultra             | `ultraplan_start`, `ultraplan_status`, `ultrareview_start`, `ultrareview_status`                                                                      |
+| Category          | Tools                                                                                                                                                                                                                                                                                                        |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Session Lifecycle | `session_start`, `session_send`, `session_handoff`, `session_stop`, `session_list`, `sessions_overview`                                                                                                                                                                                                      |
+| Session Ops       | `coding_session_status`, `session_grep`, `session_compact`, `session_update_tools`, `session_switch_model`, `project_purge`                                                                                                                                                                                  |
+| Inbox             | `session_send_to`, `session_inbox`, `session_deliver_inbox`                                                                                                                                                                                                                                                  |
+| Teams             | `coding_agents_list`, `team_list`, `team_send`                                                                                                                                                                                                                                                               |
+| Codex             | `codex_resume`, `codex_review`, `codex_goal_*`, `codex_interrupt`, `codex_steer`, `codex_fork`, `codex_rollback`, `codex_models`, `codex_thread_list`                                                                                                                                                        |
+| Claude CLI        | `claude_goal_*`, `claude_agents_list`, `plugin_details`                                                                                                                                                                                                                                                      |
+| Fan-out           | `fanout_start`, `fanout_status`, `fanout_abort`                                                                                                                                                                                                                                                              |
+| Council           | `council_start`, `council_status`, `council_abort`, `council_inject`, `council_review`, `council_accept`, `council_reject`                                                                                                                                                                                   |
+| Ultra             | `ultraplan_start`, `ultraplan_status`, `ultrareview_start`, `ultrareview_status`                                                                                                                                                                                                                             |
+| Autoloop          | `autoloop_start`, `autoloop_chat`, `autoloop_status`, `autoloop_list`, `autoloop_stop`, `autoloop_reset_agent`                                                                                                                                                                                               |
+| Workflow & verify | `workflow_start`, `workflow_status`, `workflow_list`, `workflow_resume`, `workflow_cancel`, `workflow_steer`, `workflow_approve`, `verify_run`                                                                                                                                                               |
+| Ultraapp          | `ultraapp_new`, `ultraapp_answer`, `ultraapp_add_file`, `ultraapp_spec_edit`, `ultraapp_build_start`, `ultraapp_build_cancel`, `ultraapp_status`, `ultraapp_get`, `ultraapp_list`, `ultraapp_feedback`, `ultraapp_promote_version`, `ultraapp_start_container`, `ultraapp_stop_container`, `ultraapp_delete` |
 
 `ultracode` (Claude dynamic workflows) is a `session_start` option, not a separate tool: set
 `ultracode: true` to have Claude orchestrate a JS workflow and fan out to subagents per task.
@@ -208,15 +206,16 @@ For full parameter reference: see [references/tools.md](references/tools.md)
 `clawo acp` (or the `clawo-acp` binary) serves Agent Client Protocol over stdio, so any ACP
 client — Zed, JetBrains, Neovim, Emacs, the VS Code ACP extension, or `dsh` through its
 `subagent-acp` provider — drives the orchestrator as its coding agent. The model selector is
-grouped by engine, so one dropdown spans Claude, Codex and Cursor and switching it switches
-engine mid-session.
+grouped by engine, so one dropdown spans Claude, Codex, Antigravity and Grok, and switching it
+switches engine mid-session.
 
 For setup, the dsh YAML block, and the cancellation/permission limits: see [references/acp.md](references/acp.md)
 
 ## Durable workflows
 
 `workflow_start` runs a declarative graph of `agent` / `fanout` / `council` / `verifier` /
-`human_gate` / `router` / `subflow` nodes. Every state transition is checkpointed to
+`human_gate` / `router` / `subflow` / `autoloop` / `ultraapp_synth` /
+`ultraapp_deploy` nodes. Every state transition is checkpointed to
 `~/.claw-orchestrator/wf/<runId>/`, so a run survives a process restart and `workflow_resume`
 picks it up at the node boundary — nodes already succeeded are not re-run, and the one that
 was in flight is retried because a half-finished node left no result to trust.
@@ -254,7 +253,7 @@ survives restarts, so it answers "what did we run today and what did it cost" af
 sessions are gone.
 
 `maxBudgetUsd` on a session (or per council / fanout agent) is enforced by the runtime, so it
-holds on Codex, Cursor, agy, OpenCode and custom engines too — not just Claude Code. Once
+holds on Codex, agy, Grok, OpenCode and custom engines too — not just Claude Code. Once
 cumulative spend reaches the cap, further sends are refused before the engine is spawned.
 
 Rows carry two different judgements and keep them apart: `ok` is the engine's terminal verdict

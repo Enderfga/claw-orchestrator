@@ -1,6 +1,6 @@
 # Tools Reference
 
-All tools are registered as Claw Orchestrator plugin tools. In standalone mode, they're accessible via the embedded HTTP server.
+All 78 tools are registered as OpenClaw plugin tools and exposed over MCP by `clawo-mcp` (see [mcp.md](./mcp.md)). The embedded HTTP server covers a subset of them.
 
 ## Session Lifecycle (6)
 
@@ -16,18 +16,17 @@ Start a persistent coding session with full CLI flag support.
 | `model`                              | string                                                                                        | Model alias or full name                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `permissionMode`                     | string                                                                                        | `acceptEdits`, `bypassPermissions`, `plan`, `auto`, `manual`, `dontAsk` (`default` = legacy alias for `manual`)                                                                                                                                                                                                                                                                                                                                                                        |
 | `sandboxMode`                        | `'read-only'` \| `'workspace-write'` \| `'danger-full-access'`                                | Sandbox policy. Codex supports all values. `read-only` is enforced on every other built-in engine too: Claude → plan mode; Antigravity → its plan mode; OpenCode → a generated `clawo-readonly` agent denying `edit`/`bash`. **`grok` refuses a read-only session** rather than approximate one — its enforcement has not been adversarially verified. A `custom` engine must map it via `permissionModes`, or the session refuses to start. Persisted across session resume.          |
-| `effort`                             | string                                                                                        | `low`, `medium`, `high`, `max`, `auto`                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | `allowedTools`                       | string[]                                                                                      | Tools to auto-approve                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `disallowedTools`                    | string[]                                                                                      | Tools to deny                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `maxTurns`                           | number                                                                                        | Max agent loop turns                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `maxBudgetUsd`                       | number                                                                                        | Max API spend (USD). Enforced by the runtime on every engine: once the session's cumulative cost reaches the cap, further sends are refused before the engine is spawned. See [observability.md](observability.md) for the accuracy caveat on engines that estimate token counts.                                                                                                                                                                                                      |
 | `systemPrompt`                       | string                                                                                        | Replace system prompt                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `appendSystemPrompt`                 | string                                                                                        | Append custom instructions to the system prompt. Claude Code and Grok take it natively; Codex, Antigravity and OpenCode have no such flag and receive it at the top of the first message of a conversation |
+| `appendSystemPrompt`                 | string                                                                                        | Append custom instructions to the system prompt. Claude Code and Grok take it natively; Codex, Antigravity and OpenCode have no such flag and receive it at the top of the first message of a conversation                                                                                                                                                                                                                                                                             |
 | `agents`                             | object                                                                                        | Custom sub-agents JSON                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | `agent`                              | string                                                                                        | Default agent to use                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `bare`                               | boolean                                                                                       | Skip hooks, LSP, auto-memory, CLAUDE.md                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `worktree`                           | string \| boolean                                                                             | Run in git worktree                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| `fallbackModel`                      | string                                                                                        | Fallback when primary overloaded                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `fallbackModel`                      | string \| string[]                                                                            | Fallback model(s) when the primary is overloaded; an array is tried in order                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `resumeSessionId`                    | string                                                                                        | Resume existing session by ID                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `jsonSchema`                         | string                                                                                        | JSON Schema for structured output. Claude: `--json-schema` (inline). Codex: `--output-schema` (written to a temp file, requires Codex 0.132+). Other engines ignore it.                                                                                                                                                                                                                                                                                                                |
 | `mcpConfig`                          | string \| string[]                                                                            | MCP server config file(s)                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
@@ -35,20 +34,21 @@ Start a persistent coding session with full CLI flag support.
 | `ultracode`                          | boolean                                                                                       | Claude only. Enable "ultracode" / dynamic workflows — Claude plans a JS orchestration script per substantive task and fans out to subagents. Injected as the `ultracode:true` settings key (merged into `settings`). The workflow runs in the background: `session_send` returns at launch, and the completion turn is not returned by a later send (see sessions.md).                                                                                                                 |
 | `noSessionPersistence`               | boolean                                                                                       | Do not save session to disk — both the engine's own transcript and this orchestrator's resume registry, so a later start under the same name does not reattach                                                                                                                                                                                                                                                                                                                         |
 | `ignoreUserConfig`                   | boolean                                                                                       | Codex only. Run without loading `$CODEX_HOME/config.toml`, so an orchestrated run is decided by what the caller passed rather than by the machine's own Codex config — notably a `model = …` line in that file, which otherwise picks the model while the ledger records this engine's default. Auth still resolves from `CODEX_HOME`.                                                                                                                                                 |
+| `codexProfile`                       | string                                                                                        | Codex only. Named profile from `~/.codex/config.toml`, passed as `codex exec --profile`                                                                                                                                                                                                                                                                                                                                                                                                |
 | `restricted`                         | boolean                                                                                       | Claude Code only. Restricted mode (`--restricted`): the CLI removes the built-in tools that run commands or code — Bash, PowerShell, the REPL — plus `WebFetch` unless `tools` names them, and ignores user, project and local settings files. Separate from `sandboxMode: 'read-only'`: that maps to plan mode, which holds on its own, while this makes the shell absent rather than refused. It also drops the caller's CLAUDE.md and hooks, so it is never switched on implicitly. |
 | `betas`                              | string \| string[]                                                                            | Custom beta headers                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `enableAgentTeams`                   | boolean                                                                                       | Enable experimental agent teams                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `enableAutoMode`                     | boolean                                                                                       | Enable auto permission mode                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| `customEngine`                       | object                                                                                        | Custom engine config (required when `engine='custom'`). See [Multi-Engine: Custom Engine](./multi-engine.md#custom-engine-enginecustom).                                                                                                                                                                                                                                                                                                                                               |
+| `customEngine`                       | object                                                                                        | Custom engine config (required when `engine='custom'`). See [Multi-Engine: Custom Engine](./multi-engine.md#custom-engine-engine-custom).                                                                                                                                                                                                                                                                                                                                               |
 | `crossSessionInbound`                | string                                                                                        | `accept` / `hold` / `refuse` — policy for peer messages from other Claude Code sessions on this machine (Claude engine). Delivered as a settings key; there is no CLI flag. Without it the CLI holds messages whose two sides run different permission modes, which is the usual orchestrated-session-to-human-terminal case                                                                                                                                                           |
 | `includeHookEvents`                  | boolean                                                                                       | Stream hook lifecycle events (PreToolUse/PostToolUse) as `system` events                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `forwardSubagentText`                | boolean                                                                                       | Forward subagent text and thinking into the output stream (Claude engine, CLI 2.1.211+). Without it the parent stream stays quiet while a subagent works                                                                                                                                                                                                                                                                                                                               |
-| `permissionPromptTool`               | string                                                                                        | MCP tool name to delegate permission prompts to (non-interactive use) When omitted, the session runs with `--permission-prompts none`: a prompt nobody could answer is denied rather than left waiting until the turn timeout.                                                                                                                                                                                                                                                         |
+| `permissionPromptTool`               | string                                                                                        | MCP tool name to delegate permission prompts to (non-interactive use). When omitted, the session runs with `--permission-prompts none`: a prompt nobody could answer is denied rather than left waiting until the turn timeout.                                                                                                                                                                                                                                                        |
 | `excludeDynamicSystemPromptSections` | boolean                                                                                       | Move cwd/env/git context from system prompt to user message for better prompt cache hits; auto-enabled with `bare: true`                                                                                                                                                                                                                                                                                                                                                               |
 | `enablePromptCaching1H`              | boolean                                                                                       | Enable 1-hour prompt cache TTL (vs default 5-min); auto-enabled with `bare: true`                                                                                                                                                                                                                                                                                                                                                                                                      |
-| `debug`                              | string                                                                                        | Debug categories to enable (comma-separated, e.g. `"api,mcp"`)                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `debug`                              | string \| string[]                                                                            | Debug categories to enable (e.g. `"api,mcp"` or `["api", "mcp"]`)                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `debugFile`                          | string                                                                                        | File path to write debug output to                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| `fromPr`                             | string \| number                                                                              | Resume a session linked to a GitHub PR number or URL                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `fromPr`                             | string                                                                                        | Resume a session linked to a GitHub PR number or URL                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `channels`                           | string \| string[]                                                                            | MCP channel subscription spec (research preview)                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `dangerouslyLoadDevelopmentChannels` | string \| string[]                                                                            | Development MCP channel subscriptions (research preview)                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `forkSubagent`                       | boolean                                                                                       | Fork subagent for non-interactive sessions (sets `CLAUDE_CODE_FORK_SUBAGENT=1`)                                                                                                                                                                                                                                                                                                                                                                                                        |
@@ -119,7 +119,7 @@ Dashboard view: all sessions with ready/busy/paused state, cost, context %, last
 
 ### `coding_session_status`
 
-Detailed status: tokens, cost, context %, tool calls, uptime. (Renamed from `session_status` in v3.2 to avoid collision with OpenClaw's built-in `session_status` tool.)
+Detailed status: tokens, cost, context %, tool calls, uptime. (Prefixed to avoid clashing with OpenClaw's built-in `session_status`.)
 
 | Parameter | Type   | Required |
 | --------- | ------ | -------- |
@@ -190,9 +190,9 @@ Returns `{ ok, stdout, stderr, dryRun }`.
 
 ---
 
-## Claude (4)
+## Claude (5)
 
-Tools targeting Claude Code's CLI. `plugin_details` is a one-shot wrapper. The `claude_goal_*` tools require a session started with `engine: "claude"` (the default) and pre-format the `/goal` slash command introduced in CLI 2.1.139.
+Tools targeting Claude Code's CLI. `plugin_details` and `claude_agents_list` are one-shot wrappers. The `claude_goal_*` tools require a session started with `engine: "claude"` (the default) and pre-format the `/goal` slash command introduced in CLI 2.1.139.
 
 ### `plugin_details`
 
@@ -239,6 +239,17 @@ Send bare `/goal` to query the active goal (objective, elapsed time, turns, toke
 Returns the regular turn result; goal info is in the assistant's reply text.
 
 > Note: Claude's `/goal` is interactive-only in the upstream TUI sense — it has no dedicated CLI flag or JSON event. These wrappers work because Claude Code interprets slash-prefixed user messages in non-interactive (`-p` / stream-json) mode the same way. The wrappers exist for engine-guard and discoverability, not protocol translation.
+
+### `claude_agents_list`
+
+Wraps `claude agents --json` — lists Claude Code background agent sessions (state/model/title/progress). One-shot spawn, not tied to a managed session. (`claude continue/respawn/stop/logs` do not exist as headless subcommands; use `resumeSessionId` on `session_start` to resume.)
+
+| Parameter | Type    | Description                                               |
+| --------- | ------- | --------------------------------------------------------- |
+| `all`     | boolean | Include completed sessions (`--all`).                     |
+| `cwd`     | string  | Scope to sessions started under this directory (`--cwd`). |
+
+Returns `{ ok, agents }`.
 
 ---
 
@@ -313,11 +324,11 @@ Send `/goal pause`, `/goal resume`, or `/goal clear` respectively. Requires `eng
 
 Returns `{ ok, text, goal }`.
 
-> **Stability note:** Codex's `goals` feature is flagged "under development" in 0.128.0 and has known bugs (issue #20591). The slash-command parsing on the server side may also evolve. The wrapper is intentionally a thin sugar layer so upstream changes only affect the slash-text we send, not the protocol structure.
+> **Stability note:** Codex's `goals` feature is experimental upstream. The wrapper only formats the `/goal` slash text, so upstream changes affect that text, not the protocol.
 
-### `codex_interrupt` / `codex_steer` / `codex_fork` / `codex_rollback` / `codex_models`
+### Codex app-server RPCs
 
-Codex app-server v2 RPCs (require `engine: "codex-app"`). Method names + param shapes verified against `codex app-server generate-json-schema` (Codex 0.137).
+`codex_interrupt`, `codex_steer`, `codex_fork`, `codex_rollback`, `codex_models` and `codex_thread_list` call Codex app-server v2 methods and require `engine: "codex-app"`. Method names and parameter shapes follow `codex app-server generate-json-schema`.
 
 | Tool                | RPC               | Params                                                          | Returns                                                                                                      |
 | ------------------- | ----------------- | --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
@@ -331,21 +342,6 @@ Codex app-server v2 RPCs (require `engine: "codex-app"`). Method names + param s
 To **resume** a codex-app thread, start a session with `engine: "codex-app"` and
 `resumeSessionId: "<threadId>"` — it loads the existing thread via `thread/resume` instead of
 opening a fresh one.
-
----
-
-## Claude CLI (1)
-
-### `claude_agents_list`
-
-Wraps `claude agents --json` — lists Claude Code background agent sessions (state/model/title/progress). One-shot spawn, not tied to a managed session. (`claude continue/respawn/stop/logs` do not exist as headless subcommands; use `resumeSessionId` on `session_start` to resume.)
-
-| Parameter | Type    | Description                                               |
-| --------- | ------- | --------------------------------------------------------- |
-| `all`     | boolean | Include completed sessions (`--all`).                     |
-| `cwd`     | string  | Scope to sessions started under this directory (`--cwd`). |
-
-Returns `{ ok, agents }`.
 
 ---
 
@@ -382,7 +378,7 @@ Abort a running fan-out by `id` (already-started agents finish; synthesis is ski
 
 ### `coding_agents_list`
 
-List agent definitions from `.claude/agents/` (project + global). (Renamed from `agents_list` in v3.2 to avoid collision with OpenClaw's built-in `agents_list` tool.)
+List agent definitions from `.claude/agents/` (project + global). (Prefixed to avoid clashing with OpenClaw's built-in `agents_list`.)
 
 | Parameter | Type   |
 | --------- | ------ |
@@ -542,15 +538,16 @@ Get status and plan text when completed.
 
 ### `ultrareview_start`
 
-Launch a fleet of bug-hunting agents (1-20) reviewing code from different angles.
+Start 1–20 reviewer agents that review the code in parallel, each from a different angle. Runs in background.
 
-| Parameter            | Type   | Required | Description                     |
-| -------------------- | ------ | -------- | ------------------------------- |
-| `cwd`                | string | yes      | Project directory               |
-| `agentCount`         | number |          | Agents (1-20, default 5)        |
-| `maxDurationMinutes` | number |          | Duration (5-25 min, default 10) |
-| `model`              | string |          | Model for reviewers             |
-| `focus`              | string |          | Review focus area               |
+| Parameter            | Type     | Required | Description                                                                        |
+| -------------------- | -------- | -------- | ---------------------------------------------------------------------------------- |
+| `cwd`                | string   | yes      | Project directory                                                                  |
+| `agentCount`         | number   |          | Agents (1-20, default 5)                                                           |
+| `maxDurationMinutes` | number   |          | Duration (5-25 min, default 10)                                                    |
+| `model`              | string   |          | Model for reviewers                                                                |
+| `focus`              | string   |          | Review focus area                                                                  |
+| `engines`            | string[] |          | Engines to spread reviewers across (default `["claude"]`). Every reviewer runs read-only, so `grok` and `custom` are not allowed |
 
 ### `ultrareview_status`
 
@@ -597,21 +594,13 @@ Start a chat-mode autoloop. Planner starts immediately; Coder + Reviewer start o
 > permission to choose what binary runs. Built-in engines stay fully selectable
 > over HTTP.
 >
-> The check used to be wired into two autoloop routes and to match three
-> snake_case names; `POST /session/start` had no guard and `session_start` spells
-> the field `customEngine`, so it went straight through. Matching by shape at the
-> one place every body passes is what stops the next route from inheriting the
-> same gap.
->
-> **Resuming one is done by reference.** Refusing the config over HTTP left a real
-> gap: a custom-engine run that crashed could not be brought back by any remote
-> caller, because the material it needed had nowhere to come from. So a remote
-> resume names the secret instead of carrying it — `plannerCustomEngineRef` and
-> friends on `POST /autoloop/<id>/resume`, `agentCustomEngineRefs` on
-> `workflow_resume` — and the orchestrator resolves the name against its own
-> `CLAWO_CUSTOM_ENGINE_<NAME>` environment. `GET /autoloop/<id>/resume-requirements`
-> says which roles need one. The name is not sensitive, the value never leaves the
-> host, and an unknown name fails loudly rather than starting without credentials.
+> **Resuming by reference.** A remote resume names the credential instead of
+> carrying it — `plannerCustomEngineRef` and friends on `POST /autoloop/<id>/resume`,
+> `agentCustomEngineRefs` on `workflow_resume` — and the orchestrator resolves the
+> name against its own `CLAWO_CUSTOM_ENGINE_<NAME>` environment.
+> `GET /autoloop/<id>/resume-requirements` lists which roles need one. The name is
+> not sensitive, the value never leaves the host, and an unknown name fails rather
+> than starting without credentials.
 
 Custom configs are not persisted or accepted from Planner output. See [`multi-engine.md`](./multi-engine.md) for their shape.
 
@@ -626,7 +615,7 @@ when it coincides with lease expiry.
 Recovery is exposed by `POST /autoloop/<id>/resume`, not by an MCP resume tool.
 Its timeout body is limited to `send_timeout_ms` plus
 `pending_dispatch_id`. The send timeout must be finite, in range, and strictly
-larger than the run's latest effective value (legacy baseline: 600000). Equal
+larger than the run's latest effective value (600000 for runs that predate this setting). Equal
 or smaller values are rejected, and there is deliberately no
 `allow_decrease`. Lease and hard-cap overrides are not accepted on resume.
 Each successful increase appends one migration row to `decisions.jsonl`; the
@@ -695,7 +684,7 @@ Full snapshot of a run: spec + chat + state.
 
 | Parameter | Type   | Required |
 | --------- | ------ | -------- |
-| `id`      | string | yes      |
+| `runId`   | string | yes      |
 
 ### `ultraapp_status`
 
@@ -703,15 +692,13 @@ Lightweight status (mode + timestamps).
 
 | Parameter | Type   | Required |
 | --------- | ------ | -------- |
-| `id`      | string | yes      |
+| `runId`   | string | yes      |
 
 ### `ultraapp_new`
 
-Create a fresh run. Optionally seeds the interview with the user's first message.
+Create a fresh run and start the interview session. Returns `{ ok, runId }`. The first question arrives via `ultraapp_get`.
 
-| Parameter      | Type   | Required | Description                                                                   |
-| -------------- | ------ | -------- | ----------------------------------------------------------------------------- |
-| `firstMessage` | string |          | Free-form opening line; the interview Opus reads it before its first question |
+(no params)
 
 ### `ultraapp_answer`
 
@@ -719,19 +706,18 @@ Submit an answer to the current interview question.
 
 | Parameter  | Type   | Required | Description                                                          |
 | ---------- | ------ | -------- | -------------------------------------------------------------------- |
-| `id`       | string | yes      | Run id                                                               |
+| `runId`    | string | yes      | Run id                                                               |
 | `value`    | string | yes      | One of the question's `options[].value`, or `''` when using freeform |
 | `freeform` | string |          | Free-form text when none of the options fit                          |
 
 ### `ultraapp_add_file`
 
-Upload a sample file to `examples/` (the interview engine will `extract_metadata` it).
+Reference a local example file by absolute path (under `$HOME` or `/tmp`; symlinks and dotfiles are rejected). The interview extracts metadata from it. To upload a file from a browser, use the dashboard.
 
-| Parameter | Type             | Required |
-| --------- | ---------------- | -------- |
-| `id`      | string           | yes      |
-| `path`    | string           | yes      |
-| `content` | string \| Buffer | yes      |
+| Parameter      | Type   | Required |
+| -------------- | ------ | -------- |
+| `runId`        | string | yes      |
+| `absolutePath` | string | yes      |
 
 ### `ultraapp_spec_edit`
 
@@ -739,7 +725,7 @@ Apply RFC 6902 JSON Patch ops to the AppSpec mid-interview.
 
 | Parameter | Type     | Required |
 | --------- | -------- | -------- |
-| `id`      | string   | yes      |
+| `runId`   | string   | yes      |
 | `patch`   | object[] | yes      |
 
 ### `ultraapp_build_start`
@@ -748,7 +734,7 @@ Validate the spec strictly (shape + cross-refs + DAG) and enqueue the build. Cou
 
 | Parameter | Type   | Required |
 | --------- | ------ | -------- |
-| `id`      | string | yes      |
+| `runId`   | string | yes      |
 
 ### `ultraapp_build_cancel`
 
@@ -756,7 +742,7 @@ Abort an active build. Council sessions are stopped and the worktrees are left a
 
 | Parameter | Type   | Required |
 | --------- | ------ | -------- |
-| `id`      | string | yes      |
+| `runId`   | string | yes      |
 
 ### `ultraapp_feedback`
 
@@ -764,7 +750,7 @@ Done-mode feedback. Haiku classifier routes into `cosmetic` (Opus patcher), `spe
 
 | Parameter | Type   | Required | Description             |
 | --------- | ------ | -------- | ----------------------- |
-| `id`      | string | yes      | Run id                  |
+| `runId`   | string | yes      | Run id                  |
 | `text`    | string | yes      | The feedback (1+ chars) |
 
 ### `ultraapp_promote_version`
@@ -773,7 +759,7 @@ Atomically swap the deployed version. Stops the current container/process, start
 
 | Parameter | Type   | Required | Description                          |
 | --------- | ------ | -------- | ------------------------------------ |
-| `id`      | string | yes      | Run id                               |
+| `runId`   | string | yes      | Run id                               |
 | `version` | string | yes      | Target version label (`v1`, `v2`, …) |
 
 ### `ultraapp_start_container`
@@ -782,7 +768,7 @@ Start the container/process for the active version (no-op if already running).
 
 | Parameter | Type   | Required |
 | --------- | ------ | -------- |
-| `id`      | string | yes      |
+| `runId`   | string | yes      |
 
 ### `ultraapp_stop_container`
 
@@ -790,7 +776,7 @@ Stop the container/process without deleting any state.
 
 | Parameter | Type   | Required |
 | --------- | ------ | -------- |
-| `id`      | string | yes      |
+| `runId`   | string | yes      |
 
 ### `ultraapp_delete`
 
@@ -798,11 +784,11 @@ Stop + remove the run completely (sessions, container, on-disk state, router ent
 
 | Parameter | Type   | Required |
 | --------- | ------ | -------- |
-| `id`      | string | yes      |
+| `runId`   | string | yes      |
 
 ---
 
-## Workflow kernel & verification (6.0.0)
+## Workflow & Verification (8)
 
 Full semantics in [`workflow.md`](./workflow.md) and
 [`verification.md`](./verification.md).

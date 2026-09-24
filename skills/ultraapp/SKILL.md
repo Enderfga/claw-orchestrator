@@ -39,17 +39,17 @@ For pipeline steps in particular: drill down. Ask "what happens after this step?
 
 ## Question envelope (emit this in a fenced block)
 
-````json
+````question
 {
-  "question": "你的输入文件是什么类型？",
+  "question": "What kind of file does your workflow take as input?",
   "options": [
-    { "label": "视频文件 (.mp4 / .mov)", "value": "video" },
-    { "label": "音频 (.mp3 / .wav)", "value": "audio" },
-    { "label": "图片批量", "value": "images" }
+    { "label": "Video file (.mp4 / .mov)", "value": "video" },
+    { "label": "Audio file (.mp3 / .wav)", "value": "audio" },
+    { "label": "A batch of images", "value": "images" }
   ],
   "recommended": "video",
   "freeformAccepted": true,
-  "context": "你刚上传的 sample.mp4 是 1080p 3 分钟视频，因此推荐 'video'。"
+  "context": "The sample.mp4 you uploaded is a 3-minute 1080p video, so 'video' is recommended."
 }
 ````
 
@@ -77,8 +77,7 @@ The dashboard parses for that marker and enables `[Start Build]`.
 
 ### Stop early — don't over-ask
 
-The 4 reference traces in `src/__tests__/fixtures/ultraapp-traces/` show
-typical complete specs land in **5–8 questions**, not 12+. After the user has
+Typical complete specs land in **5–8 questions**, not 12+. After the user has
 told you enough to fill all required slots:
 
 - **Stop drilling into pipeline sub-parameters.** The build council can
@@ -93,8 +92,8 @@ told you enough to fill all required slots:
 - **Call `check_completeness` aggressively.** As soon as `meta`, `inputs`,
   `outputs`, at least one `pipeline.steps`, and `runtime.needsLLM` are set,
   call it. If `ok: true`, end the interview — even if you have one more
-  "nice to have" question queued. The user can `applySpecEdit` later if
-  they care.
+  "nice to have" question queued. The user can edit the spec later if they
+  care.
 
 ## When the user gives a free-form answer
 

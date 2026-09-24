@@ -1,50 +1,18 @@
 # Workflow kernel — durable runs
 
 A durable executor for workflow runs: what is running, what happens when a step
-fails, when to stop, and — the part none of the previous state machines had — how
-to come back after the process dies.
+fails, when to stop, and how to come back after the process dies.
 
 ## Every mode runs on it
 
 `council_start`, `fanout_start`, `ultraplan_start`, `ultrareview_start` and
-`autoloop_start` all create a kernel run. Their tool signatures are unchanged and
-their result shapes are unchanged — `CouncilSession`, `FanoutSession`,
-`UltraplanResult`, `UltrareviewResult`, `AutoloopState` are now _projected_ from
-the run record rather than held in a map.
+`autoloop_start` all create a kernel run. Their result shapes —
+`CouncilSession`, `FanoutSession`, `UltraplanResult`, `UltrareviewResult`,
+`AutoloopState` — are _projected_ from the run record.
 
-The engines that do the work — `Council`, `Fanout`, the autoloop
-planner/coder/reviewer dispatcher — are untouched. What they lost is ownership of
-a lifecycle. Deleted along the way:
-
-| Gone               | Was                                                                              |
-| ------------------ | -------------------------------------------------------------------------------- |
-| 5 result maps      | `councils`, `fanouts`, `ultraplans`, `ultrareviews`, `autoloops`                 |
-| 4 eviction timers  | a 30-minute TTL per mode, three of them separate implementations                 |
-| 1 poller           | ultrareview asking the fan-out every 5s whether it had finished                  |
-| 2 fences           | `_startingAutoloops` / `_deletingAutoloops`, guarding a shared map               |
-| 2 disk enumerators | a regex over council markdown transcripts; a bespoke JSONL registry for autoloop |
-
-Concretely, three bugs went with them: a fan-out's results vanished 30 minutes
-after it finished; an ultraplan still running when its TTL fired was rewritten as
-`error: 'Timed out (TTL expired)'` and deleted, so a long plan could be destroyed
-by its own eviction timer; and ultrareview's correctness depended on the
-fan-out's TTL — evict first and its poll threw, the interval was cleared, and the
-review stayed `running` forever.
-
-## Why this exists
-
-Through 5.1.0 each mode carried its own machinery. The same "start in the
-background, poll by id, evict after 30 minutes" was written four separate times
-(`council`, `fanout`, `ultraplan`, `ultrareview`), with four timer sites and six
-status vocabularies that did not overlap. Cross-process listing was implemented
-three incompatible ways — council scraped its own markdown transcripts with a
-regex, autoloop read a JSONL registry, ultraapp walked a store directory.
-
-More to the point, most of it was not durable. A fan-out wrote nothing to disk at
-all and its results vanished after 30 minutes. Ultraplan and ultrareview were
-entirely in memory. A council that crashed mid-round left worktrees and branches
-on disk with no index pointing at them. UltraApp's build queue documented that it
-did not persist, so a restart mid-build failed the build.
+The mode engines (`Council`, `Fanout`, the autoloop planner/coder/reviewer
+dispatcher) do the work; the kernel owns lifecycle, persistence and listing. A
+run's record stays on disk until you delete it.
 
 ## Durability contract
 
@@ -92,75 +60,46 @@ names four things, and all four are checked on every durable write:
 - **`commit(guard, batch)` is the only way to change anything durable.**
   Checkpoints, events and node artifacts all go through it, inside one `O_EXCL`
   critical section that verifies the guard first. The raw writers are not
-  exported, so there is no path around it — the previous version stated this rule
-  in a comment while the engine wrote checkpoints directly from `start`,
-  `resume`, `publish` and `setChild`, and a rule enforced by a comment is not a
-  rule.
+  exported, so there is no path around it.
 - **A batch lands whole.** It is staged in a scratch directory and published by a
   single atomic directory rename; the rename is the commit point, and what
   follows is replayable application of an already-committed transaction. A reader
   finishes any transaction a crashed owner left, and applying is idempotent — the
   manifest records the event log's length from before, so recovery truncates and
-  re-appends rather than duplicating. Without this, `committed` meant "most of it
-  was attempted": the event append swallowed its own errors, so a checkpoint
-  could land with its events silently dropped, and a batch that failed partway
-  left the artifacts it had already written behind.
+  re-appends rather than duplicating.
 - **Creating a run and claiming it are one step.** The run directory is made with
   a non-recursive `mkdir`, which _is_ the claim — it fails for everyone but the
-  first caller. Asking `runExists()` and then creating is a check-then-write
-  race, and it lost: two processes creating the same id 80 times both "succeeded"
-  76 times, leaving one workflow executing under another's `spec.json`.
+  first caller, so two processes creating the same id cannot both succeed.
 - **The lock is exclusive, and release is not "unlink that path".** A vanished
   lock is retried rather than treated as stale debris; a genuinely stale one is
   broken by atomic rename; and a holder removes the lock file only if it is still
-  the one it created. Getting any of those wrong puts two callers in the section
-  at once, and the symptom is not an error — it is a committed transaction being
-  emptied by the other caller's cleanup, so writes vanish and the run wedges.
+  the one it created.
 - **A published transaction is authoritative before it is applied.** Readers
   finish any pending transaction first, and refuse rather than hand back the
   older checkpoint if it cannot be applied. Applying carries a marker written
   after the last data step, so a failure during cleanup cannot make a healthy
   transaction permanently unapplicable.
-- **The lock is exclusive, and release is not "unlink that path".** A vanished
-  lock is retried rather than treated as stale debris; a genuinely stale one is
-  broken by atomic rename; and a holder removes the lock file only if it is still
-  the one it created. Getting any of those wrong puts two callers in the section
-  at once, and the symptom is not an error — it is a committed transaction being
-  emptied by the other caller's cleanup, so writes vanish and the run wedges.
-- **A published transaction is authoritative before it is applied.** Readers
-  finish any pending transaction first, and refuse rather than hand back the
-  older checkpoint if it cannot be applied. Applying carries a marker written
-  after its last data step, so a failure during cleanup cannot make a healthy
-  transaction permanently unapplicable.
-- **`delete` claims before removing.** Releasing the lease first opened a window
-  in which another process could legally resume the run, only for this one to
-  remove the directory under its new owner.
+- **`delete` claims before removing**, so no other process can resume the run
+  while its directory is being removed.
 - **Contention is not a takeover.** `commit` reports `committed`, `superseded` or
   `blocked`, and only `superseded` is permanent. The lock waits briefly rather
   than failing on sight, and an owner that still cannot write stops _and hands
-  its claim back_ — because a live local pid is never judged stale, so a lease
-  left behind by a stopped run can never be taken over and the run is lost for
-  good. Collapsing the two into one boolean is what made a millisecond of
-  contention wedge a run permanently.
+  its claim back_ — a live local pid is never judged stale, so a lease left
+  behind by a stopped run could otherwise never be taken over.
 - **Copy-on-write.** A change is applied to a clone, committed, and adopted only
-  if the disk accepted it. So a superseded owner does not merely fail to
-  persist — the record it hands back to its own caller stops advancing too.
-  Refusing the write while returning a record that says `completed` is the same
-  claim one layer up, and callers read the record.
+  if the disk accepted it, so the record a superseded owner hands back to its
+  caller stops advancing too.
 - **A deleted run id is a new run.** The fence lives in `incarnation.json`, which
   survives `releaseLease` (so the counter never restarts while the run exists)
   and dies with the run directory (so the next run under the same id gets a new
-  random `incarnationId`). Without that, deleting a run and reusing its id reset
-  the fence to 1, and an abandoned attempt still holding fence 1 became valid a
-  second time — a textbook ABA, and not hypothetical, because a timed-out attempt
-  outlives its run by construction.
+  random `incarnationId`). An abandoned attempt from a deleted run therefore
+  cannot write into a new run that reuses its id.
 - **Re-acquiring supersedes.** A second claim, even by the same owner, mints a
   new `acquisitionId` and kills the previous guard.
 - **Owner identity is not the pid.** Two kernels in one process share a pid;
   each has its own owner id, or both would read the other's claim as their own.
-- **Atomic acquisition.** The check and the write happen inside the lock.
-  Read-then-write let two processes both see "free" and both conclude they had
-  it, which is the failure a lease exists to prevent.
+- **Atomic acquisition.** The check and the write happen inside the lock, so two
+  processes cannot both see "free" and both claim the run.
 - **An independent heartbeat.** Renewed on a timer, not only at checkpoints: a
   run executing one long node makes no checkpoints, and must not look abandoned
   for it. On the same host a live pid is the authority and is never judged stale
@@ -173,7 +112,8 @@ A second process trying to resume a run someone else is executing is refused by
 name, with the owner's pid and host in the message.
 
 One thing deliberately sits outside the guard: **evidence bundles**. They are
-written by the verifier as its checks run, under `evidence/<node>-<attempt>/`,
+written by the verifier as its checks run, under
+`evidence/<node>-v<visit>-<attempt>/`,
 and they are append-only artifacts, never read as state. What makes a bundle
 authoritative is the run record's `evidenceId` pointing at it, and that reference
 _is_ committed under the guard. So a bundle left behind by an owner that has been
@@ -205,7 +145,7 @@ Every node takes `retry: { max, backoffMs }`, `timeoutMs`, and
 On `fanout` and `council`, `timeoutMs` bounds the whole node and `agentTimeoutMs` one
 agent's send. They differ because agents beyond the free session slots wait for one, so
 the node can run several agents' worth of time. Without `agentTimeoutMs`, `timeoutMs`
-serves as both, as it did before the field existed. `fanout_start`, `ultrareview_start`,
+serves as both. `fanout_start`, `ultrareview_start`,
 `council_start` and the built-in `fanout`, `council` and `solve` workflows set both: the
 agent's own default, and a node bound for the worst case — one agent at a time, every
 retry taken.
@@ -235,8 +175,8 @@ next node**, so a gate that failed to match simply hands control to the router
 after it, which then matches on its own. Chaining reads as AND and behaves as
 "whatever the last router says".
 
-`maxNodeVisits` (default 50) bounds every loop as a backstop. Use `visits_lt` for
-the actual budget — the backstop failing a run is a bug report, not a feature.
+`maxNodeVisits` (default 50) bounds every loop as a safety backstop. Budget loops
+with `visits_lt`.
 
 ## Example: repair until green
 
@@ -288,7 +228,7 @@ test suite would double the most expensive part of the run to learn nothing new.
 `workflow_start` accepts `template` instead of `spec`:
 
 - **`solve`** — the shape above: triage → (optional human gate) → implement →
-  verify → repair-until-green → optional review.
+  (optional review) → verify → repair-until-green.
 - **`council`** — one council node, plus the implicit verifier when a contract is
   declared.
 - **`fanout`** — one fan-out node.
@@ -299,20 +239,13 @@ These are ordinary specs, not privileged paths.
 
 A passing verdict only stands while it still describes the tree.
 
-The digest is over **content**, not status: HEAD, the full `git diff HEAD`, and
-the bytes of every untracked file. An earlier version hashed
-`git status --porcelain`, which reports a file's state rather than its bytes — so
-a file already `M` before the checks and rewritten afterwards produced an
-identical digest, and the commonest case (an agent editing a file it had already
-edited) was the one it could not see.
-
 This cannot be enforced by inspecting the spec — a router can send control
 anywhere, so which node runs last is not a property of the graph. And "nothing
 may follow the verifier" would be the wrong rule anyway: what matters is not that
 a node ran, but that the tree moved. So the kernel measures. Each evidence bundle
-records a digest of the working tree (`git rev-parse HEAD` plus
-`git status --porcelain`), and when the run ends, if any workspace-touching node
-ran after the verdict, the digest is recomputed.
+records a content digest of the working tree (HEAD, the full `git diff HEAD`,
+and the path and bytes of every untracked file), and when the run ends, if any
+workspace-touching node ran after the verdict, the digest is recomputed.
 
 If it moved, the outcome drops from `verified` to `unverified` with the reason
 recorded on the run. Not `refuted` — no check failed; we simply stopped knowing,
@@ -323,9 +256,8 @@ checks means the verdict stands regardless (a contract that passed in a plain
 directory passed); something running after it means we cannot vouch, and the run
 says so.
 
-The built-in `solve` template puts its reviewer fan-out **before** the gate for
-this reason. It shipped the other way round first, which let reviewers edit a
-tree the verifier had already signed off while the run still reported `verified`.
+The built-in `solve` template puts its reviewer fan-out **before** the verifier,
+so anything the reviewers change is covered by the verdict.
 
 ## Completion
 
@@ -373,11 +305,12 @@ belong before the task.
 - Cancel and a node timeout are different things. A timeout is a node failure
   (it still gets its retries and still honours `onFailure`); cancelling ends the
   run.
-- Nothing prunes run directories. Delete them yourself, or with
-  `workflowDelete`.
+- Nothing prunes run directories. Delete them yourself
+  (`rm -rf ~/.claw-orchestrator/wf/<runId>`), or programmatically with
+  `SessionManager.workflowDelete(runId)`.
 
 ## Related
 
 - [`verification.md`](./verification.md) — contracts, checks, evidence
 - [`observability.md`](./observability.md) — how a run's verdict reaches the ledger
-- [`council.md`](./council.md), [`autoloop.md`](./autoloop.md), [`ultraapp.md`](./ultraapp.md) — the modes, and what changed for each
+- [`council.md`](./council.md), [`autoloop.md`](./autoloop.md), [`ultraapp.md`](./ultraapp.md) — the modes that run on the kernel

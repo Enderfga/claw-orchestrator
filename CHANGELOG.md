@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.5.4] - 2026-09-24
+
+### Fixed
+
+- **Ultrareview reviewers are read-only on every engine.** They were started with `permissionMode:
+  'plan'`, which constrains Claude only, so a reviewer assigned to another engine through `engines`
+  ran under that engine's default sandbox — for Codex, one that can write — in the project directory
+  it was reviewing. Reviewers now also get `sandboxMode: 'read-only'`, which reaches the session
+  through the fan-out, and `ultrareview_start` refuses `grok`, which declines a read-only session
+  rather than approximating one.
+- **A grok session on the OpenAI-compatible endpoint is replayed like the other resuming engines.**
+  A grok session whose first turn failed before grok returned a session id counted as live, so the
+  next turn went out without the conversation before it. It now waits for the id, as codex, agy
+  and opencode already did.
+- **Browsers can send `X-Session-Id` and `X-Session-Reset` cross-origin.** The CORS preflight now
+  allows both headers, which the OpenAI-compatible endpoint uses to key and reset a conversation.
+- **`session_start` declares `restricted` and `ignoreUserConfig`**, so a host that builds calls from
+  the tool schema can pass them.
+- **The ACP model selector labels Grok Build and no longer offers the legacy Cursor engine.**
+- **Tool and CLI descriptions match the code:** they list the current engines, `council_start`
+  gives `maxTurnsPerAgent`'s real default (50), and `ultrareview_start` says 1–20 reviewers.
+- **The reference docs match the code.** Among the corrections: the embedded server has
+  authentication on by default; the ultraapp tools take `runId`; `clawo session-start` lists only
+  flags it has; the rate limit is 300 requests per minute; ultrareview is a fan-out of read-only
+  reviewers rather than a council; `maxTurnsPerAgent` for a council defaults to 50; the autoloop
+  quick start targets `clawo serve`; and an autoloop acceptance contract is library-level only.
+
+### Changed
+
+- **Autoloop's email fallback runs the script named by `AUTOLOOP_EMAIL_SCRIPT`**, as
+  `bash "$AUTOLOOP_EMAIL_SCRIPT" -s "<subject>"` with the body on stdin. Unset, the email tier is
+  skipped like the WeChat and WhatsApp tiers; set to a missing file, it logs a warning.
+
 ## [7.5.3] - 2026-09-23
 
 ### Changed

@@ -4,17 +4,12 @@ Two related surfaces: a durable record of every turn this runtime executes, and 
 spend cap that is enforced by the runtime rather than by whichever CLI happens to
 support a budget flag.
 
-## Why
+## Purpose
 
-`getStats()` / `getCost()` describe a **live** session. They live in memory, and
-per-session history is capped and evicted, so a restart erased everything except
-the resume-id registry — there was no way to answer "what did we run today, on
-which engine, for how much". The run ledger is that record.
-
-The same gap made `maxBudgetUsd` a promise the runtime did not keep: it was only
-ever translated into Claude Code's `--max-budget-usd` flag, so a council of Codex
-agents ran with no cap at all. The cap is now applied in `SessionManager`, which
-every engine passes through.
+`getStats()` / `getCost()` describe a **live** session and are held in memory.
+The run ledger is the durable record of every turn across restarts: what ran, on
+which engine, for how much. `maxBudgetUsd` is enforced in `SessionManager`, which
+every engine passes through, not only through Claude Code's `--max-budget-usd`.
 
 ## The ledger
 
@@ -34,7 +29,7 @@ every engine passes through.
 | ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `ts`                                      | ISO timestamp of turn completion                                                                                                                                                                                                                                                                                                                                                                           |
 | `session`                                 | SessionManager session name                                                                                                                                                                                                                                                                                                                                                                                |
-| `engine`                                  | `claude` / `codex` / `codex-app` / `grok` / `opencode` / `agy` / `custom`                                                                                                                                                                                                                                                                                                                                  |
+| `engine`                                  | `claude` / `codex` / `codex-app` / `grok` / `opencode` / `agy` / `cursor` (legacy) / `custom`                                                                                                                                                                                                                                                                                                              |
 | `model`                                   | Configured model, or the engine's own reported model when none was set (Claude Code: the model named in its `init` event). Absent when neither is known                                                                                                                                                                                                                                                    |
 | `cwd`                                     | Working directory the turn ran in                                                                                                                                                                                                                                                                                                                                                                          |
 | `turn`                                    | 1-based index of the send within the session, counted by the process that recorded it                                                                                                                                                                                                                                                                                                                      |
@@ -45,7 +40,7 @@ every engine passes through.
 | `toolCalls` / `toolErrors`                | Per-turn deltas                                                                                                                                                                                                                                                                                                                                                                                            |
 | `ok`                                      | `false` for a turn that threw, or that the session's own `turnsSucceeded` counter did not count (see `sessions.md`). Falls back to "nothing was thrown" when the counter cannot be read                                                                                                                                                                                                                    |
 | `error`                                   | Failure text, truncated to 500 chars. Absent when the turn resolved but the engine did not count it as succeeded (an interrupted or non-SUCCESS turn), so a failed row does not always carry one                                                                                                                                                                                                           |
-| `parent`                                  | council id / fanout id / autoloop run id, when the turn belongs to one                                                                                                                                                                                                                                                                                                                                     |
+| `parent`                                  | council / fanout / autoloop / workflow run id, when the turn belongs to one                                                                                                                                                                                                                                                                                                                                |
 
 Deltas rather than totals means summing a query window gives that window's spend
 without double-counting.
@@ -74,7 +69,8 @@ curl "http://127.0.0.1:18796/runs?since=24h&limit=200" -H "Authorization: Bearer
 ```
 
 Returns `{ ok, rows, summary }`, where `summary` carries `rows`, `costUsd`,
-`tokensIn`, `tokensOut`, `estimatedRows` and a per-engine breakdown. The dashboard
+`tokensIn`, `tokensOut`, `estimatedRows`, `verifiedRows`, `refutedRows`,
+`unverifiedRows` and a per-engine breakdown `byEngine`. The dashboard
 header shows the 24-hour figure from the same endpoint.
 
 Programmatically: `manager.getRunLedger({ since, session, engine, parent, limit })`.
@@ -106,8 +102,8 @@ Notes:
 
 ### Zeroing a model's pricing
 
-`pricingOverrides` zeroes the fiction that a subscription seat gets billed per token, and
-the cost figures above stop reporting money nobody paid. It also **disables `maxBudgetUsd`
+`pricingOverrides` sets a model's per-token rate, so the cost figures for a subscription
+seat read 0 instead of an API-rate equivalent. Zeroing a rate also **disables `maxBudgetUsd`
 for that model**: the cap compares the session's accrued `getCost().totalUsd` against it,
 and that number is pricing-derived, so at a rate of 0 it never reaches any cap. There is
 no separate token or turn ceiling behind it.
@@ -138,16 +134,30 @@ Where the engine reports usage, those counts are the engine's own. Where it does
 not, the wrapper falls back to `estimateTokens()` (characters ÷ 4) and the row is
 flagged `tokensEstimated: true`; the CLI marks those costs with a trailing `~`.
 
-| Engine            | Token counts                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `claude`          | Engine-reported — and so is the **cost**: the `result` event's `total_cost_usd` is taken as-is, so registry drift cannot affect a Claude row. It is the session running total rather than the turn's, so spend advances by the difference between turns. A process started with `--resume` (a model switch, a session recovered after a restart) inherits the resumed session's total since Claude Code 2.1.277, so its first report is taken as a baseline and that one turn is priced from the registry instead — charging the inherited figure would bill the whole history again, and `maxBudgetUsd` gates against this number. Proxy sessions (`baseUrl` set) are the exception: the CLI is told it is running `opus` while another provider serves the tokens, so its figure is Opus list price for someone else's model and the registry estimate is used instead |
-| `codex`           | Engine-reported                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| `codex-app`       | Engine-reported                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| `grok`            | Engine-reported — and so is the **cost**: this engine reports `total_cost_usd`, which the wrapper passes through instead of pricing tokens from the registry, so registry drift cannot affect a grok row                                                                                                                                                                                                                                                                                      |
-| `cursor` (legacy) | Engine-reported when the stream carries `usage`, else estimated                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| `opencode`        | Engine-reported when the run JSON carries `tokens`, else estimated                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| `agy`             | Engine-reported when the result event carries usage, else estimated                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| `custom`          | Depends on the CLI; estimated when it emits no usage                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| Engine            | Token counts                                                                                                                                                                                             |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `claude`          | Engine-reported, including the **cost** (see below)                                                                                                                                                      |
+| `codex`           | Engine-reported                                                                                                                                                                                          |
+| `codex-app`       | Engine-reported                                                                                                                                                                                          |
+| `grok`            | Engine-reported — and so is the **cost**: this engine reports `total_cost_usd`, which the wrapper passes through instead of pricing tokens from the registry, so registry drift cannot affect a grok row |
+| `cursor` (legacy) | Engine-reported when the stream carries `usage`, else estimated                                                                                                                                          |
+| `opencode`        | Engine-reported when the run JSON carries `tokens`, else estimated                                                                                                                                       |
+| `agy`             | Engine-reported when the result event carries usage, else estimated                                                                                                                                      |
+| `custom`          | Depends on the CLI; estimated when it emits no usage                                                                                                                                                     |
+
+How a `claude` row's cost is taken:
+
+- The `result` event's `total_cost_usd` is used as-is, so pricing-table drift
+  cannot affect a Claude row.
+- That figure is the session's running total, so a turn's cost is the difference
+  from the previous report.
+- A process started with `--resume` (a model switch, a session recovered after a
+  restart) reports a total that includes the resumed history. Its first report is
+  taken as a baseline, and that one turn is priced from the registry instead, so
+  the history is not billed twice (`maxBudgetUsd` gates against this number).
+- Proxy sessions (`baseUrl` set) use the registry estimate instead: the CLI
+  believes it is running `opus` while another provider serves the tokens, so its
+  own figure would be Opus list price.
 
 ### What "input tokens" means is not the same on every engine
 
@@ -183,14 +193,13 @@ Cost figures are also only as good as the pricing table: a model missing from
 ChatGPT Pro) bill nothing per token while the ledger still reports the API-rate
 equivalent. Read `costUsd` as "what this would cost at API rates".
 
-## `ok` vs `verified` (6.0.0)
+## `ok` vs `verified`
 
-A row now carries two different judgements, and conflating them is the mistake
-this section exists to prevent.
+A row carries two different judgements.
 
 - **`ok`** — the engine's own terminal verdict for that turn. Codex fails a turn
-  that emits `turn.failed` while exiting 0; gemini succeeds on exit 53. It is a
-  careful signal, but it is the engine talking about itself.
+  that emits `turn.failed` while exiting 0. It is a careful signal, but it is the
+  engine talking about itself.
 - **`verified`** — an acceptance contract ran against the work and every required
   check passed. That is the runtime's own measurement.
 
@@ -210,7 +219,8 @@ either would make the ledger useless for the thing it is for.
 `verified` is **not written at turn time**, deliberately. The turns that produce
 the work all finish before the verifier that judges it, so stamping a verdict on
 them as they are written would be inventing one. It is joined in at read time
-from the run record via the row's `parent`, by `annotateVerdicts()`.
+from the run record via the row's `parent`, by `annotateVerdicts()`. The exception
+is a standalone `verify_run`, which writes its verdict directly.
 
 Two consequences worth knowing:
 
@@ -219,7 +229,7 @@ Two consequences worth knowing:
 - Filtering on `--verified` happens _after_ the join. Pushing the filter into the
   ledger read would match on a field no row carries yet and return nothing.
 
-### Other new row fields
+### Verification row fields
 
 | Field                      | Source                                                                                                                                                          |
 | -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |

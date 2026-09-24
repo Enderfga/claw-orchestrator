@@ -25,7 +25,6 @@ import {
  * and oldest-dropped-first rule as REPLAY_CHAR_BUDGET in the autoloop dispatcher. MAX_BODY_SIZE is
  * not the bound that matters: six of the nine ENGINE_TYPES pass the prompt as one argv element and
  * Linux caps one argument at 128 KiB — going over is a 500 with the turn lost.
- * Measurements in skills/references/openai-compat.md.
  */
 const HISTORY_CHAR_BUDGET = 24_000;
 
@@ -488,7 +487,6 @@ export function fenceHistoryTags(text: string): string {
  * the name it describes, defaulting to false for the same reason: a caller that cannot establish the
  * engine's state sends the context rather than drops it. Capped because the caller this exists for
  * opens a new conversation per turn, so the block is re-serialized in full on every one of them.
- * Rest of the rationale: skills/references/openai-compat.md.
  */
 export function serializeConversationHistory(messages: OpenAIChatMessage[], engineHoldsTranscript = false): string {
   if (engineHoldsTranscript) return '';
@@ -828,6 +826,7 @@ interface SessionManagerLike {
       agyConversationId?: string;
       cursorChatId?: string;
       opencodeSessionId?: string;
+      grokSessionId?: string;
     };
   };
   compactSession(name: string): Promise<unknown>;
@@ -847,7 +846,10 @@ interface SessionManagerLike {
  */
 export function nativeThreadIsLive(
   engine: EngineType | undefined,
-  stats: Pick<SessionStats, 'codexThreadId' | 'agyConversationId' | 'cursorChatId' | 'opencodeSessionId'>,
+  stats: Pick<
+    SessionStats,
+    'codexThreadId' | 'agyConversationId' | 'cursorChatId' | 'opencodeSessionId' | 'grokSessionId'
+  >,
 ): boolean {
   switch (engine) {
     case 'codex':
@@ -859,6 +861,11 @@ export function nativeThreadIsLive(
       return !!stats.cursorChatId;
     case 'opencode':
       return !!stats.opencodeSessionId;
+    case 'grok':
+      // grok resumes by session id like the engines above. It was missing here, so a grok
+      // session whose first turn died before grok returned an id counted as live and the next
+      // turn went out with none of the conversation before it.
+      return !!stats.grokSessionId;
     default:
       // claude and persistent custom engines hold their context in a live process, so there is no
       // separate id to check — being in the map is the strongest signal available.

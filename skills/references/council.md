@@ -80,7 +80,7 @@ import { SessionManager } from '@enderfga/claw-orchestrator';
 
 const manager = new SessionManager();
 
-const session = manager.councilStart('Build a REST API with authentication', {
+const session = await manager.councilStart('Build a REST API with authentication', {
   agents: [
     {
       name: 'Planner',
@@ -173,7 +173,7 @@ Rewrites `plan.md` with rejection feedback and commits it. All worktrees and bra
 | ------------------ | ------------------ | ---------------------------------- |
 | `maxRounds`        | 15                 | Maximum collaboration rounds       |
 | `agentTimeoutMs`   | 1,800,000 (30 min) | Per-agent timeout per round        |
-| `maxTurnsPerAgent` | 30                 | Max tool turns per agent per round |
+| `maxTurnsPerAgent` | 50                 | Max tool turns per agent per round |
 | `maxBudgetUsd`     | —                  | API spend limit per agent          |
 
 ### defaultPermissionMode
@@ -181,7 +181,7 @@ Rewrites `plan.md` with rejection feedback and commits it. All worktrees and bra
 Optional. Sets the default permission mode for council agents when individual agents don't specify one. Defaults to `bypassPermissions`.
 
 ```typescript
-manager.councilStart('task', {
+await manager.councilStart('task', {
   agents: [...],
   maxRounds: 10,
   projectDir: '/project',
@@ -191,52 +191,41 @@ manager.councilStart('task', {
 
 Permission priority: agent-level `permissionMode` > `defaultPermissionMode` > `'bypassPermissions'`
 
-> **Note (Claude CLI 2.1.121+):** When agent personas are persisted as Claude agent files with frontmatter, the `permissionMode`, `tools`, and `disallowedTools` fields are now **enforced** by `--agent` and `--print` modes (previously advisory). If you write agent files with restrictive `tools` lists, expect those agents to refuse calls to other tools at runtime.
-
 ## System Prompt
 
-The council system prompt is loaded from `configs/council-system-prompt.md` and supports hot-editing. It includes 9 charter sections tuned through extensive multi-agent collaboration testing:
+The council system prompt is loaded from `configs/council-system-prompt.md` and supports hot-editing. It has 9 charter sections:
 
-| Section                     | Purpose                                        |
-| --------------------------- | ---------------------------------------------- |
-| §0 No Hallucination         | Agents must use tools, never fabricate results |
-| §1 Plan First               | Two-phase protocol with plan.md                |
-| §2 Parallel Coordination    | Claim/done protocol for concurrent work        |
-| §3 Truth in Git             | Git state over conversation memory             |
-| §4 Merge to Main            | Local only, never push                         |
-| §5 Cross-Review             | Structured APPROVE/REQUEST_CHANGES             |
-| §6 Auto-Conflict Resolution | Never stop on merge conflicts                  |
-| §7 Action Over Words        | Never ask permission, just work                |
-| §8 Efficient Tool Use       | Minimum necessary principle                    |
+| Section                           | Purpose                                        |
+| --------------------------------- | ---------------------------------------------- |
+| §0 Must Use Tools to Execute      | Agents must use tools, never fabricate results |
+| §1 Blueprint First                | Two-phase protocol with plan.md                |
+| §2 Parallel Coordination          | Claim/done protocol for concurrent work        |
+| §3 Truth in Git                   | Git state over conversation memory             |
+| §4 Integration Is Completion      | Local only, never push                         |
+| §5 Cross-Review                   | Structured APPROVE/REQUEST_CHANGES             |
+| §6 Autonomous Conflict Resolution | Never stop on merge conflicts                  |
+| §7 Action Over Words              | Never ask permission, just work                |
+| §8 Efficient Tool Use             | Minimum necessary principle                    |
 
 Placeholders: `{{emoji}}`, `{{name}}`, `{{persona}}`, `{{workDir}}`, `{{projectDir}}`, `{{otherBranches}}`
 
 The charter is each seat's only instruction channel, and it reaches every engine through `appendSystemPrompt`:
 natively on Claude Code and Grok, as the top of the seat's first message on Codex, Antigravity and OpenCode.
-Nothing is written into the worktrees. Seats used to get their identity and workspace boundary from a
-generated `<worktree>/.claude/CLAUDE.md`, which only Claude Code reads and which an agent could commit
-into the project.
+Nothing is written into the worktrees.
 
 ## Transcript Logging
 
-All council sessions save transcripts to `~/.openclaw/council-logs/council-<timestamp>.md`. Completed councils remain queryable via `council_status` for 30 minutes after completion.
+All council sessions save transcripts to `~/.openclaw/council-logs/council-<timestamp>.md`. Transcripts are for humans to read; nothing parses them. Completed councils stay queryable via `council_status` indefinitely — the run record is on disk.
 
-## Consensus is advisory (6.0.0)
+## Votes end the rounds; contracts decide the verdict
 
-Through 5.1.0 a council ended when `parseConsensus` found `[CONSENSUS: YES]` in
-every agent's reply — that is, the termination condition was a regex over agent
-prose. Two things made that weaker than it looked: the fallback patterns match a
-bare `consensus: yes` anywhere in the text, and when a reply came back short and
-unmarked the orchestrator re-prompted twice _asking for the token_, which is
-demanding a vote rather than checking anything.
+A council stops early when every agent votes YES, but the votes do not decide
+whether the work is acceptable. They are recorded on the run as
+`consensusVotes`, each with the parse `source` (`strict` / `variant` / `none`),
+so a loosely detected vote is visible as such.
 
-Votes are still collected and still recorded — they are what the agents were
-asked for, and they are useful. They are recorded on the run as
-`consensusVotes`, each with the parse `source` (`strict` / `variant` / `none`) so
-a loosely-detected vote is visible as such.
-
-What changed is that they no longer decide whether the work is acceptable. Give
-the run an acceptance contract and the runtime checks the result itself:
+To have the result checked, give the run an acceptance contract and the runtime
+runs the checks itself:
 
 ```jsonc
 workflow_start({
@@ -247,42 +236,30 @@ workflow_start({
 })
 ```
 
-Without a contract the council behaves exactly as before and the run completes
-`unverified` — nothing checked it.
+Without a contract the run completes `unverified` — nothing checked it.
 
-`council_start` and the rest of the `council_*` tools keep their signatures, with
-one change forced by the cutover: **`councilStart` is now async** (it creates a
-durable run before returning). The same applies to `fanoutStart`,
-`ultraplanStart` and `ultrareviewStart`. Tool callers are unaffected; direct
-TypeScript callers need an `await`.
+`councilStart`, `fanoutStart`, `ultraplanStart` and `ultrareviewStart` are
+async (each creates a durable run before returning); direct TypeScript callers
+need `await`.
 
-## Lifecycle moved to the kernel
+## Durable runs
 
-A council is a kernel run. `councils`, its 30-minute eviction timer, and
-`listCouncilsFromDisk` — which read `~/.openclaw/council-logs/*.md` with a regex
-and fabricated a stub session with no responses and an empty config — are gone.
-`council_list` returns real records, from disk, across processes.
+A council is a durable kernel run. `GET /council/list` (and the dashboard)
+returns real records from disk, across processes.
 
-`council_review` / `accept` / `reject` work after a restart now. They act on the
-git state a finished council left behind, not on live agents, so they run against
-a `Council` rebuilt from the record. Only `council_inject` still needs the live
-engine, and it says so plainly when there isn't one.
-
-Transcripts are still written to `~/.openclaw/council-logs/` for humans. Nothing
-parses them.
+`council_review` / `council_accept` / `council_reject` work after a restart:
+they act on the git state the council left behind, not on live agents.
+`council_inject` needs the live run and says so plainly when there is none.
 
 ## Changed-file reporting
 
-`council_review` used to diff `HEAD~20..HEAD` with a `HEAD~10` fallback: a magic
-window unrelated to when the council started, which returned nothing at all on a
-shallow or young history. It now diffs against the **merge-base** of `HEAD` and
-the first `council/*` branch — the actual fork point — and includes files the
-agents created, which a tracked-file diff cannot see.
+`council_review` diffs against the **merge-base** of `HEAD` and the first
+`council/*` branch — the point where the council's work started — and includes
+files the agents created, which a tracked-file diff cannot see.
 
-`CouncilChangedFile.status` was previously hardcoded to `'clean'` for every
-entry, which read as "reviewed and found fine" when nothing had looked at it. It
-is now optional and left undefined until a reviewer assesses the file; the new
-`change` field carries git's own account (`added` / `modified` / `deleted`).
+Each `CouncilChangedFile` carries `change` — git's own account (`added` /
+`modified` / `deleted`). `status` is optional and stays undefined until a
+reviewer assesses the file.
 
 ## Related
 
