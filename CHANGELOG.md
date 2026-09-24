@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.5.5] - 2026-09-24
+
+### Fixed
+
+- **A resumed workflow continues at the node it was on.** Resume picked the first `pending` node in
+  declaration order, and a node on a branch the run never took stays `pending` for good — so a run
+  that died inside one node could come back at a contingency `human_gate` declared above it, park
+  there, and re-run earlier nodes once approved. The resume point now comes from the run record: the
+  node that was running or waiting at a gate; the successor of a node that finished just before the
+  process died (a router is evaluated again, since its choice is not recorded); and the first node
+  for a run that has not started, or one restarted with `restart`. Reported by @dhroco in #117.
+- **Approving a gate works after a restart.** A run parked at a `human_gate` is on disk but not live
+  once the server restarts, and `workflow_approve` returned `{ answered: false }` without doing
+  anything until the run was resumed by hand. The answer is now attached to the gate the run was
+  parked at and the run is resumed; it takes the answer when it reaches that gate. (#117)
+- **Steers survive a restart.** The steer queue lived in memory, so a steer that had arrived but not
+  been taken was lost on a restart, although the run's log recorded it. A node now records how many
+  steers it held when it finishes, and on resume every steer no finished node consumed is queued
+  again — including one held by a node that died, which goes to that node's retry. (#117)
+
 ## [7.5.4] - 2026-09-24
 
 ### Fixed

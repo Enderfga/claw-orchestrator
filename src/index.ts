@@ -1497,7 +1497,8 @@ const plugin = {
 
     registerTool({
       name: 'workflow_approve',
-      description: 'Answer a workflow parked at a human_gate node.',
+      description:
+        'Answer a workflow parked at a human_gate node. A run parked before a server restart is resumed with the answer attached.',
       parameters: {
         type: 'object',
         properties: { runId: { type: 'string' }, approved: { type: 'boolean' } },
@@ -1505,7 +1506,7 @@ const plugin = {
       },
       execute: async (_id, args) => ({
         ok: true,
-        ...getManager().workflowApprove(args.runId as string, args.approved as boolean),
+        ...(await getManager().workflowApprove(args.runId as string, args.approved as boolean)),
       }),
     });
 

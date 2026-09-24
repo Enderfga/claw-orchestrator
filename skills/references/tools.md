@@ -830,8 +830,11 @@ same as a failure).
   trust.
 - `workflow_cancel({ runId })`.
 - `workflow_steer({ runId, text })` — the text is **prepended** to the next agent
-  node's prompt.
-- `workflow_approve({ runId, approved })` — answers a `human_gate` node.
+  node's prompt. Steers not yet consumed are delivered after a restart too.
+- `workflow_approve({ runId, approved })` — answers a `human_gate` node. A run
+  parked before the server restarted is resumed with the answer attached, so it
+  needs no separate `workflow_resume`. Returns `{ answered: false }` when the run
+  is not parked at a gate.
 
 ### `verify_run`
 

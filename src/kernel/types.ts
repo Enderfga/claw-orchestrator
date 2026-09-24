@@ -352,6 +352,8 @@ export type KernelEvent =
   | { ts: string; type: 'node_state'; node: string; state: NodeState; attempt?: number; error?: string }
   | { ts: string; type: 'node_output'; node: string; text: string }
   | { ts: string; type: 'steer'; node: string; text: string }
+  /** A node finished holding `count` steers, taken in the order they were logged. */
+  | { ts: string; type: 'steer_consumed'; node: string; count: number }
   | { ts: string; type: 'evidence'; node: string; evidenceId: string; passed: boolean }
   | { ts: string; type: 'log'; level: 'info' | 'warn' | 'error'; message: string };
 

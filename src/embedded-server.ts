@@ -931,7 +931,7 @@ export class EmbeddedServer {
               json(200, { ok: true, ...this.manager.workflowSteer(runId, String(body.text ?? '')) });
               return;
             case 'approve':
-              json(200, { ok: true, ...this.manager.workflowApprove(runId, body.approved !== false) });
+              json(200, { ok: true, ...(await this.manager.workflowApprove(runId, body.approved !== false)) });
               return;
             case 'evidence': {
               const bundle = this.manager.workflowEvidence(
