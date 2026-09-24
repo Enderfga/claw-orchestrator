@@ -620,6 +620,11 @@ export class RunKernel extends EventEmitter {
             n.error = undefined;
           }
         }
+        if (opts.restart && wasTerminal) {
+          // Every node went back to pending above, so the run starts from the
+          // top; `currentNode` would otherwise point at wherever it finished.
+          draft.currentNode = undefined;
+        }
         if (opts.restart) {
           draft.endedAt = undefined;
           draft.outcome = 'unverified';
@@ -844,6 +849,33 @@ export class RunKernel extends EventEmitter {
     return idx >= 0 && idx + 1 < record.spec.nodes.length ? record.spec.nodes[idx + 1].id : undefined;
   }
 
+  /**
+   * Where `_run` starts: the node the run was on, not the first pending node.
+   *
+   * `_firstPending` scans in declaration order, and a node on a branch the run
+   * never took stays `pending` for good — so after a crash it found that node
+   * instead of the one that had been running, and a run could resume at a
+   * contingency gate nobody asked for. Execution is one cursor at a time and
+   * every node state change records `currentNode`, so the record already says
+   * where the run was:
+   *
+   * - `pending` (reset from `running` by `resume`) or `awaiting_human`: that node.
+   * - finished, with the process gone before the next node started: its
+   *   successor, computed the way the loop computes it. A router's choice is not
+   *   recorded, so a router is evaluated again — it reads recorded state only.
+   * - no `currentNode` yet: a run that has not started, so the first pending node.
+   */
+  private _resumePoint(record: RunRecord): string | undefined {
+    const id = record.currentNode;
+    const node = id ? record.nodes[id] : undefined;
+    const spec = id ? this._nodeSpec(record, id) : undefined;
+    if (!id || !node || !spec) return this._firstPending(record);
+    if (node.state === 'pending' || node.state === 'running' || node.state === 'awaiting_human') return id;
+    const carriedOn = node.state === 'succeeded' || (node.state === 'failed' && (spec.onFailure ?? 'fail') !== 'fail');
+    if (carriedOn) return spec.kind === 'router' ? id : (spec.next ?? this._nextInOrder(record, id));
+    return this._firstPending(record);
+  }
+
   private _firstPending(record: RunRecord): string | undefined {
     for (const n of record.spec.nodes) {
       const rec = record.nodes[n.id];
@@ -928,7 +960,7 @@ export class RunKernel extends EventEmitter {
     const maxVisits = txn.record.spec.maxNodeVisits ?? DEFAULT_MAX_NODE_VISITS;
     this._setRunState(handle, 'running');
 
-    let cursor = this._firstPending(txn.record);
+    let cursor = this._resumePoint(txn.record);
 
     while (cursor) {
       // Losing the run outranks everything else: this owner may not write, so

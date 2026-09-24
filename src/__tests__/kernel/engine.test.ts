@@ -445,6 +445,8 @@ describe('resume', () => {
     record.endedAt = undefined;
     record.nodes.b.state = 'running';
     record.nodes.c.state = 'pending';
+    // A process that died inside `b` last recorded `b` as the node it was on.
+    record.currentNode = 'b';
     // No unguarded write exists any more, so the "crashed process" is simulated
     // the way a real one behaves: claim the run, write the checkpoint it died
     // holding, and let the claim go (a lease whose holder is gone is free).
@@ -471,6 +473,7 @@ describe('resume', () => {
     record.state = 'running';
     record.nodes.b.state = 'running';
     record.nodes.b.attempts = 2;
+    record.currentNode = 'b';
     // No unguarded write exists any more, so the "crashed process" is simulated
     // the way a real one behaves: claim the run, write the checkpoint it died
     // holding, and let the claim go (a lease whose holder is gone is free).
@@ -485,6 +488,129 @@ describe('resume', () => {
     await kernel2.wait(started.runId);
     expect(ran2).toEqual(['b']);
     expect(loadRun(started.runId)!.nodes.b.attempts).toBe(1);
+  });
+
+  // #117. A node on a branch the run never took stays `pending` for good, and the
+  // resume point used to be the first pending node in declaration order — so a
+  // run that died inside `test` came back at the `unblock` gate declared above it.
+  const branched: WorkflowSpec = {
+    name: 'branched',
+    nodes: [
+      { id: 'implement', kind: 'agent', prompt: 'implement' },
+      { id: 'route', kind: 'router', default: 'test' },
+      { id: 'unblock', kind: 'human_gate', prompt: 'unblock?', next: 'implement' },
+      { id: 'test', kind: 'agent', prompt: 'test' },
+    ],
+  };
+
+  /** Finish `branched`, then leave the checkpoint a crash at `at` would have left. */
+  async function crashedAt(at: string, edit: (r: ReturnType<typeof loadRun> & object) => void) {
+    const { kernel } = makeKernel();
+    kernel.setExecutor('human_gate', async () => ({ ok: true, awaitHuman: true }));
+    const started = await kernel.start(branched);
+    await kernel.wait(started.runId);
+    const record = loadRun(started.runId)!;
+    expect(record.nodes.unblock.state).toBe('pending'); // the branch never taken
+    record.state = 'running';
+    record.endedAt = undefined;
+    // The implicit verifier is appended only for some specs; reset it when present.
+    if (record.nodes[IMPLICIT_VERIFIER_ID]) record.nodes[IMPLICIT_VERIFIER_ID].state = 'pending';
+    record.currentNode = at;
+    edit(record);
+    const { acquireLease, commit, releaseLease } = await import('../../kernel/store.js');
+    const crashed = acquireLease(record.runId, 'crashed-process');
+    commit(crashed, { record });
+    releaseLease(crashed);
+    return started.runId;
+  }
+
+  async function resumeAndWait(runId: string) {
+    const ran: string[] = [];
+    const { kernel } = makeKernel({}, ran);
+    kernel.setExecutor('human_gate', async () => ({ ok: true, awaitHuman: true }));
+    await kernel.resume(runId);
+    await new Promise((r) => setTimeout(r, 30));
+    return { ran, record: loadRun(runId)!, kernel };
+  }
+
+  it('resumes at the node that was running, not at a never-visited node declared before it', async () => {
+    const runId = await crashedAt('test', (r) => {
+      r.nodes.test.state = 'running';
+    });
+    const { ran, record, kernel } = await resumeAndWait(runId);
+    expect(record.state).not.toBe('awaiting_human');
+    await kernel.wait(runId);
+    expect(ran).toEqual(['test']);
+    expect(loadRun(runId)!.state).toBe('completed');
+  });
+
+  it('continues at the successor when the process died between two nodes', async () => {
+    // `skipped` sits between `x` and its successor and is never visited, so the
+    // first pending node and the true successor are different nodes here.
+    const ran: string[] = [];
+    const { kernel } = makeKernel({}, ran);
+    const started = await kernel.start({
+      name: 'jumps',
+      nodes: [
+        { id: 'x', kind: 'agent', prompt: 'x', next: 'z' },
+        { id: 'skipped', kind: 'agent', prompt: 'never on the path' },
+        { id: 'z', kind: 'agent', prompt: 'z' },
+      ],
+    });
+    await kernel.wait(started.runId);
+    expect(ran).toEqual(['x', 'z']);
+
+    const record = loadRun(started.runId)!;
+    record.state = 'running';
+    record.endedAt = undefined;
+    record.nodes.z.state = 'pending';
+    if (record.nodes[IMPLICIT_VERIFIER_ID]) record.nodes[IMPLICIT_VERIFIER_ID].state = 'pending';
+    record.currentNode = 'x'; // `x` finished; the process died before `z` started
+    const { acquireLease, commit, releaseLease } = await import('../../kernel/store.js');
+    const crashed = acquireLease(record.runId, 'crashed-process');
+    commit(crashed, { record });
+    releaseLease(crashed);
+
+    const ran2: string[] = [];
+    const { kernel: kernel2 } = makeKernel({}, ran2);
+    await kernel2.resume(started.runId);
+    await kernel2.wait(started.runId);
+    expect(ran2).toEqual(['z']);
+  });
+
+  it('re-evaluates a router that finished before the crash, since its choice was not recorded', async () => {
+    const runId = await crashedAt('route', (r) => {
+      r.nodes.test.state = 'pending';
+    });
+    const { ran, kernel } = await resumeAndWait(runId);
+    await kernel.wait(runId);
+    expect(ran).toEqual(['test']);
+    expect(loadRun(runId)!.state).toBe('completed');
+  });
+
+  it('still parks again at a gate the run was waiting on', async () => {
+    const runId = await crashedAt('unblock', (r) => {
+      r.nodes.unblock.state = 'awaiting_human';
+      r.nodes.test.state = 'pending';
+    });
+    const { ran, record, kernel } = await resumeAndWait(runId);
+    expect(record.state).toBe('awaiting_human');
+    expect(record.currentNode).toBe('unblock');
+    expect(ran).toEqual([]);
+    kernel.cancel(runId);
+    await kernel.wait(runId);
+  });
+
+  it('restarts a finished run from the top rather than where it ended', async () => {
+    const { kernel } = makeKernel();
+    const started = await kernel.start(branched);
+    await kernel.wait(started.runId);
+
+    const ran: string[] = [];
+    const { kernel: kernel2 } = makeKernel({}, ran);
+    await kernel2.resume(started.runId, { restart: true });
+    await kernel2.wait(started.runId);
+    expect(ran).toEqual(['implement', 'test']);
   });
 
   it('returns a terminal run untouched', async () => {
