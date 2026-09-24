@@ -35,9 +35,18 @@ total: if `run.json` is missing or half-written, state is rebuilt by replaying
 `events.jsonl` against `spec.json`. The atomic rewrite makes that path rare; the
 replay makes it survivable anyway.
 
-A kernel resumes at a **node boundary**, never mid-node. Nodes already marked
-succeeded are not re-run; the node that was in flight when the process died is
-retried from the start, because a half-finished node left no result to trust.
+A kernel resumes at a **node boundary**, never mid-node, and at the node the run
+was on — not at the first pending node, since a node on a branch the run never
+took stays pending. Nodes already marked succeeded are not re-run; the node that
+was in flight when the process died is retried from the start, because a
+half-finished node left no result to trust. A node that had finished just before
+the process died continues at its successor; a router is evaluated again, since
+its choice is not recorded. A run parked at a `human_gate` parks there again.
+
+Steers survive a restart. They are logged when they arrive and recorded as
+consumed when the node that took them finishes, so on resume every steer no
+finished node consumed is queued again — including one a node was holding when
+it died, which goes to that node's retry.
 
 **This makes node execution at-least-once, not exactly-once.** There is no
 idempotency key and no side-effect commit marker, so a node that wrote files and

@@ -1338,8 +1338,13 @@ export class SessionManager {
     return { steered: this.kernel.steer(runId, text) };
   }
 
-  workflowApprove(runId: string, approved: boolean): { answered: boolean } {
-    return { answered: this.kernel.approve(runId, approved) };
+  /**
+   * Answer a parked `human_gate`. A run parked by a process that has since
+   * restarted is resumed with the answer attached, so a caller does not need to
+   * know whether the server restarted in between.
+   */
+  async workflowApprove(runId: string, approved: boolean): Promise<{ answered: boolean }> {
+    return { answered: await this.kernel.approveStored(runId, approved) };
   }
 
   workflowDelete(runId: string): void {

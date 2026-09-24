@@ -627,6 +627,131 @@ describe('resume', () => {
   });
 });
 
+// #117. The run record survives a restart; the gate a parked run waits on and
+// the steer queue lived only in the process, so after a restart `approve` did
+// nothing and queued steers were gone.
+describe('after a restart', () => {
+  const gated: WorkflowSpec = {
+    name: 'gated',
+    nodes: [
+      { id: 'a', kind: 'agent', prompt: 'a' },
+      { id: 'gate', kind: 'human_gate', prompt: 'ok?' },
+      { id: 'b', kind: 'agent', prompt: 'b' },
+    ],
+  };
+
+  /** A checkpoint left by a process that died at `at`, with `events` in its log. */
+  async function crashed(at: 'gate' | 'b', events: Array<Record<string, unknown>> = []) {
+    const kernel = new RunKernel({ nodeTimeoutMs: 5000 });
+    kernel.setExecutor('agent', async () => ({ ok: true }));
+    kernel.setExecutor('human_gate', async () => ({ ok: true }));
+    kernel.setExecutor('verifier', async () => ({ ok: true, output: 'nothing declared' }));
+    const started = await kernel.start(gated);
+    await kernel.wait(started.runId);
+
+    const record = loadRun(started.runId)!;
+    record.endedAt = undefined;
+    if (record.nodes[IMPLICIT_VERIFIER_ID]) record.nodes[IMPLICIT_VERIFIER_ID].state = 'pending';
+    if (at === 'gate') {
+      record.state = 'awaiting_human';
+      record.nodes.gate.state = 'awaiting_human';
+      record.nodes.b.state = 'pending';
+    } else {
+      record.state = 'running';
+      record.nodes.b.state = 'running';
+    }
+    record.currentNode = at;
+    const ts = new Date().toISOString();
+    const { acquireLease, commit, releaseLease } = await import('../../kernel/store.js');
+    const lease = acquireLease(record.runId, 'crashed-process');
+    commit(lease, { record, events: events.map((e) => ({ ts, ...e })) as never });
+    releaseLease(lease);
+    return started.runId;
+  }
+
+  /** A fresh process: gates park, agents report the steers they were handed. */
+  function restarted() {
+    const kernel = new RunKernel({ nodeTimeoutMs: 5000 });
+    const got: Record<string, string[]> = {};
+    kernel.setExecutor('agent', async (node, ctx) => {
+      got[node.id] = ctx.takeSteer();
+      return { ok: true };
+    });
+    kernel.setExecutor('human_gate', async () => ({ ok: true, awaitHuman: true }));
+    kernel.setExecutor('verifier', async () => ({ ok: true, output: 'nothing declared' }));
+    return { kernel, got };
+  }
+
+  it('approves a gate whose run was parked by a process that is gone', async () => {
+    const runId = await crashed('gate');
+    const { kernel, got } = restarted();
+    expect(kernel.approve(runId, true)).toBe(false); // nothing live to answer
+    expect(await kernel.approveStored(runId, true)).toBe(true);
+    const done = await kernel.wait(runId);
+    expect(Object.keys(got)).toEqual(['b']);
+    expect(done!.state).toBe('completed');
+  });
+
+  it('rejects such a gate just as a live one', async () => {
+    const runId = await crashed('gate');
+    const { kernel } = restarted();
+    expect(await kernel.approveStored(runId, false)).toBe(true);
+    const done = await kernel.wait(runId);
+    expect(done!.state).toBe('failed');
+    expect(done!.error).toContain('human gate');
+  });
+
+  it('does not answer a run that is not parked', async () => {
+    const runId = await crashed('b');
+    const { kernel } = restarted();
+    expect(await kernel.approveStored(runId, true)).toBe(false);
+    expect(await kernel.approveStored('nope', true)).toBe(false);
+  });
+
+  it('delivers a steer that arrived before the crash and was never taken', async () => {
+    const runId = await crashed('gate', [{ type: 'steer', node: 'gate', text: 'use the other library' }]);
+    const { kernel, got } = restarted();
+    await kernel.approveStored(runId, true);
+    await kernel.wait(runId);
+    expect(got.b).toEqual(['use the other library']);
+  });
+
+  it('does not deliver a steer again once a finished node consumed it', async () => {
+    const runId = await crashed('gate', [
+      { type: 'steer', node: 'a', text: 'already used' },
+      { type: 'steer_consumed', node: 'a', count: 1 },
+      { type: 'steer', node: 'gate', text: 'still pending' },
+    ]);
+    const { kernel, got } = restarted();
+    await kernel.approveStored(runId, true);
+    await kernel.wait(runId);
+    expect(got.b).toEqual(['still pending']);
+  });
+
+  it('gives the retry the steers a node was holding when the process died', async () => {
+    // `b` took the steer and died before finishing, so nothing recorded it as consumed.
+    const runId = await crashed('b', [{ type: 'steer', node: 'gate', text: 'take this into account' }]);
+    const { kernel, got } = restarted();
+    await kernel.resume(runId);
+    await kernel.wait(runId);
+    expect(got.b).toEqual(['take this into account']);
+  });
+
+  it('records a steer as consumed when the node that took it finishes', async () => {
+    const kernel = new RunKernel();
+    kernel.setExecutor('agent', async (_node, ctx) => {
+      ctx.takeSteer();
+      await new Promise((r) => setTimeout(r, 20));
+      return { ok: true };
+    });
+    const started = await kernel.start(linear);
+    kernel.steer(started.runId, 'noted');
+    await kernel.wait(started.runId);
+    const consumed = readEvents(started.runId).filter((e) => e.type === 'steer_consumed');
+    expect(consumed.map((e) => (e as { count: number }).count)).toEqual([1]);
+  });
+});
+
 describe('steer', () => {
   it('hands queued text to the next agent node', async () => {
     const prompts: string[] = [];

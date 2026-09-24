@@ -61,6 +61,7 @@ import {
   listRuns,
   loadRun,
   nodeArtifactPath,
+  readEvents,
   runDir,
   summarize,
   type CommitBatch,
@@ -283,6 +284,11 @@ interface RunHandle {
   txn: RunTxn;
   signal: { aborted: boolean };
   steer: string[];
+  /**
+   * Steers the node in flight has taken. Recorded as consumed only when that
+   * node finishes, so a crash mid-node leaves them to be delivered to the retry.
+   */
+  steerTaken?: number;
   tag?: string;
   /** Independent of any checkpoint, so a long node cannot look abandoned. */
   heartbeat?: ReturnType<typeof setInterval>;
@@ -411,6 +417,8 @@ export class RunKernel extends EventEmitter {
   private readonly executors: Partial<Record<NodeKind, NodeExecutor>>;
   private readonly nodeTimeoutMs: number;
   private readonly live = new Map<string, RunHandle>();
+  /** Gate answers given while their run was not live, keyed by run id; see `approveStored`. */
+  private readonly _presetGates = new Map<string, { nodeId: string; approved: boolean }>();
   /**
    * This kernel's identity as a run owner.
    *
@@ -609,6 +617,7 @@ export class RunKernel extends EventEmitter {
     // nodes, with every side effect happening twice.
     const guard = acquireLease(runId, this.ownerId);
     const { txn, signal } = this._open(guard, record);
+    const pendingSteers = this._unconsumedSteers(runId);
 
     const wasTerminal = isTerminalRunState(record.state);
     if (
@@ -637,8 +646,33 @@ export class RunKernel extends EventEmitter {
     ) {
       throw new Error(`Run '${runId}' could not be checkpointed: the claim was lost before it resumed`);
     }
-    this._launch(txn, signal);
+    this._launch(txn, signal, pendingSteers);
     return txn.record;
+  }
+
+  /**
+   * Steers logged for this run that no finished node consumed.
+   *
+   * The queue lives in memory, so a restart used to drop every steer that had
+   * arrived but not been taken — while the log still said it was sent. Steers are
+   * taken in log order and a node records how many it held only when it finishes,
+   * so the unconsumed ones are the tail of the log. A node that died holding some
+   * never recorded them, and they go to its retry: at-least-once, like the node.
+   */
+  private _unconsumedSteers(runId: string): string[] {
+    let events: ReturnType<typeof readEvents>;
+    try {
+      events = readEvents(runId);
+    } catch {
+      return [];
+    }
+    const texts: string[] = [];
+    let consumed = 0;
+    for (const e of events) {
+      if (e.type === 'steer') texts.push(e.text);
+      else if (e.type === 'steer_consumed') consumed += e.count;
+    }
+    return texts.slice(consumed);
   }
 
   cancel(runId: string): boolean {
@@ -679,11 +713,36 @@ export class RunKernel extends EventEmitter {
     return true;
   }
 
-  /** Answer a parked `human_gate`. */
+  /** Answer a parked `human_gate` in a run that is live in this process. */
   approve(runId: string, approved: boolean): boolean {
     const handle = this.live.get(runId);
     if (!handle?.gate) return false;
     handle.gate.resolve(approved);
+    return true;
+  }
+
+  /**
+   * Answer a parked `human_gate`, wherever the run was parked.
+   *
+   * After a restart a parked run is on disk but not live, so `approve` found no
+   * gate and quietly did nothing. Here the answer is attached to the gate the run
+   * was waiting at and the run is resumed; when it reaches that gate again, the
+   * answer is waiting. Attaching it before resuming leaves nothing to race.
+   */
+  async approveStored(runId: string, approved: boolean): Promise<boolean> {
+    if (this.approve(runId, approved)) return true;
+    if (this.live.has(runId)) return false;
+    const record = loadRun(runId);
+    const gateId = record?.currentNode;
+    if (!record || record.state !== 'awaiting_human' || !gateId) return false;
+    if (record.nodes[gateId]?.state !== 'awaiting_human') return false;
+    this._presetGates.set(runId, { nodeId: gateId, approved });
+    try {
+      await this.resume(runId);
+    } catch (err) {
+      this._presetGates.delete(runId);
+      throw err;
+    }
     return true;
   }
 
@@ -760,12 +819,14 @@ export class RunKernel extends EventEmitter {
 
   // ─── Execution ────────────────────────────────────────────────────────────
 
-  private _launch(txn: RunTxn, signal: { aborted: boolean }): void {
+  private _launch(txn: RunTxn, signal: { aborted: boolean }, steer: string[] = []): void {
     const runId = txn.guard.runId;
     const handle: RunHandle = {
       txn,
       signal,
-      steer: [],
+      // Seeded before `_run` starts: its first node can take steers before the
+      // first await, so pushing them afterwards would be too late.
+      steer,
       tag: this._tags.get(runId),
       inflight: new Set(),
       secrets: this._secrets.get(runId) ?? {},
@@ -999,6 +1060,11 @@ export class RunKernel extends EventEmitter {
 
       const result = await this._runWithRetry(handle, spec);
       if (txn.finished) return txn.record;
+      if (handle.steerTaken) {
+        const count = handle.steerTaken;
+        handle.steerTaken = 0;
+        txn.emit({ ts: new Date().toISOString(), type: 'steer_consumed', node: nodeId, count });
+      }
       // Back to `running` once the checks are done: `verifying` was only ever
       // set on the way in, and a verifier that sits mid-chain (the solve repair
       // loop puts routers and another implement pass after it) left the record
@@ -1097,7 +1163,11 @@ export class RunKernel extends EventEmitter {
             attemptSignal.aborted = v;
           },
         },
-        takeSteer: () => handle.steer.splice(0, handle.steer.length),
+        takeSteer: () => {
+          const taken = handle.steer.splice(0, handle.steer.length);
+          handle.steerTaken = (handle.steerTaken ?? 0) + taken.length;
+          return taken;
+        },
         // Fenced like everything else. It used to be the one context method that
         // wrote unguarded, so a superseded owner's node could still append to the
         // log its replacement was reading.
@@ -1143,9 +1213,15 @@ export class RunKernel extends EventEmitter {
     // gate we can never record the answer to would hang the executor forever.
     if (!this._setNodeState(handle, nodeId, 'awaiting_human')) return false;
     if (!this._setRunState(handle, 'awaiting_human')) return false;
-    const approved = await new Promise<boolean>((resolve) => {
-      handle.gate = { resolve };
-    });
+    const runId = handle.txn.guard.runId;
+    const preset = this._presetGates.get(runId);
+    if (preset) this._presetGates.delete(runId);
+    const approved =
+      preset && preset.nodeId === nodeId
+        ? preset.approved
+        : await new Promise<boolean>((resolve) => {
+            handle.gate = { resolve };
+          });
     handle.gate = undefined;
     if (!handle.signal.aborted) this._setRunState(handle, 'running');
     return approved;
