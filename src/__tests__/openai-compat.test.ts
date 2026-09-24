@@ -927,6 +927,15 @@ describe('nativeThreadIsLive', () => {
     expect(nativeThreadIsLive('opencode', { opencodeSessionId: 'ses_abc' })).toBe(true);
   });
 
+  // grok is in engineHasNativeConversation() and resumes by session id, but had no
+  // case here, so a grok session whose first turn died before grok returned an id
+  // counted as live and the next turn went out without the conversation before it.
+  it('requires a captured session id for grok', () => {
+    expect(nativeThreadIsLive('grok', {})).toBe(false);
+    expect(nativeThreadIsLive('grok', { grokSessionId: 'grok_abc' })).toBe(true);
+    expect(nativeThreadIsLive('grok', { opencodeSessionId: 'ses_abc' })).toBe(false);
+  });
+
   it('treats engines that keep context in a live process as live', () => {
     // claude and persistent custom engines expose no separate id, so presence in the map is the
     // strongest signal there is; this must not regress to false.

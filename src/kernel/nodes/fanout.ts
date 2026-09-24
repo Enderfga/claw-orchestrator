@@ -34,6 +34,7 @@ export async function executeFanoutNode(node: NodeSpec, ctx: NodeContext): Promi
         prompt: a.prompt ?? a.persona,
         baseUrl: a.baseUrl,
         permissionMode: a.permissionMode as never,
+        sandboxMode: a.sandboxMode,
         // Credentials never travel in the spec; they arrive through the
         // in-memory side channel keyed by agent name.
         customEngine: customEngines[a.name] as never,

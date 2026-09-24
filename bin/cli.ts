@@ -156,7 +156,9 @@ program
 // Session commands
 program
   .command('session-start [name]')
-  .description('Start a persistent coding session (Claude Code, Codex, Gemini, or Cursor)')
+  .description(
+    'Start a persistent coding session (Claude Code, Codex, Antigravity, Grok Build, OpenCode, or a custom engine preset)',
+  )
   .option('-d, --cwd <dir>', 'Working directory')
   .option(
     '-e, --engine <engine>',

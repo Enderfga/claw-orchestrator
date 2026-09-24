@@ -153,6 +153,17 @@ describe('plugin tool registration', () => {
     }
   });
 
+  // Both reach SessionConfig through the handler's spread, but a host that builds
+  // calls from the declared schema never sends a field the schema does not name.
+  it('declares restricted and ignoreUserConfig on session_start', () => {
+    const properties = (byName.get('session_start')!.parameters.properties ?? {}) as Record<
+      string,
+      Record<string, unknown>
+    >;
+    expect(properties.restricted?.type).toBe('boolean');
+    expect(properties.ignoreUserConfig?.type).toBe('boolean');
+  });
+
   it('exposes sandboxMode on session_start for cross-engine read-only sessions', () => {
     const tool = byName.get('session_start');
     expect(tool).toBeDefined();

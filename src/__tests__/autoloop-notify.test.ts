@@ -72,14 +72,43 @@ afterEach(() => {
 });
 
 describe('notifyUserFallbackChain', () => {
-  it('returns "none" when no channel env vars are set', async () => {
+  it('returns "none" and spawns nothing when no channel env vars are set', async () => {
     delete process.env.AUTOLOOP_WECHAT_RECIPIENT;
     delete process.env.AUTOLOOP_WECHAT_ACCOUNT;
     delete process.env.AUTOLOOP_WHATSAPP_RECIPIENT;
-    setSpawnSequence([]); // nothing should spawn
+    delete process.env.AUTOLOOP_EMAIL_SCRIPT;
+    setSpawnSequence([]);
     const r = await notifyUserFallbackChain({ level: 'info', summary: 'x', channel: 'auto' });
-    // Email script may or may not exist on the machine; allow either none or email.
-    expect(['none', 'email']).toContain(r.channel_used);
+    expect(r.channel_used).toBe('none');
+    expect(spawnCalls).toHaveLength(0);
+  });
+
+  // Email is configured by one variable naming the script, not found by probing
+  // paths under the home directory — the result no longer depends on whose
+  // machine the chain runs on.
+  it('emails through AUTOLOOP_EMAIL_SCRIPT, with the subject as an argument', async () => {
+    delete process.env.AUTOLOOP_WECHAT_RECIPIENT;
+    delete process.env.AUTOLOOP_WHATSAPP_RECIPIENT;
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'autoloop-email-'));
+    const script = path.join(dir, 'send.sh');
+    fs.writeFileSync(script, '#!/bin/sh\n');
+    process.env.AUTOLOOP_EMAIL_SCRIPT = script;
+    try {
+      setSpawnSequence([{ exitCode: 0 }]);
+      const r = await notifyUserFallbackChain({ level: 'warn', summary: 'stalled', channel: 'email' });
+      expect(r.channel_used).toBe('email');
+      expect(spawnCalls).toEqual([{ argv: ['bash', script, '-s', '[autoloop] stalled'] }]);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('skips email when AUTOLOOP_EMAIL_SCRIPT names a file that does not exist', async () => {
+    process.env.AUTOLOOP_EMAIL_SCRIPT = path.join(os.tmpdir(), 'no-such-dir', 'send.sh');
+    setSpawnSequence([]);
+    const r = await notifyUserFallbackChain({ level: 'info', summary: 'x', channel: 'email' });
+    expect(r.channel_used).toBe('none');
+    expect(spawnCalls).toHaveLength(0);
   });
 
   it('chooses wechat when env is set and openclaw returns the success marker', async () => {

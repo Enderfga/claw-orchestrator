@@ -2950,6 +2950,17 @@ export class SessionManager {
       engines?: EngineType[];
     },
   ): Promise<UltrareviewResult> {
+    // Every reviewer runs read-only (see below). grok refuses a read-only session
+    // rather than approximate one, and a custom reviewer has no config to start
+    // from, so both are turned away here instead of failing one reviewer at a time.
+    const unsupported = (opts?.engines ?? []).filter((e) => e === 'grok' || e === 'custom');
+    if (unsupported.length) {
+      throw new Error(
+        `ultrareview cannot use ${[...new Set(unsupported)].join(', ')}: reviewers run read-only, which ${
+          unsupported.includes('grok') ? 'grok refuses' : 'a custom engine cannot be configured for here'
+        }`,
+      );
+    }
     const id = `ultrareview-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
     const agentCount = Math.min(20, Math.max(1, opts?.agentCount || 5));
 
@@ -3100,12 +3111,14 @@ export class SessionManager {
       engine: engines[i % engines.length],
       model: opts?.model,
       prompt: `${a.persona}\n\n${reviewInstruction}`,
-      // Review is read-only: keep reviewers out of edit mode so they analyse and
-      // report without modifying the very code they review. (Unlike council,
-      // fan-out shares the project dir — there is no worktree to sandbox edits.
-      // `plan` constrains the claude engine; non-claude reviewers, which are
-      // opt-in via `engines`, run under their engine's default sandbox.)
+      // Review is read-only: reviewers analyse and report without modifying the
+      // very code they review. Unlike council, fan-out shares the project dir —
+      // there is no worktree to contain an edit — so this has to hold on every
+      // engine. `plan` constrains Claude only; `sandboxMode: 'read-only'` is the
+      // engine-agnostic setting, which codex, agy and opencode map to their own
+      // read-only modes. Before it was set, a codex reviewer ran workspace-write.
       permissionMode: 'plan',
+      sandboxMode: 'read-only',
     }));
 
     const runId = id;

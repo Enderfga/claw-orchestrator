@@ -1,19 +1,16 @@
 /**
  * notify_user — wechat → whatsapp → email fallback chain.
  *
- * Mirrors the bash `push()` recipe in ~/.claude/skills/push-api-skill/SKILL.md
- * §B.2.5. Purposefully shells out via `openclaw` and the email script rather
- * than reimplementing the API contracts — the skill is the source of truth.
- *
- * Per the recovery-path principle in CLAUDE.md: this code path must stay
- * thin. If openclaw itself is down, the email fallback is independent
- * (Gmail SMTP via the script).
+ * Shells out to the `openclaw` CLI for WeChat and WhatsApp, and to an
+ * operator-supplied script for email, rather than reimplementing either API.
+ * This path stays thin on purpose: a notifier is part of recovery, so it must be
+ * simpler than what it reports on. Email is the independent tier — it does not
+ * depend on openclaw being up.
  */
 
 import { spawn } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import * as os from 'node:os';
 
 import type { PushChannel, PushLevel } from './messages.js';
 import { type Logger, nullLogger } from '../logger.js';
@@ -21,9 +18,9 @@ import { type Logger, nullLogger } from '../logger.js';
 // Recipient identifiers are personal contact info — never hard-code them.
 // Set the following env vars before relying on the matching channel; if a
 // var is unset that channel is silently skipped and the fallback chain moves
-// on. Email (independent SMTP via push-api-skill script) is the final tier
-// regardless of these. Read at call time (not module load) so the operator
-// can rotate the env without restarting the whole orchestrator.
+// on. Email is the final tier and has its own variable, AUTOLOOP_EMAIL_SCRIPT.
+// Read at call time (not module load) so the operator can rotate the env
+// without restarting the whole orchestrator.
 function readRecipientEnv(): {
   wechatRecipient: string;
   wechatAccount: string;
@@ -123,15 +120,18 @@ async function tryWhatsApp(text: string, logger: Logger): Promise<boolean> {
   return false;
 }
 
+/**
+ * Email through the script named by AUTOLOOP_EMAIL_SCRIPT, run as
+ * `bash "$AUTOLOOP_EMAIL_SCRIPT" -s "<subject>"` with the body on stdin. Unset
+ * means the operator has not configured email, so the tier is skipped without a
+ * warning, like the other channels; set but missing is a misconfiguration and
+ * says so.
+ */
 async function tryEmail(subject: string, body: string, logger: Logger): Promise<boolean> {
-  // Prefer the user-installed skill script; tolerate either ~/clawd or ~/.claude path.
-  const candidates = [
-    path.join(os.homedir(), 'clawd', 'skills', 'push-api-skill', 'scripts', 'send-email.sh'),
-    path.join(os.homedir(), '.claude', 'skills', 'push-api-skill', 'scripts', 'send-email.sh'),
-  ];
-  const script = candidates.find((p) => fs.existsSync(p));
-  if (!script) {
-    logger.warn?.('[autoloop/notify] email fallback unavailable: send-email.sh not found');
+  const script = process.env.AUTOLOOP_EMAIL_SCRIPT ?? '';
+  if (!script) return false;
+  if (!fs.existsSync(script)) {
+    logger.warn?.(`[autoloop/notify] email fallback unavailable: AUTOLOOP_EMAIL_SCRIPT does not exist (${script})`);
     return false;
   }
   const r = await runCmd(['bash', script, '-s', subject], { stdin: body, timeoutMs: 30_000 });
@@ -171,7 +171,8 @@ export async function notifyUserFallbackChain(opts: {
 
   // 'auto' or 'both' → walk the chain.
   if (await tryWechat(wechatText, logger)) return { channel_used: 'wechat' };
-  if (await tryWhatsApp(`[微信失败已 fallback] ${wechatText}`, logger)) return { channel_used: 'whatsapp' };
+  if (await tryWhatsApp(`[WeChat failed, sent via WhatsApp] ${wechatText}`, logger))
+    return { channel_used: 'whatsapp' };
   if (await tryEmail(emailSubject, emailBody, logger)) return { channel_used: 'email' };
   return { channel_used: 'none' };
 }

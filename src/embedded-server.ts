@@ -373,7 +373,10 @@ export class EmbeddedServer {
       res.setHeader('Access-Control-Allow-Origin', origin || '*');
     }
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    // X-Session-Id and X-Session-Reset are how an OpenAI-compat client keys and resets its
+    // conversation. A browser only sends a custom header if the preflight allows it, so leaving
+    // them out made every cross-origin client that used them fail before the request was sent.
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Session-Id, X-Session-Reset');
     if (req.method === 'OPTIONS') {
       res.writeHead(200);
       res.end();
@@ -387,9 +390,9 @@ export class EmbeddedServer {
     // We re-read ~/.openclaw/server-token PER REQUEST (64-byte read, kernel
     // page cache, microseconds). Necessary because another clawo instance
     // (nohup test, second launchd, npm test process) can overwrite the file
-    // mid-life; sasha-doctor's reverse proxy reads disk fresh on every
-    // request, so without us doing the same we sit with a stale in-memory
-    // token and 401 everything the proxy injects.
+    // mid-life; a reverse proxy that reads the file fresh on every request
+    // would then inject a token we no longer hold, and we would 401 everything
+    // it forwards.
     if (this.authToken && path !== '/health') {
       const envExplicit =
         typeof process.env.OPENCLAW_SERVER_TOKEN === 'string' &&

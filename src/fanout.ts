@@ -46,6 +46,12 @@ export interface FanoutAgentSpec {
   baseUrl?: string;
   customEngine?: CustomEngineConfig;
   permissionMode?: PermissionMode;
+  /**
+   * The engine-agnostic sandbox. `permissionMode: 'plan'` constrains Claude only;
+   * `sandboxMode: 'read-only'` is what keeps an agent on any engine from writing,
+   * and it matters here because every agent shares the one project directory.
+   */
+  sandboxMode?: 'read-only' | 'workspace-write' | 'danger-full-access';
 }
 
 export interface FanoutConfig {
@@ -187,6 +193,7 @@ export class Fanout {
         model: spec.model,
         baseUrl: spec.baseUrl,
         permissionMode: spec.permissionMode ?? 'bypassPermissions',
+        sandboxMode: spec.sandboxMode,
         maxTurns: this.config.maxTurnsPerAgent ?? DEFAULT_MAX_TURNS,
         maxBudgetUsd: this.config.maxBudgetUsd,
         customEngine: spec.customEngine,

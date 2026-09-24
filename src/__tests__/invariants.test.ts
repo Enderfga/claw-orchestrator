@@ -83,8 +83,13 @@ class FakeSession extends EventEmitter implements Partial<ISession> {
     this.stats.turnsSucceeded++;
     const record = observed.find((o) => o.config.name === this.config.name);
     record?.messages.push(message);
-    // An agent that is allowed to write, writes. `plan` must not be able to.
-    if (this.config.permissionMode !== 'plan' && this.config.cwd) {
+    // An agent that is allowed to write, writes. What stops it is engine-specific,
+    // as it is for the real CLIs: `plan` is Claude's own mode and holds only there;
+    // every other engine is held by the engine-agnostic `sandboxMode: 'read-only'`.
+    const engine = this.config.engine ?? 'claude';
+    const readOnly =
+      this.config.sandboxMode === 'read-only' || (engine === 'claude' && this.config.permissionMode === 'plan');
+    if (!readOnly && this.config.cwd) {
       try {
         fs.appendFileSync(path.join(this.config.cwd, 'AGENT-WROTE-HERE.txt'), `${this.config.name}\n`);
       } catch {
@@ -319,6 +324,27 @@ describe('ultrareview is read-only', () => {
     expect(fs.existsSync(path.join(cwd, 'AGENT-WROTE-HERE.txt'))).toBe(false);
 
     fs.rmSync(cwd, { recursive: true, force: true });
+  });
+
+  // `plan` is Claude's own mode. A reviewer on another engine was held by nothing
+  // but that, and ran under its engine's default sandbox — for codex, writable —
+  // in the very directory it was reviewing.
+  it('does not let a reviewer on another engine write either', async () => {
+    const cwd = gitRepo();
+    const review = await mgr.ultrareviewStart(cwd, { agentCount: 2, engines: ['claude', 'codex'] });
+    await (mgr as unknown as { kernel: { wait(id: string): Promise<unknown> } }).kernel.wait(review.id);
+
+    const reviewers = observed.filter((o) => !o.config.name?.endsWith('-synthesis'));
+    expect(reviewers.map((r) => r.config.engine)).toEqual(['claude', 'codex']);
+    expect(reviewers.every((r) => r.config.sandboxMode === 'read-only')).toBe(true);
+    expect(fs.existsSync(path.join(cwd, 'AGENT-WROTE-HERE.txt'))).toBe(false);
+
+    fs.rmSync(cwd, { recursive: true, force: true });
+  });
+
+  it('refuses engines that cannot run a read-only reviewer', async () => {
+    await expect(mgr.ultrareviewStart('/tmp', { engines: ['claude', 'grok'] })).rejects.toThrow(/grok/);
+    await expect(mgr.ultrareviewStart('/tmp', { engines: ['custom'] })).rejects.toThrow(/custom/);
   });
 });
 

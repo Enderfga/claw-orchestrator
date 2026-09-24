@@ -97,6 +97,8 @@ export interface FanoutAgentSpec {
   /** Council-style persona text. */
   persona?: string;
   permissionMode?: string;
+  /** Engine-agnostic sandbox; `read-only` holds on every engine that supports it. */
+  sandboxMode?: 'read-only' | 'workspace-write' | 'danger-full-access';
   baseUrl?: string;
   effort?: string;
   ultracode?: boolean;

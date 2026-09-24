@@ -614,6 +614,17 @@ describe('EmbeddedServer', () => {
       expect(res.status).toBe(200);
       expect(res.headers['access-control-allow-methods']).toContain('POST');
     });
+
+    // A browser sends a custom header only if the preflight allows it. The
+    // OpenAI-compat client keys and resets its conversation with these two.
+    it('allows the session headers the OpenAI-compat endpoint reads', async () => {
+      await server.start();
+
+      const res = await request(port, '/v1/chat/completions', { method: 'OPTIONS' });
+      const allowed = String(res.headers['access-control-allow-headers']).toLowerCase();
+      expect(allowed).toContain('x-session-id');
+      expect(allowed).toContain('x-session-reset');
+    });
   });
 
   describe('error handling', () => {

@@ -507,6 +507,8 @@ export interface SessionStats {
   cursorChatId?: string;
   /** OpenCode session ID captured from the run's JSON output. Reused via `--session` for multi-turn context. */
   opencodeSessionId?: string;
+  /** Grok Build session ID captured from the turn's JSON result. Reused via `--resume` for multi-turn context. */
+  grokSessionId?: string;
   /**
    * True when the most recent turn's token counts came from estimateTokens()
    * because the engine reported no usage. Cost derived from those counts is an
