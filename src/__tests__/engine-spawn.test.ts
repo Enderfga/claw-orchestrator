@@ -18,7 +18,7 @@ import type { ChildProcess } from 'node:child_process';
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { execEngine, spawnEngine } from '../engine-spawn.js';
+import { execEngine, isWindowsBatchTarget, spawnEngine } from '../engine-spawn.js';
 
 const isWin = process.platform === 'win32';
 
@@ -109,8 +109,7 @@ describe('spawnEngine', () => {
   });
 });
 
-describe('execEngine', () => {
-  it('captures stdout/stderr and resolves on exit 0', async () => {
+describe('execEngine', () => {  it('captures stdout/stderr and resolves on exit 0', async () => {
     const res = await execEngine(process.execPath, ['-e', 'console.log("out");console.error("err")']);
     expect(res.stdout).toContain('out');
     expect(res.stderr).toContain('err');
@@ -151,5 +150,62 @@ describe('execEngine', () => {
       (e: unknown) => e as Error,
     );
     expect(err).not.toBeNull();
+  });
+});
+
+describe('isWindowsBatchTarget', () => {
+  const realPlatform = process.platform;
+
+  it('is always false off Windows', () => {
+    Object.defineProperty(process, 'platform', { value: 'linux' });
+    try {
+      expect(isWindowsBatchTarget('codex')).toBe(false);
+      expect(isWindowsBatchTarget('codex.cmd')).toBe(false);
+    } finally {
+      Object.defineProperty(process, 'platform', { value: realPlatform });
+    }
+  });
+
+  it.runIf(isWin)('classifies shims and executables via PATH lookup', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'clawo batchdetect-'));
+    try {
+      writeFileSync(join(dir, 'only-cmd.cmd'), '@echo off', 'utf8');
+      writeFileSync(join(dir, 'only-exe.exe'), 'MZ', 'utf8');
+      writeFileSync(join(dir, 'both'), '#!/bin/sh', 'utf8');
+      writeFileSync(join(dir, 'both.cmd'), '@echo off', 'utf8');
+      const env = { PATH: dir, PATHEXT: '.COM;.EXE;.BAT;.CMD' };
+      expect(isWindowsBatchTarget('only-cmd', env)).toBe(true);
+      expect(isWindowsBatchTarget('only-exe', env)).toBe(false);
+      expect(isWindowsBatchTarget('both', env)).toBe(true);
+      expect(isWindowsBatchTarget('missing-tool', env)).toBe(false);
+      expect(isWindowsBatchTarget(join(dir, 'only-cmd.cmd'), env)).toBe(true);
+      expect(isWindowsBatchTarget(join(dir, 'only-exe.exe'), env)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('newline flattening', () => {
+  it('keeps newlines intact through a direct executable', async () => {
+    const child = spawnEngine(process.execPath, ['-e', ECHO_SCRIPT, 'line1\nline2\r\nline3'], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const { code, stdout } = await capture(child);
+    expect(code).toBe(0);
+    const parsed = JSON.parse(stdout) as { argv: string[] };
+    expect(parsed.argv).toEqual(['line1\nline2\r\nline3']);
+  });
+
+  it.runIf(isWin)('flattens newlines to spaces through a .cmd shim', async () => {
+    const { cmdPath, dir } = writeCmdFixture();
+    try {
+      const { stdout, stderr } = await execEngine(cmdPath, ['line1\nline2\r\nline3']);
+      expect(stderr).toBe('');
+      const parsed = JSON.parse(stdout) as { argv: string[] };
+      expect(parsed.argv).toEqual([join(dir, 'echo-argv.cjs'), 'line1 line2 line3']);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

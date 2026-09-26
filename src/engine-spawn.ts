@@ -21,20 +21,107 @@
  *
  * Known cmd.exe limits on the shim path (verified, see engine-spawn.test.ts):
  * arguments keep spaces, balanced quotes, `&|;%`, unicode and empty strings,
- * but an UNBALANCED double-quote derails the whole command line and a
- * NEWLINE truncates the argument — multi-line prompts lose everything after
- * the first line. Single-line missions are unaffected; this is still strictly
- * better than the previous unconditional ENOENT.
+ * but an UNBALANCED double-quote derails the whole command line. Newlines
+ * cannot pass through `cmd.exe` at all, so `spawnEngine`/`execEngine`
+ * flatten `\r\n`/`\n` to spaces for batch targets only (detected via
+ * PATH/PATHEXT lookup in `isWindowsBatchTarget`) — every word survives,
+ * line structure does not. Direct executables keep byte-identical argv.
+ * This is still strictly better than the previous unconditional ENOENT.
  */
 import crossSpawn from 'cross-spawn';
+import { statSync } from 'node:fs';
+import { isAbsolute, join, resolve } from 'node:path';
 import type { ChildProcess, SpawnOptions } from 'node:child_process';
+
+/** Extensions CreateProcess runs directly — everything else needs cmd.exe. */
+const DIRECT_EXEC_EXTS = new Set(['.exe', '.com']);
+const BATCH_EXTS = new Set(['.cmd', '.bat']);
+
+/** Lower-cased extension, '' when the name has none. */
+function extOf(name: string): string {
+  const i = name.lastIndexOf('.');
+  const j = Math.max(name.lastIndexOf('/'), name.lastIndexOf('\\'));
+  return i > j ? name.slice(i).toLowerCase() : '';
+}
+
+function isFile(p: string): boolean {
+  try {
+    return statSync(p).isFile();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * True when `bin` will run through `cmd.exe` on Windows (npm `.cmd` shims,
+ * extensionless shell shims, …) rather than launching directly. On other
+ * platforms always false. `env`/`cwd` mirror what the child process will see,
+ * so the verdict matches cross-spawn's own resolution.
+ */
+export function isWindowsBatchTarget(
+  bin: string,
+  env: NodeJS.ProcessEnv = process.env,
+  cwd?: string,
+): boolean {
+  if (process.platform !== 'win32' || !bin) return false;
+  const pathext = (env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD')
+    .split(';')
+    .map((e) => e.trim().toLowerCase())
+    .filter((e) => e.startsWith('.'));
+  // An exact hit decides first: a real `.exe` next to a shim name wins.
+  const dirs: string[] = [];
+  if (/[\\/]/.test(bin)) {
+    dirs.push(isAbsolute(bin) ? '' : (typeof cwd === 'string' ? cwd : process.cwd()));
+  } else {
+    const raw = env.PATH ?? env.Path ?? '';
+    for (const d of raw.split(';')) {
+      const dir = d.trim().replace(/^"|"$/g, '');
+      if (dir) dirs.push(dir);
+    }
+  }
+  for (const dir of dirs) {
+    const base = dir ? join(dir, bin) : bin;
+    const ordered = [base, ...pathext.map((e) => base + e)];
+    for (const candidate of ordered) {
+      const resolved = dir && !isAbsolute(candidate) ? resolve(candidate) : candidate;
+      if (!isFile(dir ? resolved : candidate)) continue;
+      const ext = extOf(candidate);
+      if (!ext) return true; // extensionless shim: not directly executable
+      if (DIRECT_EXEC_EXTS.has(ext)) return false;
+      if (BATCH_EXTS.has(ext)) return true;
+      return true; // .ps1, .js, … : cmd.exe cannot run them directly either
+    }
+  }
+  return false; // unresolved: leave cross-spawn's own error path untouched
+}
+
+/**
+ * Newlines do not survive `cmd.exe` — it truncates the argument at the first
+ * one. Flattening to spaces keeps every word (formatting is degraded, content
+ * is complete), which strictly dominates the silent truncation. Applied only
+ * to batch targets; direct executables keep byte-identical argv.
+ */
+function flattenNewlines(args: string[]): string[] {
+  return args.map((a) => a.replace(/\r\n|[\r\n]/g, ' '));
+}
+
+function prepareArgs(
+  bin: string,
+  args: string[],
+  env: NodeJS.ProcessEnv,
+  cwd: string | undefined,
+): string[] {
+  return isWindowsBatchTarget(bin, env, cwd) ? flattenNewlines(args) : args;
+}
 
 /**
  * Streaming spawn for engine CLIs. Same signature and return type as
  * `node:child_process` spawn, so call sites change by one import line.
  */
 export function spawnEngine(bin: string, args: string[], options: SpawnOptions): ChildProcess {
-  return crossSpawn(bin, args, options);
+  const env = options.env ?? process.env;
+  const cwd = typeof options.cwd === 'string' ? options.cwd : undefined;
+  return crossSpawn(bin, prepareArgs(bin, args, env, cwd), options);
 }
 
 export interface ExecEngineOptions {
@@ -81,9 +168,10 @@ export function execEngine(bin: string, args: string[], opts: ExecEngineOptions 
 
     let child: ChildProcess;
     try {
-      child = crossSpawn(bin, args, {
+      const childEnv = env ?? process.env;
+      child = crossSpawn(bin, prepareArgs(bin, args, childEnv, cwd), {
         cwd,
-        env: env ?? process.env,
+        env: childEnv,
         stdio: ['ignore', 'pipe', 'pipe'],
         windowsHide: true,
       });

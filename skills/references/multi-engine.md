@@ -81,7 +81,7 @@ Wraps the `codex exec` subcommand. Each `send()` spawns a new process. Tested wi
 - Working directory passed via `-C` on the first turn
 - Default model: `gpt-5.5`
 - Requires `codex` CLI >= 0.119 (for `exec resume`): `npm install -g @openai/codex`
-- **Windows:** npm `.cmd` shims launch via `src/engine-spawn.ts` (cross-spawn). Arguments keep spaces, balanced quotes and `%`; an unbalanced `"` or a newline in one argument does not survive `cmd.exe` — keep prompts to balanced quoting.
+- **Windows:** npm `.cmd` shims launch via `src/engine-spawn.ts` (cross-spawn). Arguments keep spaces, balanced quotes and `%`; newlines are flattened to spaces for batch targets (cmd.exe cannot carry them); an unbalanced `"` in one argument is a cmd.exe limit.
 - **Does not support `/goal`** — for that, use `engine: 'codex-app'` below
 
 ```typescript

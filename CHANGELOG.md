@@ -14,8 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   while true executables (`claude.exe`, `agy.exe`) worked. All engine spawns now go through the new
   `src/engine-spawn.ts` (cross-spawn: PATH/PATHEXT resolution plus `cmd.exe` argv escaping only when
   the target needs it; direct executables and non-Windows spawns are unchanged). `shell: true` was
-  deliberately not used — Node concatenates argv unescaped there. Limit: `cmd.exe` still drops an
-  unbalanced `"` and truncates at newlines on the shim path.
+  deliberately not used — Node concatenates argv unescaped there. Follow-up: `cmd.exe` cannot carry
+  newlines, so prompts sent to a batch target are flattened (`\n` → space, batch targets only,
+  detected via PATH/PATHEXT lookup) instead of being silently truncated after the first line. An
+  unbalanced `"` in one argument remains a `cmd.exe` limit.
 
 ## [7.5.5] - 2026-09-24
 
