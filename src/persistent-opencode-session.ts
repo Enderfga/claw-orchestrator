@@ -33,7 +33,7 @@
  * ever wanted — verified against 1.17.15.)
  */
 
-import { spawn } from 'node:child_process';
+import { spawnEngine } from './engine-spawn.js';
 import * as readline from 'node:readline';
 
 import type { SessionConfig, SessionSendOptions, StreamEvent, TurnResult } from './types.js';
@@ -204,7 +204,7 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
       // a read-only session degrade to writable — detect that line and fail.
       let readOnlyAgentMissing = false;
 
-      const proc = spawn(this.engineBin, args, {
+      const proc = spawnEngine(this.engineBin, args, {
         cwd: this.options.cwd,
         env: readOnly ? { ...process.env, OPENCODE_CONFIG_CONTENT: READ_ONLY_AGENT_CONFIG } : { ...process.env },
         stdio: ['pipe', 'pipe', 'pipe'],

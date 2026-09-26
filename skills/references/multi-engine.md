@@ -81,6 +81,7 @@ Wraps the `codex exec` subcommand. Each `send()` spawns a new process. Tested wi
 - Working directory passed via `-C` on the first turn
 - Default model: `gpt-5.5`
 - Requires `codex` CLI >= 0.119 (for `exec resume`): `npm install -g @openai/codex`
+- **Windows:** npm `.cmd` shims launch via `src/engine-spawn.ts` (cross-spawn). Arguments keep spaces, balanced quotes and `%`; an unbalanced `"` or a newline in one argument does not survive `cmd.exe` — keep prompts to balanced quoting.
 - **Does not support `/goal`** — for that, use `engine: 'codex-app'` below
 
 ```typescript
@@ -340,7 +341,7 @@ Wraps the [sst/opencode](https://github.com/sst/opencode) CLI with `run --format
   - if the `clawo-readonly` agent fails to load, the turn is refused rather than run with write access
   - to test a change to this config, use adversarial prompts that include asking the agent to delegate; `opencode agent list` shows compiled rules that look the same for a safe and an unsafe agent
 - Requires opencode installed: `brew install sst/tap/opencode` or `npm install -g opencode-ai`. Auth via `opencode auth login` **or** any provider env var (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, etc.) — opencode picks up either path
-- Binary: `opencode` (set `OPENCODE_BIN` env var to override)
+- Binary: `opencode` (set `OPENCODE_BIN` env var to override). **Windows:** npm `.cmd` shims launch via `src/engine-spawn.ts` (cross-spawn) — same quoting limits as the codex entry above.
 
 ```typescript
 await manager.startSession({

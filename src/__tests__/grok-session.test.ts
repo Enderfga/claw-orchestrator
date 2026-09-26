@@ -12,8 +12,8 @@ import { EventEmitter } from 'node:events';
 import { Readable } from 'node:stream';
 
 const mockSpawn = vi.fn();
-vi.mock('node:child_process', () => ({
-  spawn: (...args: unknown[]) => mockSpawn(...args),
+vi.mock('../engine-spawn.js', () => ({
+  spawnEngine: (...args: unknown[]) => mockSpawn(...args),
 }));
 
 const { PersistentGrokSession } = await import('../persistent-grok-session.js');

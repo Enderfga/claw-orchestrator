@@ -11,6 +11,7 @@ import * as os from 'node:os';
 import { execFile, execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { promisify } from 'node:util';
+import { execEngine } from './engine-spawn.js';
 
 const execFileAsync = promisify(execFile);
 import * as http from 'node:http';
@@ -2169,7 +2170,7 @@ export class SessionManager {
     args.push('--skip-git-repo-check', '--json');
     if (opts.model) args.push('--model', opts.model);
     args.push(opts.message);
-    const { stdout } = await execFileAsync(this._codexBin(), args, {
+    const { stdout } = await execEngine(this._codexBin(), args, {
       cwd: opts.cwd ? path.resolve(opts.cwd) : undefined,
       maxBuffer: 32 * 1024 * 1024,
       timeout: opts.timeout || 300_000,
@@ -2222,7 +2223,7 @@ export class SessionManager {
     if (opts.title) args.push('--title', opts.title);
     if (opts.model) args.push('-c', `model="${opts.model}"`);
     if (opts.prompt) args.push(opts.prompt);
-    const { stdout, stderr } = await execFileAsync(this._codexBin(), args, {
+    const { stdout, stderr } = await execEngine(this._codexBin(), args, {
       cwd: opts.cwd ? path.resolve(opts.cwd) : undefined,
       maxBuffer: 16 * 1024 * 1024,
       timeout: opts.timeout || 600_000,

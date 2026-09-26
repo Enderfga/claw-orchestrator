@@ -14,7 +14,7 @@
  *     conversation continuity (Codex 0.119+).
  */
 
-import { spawn } from 'node:child_process';
+import { spawnEngine } from './engine-spawn.js';
 import { writeFileSync, unlinkSync, readFileSync, readdirSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
@@ -327,7 +327,7 @@ export class PersistentCodexSession extends BaseOneShotSession {
       let turnError: string | undefined;
       let settled = false;
 
-      const proc = spawn(this.engineBin, args, {
+      const proc = spawnEngine(this.engineBin, args, {
         cwd: this.options.cwd,
         env: { ...process.env },
         stdio: ['ignore', 'pipe', 'pipe'],

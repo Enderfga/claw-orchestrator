@@ -43,8 +43,8 @@ class MockProcess extends EventEmitter {
 
 let mockProc: MockProcess;
 
-vi.mock('node:child_process', () => ({
-  spawn: vi.fn(() => {
+vi.mock('../engine-spawn.js', () => ({
+  spawnEngine: vi.fn(() => {
     mockProc = new MockProcess();
     return mockProc;
   }),
@@ -129,7 +129,7 @@ describe('PersistentClaudeSession', () => {
     });
 
     it('assembles correct CLI args with model', async () => {
-      const { spawn } = await import('node:child_process');
+      const { spawnEngine: spawn } = await import('../engine-spawn.js');
       const startPromise = session.start();
       emitInitEvent(mockProc);
       await startPromise;
@@ -145,7 +145,7 @@ describe('PersistentClaudeSession', () => {
 
     it('includes --resume flag when resumeSessionId is set', async () => {
       session = new PersistentClaudeSession(makeConfig({ resumeSessionId: 'resume_abc' }));
-      const { spawn } = await import('node:child_process');
+      const { spawnEngine: spawn } = await import('../engine-spawn.js');
       const startPromise = session.start();
       emitInitEvent(mockProc);
       await startPromise;
@@ -164,7 +164,7 @@ describe('PersistentClaudeSession', () => {
         scout: { description: 'Looks things up', prompt: 'You are a scout.', omitClaudeMd: true, maxTurns: 3 },
       };
       session = new PersistentClaudeSession(makeConfig({ agents }));
-      const { spawn } = await import('node:child_process');
+      const { spawnEngine: spawn } = await import('../engine-spawn.js');
       const startPromise = session.start();
       emitInitEvent(mockProc);
       await startPromise;
@@ -176,7 +176,7 @@ describe('PersistentClaudeSession', () => {
 
     it('routes non-Claude model through proxy when baseUrl is set', async () => {
       session = new PersistentClaudeSession(makeConfig({ model: 'gpt-5.4', baseUrl: 'http://localhost:3000' }));
-      const { spawn } = await import('node:child_process');
+      const { spawnEngine: spawn } = await import('../engine-spawn.js');
       const startPromise = session.start();
       emitInitEvent(mockProc);
       await startPromise;
@@ -190,7 +190,7 @@ describe('PersistentClaudeSession', () => {
     it('drops an inherited ANTHROPIC_API_KEY when no baseUrl is configured', async () => {
       vi.stubEnv('ANTHROPIC_API_KEY', 'proxy-key-not-for-official-api');
       session = new PersistentClaudeSession(makeConfig());
-      const { spawn } = await import('node:child_process');
+      const { spawnEngine: spawn } = await import('../engine-spawn.js');
       const startPromise = session.start();
       emitInitEvent(mockProc);
       await startPromise;
@@ -202,7 +202,7 @@ describe('PersistentClaudeSession', () => {
     it('keeps an official-format ANTHROPIC_API_KEY even without baseUrl', async () => {
       vi.stubEnv('ANTHROPIC_API_KEY', 'sk-ant-api03-real-key');
       session = new PersistentClaudeSession(makeConfig());
-      const { spawn } = await import('node:child_process');
+      const { spawnEngine: spawn } = await import('../engine-spawn.js');
       const startPromise = session.start();
       emitInitEvent(mockProc);
       await startPromise;
@@ -214,7 +214,7 @@ describe('PersistentClaudeSession', () => {
     it('keeps ANTHROPIC_API_KEY when a baseUrl is configured', async () => {
       vi.stubEnv('ANTHROPIC_API_KEY', 'proxy-key');
       session = new PersistentClaudeSession(makeConfig({ baseUrl: 'http://localhost:3000' }));
-      const { spawn } = await import('node:child_process');
+      const { spawnEngine: spawn } = await import('../engine-spawn.js');
       const startPromise = session.start();
       emitInitEvent(mockProc);
       await startPromise;
@@ -228,7 +228,7 @@ describe('PersistentClaudeSession', () => {
       vi.stubEnv('ANTHROPIC_API_KEY', 'proxy-key');
       vi.stubEnv('ANTHROPIC_BASE_URL', 'http://localhost:4000');
       session = new PersistentClaudeSession(makeConfig());
-      const { spawn } = await import('node:child_process');
+      const { spawnEngine: spawn } = await import('../engine-spawn.js');
       const startPromise = session.start();
       emitInitEvent(mockProc);
       await startPromise;
@@ -239,7 +239,7 @@ describe('PersistentClaudeSession', () => {
 
     it('includes --include-hook-events when set', async () => {
       session = new PersistentClaudeSession(makeConfig({ includeHookEvents: true }));
-      const { spawn } = await import('node:child_process');
+      const { spawnEngine: spawn } = await import('../engine-spawn.js');
       const startPromise = session.start();
       emitInitEvent(mockProc);
       await startPromise;
@@ -249,7 +249,7 @@ describe('PersistentClaudeSession', () => {
 
     it('includes --forward-subagent-text when set', async () => {
       session = new PersistentClaudeSession(makeConfig({ forwardSubagentText: true }));
-      const { spawn } = await import('node:child_process');
+      const { spawnEngine: spawn } = await import('../engine-spawn.js');
       const startPromise = session.start();
       emitInitEvent(mockProc);
       await startPromise;
@@ -259,7 +259,7 @@ describe('PersistentClaudeSession', () => {
 
     it('omits --forward-subagent-text by default', async () => {
       session = new PersistentClaudeSession(makeConfig({}));
-      const { spawn } = await import('node:child_process');
+      const { spawnEngine: spawn } = await import('../engine-spawn.js');
       const startPromise = session.start();
       emitInitEvent(mockProc);
       await startPromise;
@@ -269,7 +269,7 @@ describe('PersistentClaudeSession', () => {
 
     it('includes --permission-prompt-tool when set', async () => {
       session = new PersistentClaudeSession(makeConfig({ permissionPromptTool: 'mcp__auth__decide' }));
-      const { spawn } = await import('node:child_process');
+      const { spawnEngine: spawn } = await import('../engine-spawn.js');
       const startPromise = session.start();
       emitInitEvent(mockProc);
       await startPromise;
@@ -280,7 +280,7 @@ describe('PersistentClaudeSession', () => {
 
     it('includes --exclude-dynamic-system-prompt-sections when set', async () => {
       session = new PersistentClaudeSession(makeConfig({ excludeDynamicSystemPromptSections: true }));
-      const { spawn } = await import('node:child_process');
+      const { spawnEngine: spawn } = await import('../engine-spawn.js');
       const startPromise = session.start();
       emitInitEvent(mockProc);
       await startPromise;
@@ -290,7 +290,7 @@ describe('PersistentClaudeSession', () => {
 
     it('auto-enables --exclude-dynamic-system-prompt-sections when bare is true', async () => {
       session = new PersistentClaudeSession(makeConfig({ bare: true }));
-      const { spawn } = await import('node:child_process');
+      const { spawnEngine: spawn } = await import('../engine-spawn.js');
       const startPromise = session.start();
       emitInitEvent(mockProc);
       await startPromise;
@@ -300,7 +300,7 @@ describe('PersistentClaudeSession', () => {
 
     it('does NOT auto-enable --exclude-dynamic-system-prompt-sections when bare + explicit false', async () => {
       session = new PersistentClaudeSession(makeConfig({ bare: true, excludeDynamicSystemPromptSections: false }));
-      const { spawn } = await import('node:child_process');
+      const { spawnEngine: spawn } = await import('../engine-spawn.js');
       const startPromise = session.start();
       emitInitEvent(mockProc);
       await startPromise;
@@ -310,7 +310,7 @@ describe('PersistentClaudeSession', () => {
 
     it('includes --debug with comma-joined categories', async () => {
       session = new PersistentClaudeSession(makeConfig({ debug: ['api', 'mcp'] }));
-      const { spawn } = await import('node:child_process');
+      const { spawnEngine: spawn } = await import('../engine-spawn.js');
       const startPromise = session.start();
       emitInitEvent(mockProc);
       await startPromise;
@@ -321,7 +321,7 @@ describe('PersistentClaudeSession', () => {
 
     it('includes --debug-file when set', async () => {
       session = new PersistentClaudeSession(makeConfig({ debugFile: '/tmp/debug.log' }));
-      const { spawn } = await import('node:child_process');
+      const { spawnEngine: spawn } = await import('../engine-spawn.js');
       const startPromise = session.start();
       emitInitEvent(mockProc);
       await startPromise;
@@ -332,7 +332,7 @@ describe('PersistentClaudeSession', () => {
 
     it('includes --from-pr when set', async () => {
       session = new PersistentClaudeSession(makeConfig({ fromPr: '42' }));
-      const { spawn } = await import('node:child_process');
+      const { spawnEngine: spawn } = await import('../engine-spawn.js');
       const startPromise = session.start();
       emitInitEvent(mockProc);
       await startPromise;
@@ -343,7 +343,7 @@ describe('PersistentClaudeSession', () => {
 
     it('includes --channels for each entry', async () => {
       session = new PersistentClaudeSession(makeConfig({ channels: ['plugin:a@market', 'plugin:b@market'] }));
-      const { spawn } = await import('node:child_process');
+      const { spawnEngine: spawn } = await import('../engine-spawn.js');
       const startPromise = session.start();
       emitInitEvent(mockProc);
       await startPromise;
@@ -354,7 +354,7 @@ describe('PersistentClaudeSession', () => {
 
     it('includes --dangerously-load-development-channels when set', async () => {
       session = new PersistentClaudeSession(makeConfig({ dangerouslyLoadDevelopmentChannels: 'server:test' }));
-      const { spawn } = await import('node:child_process');
+      const { spawnEngine: spawn } = await import('../engine-spawn.js');
       const startPromise = session.start();
       emitInitEvent(mockProc);
       await startPromise;
@@ -365,7 +365,7 @@ describe('PersistentClaudeSession', () => {
 
     it('sets ENABLE_PROMPT_CACHING_1H env var when enablePromptCaching1H is true', async () => {
       session = new PersistentClaudeSession(makeConfig({ enablePromptCaching1H: true }));
-      const { spawn } = await import('node:child_process');
+      const { spawnEngine: spawn } = await import('../engine-spawn.js');
       const startPromise = session.start();
       emitInitEvent(mockProc);
       await startPromise;
@@ -376,7 +376,7 @@ describe('PersistentClaudeSession', () => {
 
     it('auto-sets ENABLE_PROMPT_CACHING_1H when bare is true', async () => {
       session = new PersistentClaudeSession(makeConfig({ bare: true }));
-      const { spawn } = await import('node:child_process');
+      const { spawnEngine: spawn } = await import('../engine-spawn.js');
       const startPromise = session.start();
       emitInitEvent(mockProc);
       await startPromise;
@@ -387,7 +387,7 @@ describe('PersistentClaudeSession', () => {
 
     it('does NOT set ENABLE_PROMPT_CACHING_1H when bare + explicit false', async () => {
       session = new PersistentClaudeSession(makeConfig({ bare: true, enablePromptCaching1H: false }));
-      const { spawn } = await import('node:child_process');
+      const { spawnEngine: spawn } = await import('../engine-spawn.js');
       const startPromise = session.start();
       emitInitEvent(mockProc);
       await startPromise;
@@ -398,7 +398,7 @@ describe('PersistentClaudeSession', () => {
 
     it('sets CLAUDE_CODE_FORK_SUBAGENT env var when forkSubagent is true', async () => {
       session = new PersistentClaudeSession(makeConfig({ forkSubagent: true }));
-      const { spawn } = await import('node:child_process');
+      const { spawnEngine: spawn } = await import('../engine-spawn.js');
       const startPromise = session.start();
       emitInitEvent(mockProc);
       await startPromise;
@@ -408,7 +408,7 @@ describe('PersistentClaudeSession', () => {
 
     it('sets ENABLE_TOOL_SEARCH env var when enableToolSearch is true', async () => {
       session = new PersistentClaudeSession(makeConfig({ enableToolSearch: true }));
-      const { spawn } = await import('node:child_process');
+      const { spawnEngine: spawn } = await import('../engine-spawn.js');
       const startPromise = session.start();
       emitInitEvent(mockProc);
       await startPromise;
@@ -418,7 +418,7 @@ describe('PersistentClaudeSession', () => {
 
     it('sets OTEL_LOG_USER_PROMPTS env var when otelLogUserPrompts is true', async () => {
       session = new PersistentClaudeSession(makeConfig({ otelLogUserPrompts: true }));
-      const { spawn } = await import('node:child_process');
+      const { spawnEngine: spawn } = await import('../engine-spawn.js');
       const startPromise = session.start();
       emitInitEvent(mockProc);
       await startPromise;
@@ -428,7 +428,7 @@ describe('PersistentClaudeSession', () => {
 
     it('sets OTEL_LOG_RAW_API_BODIES env var when otelLogRawApiBodies is true', async () => {
       session = new PersistentClaudeSession(makeConfig({ otelLogRawApiBodies: true }));
-      const { spawn } = await import('node:child_process');
+      const { spawnEngine: spawn } = await import('../engine-spawn.js');
       const startPromise = session.start();
       emitInitEvent(mockProc);
       await startPromise;

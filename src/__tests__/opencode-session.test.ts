@@ -13,8 +13,8 @@ import { Readable } from 'node:stream';
 
 // Mock child_process before importing the session
 const mockSpawn = vi.fn();
-vi.mock('node:child_process', () => ({
-  spawn: (...args: unknown[]) => mockSpawn(...args),
+vi.mock('../engine-spawn.js', () => ({
+  spawnEngine: (...args: unknown[]) => mockSpawn(...args),
 }));
 
 const { PersistentOpencodeSession } = await import('../persistent-opencode-session.js');

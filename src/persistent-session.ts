@@ -5,7 +5,8 @@
  * Enables multi-turn agent loops, continuous conversation, and real-time streaming.
  */
 
-import { spawn, ChildProcess } from 'node:child_process';
+import { ChildProcess } from 'node:child_process';
+import { spawnEngine } from './engine-spawn.js';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import * as readline from 'node:readline';
@@ -411,7 +412,7 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
     // Spawn
     // A new process answers none of the old one's messages.
     this._unanswered.clear();
-    this.proc = spawn(resolvedBin, args, {
+    this.proc = spawnEngine(resolvedBin, args, {
       cwd: this.options.cwd,
       env: spawnEnv,
       stdio: ['pipe', 'pipe', 'pipe'],

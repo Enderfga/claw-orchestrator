@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Codex and OpenCode launch on Windows.** npm `.cmd` shims (`codex`, `opencode`) failed every turn
+  with `spawn <bin> ENOENT`, because `node:child_process` cannot execute batch files without a shell
+  while true executables (`claude.exe`, `agy.exe`) worked. All engine spawns now go through the new
+  `src/engine-spawn.ts` (cross-spawn: PATH/PATHEXT resolution plus `cmd.exe` argv escaping only when
+  the target needs it; direct executables and non-Windows spawns are unchanged). `shell: true` was
+  deliberately not used — Node concatenates argv unescaped there. Limit: `cmd.exe` still drops an
+  unbalanced `"` and truncates at newlines on the shim path.
+
 ## [7.5.5] - 2026-09-24
 
 ### Fixed

@@ -15,9 +15,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const mockSpawn = vi.fn();
-vi.mock('node:child_process', () => ({
-  spawn: (...args: unknown[]) => mockSpawn(...args),
-  ChildProcess: class {},
+vi.mock('../engine-spawn.js', () => ({
+  spawnEngine: (...args: unknown[]) => mockSpawn(...args),
 }));
 
 const { PersistentClaudeSession } = await import('../persistent-session.js');
