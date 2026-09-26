@@ -383,9 +383,9 @@ const MODELS: ModelDef[] = [
   // The base slugs registered below are the halves agy composes with
   // `--effort`, which PersistentAgySession always supplies — passing a base
   // slug without one is a hard CLI error, not a silent fallback. Tiers are not
-  // uniform: gemini-3.1-pro has low/high only. agy also proxies Claude/GPT-OSS
-  // models and accepts qualified slugs directly; both pass through unregistered
-  // and price at their family default.
+  // uniform: gemini-3.1-pro has low/high only. agy also accepts qualified slugs
+  // directly, which the agy session prices as their base model; the Claude and
+  // GPT-OSS models it proxies pass through unregistered at the engine default.
   //
   // Every Flash tier agy offers is registered, not just the one this engine
   // defaults to. An unregistered tier does not fail — it falls through to the

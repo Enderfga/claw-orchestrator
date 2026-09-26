@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.5.6] - 2026-09-26
+
+### Fixed
+
+- **An agy turn that started a background task no longer fails as a timeout.** Since agy 1.2.9 a
+  headless run whose agent started a background task — a dev server, a watcher — stays open until
+  its `--print-timeout` deadline, and prints the reply only when it exits. The wrapper set that
+  deadline 5s after its own timer, so it killed the run first and reported a finished turn as a
+  timeout. agy's deadline is now set just inside the send timeout, so agy ends the background task
+  and delivers the reply. A run that reaches the deadline while the agent is still working is
+  reported as a timeout: agy marks it `SUCCESS` with a partial reply and says otherwise only on
+  stderr.
+- **An effort-qualified agy model is priced as its base model.** A session on
+  `gemini-3.1-pro-high` was not found in the model registry and fell back to the Gemini Flash rates;
+  it is now priced as `gemini-3.1-pro`.
+
+### Changed
+
+- Tested with Claude Code 2.1.283, Codex 0.157.1 and agy 1.2.11.
+
 ## [7.5.5] - 2026-09-24
 
 ### Fixed
@@ -30,7 +50,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **Ultrareview reviewers are read-only on every engine.** They were started with `permissionMode:
-  'plan'`, which constrains Claude only, so a reviewer assigned to another engine through `engines`
+'plan'`, which constrains Claude only, so a reviewer assigned to another engine through `engines`
   ran under that engine's default sandbox — for Codex, one that can write — in the project directory
   it was reviewing. Reviewers now also get `sandboxMode: 'read-only'`, which reaches the session
   through the fan-out, and `ultrareview_start` refuses `grok`, which declines a read-only session

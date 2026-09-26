@@ -28,7 +28,7 @@ SessionManager
 
 ### Claude Code (`engine: 'claude'`)
 
-Default engine. Long-running subprocess with streaming JSON I/O. Tested with Claude Code CLI **2.1.280**.
+Default engine. Long-running subprocess with streaming JSON I/O. Tested with Claude Code CLI **2.1.283**.
 
 - Persistent multi-turn conversations
 - Real-time streaming (text, tool_use, tool_result, system events)
@@ -62,7 +62,7 @@ await manager.startSession({
 
 ### OpenAI Codex (`engine: 'codex'`)
 
-Wraps the `codex exec` subcommand. Each `send()` spawns a new process. Tested with `codex` CLI **0.156.1**.
+Wraps the `codex exec` subcommand. Each `send()` spawns a new process. Tested with `codex` CLI **0.157.1**.
 
 - Non-interactive execution via `codex exec --sandbox workspace-write --skip-git-repo-check --json`
 - Real `usage` from the `turn.completed` JSON event (input, output, cached, reasoning tokens). **These are cumulative over the thread, not per turn**, so they replace the session totals rather than being added to them; subtracting consecutive values gives one turn's prompt
@@ -126,7 +126,7 @@ await manager.startSession({
 
 Wraps Google's **Antigravity CLI** (`agy`) — the successor to Gemini CLI (consumer
 Gemini CLI tiers stopped serving 2026-06-18). Each `send()` spawns a new process
-in print mode. Tested with `agy` **1.2.8**.
+in print mode. Tested with `agy` **1.2.11**.
 
 - One-shot execution per message (no persistent subprocess)
 - **Structured output and real usage** — `--output-format stream-json` emits an
@@ -169,9 +169,13 @@ in print mode. Tested with `agy` **1.2.8**.
   must explicitly choose `bypassPermissions` for a write-enabled session; it is
   not a recovery mechanism. In particular, an Autoloop Planner stays on
   `--mode plan` when its preserved conversation is resumed.
-- The engine always passes `--print-timeout` (the send timeout plus 5s), so the
-  wrapper's timer decides when a turn ends; without it a stuck headless agy turn
-  can run indefinitely
+- The engine always passes `--print-timeout`, set just inside the send timeout
+  (10% earlier, at most 10s). Since agy 1.2.9 a headless run whose agent started a
+  background task (a dev server, a watcher) stays open until that deadline and
+  delivers the reply when it exits, ending the task; the earlier deadline lets it
+  do so before the send times out. A run that reaches the deadline while the agent
+  is still working fails as a timeout even though agy reports `SUCCESS` with a
+  partial reply. Without the flag a stuck headless agy turn can run indefinitely
 - Do not rely on an unknown `--model` falling back: current agy versions can
   report `status: ERROR` with no usable response. The adapter rejects result
   errors, non-success statuses, and empty responses. `agy-flash` and the engine
