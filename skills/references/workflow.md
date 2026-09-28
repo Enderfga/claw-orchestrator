@@ -151,6 +151,11 @@ is unrecoverable and reads back as "not found".
 Every node takes `retry: { max, backoffMs }`, `timeoutMs`, and
 `onFailure: 'fail' | 'continue'`.
 
+Direct agent bindings use the same optional `engine`, `model`, and `effort`
+fields. Fan-out and council entries configure them per agent; `effort` accepts
+`low`, `medium`, `high`, `xhigh`, `max`, `ultra`, or `auto`. Omission preserves
+the session default.
+
 On `fanout` and `council`, `timeoutMs` bounds the whole node and `agentTimeoutMs` one
 agent's send. They differ because agents beyond the free session slots wait for one, so
 the node can run several agents' worth of time. Without `agentTimeoutMs`, `timeoutMs`
@@ -201,8 +206,8 @@ with `visits_lt`.
       "kind": "fanout",
       "prompt": "Investigate. Change nothing.",
       "agents": [
-        { "name": "a", "engine": "claude" },
-        { "name": "b", "engine": "codex" },
+        { "name": "a", "engine": "claude", "effort": "high" },
+        { "name": "b", "engine": "codex", "effort": "ultra" },
       ],
       "synthesize": true,
     },
