@@ -31,6 +31,7 @@ export async function executeFanoutNode(node: NodeSpec, ctx: NodeContext): Promi
         name: a.name,
         engine: a.engine,
         model: a.model,
+        effort: a.effort,
         prompt: a.prompt ?? a.persona,
         baseUrl: a.baseUrl,
         permissionMode: a.permissionMode as never,

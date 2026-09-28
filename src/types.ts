@@ -38,7 +38,8 @@ export type PermissionMode = 'acceptEdits' | 'bypassPermissions' | 'default' | '
 // Codex adds `ultra` above `max`, Grok stops at `xhigh`, Antigravity at `high`,
 // and OpenCode forwards the level to its provider without validating it. Each
 // wrapper documents its own clamp; none of them silently drops the field.
-export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra' | 'auto';
+export const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra', 'auto'] as const;
+export type EffortLevel = (typeof EFFORT_LEVELS)[number];
 
 // ─── Engine ─────────────────────────────────────────────────────────────────
 
@@ -54,6 +55,13 @@ export const ENGINE_TYPES = [
   'custom',
 ] as const;
 export type EngineType = (typeof ENGINE_TYPES)[number];
+
+/** Common execution binding shared by every directly configured agent. */
+export interface AgentBinding {
+  engine?: EngineType;
+  model?: string;
+  effort?: EffortLevel;
+}
 
 /**
  * The executables the built-in engines actually spawn — the defaults in each
@@ -817,18 +825,15 @@ export interface CouncilEvent {
   toolStatus?: 'start' | 'end';
 }
 
-export interface AgentPersona {
+export interface AgentPersona extends AgentBinding {
   name: string;
   emoji: string;
   persona: string;
-  engine?: EngineType;
   role?: string;
-  model?: string;
   baseUrl?: string;
   permissionMode?: PermissionMode;
   customEngine?: CustomEngineConfig;
-  /** Per-agent reasoning effort (council only; passed to the agent's session). */
-  effort?: EffortLevel;
+  /** Per-agent reasoning effort passed to the agent's session. */
   /** Per-agent ultracode / dynamic workflows (council, claude engine only). */
   ultracode?: boolean;
 }

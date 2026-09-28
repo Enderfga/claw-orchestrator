@@ -245,13 +245,20 @@ afterEach(async () => {
 // ─── 1. Every legacy field reaches the session ──────────────────────────────
 
 describe('the legacy API contract survives the adapter', () => {
-  it('fan-out delivers each agent its own prompt, engine, model, and permission mode', async () => {
+  it('fan-out delivers each agent its own prompt, engine, model, effort, and permission mode', async () => {
     const cwd = gitRepo();
     const fan = await mgr.fanoutStart({
       task: 'SHARED TASK',
       projectDir: cwd,
       agents: [
-        { name: 'alpha', engine: 'codex', model: 'm-alpha', prompt: 'ALPHA PROMPT', permissionMode: 'plan' },
+        {
+          name: 'alpha',
+          engine: 'codex',
+          model: 'm-alpha',
+          effort: 'ultra',
+          prompt: 'ALPHA PROMPT',
+          permissionMode: 'plan',
+        },
         { name: 'beta', engine: 'claude', model: 'm-beta', prompt: 'BETA PROMPT' },
       ],
       maxTurnsPerAgent: 7,
@@ -262,7 +269,12 @@ describe('the legacy API contract survives the adapter', () => {
     const alpha = observed.find((o) => o.config.name?.endsWith('-alpha'))!;
     const beta = observed.find((o) => o.config.name?.endsWith('-beta'))!;
 
-    expect(alpha.config).toMatchObject({ engine: 'codex', model: 'm-alpha', permissionMode: 'plan' });
+    expect(alpha.config).toMatchObject({
+      engine: 'codex',
+      model: 'm-alpha',
+      effort: 'ultra',
+      permissionMode: 'plan',
+    });
     expect(beta.config).toMatchObject({ engine: 'claude', model: 'm-beta' });
     expect(alpha.config.maxTurns).toBe(7);
     expect(alpha.config.maxBudgetUsd).toBe(1.25);

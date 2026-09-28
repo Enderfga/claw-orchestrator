@@ -15,6 +15,7 @@ import { EmbeddedServer } from './embedded-server.js';
 import { sanitizeCwd, validateRegex } from './validation.js';
 import {
   ENGINE_TYPES,
+  EFFORT_LEVELS,
   type PluginConfig,
   type EffortLevel,
   type CouncilConfig,
@@ -1150,7 +1151,8 @@ const plugin = {
           agents: {
             type: 'array',
             maxItems: 16,
-            description: 'Agent specs: { name, engine?, model?, prompt?, baseUrl?, permissionMode?, customEngine? }.',
+            description:
+              'Agent specs: { name, engine?, model?, effort?, prompt?, baseUrl?, permissionMode?, customEngine? }.',
             items: {
               type: 'object',
               properties: {
@@ -1160,6 +1162,7 @@ const plugin = {
                   enum: ENGINE_TYPES,
                 },
                 model: { type: 'string' },
+                effort: { type: 'string', enum: EFFORT_LEVELS },
                 prompt: { type: 'string' },
                 baseUrl: { type: 'string' },
               },
@@ -1247,13 +1250,14 @@ const plugin = {
           agents: {
             type: 'array',
             maxItems: 16,
-            description: 'Agents for the template: { name, engine?, model?, persona? }.',
+            description: 'Agents for the template: { name, engine?, model?, effort?, persona? }.',
             items: {
               type: 'object',
               properties: {
                 name: { type: 'string', minLength: 1 },
                 engine: { type: 'string', enum: ENGINE_TYPES },
                 model: { type: 'string' },
+                effort: { type: 'string', enum: EFFORT_LEVELS },
                 persona: { type: 'string' },
               },
               required: ['name'],
@@ -1269,6 +1273,7 @@ const plugin = {
                 name: { type: 'string', minLength: 1 },
                 engine: { type: 'string', enum: ENGINE_TYPES },
                 model: { type: 'string' },
+                effort: { type: 'string', enum: EFFORT_LEVELS },
                 persona: { type: 'string' },
               },
               required: ['name'],

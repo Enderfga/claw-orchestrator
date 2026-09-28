@@ -15,7 +15,7 @@
 
 import type { TestSnapshot } from '../verify/protected-tests.js';
 import type { AcceptanceContract } from '../verify/contract.js';
-import type { EngineType } from '../types.js';
+import type { AgentBinding, EngineType } from '../types.js';
 
 // ─── Run + node state ───────────────────────────────────────────────────────
 
@@ -88,10 +88,8 @@ export interface AgentNode extends NodeBase {
  * `customEngine` is the one field NOT here. It can carry credentials, and a
  * spec is written to disk — see `StartOptions.secrets`.
  */
-export interface FanoutAgentSpec {
+export interface FanoutAgentSpec extends AgentBinding {
   name: string;
-  engine?: EngineType;
-  model?: string;
   /** Per-agent prompt. Overrides the node's shared prompt when present. */
   prompt?: string;
   /** Council-style persona text. */
@@ -100,7 +98,6 @@ export interface FanoutAgentSpec {
   /** Engine-agnostic sandbox; `read-only` holds on every engine that supports it. */
   sandboxMode?: 'read-only' | 'workspace-write' | 'danger-full-access';
   baseUrl?: string;
-  effort?: string;
   ultracode?: boolean;
 }
 

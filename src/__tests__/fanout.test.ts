@@ -15,11 +15,13 @@ function makeManager(
   } = {},
 ) {
   const started: string[] = [];
+  const startedConfigs: Array<Record<string, unknown>> = [];
   const stopped: string[] = [];
   const sent: Array<{ name: string; message: string }> = [];
   const manager = {
-    startSession: vi.fn(async (config: { name?: string }) => {
+    startSession: vi.fn(async (config: { name?: string } & Record<string, unknown>) => {
       started.push(config.name!);
+      startedConfigs.push(config);
       return { name: config.name } as never;
     }),
     sendMessage: vi.fn(async (name: string, message: string) => {
@@ -36,7 +38,7 @@ function makeManager(
       stopped.push(name);
     }),
   };
-  return { manager, started, stopped, sent };
+  return { manager, started, startedConfigs, stopped, sent };
 }
 
 const baseConfig = (agents: FanoutConfig['agents'], extra: Partial<FanoutConfig> = {}): FanoutConfig => ({
@@ -74,6 +76,22 @@ describe('Fanout', () => {
     const byAgent = Object.fromEntries(sent.map((s) => [s.name.split('-').pop(), s.message]));
     expect(byAgent.a).toBe('custom prompt');
     expect(byAgent.b).toBe('do the thing');
+  });
+
+  it('passes each agent reasoning effort into its session', async () => {
+    const { manager, startedConfigs } = makeManager();
+    const fan = new Fanout(
+      baseConfig([
+        { name: 'a', engine: 'codex', effort: 'ultra' },
+        { name: 'b', engine: 'claude', effort: 'low' },
+      ]),
+      manager,
+    );
+
+    await fan.run();
+
+    expect(startedConfigs.find((config) => config.name?.toString().endsWith('-a'))).toMatchObject({ effort: 'ultra' });
+    expect(startedConfigs.find((config) => config.name?.toString().endsWith('-b'))).toMatchObject({ effort: 'low' });
   });
 
   it('isolates a single agent failure without failing the batch', async () => {

@@ -295,6 +295,21 @@ describe('plugin tool registration', () => {
       expect(byName.has(name), `missing v4.2.0 tool: ${name}`).toBe(true);
     }
   });
+
+  it('exposes the full reasoning-effort domain for fanout and workflow agents', () => {
+    const expected = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra', 'auto'];
+    const propertiesOf = (toolName: string) =>
+      (byName.get(toolName)!.parameters as { properties: Record<string, unknown> }).properties;
+    const itemProperties = (value: unknown) =>
+      (value as { items: { properties: Record<string, { enum?: string[] }> } }).items.properties;
+
+    const fanout = propertiesOf('fanout_start');
+    const workflow = propertiesOf('workflow_start');
+
+    expect(itemProperties(fanout.agents).effort.enum).toEqual(expected);
+    expect(itemProperties(workflow.agents).effort.enum).toEqual(expected);
+    expect(itemProperties(workflow.reviewers).effort.enum).toEqual(expected);
+  });
 });
 
 // The OpenClaw plugin manifest declares the tool contract separately from the

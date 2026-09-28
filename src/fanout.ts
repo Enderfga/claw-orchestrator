@@ -21,6 +21,7 @@ import type {
   PermissionMode,
   CustomEngineConfig,
   SessionStats,
+  AgentBinding,
 } from './types.js';
 import { type Logger } from './logger.js';
 import { mapBounded } from './concurrency.js';
@@ -36,11 +37,9 @@ interface SessionManagerLike {
   freeSessionSlots?(): number;
 }
 
-export interface FanoutAgentSpec {
+export interface FanoutAgentSpec extends AgentBinding {
   /** Unique label for this agent (used in the session name and results). */
   name: string;
-  engine?: EngineType;
-  model?: string;
   /** Per-agent prompt; defaults to the shared task when omitted. */
   prompt?: string;
   baseUrl?: string;
@@ -191,6 +190,7 @@ export class Fanout {
         cwd: this.config.projectDir,
         engine,
         model: spec.model,
+        effort: spec.effort,
         baseUrl: spec.baseUrl,
         permissionMode: spec.permissionMode ?? 'bypassPermissions',
         sandboxMode: spec.sandboxMode,
