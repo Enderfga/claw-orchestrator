@@ -94,6 +94,15 @@ describe('Fanout', () => {
     expect(startedConfigs.find((config) => config.name?.toString().endsWith('-b'))).toMatchObject({ effort: 'low' });
   });
 
+  it('omits effort when the agent does not override the session default', async () => {
+    const { manager, startedConfigs } = makeManager();
+    const fan = new Fanout(baseConfig([{ name: 'a', engine: 'codex' }]), manager);
+
+    await fan.run();
+
+    expect(startedConfigs[0]).not.toHaveProperty('effort');
+  });
+
   it('isolates a single agent failure without failing the batch', async () => {
     const { manager, stopped } = makeManager({ fail: new Set(['b']) });
     const fan = new Fanout(baseConfig([{ name: 'a' }, { name: 'b' }, { name: 'c' }]), manager);

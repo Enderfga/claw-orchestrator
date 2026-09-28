@@ -62,15 +62,12 @@ export interface NodeBase {
   onFailure?: 'fail' | 'continue';
 }
 
-export interface AgentNode extends NodeBase {
+export interface AgentNode extends NodeBase, AgentBinding {
   kind: 'agent';
   prompt: string;
-  engine?: EngineType;
-  model?: string;
   cwd?: string;
   /** Reuse a named session across nodes; omitted means one session per attempt. */
   sessionName?: string;
-  effort?: string;
   permissionMode?: string;
 }
 

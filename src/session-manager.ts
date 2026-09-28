@@ -184,6 +184,7 @@ import {
   type SendResult,
   type PluginConfig,
   type EffortLevel,
+  EFFORT_LEVELS,
   ENGINE_TYPES,
   type EngineType,
   type CustomEngineConfig,
@@ -524,6 +525,14 @@ function validateAutoloopRole(
     validateAutoloopCustomEngine(role, customEngine);
   }
   return resolved;
+}
+
+function validateAutoloopEffort(role: AutoloopRoleName, effort: EffortLevel | undefined): void {
+  if (effort === undefined) return;
+  const label = role[0].toUpperCase() + role.slice(1);
+  if (!EFFORT_LEVELS.includes(effort)) {
+    throw new Error(`${label} effort '${String(effort)}' is not supported`);
+  }
 }
 
 /**
@@ -3228,12 +3237,15 @@ export class SessionManager {
     plannerPromptPath?: string;
     plannerEngine?: EngineType;
     plannerModel?: string;
+    plannerEffort?: EffortLevel;
     plannerCustomEngine?: CustomEngineConfig;
     coderEngine?: EngineType;
     coderModel?: string;
+    coderEffort?: EffortLevel;
     coderCustomEngine?: CustomEngineConfig;
     reviewerEngine?: EngineType;
     reviewerModel?: string;
+    reviewerEffort?: EffortLevel;
     reviewerCustomEngine?: CustomEngineConfig;
     sendTimeoutMs?: number;
     activityLeaseMs?: number;
@@ -3252,6 +3264,9 @@ export class SessionManager {
     const plannerEngine = validateAutoloopRole('planner', opts.plannerEngine, opts.plannerCustomEngine);
     const coderEngine = validateAutoloopRole('coder', opts.coderEngine, opts.coderCustomEngine);
     const reviewerEngine = validateAutoloopRole('reviewer', opts.reviewerEngine, opts.reviewerCustomEngine);
+    validateAutoloopEffort('planner', opts.plannerEffort);
+    validateAutoloopEffort('coder', opts.coderEffort);
+    validateAutoloopEffort('reviewer', opts.reviewerEffort);
     for (const role of ['planner', 'coder', 'reviewer'] as const) {
       const sessionName = `autoloop-${opts.runId}-${role}`;
       if (this.sessions.has(sessionName) || this._pendingSessions.has(sessionName)) {
@@ -3275,12 +3290,15 @@ export class SessionManager {
       plannerPromptPath: opts.plannerPromptPath,
       plannerEngine,
       plannerModel: opts.plannerModel,
+      plannerEffort: opts.plannerEffort,
       plannerCustomEngine: opts.plannerCustomEngine,
       coderEngine,
       coderModel: opts.coderModel,
+      coderEffort: opts.coderEffort,
       coderCustomEngine: opts.coderCustomEngine,
       reviewerEngine,
       reviewerModel: opts.reviewerModel,
+      reviewerEffort: opts.reviewerEffort,
       reviewerCustomEngine: opts.reviewerCustomEngine,
       sendTimeoutMs: opts.sendTimeoutMs,
       suppressFailedStartAudit: opts._resumeTimeoutMigration,
@@ -3371,12 +3389,15 @@ export class SessionManager {
     plannerPromptPath?: string;
     plannerEngine?: EngineType;
     plannerModel?: string;
+    plannerEffort?: EffortLevel;
     plannerCustomEngine?: CustomEngineConfig;
     coderEngine?: EngineType;
     coderModel?: string;
+    coderEffort?: EffortLevel;
     coderCustomEngine?: CustomEngineConfig;
     reviewerEngine?: EngineType;
     reviewerModel?: string;
+    reviewerEffort?: EffortLevel;
     reviewerCustomEngine?: CustomEngineConfig;
     sendTimeoutMs?: number;
     activityLeaseMs?: number;
@@ -3391,6 +3412,9 @@ export class SessionManager {
     validateAutoloopRole('planner', opts.plannerEngine, opts.plannerCustomEngine);
     validateAutoloopRole('coder', opts.coderEngine, opts.coderCustomEngine);
     validateAutoloopRole('reviewer', opts.reviewerEngine, opts.reviewerCustomEngine);
+    validateAutoloopEffort('planner', opts.plannerEffort);
+    validateAutoloopEffort('coder', opts.coderEffort);
+    validateAutoloopEffort('reviewer', opts.reviewerEffort);
     for (const role of ['planner', 'coder', 'reviewer'] as const) {
       const sessionName = `autoloop-${opts.runId}-${role}`;
       if (this.sessions.has(sessionName) || this._pendingSessions.has(sessionName)) {
@@ -3645,6 +3669,9 @@ export class SessionManager {
     validateAutoloopRole('planner', config.plannerEngine as EngineType | undefined, opts.plannerCustomEngine);
     validateAutoloopRole('coder', config.coderEngine as EngineType | undefined, opts.coderCustomEngine);
     validateAutoloopRole('reviewer', config.reviewerEngine as EngineType | undefined, opts.reviewerCustomEngine);
+    validateAutoloopEffort('planner', config.plannerEffort as EffortLevel | undefined);
+    validateAutoloopEffort('coder', config.coderEffort as EffortLevel | undefined);
+    validateAutoloopEffort('reviewer', config.reviewerEffort as EffortLevel | undefined);
 
     const workspace = typeof config.workspace === 'string' ? config.workspace : record.cwd;
     const storedContext = readStoredAutoloopResumeContext(workspace, runId, config.sendTimeoutMs);

@@ -190,7 +190,7 @@ export class Fanout {
         cwd: this.config.projectDir,
         engine,
         model: spec.model,
-        effort: spec.effort,
+        ...(spec.effort === undefined ? {} : { effort: spec.effort }),
         baseUrl: spec.baseUrl,
         permissionMode: spec.permissionMode ?? 'bypassPermissions',
         sandboxMode: spec.sandboxMode,
