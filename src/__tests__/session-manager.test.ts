@@ -679,7 +679,7 @@ describe('SessionManager', () => {
     it('resolves sonnet alias', async () => {
       await mgr.startSession({ name: 'sonnet-test', model: 'sonnet', cwd: '/tmp' });
       const list = mgr.listSessions();
-      expect(list[0].model).toBe('claude-sonnet-5');
+      expect(list[0].model).toBe('claude-sonnet-5-5');
     });
 
     it('resolves haiku alias', async () => {
@@ -709,7 +709,7 @@ describe('SessionManager', () => {
       await mgr.startSession({ name: 'model-set', model: 'opus', cwd: '/tmp' });
       mgr.setModel('model-set', 'sonnet');
       const list = mgr.listSessions();
-      expect(list[0].model).toBe('claude-sonnet-5');
+      expect(list[0].model).toBe('claude-sonnet-5-5');
     });
   });
 
