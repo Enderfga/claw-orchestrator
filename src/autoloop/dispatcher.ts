@@ -25,7 +25,14 @@ import { fileURLToPath } from 'node:url';
 
 import type { SessionManager } from '../session-manager.js';
 import type { Logger } from '../logger.js';
-import { ENGINE_TYPES, engineHasNativeConversation, type CustomEngineConfig, type EngineType } from '../types.js';
+import {
+  ENGINE_TYPES,
+  engineHasNativeConversation,
+  type AgentBinding,
+  type CustomEngineConfig,
+  type EffortLevel,
+  type EngineType,
+} from '../types.js';
 import { nullLogger } from '../logger.js';
 import { spawn } from 'node:child_process';
 import { capturePatch, changedFilesSince } from '../verify/baseline.js';
@@ -86,14 +93,17 @@ export interface ClaudeAgentDispatcherConfig {
   /** Planner engine/model (default: claude/opus). */
   plannerEngine?: EngineType;
   plannerModel?: string;
+  plannerEffort?: EffortLevel;
   plannerCustomEngine?: CustomEngineConfig;
   /** Coder defaults. Engine/model can be overridden per spawn_subagents call. */
   coderEngine?: EngineType;
   coderModel?: string;
+  coderEffort?: EffortLevel;
   coderCustomEngine?: CustomEngineConfig;
   /** Reviewer defaults. Engine/model can be overridden per spawn_subagents call. */
   reviewerEngine?: EngineType;
   reviewerModel?: string;
+  reviewerEffort?: EffortLevel;
   reviewerCustomEngine?: CustomEngineConfig;
   /** Per-message wall-clock cap. Default 10 min. */
   sendTimeoutMs?: number;
@@ -129,8 +139,8 @@ export interface ClaudeAgentDispatcherConfig {
   onSpawnSubagents?: (args: SpawnSubagentsArgs) => Promise<void>;
   /** Persist the effective non-secret role selection after a successful spawn. */
   onRoleSelectionChanged?: (selection: {
-    coder: { engine: EngineType; model?: string };
-    reviewer: { engine: EngineType; model?: string };
+    coder: { engine: EngineType; model?: string; effort?: EffortLevel };
+    reviewer: { engine: EngineType; model?: string; effort?: EffortLevel };
   }) => Promise<void> | void;
 }
 
@@ -193,7 +203,7 @@ function deriveDispatchId(runId: string, env: AnyAutoloopMessage): string {
   return `dispatch_${createHash('sha256').update(identity).digest('hex')}`;
 }
 
-interface AutoloopRoleSelection {
+interface AutoloopRoleSelection extends AgentBinding {
   engine: EngineType;
   /** User-specified model. Undefined means use the role default for Claude, otherwise the engine default. */
   model?: string;
@@ -268,16 +278,19 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
     this.plannerSelection = {
       engine: config.plannerEngine ?? 'claude',
       model: config.plannerModel,
+      effort: config.plannerEffort,
       customEngine: config.plannerCustomEngine,
     };
     this.coderSelection = {
       engine: config.coderEngine ?? 'claude',
       model: config.coderModel,
+      effort: config.coderEffort,
       customEngine: config.coderCustomEngine,
     };
     this.reviewerSelection = {
       engine: config.reviewerEngine ?? 'claude',
       model: config.reviewerModel,
+      effort: config.reviewerEffort,
       customEngine: config.reviewerCustomEngine,
     };
     this.ledgerDir = path.join(config.workspace, 'tasks', config.runId);
@@ -554,8 +567,8 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
       throw err;
     }
     const effectiveSelection = {
-      coder: { engine: nextCoder.engine, model: nextCoder.model },
-      reviewer: { engine: nextReviewer.engine, model: nextReviewer.model },
+      coder: { engine: nextCoder.engine, model: nextCoder.model, effort: nextCoder.effort },
+      reviewer: { engine: nextReviewer.engine, model: nextReviewer.model, effort: nextReviewer.effort },
     };
     this.appendDecisionLog({
       kind: 'spawn_subagents',
@@ -563,8 +576,10 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
       payload: {
         coder_engine: nextCoder.engine,
         coder_model: this.roleModel('coder', nextCoder),
+        coder_effort: nextCoder.effort,
         reviewer_engine: nextReviewer.engine,
         reviewer_model: this.roleModel('reviewer', nextReviewer),
+        reviewer_effort: nextReviewer.effort,
       },
     });
     await this.config.onRoleSelectionChanged?.(effectiveSelection);
@@ -797,6 +812,7 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
       cwd: this.config.workspace,
       engine: this.plannerSelection.engine,
       model: this.roleModel('planner', this.plannerSelection),
+      ...(this.plannerSelection.effort === undefined ? {} : { effort: this.plannerSelection.effort }),
       customEngine: this.plannerSelection.engine === 'custom' ? this.plannerSelection.customEngine : undefined,
       permissionMode: 'manual',
       sandboxMode: 'read-only',
@@ -1044,6 +1060,7 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
       cwd: this.config.workspace,
       engine: this.coderSelection.engine,
       model: this.roleModel('coder', this.coderSelection),
+      ...(this.coderSelection.effort === undefined ? {} : { effort: this.coderSelection.effort }),
       customEngine: this.coderSelection.engine === 'custom' ? this.coderSelection.customEngine : undefined,
       permissionMode: 'bypassPermissions',
       systemPrompt: this.coderSystemPrompt,
@@ -1263,6 +1280,7 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
         cwd: this.reviewerSandboxDir,
         engine: this.reviewerSelection.engine,
         model: this.roleModel('reviewer', this.reviewerSelection),
+        ...(this.reviewerSelection.effort === undefined ? {} : { effort: this.reviewerSelection.effort }),
         customEngine: this.reviewerSelection.engine === 'custom' ? this.reviewerSelection.customEngine : undefined,
         permissionMode: 'bypassPermissions',
         systemPrompt: sessionPrompt,

@@ -15,11 +15,13 @@ function makeManager(
   } = {},
 ) {
   const started: string[] = [];
+  const startedConfigs: Array<Record<string, unknown>> = [];
   const stopped: string[] = [];
   const sent: Array<{ name: string; message: string }> = [];
   const manager = {
-    startSession: vi.fn(async (config: { name?: string }) => {
+    startSession: vi.fn(async (config: { name?: string } & Record<string, unknown>) => {
       started.push(config.name!);
+      startedConfigs.push(config);
       return { name: config.name } as never;
     }),
     sendMessage: vi.fn(async (name: string, message: string) => {
@@ -36,7 +38,7 @@ function makeManager(
       stopped.push(name);
     }),
   };
-  return { manager, started, stopped, sent };
+  return { manager, started, startedConfigs, stopped, sent };
 }
 
 const baseConfig = (agents: FanoutConfig['agents'], extra: Partial<FanoutConfig> = {}): FanoutConfig => ({
@@ -67,13 +69,65 @@ describe('Fanout', () => {
     expect(stopped).toHaveLength(2);
   });
 
-  it('uses a per-agent prompt override when provided, else the shared task', async () => {
+  it('composes persona instructions before the shared task', async () => {
     const { manager, sent } = makeManager();
-    const fan = new Fanout(baseConfig([{ name: 'a', prompt: 'custom prompt' }, { name: 'b' }]), manager);
+    const fan = new Fanout(baseConfig([{ name: 'a', persona: 'ROLE INSTRUCTIONS' }]), manager);
+
     await fan.run();
-    const byAgent = Object.fromEntries(sent.map((s) => [s.name.split('-').pop(), s.message]));
-    expect(byAgent.a).toBe('custom prompt');
-    expect(byAgent.b).toBe('do the thing');
+
+    expect(sent[0]?.message).toBe('ROLE INSTRUCTIONS\n\n## Shared task\n\ndo the thing');
+  });
+
+  it('uses a per-agent prompt override instead of the shared task', async () => {
+    const { manager, sent } = makeManager();
+    const fan = new Fanout(baseConfig([{ name: 'a', prompt: 'custom prompt' }]), manager);
+
+    await fan.run();
+
+    expect(sent[0]?.message).toBe('custom prompt');
+  });
+
+  it('gives prompt precedence when an agent also has a persona', async () => {
+    const { manager, sent } = makeManager();
+    const fan = new Fanout(baseConfig([{ name: 'a', prompt: 'custom prompt', persona: 'ROLE INSTRUCTIONS' }]), manager);
+
+    await fan.run();
+
+    expect(sent[0]?.message).toBe('custom prompt');
+  });
+
+  it('uses the shared task when neither prompt nor persona is provided', async () => {
+    const { manager, sent } = makeManager();
+    const fan = new Fanout(baseConfig([{ name: 'a' }]), manager);
+
+    await fan.run();
+
+    expect(sent[0]?.message).toBe('do the thing');
+  });
+
+  it('passes each agent reasoning effort into its session', async () => {
+    const { manager, startedConfigs } = makeManager();
+    const fan = new Fanout(
+      baseConfig([
+        { name: 'a', engine: 'codex', effort: 'ultra' },
+        { name: 'b', engine: 'claude', effort: 'low' },
+      ]),
+      manager,
+    );
+
+    await fan.run();
+
+    expect(startedConfigs.find((config) => config.name?.toString().endsWith('-a'))).toMatchObject({ effort: 'ultra' });
+    expect(startedConfigs.find((config) => config.name?.toString().endsWith('-b'))).toMatchObject({ effort: 'low' });
+  });
+
+  it('omits effort when the agent does not override the session default', async () => {
+    const { manager, startedConfigs } = makeManager();
+    const fan = new Fanout(baseConfig([{ name: 'a', engine: 'codex' }]), manager);
+
+    await fan.run();
+
+    expect(startedConfigs[0]).not.toHaveProperty('effort');
   });
 
   it('isolates a single agent failure without failing the batch', async () => {

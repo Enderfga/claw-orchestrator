@@ -15,7 +15,7 @@
 
 import type { TestSnapshot } from '../verify/protected-tests.js';
 import type { AcceptanceContract } from '../verify/contract.js';
-import type { EngineType } from '../types.js';
+import type { AgentBinding, EngineType } from '../types.js';
 
 // ─── Run + node state ───────────────────────────────────────────────────────
 
@@ -62,15 +62,12 @@ export interface NodeBase {
   onFailure?: 'fail' | 'continue';
 }
 
-export interface AgentNode extends NodeBase {
+export interface AgentNode extends NodeBase, AgentBinding {
   kind: 'agent';
   prompt: string;
-  engine?: EngineType;
-  model?: string;
   cwd?: string;
   /** Reuse a named session across nodes; omitted means one session per attempt. */
   sessionName?: string;
-  effort?: string;
   permissionMode?: string;
 }
 
@@ -88,19 +85,16 @@ export interface AgentNode extends NodeBase {
  * `customEngine` is the one field NOT here. It can carry credentials, and a
  * spec is written to disk — see `StartOptions.secrets`.
  */
-export interface FanoutAgentSpec {
+export interface FanoutAgentSpec extends AgentBinding {
   name: string;
-  engine?: EngineType;
-  model?: string;
-  /** Per-agent prompt. Overrides the node's shared prompt when present. */
+  /** Complete per-agent prompt. Overrides persona and the node's shared prompt when non-empty. */
   prompt?: string;
-  /** Council-style persona text. */
+  /** Role instructions composed before the shared fan-out task without a non-empty prompt. */
   persona?: string;
   permissionMode?: string;
   /** Engine-agnostic sandbox; `read-only` holds on every engine that supports it. */
   sandboxMode?: 'read-only' | 'workspace-write' | 'danger-full-access';
   baseUrl?: string;
-  effort?: string;
   ultracode?: boolean;
 }
 

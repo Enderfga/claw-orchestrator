@@ -353,9 +353,9 @@ Run one task across N engine/model agents **in parallel** and collect their answ
 
 | Parameter                            | Type    | Required | Description                                                                            |
 | ------------------------------------ | ------- | -------- | -------------------------------------------------------------------------------------- |
-| `task`                               | string  | yes      | Shared prompt sent to every agent (unless an agent overrides via its own `prompt`).    |
+| `task`                               | string  | yes      | Shared task sent to every agent, optionally after its `persona`.                       |
 | `projectDir`                         | string  | yes      | Working directory all agents run in.                                                   |
-| `agents`                             | array   | yes      | Specs: `{ name, engine?, model?, prompt?, baseUrl?, permissionMode?, customEngine? }`. |
+| `agents`                             | array   | yes      | Specs: `{ name, engine?, model?, effort?, prompt?, persona?, baseUrl?, permissionMode?, customEngine? }`. |
 | `synthesize`                         | boolean |          | Run a final synthesis pass over the successful results (needs ≥2).                     |
 | `synthesisModel` / `synthesisEngine` | string  |          | Model/engine for the synthesis pass (default engine `claude`).                         |
 | `agentTimeoutMs`                     | number  |          | Per-agent timeout (default 600000).                                                    |
@@ -363,6 +363,17 @@ Run one task across N engine/model agents **in parallel** and collect their answ
 | `maxBudgetUsd`                       | number  |          | Per-agent spend cap.                                                                   |
 
 Runs in the background; returns `{ ok, id, status, ... }`. Poll with `fanout_status`.
+Each agent's optional `effort` accepts `low`, `medium`, `high`, `xhigh`, `max`,
+`ultra`, or `auto`. Omit it to keep the session default. The selected adapter
+applies or clamps the value as documented for `session_start`; legacy adapters
+that do not map effort retain their existing behavior.
+
+Per-agent `persona` provides role instructions without replacing the shared
+task. Fan-out sends `<persona>\n\n## Shared task\n\n<task>`. A non-empty
+per-agent `prompt` keeps its original full-override semantics: it is sent by
+itself, even when `persona` is also present. With neither field, the agent
+receives `task` unchanged. These fields are persisted in the workflow spec, so
+resume/recovery repeats the same message construction.
 
 ### `fanout_status`
 
@@ -573,12 +584,15 @@ Start a chat-mode autoloop. Planner starts immediately; Coder + Reviewer start o
 | `workspace`                | string     | yes      | Git workspace path                                                                               |
 | `planner_engine`           | EngineType |          | Planner engine (default `claude`)                                                                |
 | `planner_model`            | string     |          | Planner model (Claude default `opus`; other engines use their own default when omitted)          |
+| `planner_effort`           | EffortLevel |          | Fixed Planner reasoning effort; omission keeps the session default                               |
 | `planner_custom_engine`    | object     |          | Trusted `CustomEngineConfig` when Planner engine is `custom`. **Local callers only** — see below |
 | `coder_engine`             | EngineType |          | Default Coder engine (default `claude`)                                                          |
 | `coder_model`              | string     |          | Default Coder model (Claude default `sonnet`)                                                    |
+| `coder_effort`             | EffortLevel |          | Fixed Coder reasoning effort; omission keeps the session default                                 |
 | `coder_custom_engine`      | object     |          | Trusted config when Coder may use `custom`. **Local callers only**                               |
 | `reviewer_engine`          | EngineType |          | Default Reviewer engine (default `claude`)                                                       |
 | `reviewer_model`           | string     |          | Default Reviewer model (Claude default `sonnet`)                                                 |
+| `reviewer_effort`          | EffortLevel |          | Fixed Reviewer reasoning effort; omission keeps the session default                              |
 | `reviewer_custom_engine`   | object     |          | Trusted config when Reviewer may use `custom`. **Local callers only**                            |
 | `send_timeout_ms`          | number     |          | Per-agent send cap in ms (default 600000; inclusive 5000–7200000)                                |
 | `activity_lease_ms`        | number     |          | Inactivity lease in ms (default 1800000; inclusive 60000–7200000)                                |
@@ -603,6 +617,12 @@ Start a chat-mode autoloop. Planner starts immediately; Coder + Reviewer start o
 > than starting without credentials.
 
 Custom configs are not persisted or accepted from Planner output. See [`multi-engine.md`](./multi-engine.md) for their shape.
+
+Role efforts accept `low`, `medium`, `high`, `xhigh`, `max`, `ultra`, or
+`auto`. They are fixed at run start, stored in the durable run spec, reused on
+reset and resume, and are not part of the Planner's `spawn_subagents` control.
+Planner-selected Coder/Reviewer engine or model overrides therefore retain the
+effort chosen by the caller.
 
 The three timeout controls form a hierarchy. `send_timeout_ms` caps one
 Planner, Coder, or Reviewer delivery. A genuine send timeout is not retried:
@@ -803,8 +823,8 @@ survives a process restart and can be resumed.
 | `spec`       | object                           | `WorkflowSpec`: `{ name, nodes[], cwd?, contract?, maxNodeVisits? }` |
 | `template`   | `solve` \| `council` \| `fanout` | Build a built-in instead of supplying `spec`                         |
 | `task`       | string                           | Required with `template`                                             |
-| `agents`     | array                            | `{ name, engine?, model?, persona? }`                                |
-| `reviewers`  | array                            | `solve` only — agents that review the finished change                |
+| `agents`     | array                            | `{ name, engine?, model?, effort?, persona? }`                       |
+| `reviewers`  | array                            | `solve` only — same agent binding for final reviewers                |
 | `humanGate`  | boolean                          | `solve` only — park for approval before anything is written          |
 | `maxRepairs` | number                           | `solve` only, default 3                                              |
 | `cwd`        | string                           | Working directory                                                    |

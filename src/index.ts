@@ -15,6 +15,7 @@ import { EmbeddedServer } from './embedded-server.js';
 import { sanitizeCwd, validateRegex } from './validation.js';
 import {
   ENGINE_TYPES,
+  EFFORT_LEVELS,
   type PluginConfig,
   type EffortLevel,
   type CouncilConfig,
@@ -1144,13 +1145,15 @@ const plugin = {
         properties: {
           task: {
             type: 'string',
-            description: 'The shared task/prompt sent to every agent (unless an agent overrides it).',
+            description:
+              'The shared task sent to every agent, after persona role instructions when supplied; a non-empty per-agent prompt replaces it.',
           },
           projectDir: { type: 'string', description: 'Working directory all agents run in.' },
           agents: {
             type: 'array',
             maxItems: 16,
-            description: 'Agent specs: { name, engine?, model?, prompt?, baseUrl?, permissionMode?, customEngine? }.',
+            description:
+              'Agent specs: { name, engine?, model?, effort?, prompt?, persona?, baseUrl?, permissionMode?, customEngine? }.',
             items: {
               type: 'object',
               properties: {
@@ -1160,7 +1163,16 @@ const plugin = {
                   enum: ENGINE_TYPES,
                 },
                 model: { type: 'string' },
-                prompt: { type: 'string' },
+                effort: { type: 'string', enum: EFFORT_LEVELS },
+                prompt: {
+                  type: 'string',
+                  description: 'Complete per-agent prompt that replaces the shared task when non-empty.',
+                },
+                persona: {
+                  type: 'string',
+                  description:
+                    'Per-agent role instructions prepended to the shared task when no non-empty prompt is supplied.',
+                },
                 baseUrl: { type: 'string' },
               },
               required: ['name'],
@@ -1247,13 +1259,14 @@ const plugin = {
           agents: {
             type: 'array',
             maxItems: 16,
-            description: 'Agents for the template: { name, engine?, model?, persona? }.',
+            description: 'Agents for the template: { name, engine?, model?, effort?, persona? }.',
             items: {
               type: 'object',
               properties: {
                 name: { type: 'string', minLength: 1 },
                 engine: { type: 'string', enum: ENGINE_TYPES },
                 model: { type: 'string' },
+                effort: { type: 'string', enum: EFFORT_LEVELS },
                 persona: { type: 'string' },
               },
               required: ['name'],
@@ -1269,6 +1282,7 @@ const plugin = {
                 name: { type: 'string', minLength: 1 },
                 engine: { type: 'string', enum: ENGINE_TYPES },
                 model: { type: 'string' },
+                effort: { type: 'string', enum: EFFORT_LEVELS },
                 persona: { type: 'string' },
               },
               required: ['name'],
@@ -1979,12 +1993,14 @@ const plugin = {
             type: 'string',
             description: 'Planner model (default: opus for Claude; engine default otherwise)',
           },
+          planner_effort: { type: 'string', enum: EFFORT_LEVELS, description: 'Fixed Planner reasoning effort' },
           planner_custom_engine: CUSTOM_ENGINE_SCHEMA,
           coder_engine: { type: 'string', enum: ENGINE_TYPES, description: 'Default Coder engine (default: claude)' },
           coder_model: {
             type: 'string',
             description: 'Default Coder model (default: sonnet for Claude; engine default otherwise)',
           },
+          coder_effort: { type: 'string', enum: EFFORT_LEVELS, description: 'Fixed Coder reasoning effort' },
           coder_custom_engine: CUSTOM_ENGINE_SCHEMA,
           reviewer_engine: {
             type: 'string',
@@ -1995,6 +2011,7 @@ const plugin = {
             type: 'string',
             description: 'Default Reviewer model (default: sonnet for Claude; engine default otherwise)',
           },
+          reviewer_effort: { type: 'string', enum: EFFORT_LEVELS, description: 'Fixed Reviewer reasoning effort' },
           reviewer_custom_engine: CUSTOM_ENGINE_SCHEMA,
           send_timeout_ms: {
             ...AUTOLOOP_TIMEOUT_SCHEMA.sendTimeoutMs,
@@ -2025,12 +2042,15 @@ const plugin = {
           workspace: sanitizeCwd(args.workspace as string)!,
           plannerEngine: args.planner_engine as EngineType | undefined,
           plannerModel: args.planner_model as string | undefined,
+          plannerEffort: args.planner_effort as EffortLevel | undefined,
           plannerCustomEngine: args.planner_custom_engine as CustomEngineConfig | undefined,
           coderEngine: args.coder_engine as EngineType | undefined,
           coderModel: args.coder_model as string | undefined,
+          coderEffort: args.coder_effort as EffortLevel | undefined,
           coderCustomEngine: args.coder_custom_engine as CustomEngineConfig | undefined,
           reviewerEngine: args.reviewer_engine as EngineType | undefined,
           reviewerModel: args.reviewer_model as string | undefined,
+          reviewerEffort: args.reviewer_effort as EffortLevel | undefined,
           reviewerCustomEngine: args.reviewer_custom_engine as CustomEngineConfig | undefined,
           ...timeoutConfig,
         });

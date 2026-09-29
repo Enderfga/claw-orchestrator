@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Unified optional reasoning-effort bindings for orchestrated agents.** Fan-out agents and
+  built-in workflow agents/reviewers now accept per-agent `effort`, matching Council's existing
+  support. Autoloop accepts fixed `planner_effort`, `coder_effort`, and `reviewer_effort`; these
+  survive durable resume and role reset, and Planner engine/model overrides cannot replace them.
+  Omitting effort preserves existing defaults and older stored runs remain compatible.
+
+### Fixed
+
+- **Fan-out personas no longer replace the shared task.** Agents can now receive optional
+  `persona` role instructions composed before the common task, while a non-empty per-agent
+  `prompt` retains its documented full-override behavior. Both fields remain distinct in the
+  durable workflow spec, so resumed fan-outs reproduce the same message.
+
 ## [7.5.6] - 2026-09-26
 
 ### Fixed

@@ -157,6 +157,9 @@ describe('ClaudeAgentDispatcher — role engine configuration', () => {
     });
     expect(findStart(calls, 'coder')).toMatchObject({ engine: 'claude', model: 'sonnet' });
     expect(findStart(calls, 'reviewer')).toMatchObject({ engine: 'claude', model: 'sonnet' });
+    expect(findStart(calls, 'planner')).not.toHaveProperty('effort');
+    expect(findStart(calls, 'coder')).not.toHaveProperty('effort');
+    expect(findStart(calls, 'reviewer')).not.toHaveProperty('effort');
   });
 
   it('uses each non-Claude engine without injecting a Claude model default', async () => {
@@ -178,6 +181,38 @@ describe('ClaudeAgentDispatcher — role engine configuration', () => {
       expect(start.engine).toBe(engine);
       expect(start).toHaveProperty('model', undefined);
     }
+  });
+
+  it('keeps each configured effort across Planner engine overrides and eager resets', async () => {
+    const { dispatcher, calls } = makeDispatcher({
+      plannerEffort: 'high',
+      coderEffort: 'ultra',
+      reviewerEffort: 'low',
+    });
+
+    await dispatcher.deliver(Msg.chat(0, { text: 'hello' }));
+    await dispatcher.spawnSubagents({
+      coder_engine: 'codex',
+      coder_model: 'gpt-coder',
+      reviewer_engine: 'gemini',
+      coder_effort: 'low',
+      reviewer_effort: 'max',
+    } as never);
+
+    expect(findStart(calls, 'planner')).toMatchObject({ effort: 'high' });
+    expect(findStart(calls, 'coder')).toMatchObject({ engine: 'codex', model: 'gpt-coder', effort: 'ultra' });
+    expect(findStart(calls, 'reviewer')).toMatchObject({ engine: 'gemini', effort: 'low' });
+
+    await dispatcher.resetAgent('coder', { eagerRestart: true });
+    await dispatcher.resetAgent('reviewer', { eagerRestart: true });
+
+    const latestStart = (role: 'coder' | 'reviewer') =>
+      calls.startSession.mock.calls
+        .map((entry) => entry[0] as Record<string, unknown>)
+        .filter((config) => config.name === `autoloop-r1-${role}`)
+        .at(-1);
+    expect(latestStart('coder')).toMatchObject({ effort: 'ultra' });
+    expect(latestStart('reviewer')).toMatchObject({ effort: 'low' });
   });
 
   it('delivers the Planner protocol in-band and starts non-Claude Planners read-only', async () => {

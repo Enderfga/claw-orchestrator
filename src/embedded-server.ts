@@ -38,6 +38,7 @@ function autoloopErrorStatus(error: unknown): number {
   if (/^Autoloop with id '.+' (?:already exists|is being deleted|is still starting)$/.test(message)) return 409;
   if (/^Autoloop session name '.+' is already in use$/.test(message)) return 409;
   if (/^(?:Planner|Coder|Reviewer) engine '.+' is not supported$/.test(message)) return 400;
+  if (/^(?:Planner|Coder|Reviewer) effort\b/.test(message)) return 400;
   // Any custom-engine config complaint is caller error, not a server fault.
   // The old form pinned a single dotted segment and the verb "must be", so
   // `config.args.permissionMode must be a string` and `config.env must contain
@@ -1005,10 +1006,13 @@ export class EmbeddedServer {
           run_id?: string;
           planner_engine?: EngineType;
           planner_model?: string;
+          planner_effort?: EffortLevel;
           coder_engine?: EngineType;
           coder_model?: string;
+          coder_effort?: EffortLevel;
           reviewer_engine?: EngineType;
           reviewer_model?: string;
+          reviewer_effort?: EffortLevel;
           send_timeout_ms?: unknown;
           activity_lease_ms?: unknown;
           autoloop_hard_timeout_ms?: unknown;
@@ -1040,10 +1044,13 @@ export class EmbeddedServer {
             workspace: safeWorkspace,
             plannerEngine: input.planner_engine,
             plannerModel: input.planner_model,
+            plannerEffort: input.planner_effort,
             coderEngine: input.coder_engine,
             coderModel: input.coder_model,
+            coderEffort: input.coder_effort,
             reviewerEngine: input.reviewer_engine,
             reviewerModel: input.reviewer_model,
+            reviewerEffort: input.reviewer_effort,
             ...timeoutConfig,
           });
           json(200, {
