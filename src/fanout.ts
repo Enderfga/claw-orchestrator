@@ -40,8 +40,10 @@ interface SessionManagerLike {
 export interface FanoutAgentSpec extends AgentBinding {
   /** Unique label for this agent (used in the session name and results). */
   name: string;
-  /** Per-agent prompt; defaults to the shared task when omitted. */
+  /** Complete per-agent prompt; replaces the shared task when non-empty. */
   prompt?: string;
+  /** Role instructions prepended to the shared task without a non-empty prompt. */
+  persona?: string;
   baseUrl?: string;
   customEngine?: CustomEngineConfig;
   permissionMode?: PermissionMode;
@@ -110,6 +112,12 @@ export interface FanoutSession {
 
 export const DEFAULT_AGENT_TIMEOUT_MS = 600_000;
 const DEFAULT_MAX_TURNS = 30;
+
+function agentMessage(spec: FanoutAgentSpec, task: string): string {
+  if (spec.prompt) return spec.prompt;
+  if (spec.persona) return `${spec.persona}\n\n## Shared task\n\n${task}`;
+  return task;
+}
 
 export class Fanout {
   private session: FanoutSession;
@@ -199,7 +207,7 @@ export class Fanout {
         customEngine: spec.customEngine,
       });
       const before = this._stats(sessionName);
-      const result = await this.manager.sendMessage(sessionName, spec.prompt || this.config.task, {
+      const result = await this.manager.sendMessage(sessionName, agentMessage(spec, this.config.task), {
         timeout: this.config.agentTimeoutMs ?? DEFAULT_AGENT_TIMEOUT_MS,
         parentRunId: this.session.id,
         nodeKind: 'fanout',

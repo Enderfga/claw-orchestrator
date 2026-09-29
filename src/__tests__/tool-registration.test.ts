@@ -317,6 +317,29 @@ describe('plugin tool registration', () => {
     expect(itemProperties(workflow.agents).effort.enum).toEqual(expected);
     expect(itemProperties(workflow.reviewers).effort.enum).toEqual(expected);
   });
+
+  it('exposes persona as role instructions on fanout agents without changing prompt', () => {
+    const properties = (
+      byName.get('fanout_start')!.parameters as {
+        properties: {
+          agents: {
+            items: {
+              properties: Record<string, { type?: string; description?: string }>;
+            };
+          };
+        };
+      }
+    ).properties.agents.items.properties;
+
+    expect(properties.persona).toMatchObject({
+      type: 'string',
+      description: expect.stringMatching(/role.*shared task/i),
+    });
+    expect(properties.prompt).toMatchObject({
+      type: 'string',
+      description: expect.stringMatching(/replace.*shared task/i),
+    });
+  });
 });
 
 // The OpenClaw plugin manifest declares the tool contract separately from the

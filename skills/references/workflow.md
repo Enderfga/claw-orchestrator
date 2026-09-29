@@ -156,6 +156,13 @@ fields. Fan-out and council entries configure them per agent; `effort` accepts
 `low`, `medium`, `high`, `xhigh`, `max`, `ultra`, or `auto`. Omission preserves
 the session default.
 
+Fan-out agents may also set `persona` for role instructions. When no non-empty
+per-agent `prompt` exists, the executor sends the persona followed by a
+`## Shared task` section containing the node's shared prompt. A non-empty
+per-agent `prompt` remains a complete override and takes precedence over both
+persona and the shared task. The spec stores `prompt` and `persona` separately,
+so a resumed node reconstructs the same message.
+
 On `fanout` and `council`, `timeoutMs` bounds the whole node and `agentTimeoutMs` one
 agent's send. They differ because agents beyond the free session slots wait for one, so
 the node can run several agents' worth of time. Without `agentTimeoutMs`, `timeoutMs`

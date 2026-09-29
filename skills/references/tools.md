@@ -353,9 +353,9 @@ Run one task across N engine/model agents **in parallel** and collect their answ
 
 | Parameter                            | Type    | Required | Description                                                                            |
 | ------------------------------------ | ------- | -------- | -------------------------------------------------------------------------------------- |
-| `task`                               | string  | yes      | Shared prompt sent to every agent (unless an agent overrides via its own `prompt`).    |
+| `task`                               | string  | yes      | Shared task sent to every agent, optionally after its `persona`.                       |
 | `projectDir`                         | string  | yes      | Working directory all agents run in.                                                   |
-| `agents`                             | array   | yes      | Specs: `{ name, engine?, model?, effort?, prompt?, baseUrl?, permissionMode?, customEngine? }`. |
+| `agents`                             | array   | yes      | Specs: `{ name, engine?, model?, effort?, prompt?, persona?, baseUrl?, permissionMode?, customEngine? }`. |
 | `synthesize`                         | boolean |          | Run a final synthesis pass over the successful results (needs ≥2).                     |
 | `synthesisModel` / `synthesisEngine` | string  |          | Model/engine for the synthesis pass (default engine `claude`).                         |
 | `agentTimeoutMs`                     | number  |          | Per-agent timeout (default 600000).                                                    |
@@ -367,6 +367,13 @@ Each agent's optional `effort` accepts `low`, `medium`, `high`, `xhigh`, `max`,
 `ultra`, or `auto`. Omit it to keep the session default. The selected adapter
 applies or clamps the value as documented for `session_start`; legacy adapters
 that do not map effort retain their existing behavior.
+
+Per-agent `persona` provides role instructions without replacing the shared
+task. Fan-out sends `<persona>\n\n## Shared task\n\n<task>`. A non-empty
+per-agent `prompt` keeps its original full-override semantics: it is sent by
+itself, even when `persona` is also present. With neither field, the agent
+receives `task` unchanged. These fields are persisted in the workflow spec, so
+resume/recovery repeats the same message construction.
 
 ### `fanout_status`
 

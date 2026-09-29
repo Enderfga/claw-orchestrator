@@ -1145,14 +1145,15 @@ const plugin = {
         properties: {
           task: {
             type: 'string',
-            description: 'The shared task/prompt sent to every agent (unless an agent overrides it).',
+            description:
+              'The shared task sent to every agent, after persona role instructions when supplied; a non-empty per-agent prompt replaces it.',
           },
           projectDir: { type: 'string', description: 'Working directory all agents run in.' },
           agents: {
             type: 'array',
             maxItems: 16,
             description:
-              'Agent specs: { name, engine?, model?, effort?, prompt?, baseUrl?, permissionMode?, customEngine? }.',
+              'Agent specs: { name, engine?, model?, effort?, prompt?, persona?, baseUrl?, permissionMode?, customEngine? }.',
             items: {
               type: 'object',
               properties: {
@@ -1163,7 +1164,15 @@ const plugin = {
                 },
                 model: { type: 'string' },
                 effort: { type: 'string', enum: EFFORT_LEVELS },
-                prompt: { type: 'string' },
+                prompt: {
+                  type: 'string',
+                  description: 'Complete per-agent prompt that replaces the shared task when non-empty.',
+                },
+                persona: {
+                  type: 'string',
+                  description:
+                    'Per-agent role instructions prepended to the shared task when no non-empty prompt is supplied.',
+                },
                 baseUrl: { type: 'string' },
               },
               required: ['name'],

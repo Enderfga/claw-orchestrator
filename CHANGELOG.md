@@ -15,6 +15,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   survive durable resume and role reset, and Planner engine/model overrides cannot replace them.
   Omitting effort preserves existing defaults and older stored runs remain compatible.
 
+### Fixed
+
+- **Fan-out personas no longer replace the shared task.** Agents can now receive optional
+  `persona` role instructions composed before the common task, while a non-empty per-agent
+  `prompt` retains its documented full-override behavior. Both fields remain distinct in the
+  durable workflow spec, so resumed fan-outs reproduce the same message.
+
 ## [7.5.6] - 2026-09-26
 
 ### Fixed

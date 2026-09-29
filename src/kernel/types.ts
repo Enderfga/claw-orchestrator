@@ -87,9 +87,9 @@ export interface AgentNode extends NodeBase, AgentBinding {
  */
 export interface FanoutAgentSpec extends AgentBinding {
   name: string;
-  /** Per-agent prompt. Overrides the node's shared prompt when present. */
+  /** Complete per-agent prompt. Overrides persona and the node's shared prompt when non-empty. */
   prompt?: string;
-  /** Council-style persona text. */
+  /** Role instructions composed before the shared fan-out task without a non-empty prompt. */
   persona?: string;
   permissionMode?: string;
   /** Engine-agnostic sandbox; `read-only` holds on every engine that supports it. */
