@@ -125,8 +125,27 @@ const MODELS: ModelDef[] = [
     pricing: { input: 5, output: 25, cached: 0.5 },
     contextWindow: 1_000_000,
   },
-  // Sonnet 5 is the current-generation Sonnet and the Claude Code default as of
-  // CLI 2.1.197. Native 1M-token context. $2/$10 per Mtok, cached read 0.1× input.
+  // Sonnet 5.5 is the model `--model sonnet` resolves to since CLI 2.1.284
+  // (verified against the binary), so the `sonnet` alias moved to it, as `opus`
+  // did for Opus 5.5. It is priced like Sonnet 5 — $2/$10 per Mtok, cached read
+  // 0.1× input, 1M-token context — so the move changes no cost figure today.
+  {
+    id: 'claude-sonnet-5-5',
+    engine: 'claude',
+    provider: 'anthropic',
+    pricing: { input: 2, output: 10, cached: 0.2 },
+    aliases: ['sonnet'],
+    contextWindow: 1_000_000,
+  },
+  {
+    id: 'claude-mythos-5',
+    engine: 'claude',
+    provider: 'anthropic',
+    pricing: { input: 10, output: 50, cached: 1 },
+    contextWindow: 1_000_000,
+  },
+  // Sonnet 5 was the Claude Code default from CLI 2.1.197. Native 1M-token
+  // context. $2/$10 per Mtok, cached read 0.1× input.
   //
   // This entry used to carry $3/$15 deliberately: $2/$10 was announced as
   // introductory pricing through 2026-08-31, and pricing the scheduled rate kept
@@ -135,21 +154,11 @@ const MODELS: ModelDef[] = [
   // over-reports every Sonnet turn by 50% — including against `maxBudgetUsd`,
   // which trips on these numbers. Price what the vendor charges today; a
   // scheduled change is not a fact until it happens.
-  //
-  // The `sonnet` alias points here so it tracks the CLI's own `sonnet` default.
-  {
-    id: 'claude-mythos-5',
-    engine: 'claude',
-    provider: 'anthropic',
-    pricing: { input: 10, output: 50, cached: 1 },
-    contextWindow: 1_000_000,
-  },
   {
     id: 'claude-sonnet-5',
     engine: 'claude',
     provider: 'anthropic',
     pricing: { input: 2, output: 10, cached: 0.2 },
-    aliases: ['sonnet'],
     contextWindow: 1_000_000,
   },
   {

@@ -32,7 +32,7 @@ Agents automatically get access to all session, council, and management tools.
 ```typescript
 import { SessionManager } from '@enderfga/claw-orchestrator';
 
-const manager = new SessionManager({ defaultModel: 'claude-sonnet-5' });
+const manager = new SessionManager({ defaultModel: 'claude-sonnet-5-5' });
 
 const session = await manager.startSession({
   name: 'backend-fix',
@@ -87,11 +87,11 @@ The server exposes an OpenAI-compatible API at `/v1/chat/completions`. It serves
 
 Quick config for any client:
 
-| Setting      | Value                                                                                 |
-| ------------ | ------------------------------------------------------------------------------------- |
-| API Base URL | `http://127.0.0.1:18796/v1`                                                           |
-| API Key      | The server token (from `~/.openclaw/server-token`), or any string if auth is disabled |
-| Model        | `claude-fable-5-1`, `claude-opus-5-5`, `claude-sonnet-5`, `gpt-5.5`, `agy-pro`, etc.  |
+| Setting      | Value                                                                                  |
+| ------------ | -------------------------------------------------------------------------------------- |
+| API Base URL | `http://127.0.0.1:18796/v1`                                                            |
+| API Key      | The server token (from `~/.openclaw/server-token`), or any string if auth is disabled  |
+| Model        | `claude-fable-5-1`, `claude-opus-5-5`, `claude-sonnet-5-5`, `gpt-5.5`, `agy-pro`, etc. |
 
 See [openai-compat.md](./openai-compat.md) for the full session-keying rules, `X-Session-Reset` semantics, the legacy-heuristic env var, and the `/v1/sessions` inspection endpoint.
 

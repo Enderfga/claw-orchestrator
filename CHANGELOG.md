@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [7.6.0] - 2026-09-29
 
 ### Added
 
@@ -21,6 +21,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `persona` role instructions composed before the common task, while a non-empty per-agent
   `prompt` retains its documented full-override behavior. Both fields remain distinct in the
   durable workflow spec, so resumed fan-outs reproduce the same message.
+
+### Changed
+
+- **The `sonnet` alias resolves to Claude Sonnet 5.5.** Claude Code 2.1.284 made `claude-sonnet-5-5`
+  the model `--model sonnet` runs, so the alias moved with it and the model is registered at its
+  published rates ($2/$10 per Mtok, $0.20 cache reads, 1M-token context). These match Sonnet 5, so
+  no cost figure changes; sessions started with `sonnet` now report the model they really run.
+  `claude-sonnet-5` stays selectable by id.
+- Tested with Claude Code 2.1.284, Codex 0.159.0, agy 1.2.13, grok 1.0.44 and OpenCode 1.18.33.
 
 ## [7.5.6] - 2026-09-26
 
