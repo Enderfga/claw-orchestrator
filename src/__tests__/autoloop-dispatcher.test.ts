@@ -554,6 +554,21 @@ describe('ClaudeAgentDispatcher — frozen reviewer memory', () => {
 });
 
 describe('ClaudeAgentDispatcher — phase_error surfacing', () => {
+  it('returns a phase_error instead of an empty directive_ack when Coder returns no output', async () => {
+    const { dispatcher } = makeDispatcher({}, { sendOutput: '   ' });
+    await dispatcher.spawnSubagents();
+
+    const replies = await dispatcher.deliver(
+      Msg.directive(0, { goal: 'g', constraints: [], success_criteria: [], max_attempts: 1 }),
+    );
+
+    expect(replies).toHaveLength(1);
+    expect(replies[0].type).toBe('phase_error');
+    if (replies[0].type === 'phase_error') {
+      expect(replies[0].payload.agent).toBe('coder');
+    }
+  });
+
   it('returns a phase_error envelope (not a fake directive_ack) when Coder send fails twice', async () => {
     vi.useFakeTimers();
     const { dispatcher } = makeDispatcher({}, { sendThrows: 2 });

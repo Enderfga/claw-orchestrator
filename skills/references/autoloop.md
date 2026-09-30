@@ -288,7 +288,9 @@ Treat that warning as the signal to start a fresh session.
 
 Subprocess deaths (Claude session lost), failed `git commit` in an iter, and
 other phase-bound failures surface as `phase_error` messages instead of
-silently masquerading as a "clarification request". The runner counts
+silently masquerading as a "clarification request". An empty or whitespace-only
+Coder reply is also a phase error. Only a non-empty reply without
+`iter_complete` is treated as a clarification request. The runner counts
 consecutive `phase_error`s and:
 
 1. Fires `on_phase_error` on each one (defaults to error / both channels).

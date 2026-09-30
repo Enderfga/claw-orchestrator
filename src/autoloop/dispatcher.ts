@@ -1155,6 +1155,15 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
       ];
     }
     const replyText = (result.output ?? '').trim();
+    if (!replyText) {
+      const error = 'Coder returned an empty response';
+      this.appendDecisionLog({
+        kind: 'phase_error',
+        actor: 'dispatcher',
+        payload: { agent: 'coder', phase: 'send', error },
+      });
+      return [Msg.phaseError(env.iter, { agent: 'coder', phase: 'send', error })];
+    }
     const parsed = parseAgentReply(replyText);
     this.emit('coder_reply', parsed.cleaned_reply);
     if (parsed.cleaned_reply) {
