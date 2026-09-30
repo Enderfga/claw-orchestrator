@@ -351,16 +351,16 @@ Run one task across N engine/model agents **in parallel** and collect their answ
 
 ### `fanout_start`
 
-| Parameter                            | Type    | Required | Description                                                                            |
-| ------------------------------------ | ------- | -------- | -------------------------------------------------------------------------------------- |
-| `task`                               | string  | yes      | Shared task sent to every agent, optionally after its `persona`.                       |
-| `projectDir`                         | string  | yes      | Working directory all agents run in.                                                   |
+| Parameter                            | Type    | Required | Description                                                                                               |
+| ------------------------------------ | ------- | -------- | --------------------------------------------------------------------------------------------------------- |
+| `task`                               | string  | yes      | Shared task sent to every agent, optionally after its `persona`.                                          |
+| `projectDir`                         | string  | yes      | Working directory all agents run in.                                                                      |
 | `agents`                             | array   | yes      | Specs: `{ name, engine?, model?, effort?, prompt?, persona?, baseUrl?, permissionMode?, customEngine? }`. |
-| `synthesize`                         | boolean |          | Run a final synthesis pass over the successful results (needs ≥2).                     |
-| `synthesisModel` / `synthesisEngine` | string  |          | Model/engine for the synthesis pass (default engine `claude`).                         |
-| `agentTimeoutMs`                     | number  |          | Per-agent timeout (default 600000).                                                    |
-| `maxTurnsPerAgent`                   | number  |          | Max agent loop turns (default 30).                                                     |
-| `maxBudgetUsd`                       | number  |          | Per-agent spend cap.                                                                   |
+| `synthesize`                         | boolean |          | Run a final synthesis pass over the successful results (needs ≥2).                                        |
+| `synthesisModel` / `synthesisEngine` | string  |          | Model/engine for the synthesis pass (default engine `claude`).                                            |
+| `agentTimeoutMs`                     | number  |          | Per-agent timeout (default 600000).                                                                       |
+| `maxTurnsPerAgent`                   | number  |          | Max agent loop turns (default 30).                                                                        |
+| `maxBudgetUsd`                       | number  |          | Per-agent spend cap.                                                                                      |
 
 Runs in the background; returns `{ ok, id, status, ... }`. Poll with `fanout_status`.
 Each agent's optional `effort` accepts `low`, `medium`, `high`, `xhigh`, `max`,
@@ -578,25 +578,25 @@ Three-agent autonomous iteration loop (Planner / Coder / Reviewer) over a git wo
 
 Start a chat-mode autoloop. Planner starts immediately; Coder + Reviewer start only after the Planner receives plan approval and emits `spawn_subagents`.
 
-| Parameter                  | Type       | Required | Description                                                                                      |
-| -------------------------- | ---------- | -------- | ------------------------------------------------------------------------------------------------ |
-| `run_id`                   | string     | yes      | Stable run identifier                                                                            |
-| `workspace`                | string     | yes      | Git workspace path                                                                               |
-| `planner_engine`           | EngineType |          | Planner engine (default `claude`)                                                                |
-| `planner_model`            | string     |          | Planner model (Claude default `opus`; other engines use their own default when omitted)          |
+| Parameter                  | Type        | Required | Description                                                                                      |
+| -------------------------- | ----------- | -------- | ------------------------------------------------------------------------------------------------ |
+| `run_id`                   | string      | yes      | Stable run identifier                                                                            |
+| `workspace`                | string      | yes      | Git workspace path                                                                               |
+| `planner_engine`           | EngineType  |          | Planner engine (default `claude`)                                                                |
+| `planner_model`            | string      |          | Planner model (Claude default `opus`; other engines use their own default when omitted)          |
 | `planner_effort`           | EffortLevel |          | Fixed Planner reasoning effort; omission keeps the session default                               |
-| `planner_custom_engine`    | object     |          | Trusted `CustomEngineConfig` when Planner engine is `custom`. **Local callers only** — see below |
-| `coder_engine`             | EngineType |          | Default Coder engine (default `claude`)                                                          |
-| `coder_model`              | string     |          | Default Coder model (Claude default `sonnet`)                                                    |
+| `planner_custom_engine`    | object      |          | Trusted `CustomEngineConfig` when Planner engine is `custom`. **Local callers only** — see below |
+| `coder_engine`             | EngineType  |          | Default Coder engine (default `claude`)                                                          |
+| `coder_model`              | string      |          | Default Coder model (Claude default `sonnet`)                                                    |
 | `coder_effort`             | EffortLevel |          | Fixed Coder reasoning effort; omission keeps the session default                                 |
-| `coder_custom_engine`      | object     |          | Trusted config when Coder may use `custom`. **Local callers only**                               |
-| `reviewer_engine`          | EngineType |          | Default Reviewer engine (default `claude`)                                                       |
-| `reviewer_model`           | string     |          | Default Reviewer model (Claude default `sonnet`)                                                 |
+| `coder_custom_engine`      | object      |          | Trusted config when Coder may use `custom`. **Local callers only**                               |
+| `reviewer_engine`          | EngineType  |          | Default Reviewer engine (default `claude`)                                                       |
+| `reviewer_model`           | string      |          | Default Reviewer model (Claude default `sonnet`)                                                 |
 | `reviewer_effort`          | EffortLevel |          | Fixed Reviewer reasoning effort; omission keeps the session default                              |
-| `reviewer_custom_engine`   | object     |          | Trusted config when Reviewer may use `custom`. **Local callers only**                            |
-| `send_timeout_ms`          | number     |          | Per-agent send cap in ms (default 600000; inclusive 5000–7200000)                                |
-| `activity_lease_ms`        | number     |          | Inactivity lease in ms (default 1800000; inclusive 60000–7200000)                                |
-| `autoloop_hard_timeout_ms` | number     |          | Absolute run cap in ms (default 86400000; inclusive 600000–259200000)                            |
+| `reviewer_custom_engine`   | object      |          | Trusted config when Reviewer may use `custom`. **Local callers only**                            |
+| `send_timeout_ms`          | number      |          | Per-agent send cap in ms (default 600000; inclusive 5000–7200000)                                |
+| `activity_lease_ms`        | number      |          | Inactivity lease in ms (default 1800000; inclusive 60000–7200000)                                |
+| `autoloop_hard_timeout_ms` | number      |          | Absolute run cap in ms (default 86400000; inclusive 600000–259200000)                            |
 
 > **Custom engines are local-only.** A `CustomEngineConfig` names an executable to
 > spawn plus its argv and env, so it may only be supplied by a caller that already

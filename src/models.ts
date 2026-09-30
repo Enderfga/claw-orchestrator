@@ -282,6 +282,15 @@ const MODELS: ModelDef[] = [
     pricing: { input: 2, output: 10, cached: 0.2 },
     contextWindow: 1_050_000,
   },
+  // Codex 0.159.3 added GPT-6.1 Sol. Same list price as GPT-6 Sol, but its cache
+  // reads are 5% of input rather than 10%, the same change Opus 5.5 made.
+  {
+    id: 'gpt-6.1-sol',
+    engine: 'codex',
+    provider: 'openai',
+    pricing: { input: 2, output: 10, cached: 0.1 },
+    contextWindow: 1_050_000,
+  },
   {
     id: 'gpt-6-luna',
     engine: 'codex',

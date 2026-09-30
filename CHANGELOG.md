@@ -5,13 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [7.6.1] - 2026-09-30
+## [7.6.1] - 2026-10-01
 
 ### Fixed
 
+- **A Codex session with no model is priced as the model Codex ran.** Without `model`, Codex runs
+  its own default — the `model` in `~/.codex/config.toml` if one is set — but the cost was
+  computed at `gpt-5.5` rates regardless, so a session on `gpt-6-astra` was reported at half its
+  input price and `maxBudgetUsd` let it spend past the cap. Both Codex engines now price the model
+  Codex reports: `codex` from the thread's rollout, `codex-app` from the `thread/start` response.
 - **An empty Coder reply no longer masquerades as a clarification request.** A successful
   transport with no response now surfaces as `phase_error`, allowing the existing circuit breaker
-  to stop repeated logically empty turns.
+  to stop repeated logically empty turns. (#125, thanks @ajmtrz)
+
+### Added
+
+- `gpt-6.1-sol` (Codex 0.159.3) registered at its published rates: $2/$10 per Mtok, with cache
+  reads at $0.10 (5% of input), and a 1.05M-token context window.
+
+### Changed
+
+- Tested with Claude Code 2.1.286, Codex 0.159.3, agy 1.2.14 and OpenCode 1.18.34.
 
 ## [7.6.0] - 2026-09-29
 

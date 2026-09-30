@@ -158,6 +158,13 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
   /** The window the app-server is enforcing, from `tokenUsage.modelContextWindow`. */
   private _modelContextWindow?: number;
 
+  /**
+   * The model the app-server reports for the thread. With no `model` param it
+   * runs the one in the user's `~/.codex/config.toml`, and pricing that thread
+   * at this wrapper's default misstates its cost.
+   */
+  private _reportedModel?: string;
+
   constructor(config: SessionConfig, codexBin?: string) {
     super();
     this.codexBin = codexBin || process.env.CODEX_BIN || 'codex';
@@ -241,20 +248,21 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
     // longer exists) degrades gracefully to a fresh thread rather than failing
     // the whole session.
     const resumeId = this.options.resumeSessionId;
-    let threadResp: { thread?: { id?: string } };
+    let threadResp: { thread?: { id?: string }; model?: unknown };
     let resumed = false;
     if (resumeId) {
       try {
         threadResp = (await this._request('thread/resume', { threadId: resumeId, ...startParams })) as {
           thread?: { id?: string };
+          model?: unknown;
         };
         resumed = true;
       } catch (err) {
         this.emit(SESSION_EVENT.LOG, `[codex-app] thread/resume failed (${(err as Error).message}); starting fresh`);
-        threadResp = (await this._request('thread/start', startParams)) as { thread?: { id?: string } };
+        threadResp = (await this._request('thread/start', startParams)) as typeof threadResp;
       }
     } else {
-      threadResp = (await this._request('thread/start', startParams)) as { thread?: { id?: string } };
+      threadResp = (await this._request('thread/start', startParams)) as typeof threadResp;
     }
     if (!this.threadId && threadResp?.thread?.id) {
       this.threadId = threadResp.thread.id;
@@ -262,6 +270,7 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
     if (!this.threadId) {
       throw new Error('codex app-server did not return a thread id from thread/start');
     }
+    if (typeof threadResp.model === 'string' && threadResp.model) this._reportedModel = threadResp.model;
     this._instructionsPending = !resumed && !!this.options.appendSystemPrompt?.trim();
 
     this.sessionId = `codex-app-${this.threadId.slice(0, 8)}-${Date.now().toString(36)}`;
@@ -597,11 +606,11 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
   }
 
   getCost(): CostBreakdown {
-    const pricing = getModelPricing(this.options.model, 'gpt-5.5');
+    const pricing = getModelPricing(this._billedModel(), 'gpt-5.5');
     const cachedPrice = pricing.cached ?? 0;
     const nonCachedIn = Math.max(0, this._stats.tokensIn - this._stats.cachedTokens);
     return {
-      model: this.options.model || 'gpt-5.5',
+      model: this._billedModel() || 'gpt-5.5',
       tokensIn: this._stats.tokensIn,
       tokensOut: this._stats.tokensOut,
       cachedTokens: this._stats.cachedTokens,
@@ -722,13 +731,18 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
    */
   private _estimateContextPercent(): number {
     if (this._lastTurnTokensIn <= 0) return 0;
-    const ctx = this._modelContextWindow ?? getContextWindow(this.options.model || 'gpt-5.5');
+    const ctx = this._modelContextWindow ?? getContextWindow(this._billedModel() || 'gpt-5.5');
     if (!ctx) return 0;
     return Math.min(100, Math.round((this._lastTurnTokensIn / ctx) * 100));
   }
 
+  /** The configured model, else the one the app-server reported for the thread. */
+  private _billedModel(): string | undefined {
+    return this.options.model || this._reportedModel;
+  }
+
   private _updateCost(): void {
-    const pricing = getModelPricing(this.options.model, 'gpt-5.5');
+    const pricing = getModelPricing(this._billedModel(), 'gpt-5.5');
     const cachedPrice = pricing.cached ?? 0;
     const nonCachedIn = Math.max(0, this._stats.tokensIn - this._stats.cachedTokens);
     this._stats.costUsd =
