@@ -526,6 +526,52 @@ describe('PersistentCodexSession', () => {
     session.stop();
   });
 
+  // With no --model, codex runs the model in the user's ~/.codex/config.toml.
+  // Pricing that at the wrapper default understated an Astra session 2x on
+  // input; the rollout's turn_context names the model that actually ran.
+  it('prices a session with no model as the model codex reports it ran', async () => {
+    writeRollout('thread-model', [
+      JSON.stringify({ type: 'turn_context', payload: { model: 'gpt-6-astra', effort: 'high' } }),
+    ]);
+    const session = new PersistentCodexSession({ name: 'test', cwd: '/tmp' });
+    await session.start();
+
+    const p = session.send('hi', { waitForComplete: true });
+    setTimeout(() => {
+      mockProc.stdout.push(JSON.stringify({ type: 'thread.started', thread_id: 'thread-model' }) + '\n');
+      mockProc.stdout.push(
+        JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1_000_000, output_tokens: 0 } }) + '\n',
+      );
+      mockProc.stdout.push(null);
+      mockProc.emit('close', 0);
+    }, 10);
+    await p;
+
+    const cost = session.getCost();
+    expect(cost.model).toBe('gpt-6-astra');
+    expect(cost.pricing.inputPer1M).toBe(10);
+    expect(session.getStats().costUsd).toBeCloseTo(10, 6);
+    session.stop();
+  });
+
+  it('keeps the configured model over the one in the rollout', async () => {
+    writeRollout('thread-pinned', [JSON.stringify({ type: 'turn_context', payload: { model: 'gpt-6-astra' } })]);
+    const session = new PersistentCodexSession({ name: 'test', cwd: '/tmp', model: 'gpt-6-luna' });
+    await session.start();
+
+    const p = session.send('hi', { waitForComplete: true });
+    setTimeout(() => {
+      mockProc.stdout.push(JSON.stringify({ type: 'thread.started', thread_id: 'thread-pinned' }) + '\n');
+      mockProc.stdout.push(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 10 } }) + '\n');
+      mockProc.stdout.push(null);
+      mockProc.emit('close', 0);
+    }, 10);
+    await p;
+
+    expect(session.getCost().model).toBe('gpt-6-luna');
+    session.stop();
+  });
+
   // A resumed thread arrives with a token history this process never saw, so
   // the first `turn.completed` reports a cumulative total covering turns that
   // predate the session. Treating that as the turn's own prompt would report a

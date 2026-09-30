@@ -559,6 +559,17 @@ describe('registry covers what the engines actually offer', () => {
 // opus` resolves to, and Codex 0.156.1 added GPT-6 Sol and Luna. Every number
 // here comes from the vendors' own price tables, and each has a reverse
 // assertion so a blanket edit across the family fails the suite.
+describe('gpt-6.1-sol (Codex 0.159.3)', () => {
+  it('is priced from the published table, with a 5% cache read', () => {
+    const p = lookupModel('gpt-6.1-sol')!.pricing;
+    expect(p).toEqual({ input: 2, output: 10, cached: 0.1 });
+    expect(p.cached).toBeCloseTo(p.input * 0.05, 10);
+    expect(getContextWindow('gpt-6.1-sol')).toBe(1_050_000);
+    // Reverse: GPT-6 Sol keeps its 10% cache read.
+    expect(lookupModel('gpt-6-sol')!.pricing.cached).toBe(0.2);
+  });
+});
+
 describe('models registered on 2026-09-23', () => {
   it('prices Opus 5.5 below Opus 5, with its half-rate cache read', () => {
     expect(lookupModel('claude-opus-5-5')!.pricing).toEqual({ input: 4, output: 20, cached: 0.2 });
