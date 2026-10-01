@@ -611,6 +611,7 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
       await this.config.manager.stopSession(name);
     } catch (err) {
       this.logger.warn?.(`[autoloop] resetAgent stop failed for ${name}: ${(err as Error).message}`);
+      if (this.config.manager.hasSession?.(name) ?? true) throw err;
     }
     if (agent === 'planner') this.plannerStarted = false;
     if (agent === 'coder') this.coderStarted = false;

@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.6.2] - 2026-10-01
+
+### Fixed
+
+- **Autoloop agent reset no longer reports success while reusing a session that failed to stop.**
+  A live or unprovable old session now makes reset fail without clearing the role's started state
+  or attempting a replacement; a session confirmed absent can still be recreated.
+
 ## [7.6.1] - 2026-10-01
 
 ### Fixed

@@ -23,6 +23,7 @@ interface StubCalls {
   startSession: ReturnType<typeof vi.fn>;
   sendMessage: ReturnType<typeof vi.fn>;
   stopSession: ReturnType<typeof vi.fn>;
+  hasSession: ReturnType<typeof vi.fn>;
   getStatus: ReturnType<typeof vi.fn>;
   compactSession: ReturnType<typeof vi.fn>;
 }
@@ -55,6 +56,7 @@ function makeStubManager(
       return { output, error: undefined };
     }),
     stopSession: vi.fn(async () => undefined),
+    hasSession: vi.fn(() => true),
     getStatus: vi.fn(() => ({
       stats: { contextPercent: opts.contextPercent ?? 10, tokensIn: 0, tokensOut: 0, cachedTokens: 0 },
     })),
@@ -64,6 +66,7 @@ function makeStubManager(
     startSession: calls.startSession,
     sendMessage: calls.sendMessage,
     stopSession: calls.stopSession,
+    hasSession: calls.hasSession,
     getStatus: calls.getStatus,
     compactSession: calls.compactSession,
   } as unknown as SessionManager;
@@ -367,6 +370,39 @@ describe('ClaudeAgentDispatcher — role engine configuration', () => {
       .filter((config) => config.name === 'autoloop-r1-coder');
     expect(coderStarts).toHaveLength(2);
     expect(coderStarts[1]).toMatchObject({ engine: 'codex', model: 'gpt-coder' });
+  });
+
+  it('does not restart or clear a role when its live session cannot be stopped', async () => {
+    const { dispatcher, calls } = makeDispatcher();
+    await dispatcher.spawnSubagents();
+
+    calls.stopSession.mockRejectedValueOnce(new Error('coder still live'));
+
+    await expect(dispatcher.resetAgent('coder', { eagerRestart: true })).rejects.toThrow('coder still live');
+
+    const coderStarts = calls.startSession.mock.calls.filter(
+      (entry) => (entry[0] as { name: string }).name === 'autoloop-r1-coder',
+    );
+    expect(coderStarts).toHaveLength(1);
+    await expect(dispatcher.spawnSubagents({ coder_engine: 'codex' })).rejects.toThrow(
+      'Cannot change Coder engine or model after its session has started',
+    );
+  });
+
+  it('restarts a role once when the failed stop confirms its session is already absent', async () => {
+    const { manager, calls } = makeStubManager();
+    calls.hasSession.mockReturnValue(false);
+    const dispatcher = new ClaudeAgentDispatcher({ manager, runId: 'r1', workspace: tmpRoot });
+    await dispatcher.spawnSubagents();
+
+    calls.stopSession.mockRejectedValueOnce(new Error("Session 'autoloop-r1-coder' not found"));
+
+    await expect(dispatcher.resetAgent('coder', { eagerRestart: true })).resolves.toBeUndefined();
+
+    const coderStarts = calls.startSession.mock.calls.filter(
+      (entry) => (entry[0] as { name: string }).name === 'autoloop-r1-coder',
+    );
+    expect(coderStarts).toHaveLength(2);
   });
 
   it('rejects engine changes after a subagent session has started', async () => {
