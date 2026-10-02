@@ -190,6 +190,10 @@ export interface AutoloopConfig extends AutoloopTimeoutConfig {
   notifyUser: (level: PushLevel, summary: string, detail: string | undefined, channel: PushChannel) => Promise<void>;
   /** Agent transport layer (mockable). */
   dispatcher: AgentDispatcher;
+  /** Persist an exact Reviewer envelope before it can enter the volatile queue. */
+  persistReviewEnvelope?: (envelope: Extract<AnyAutoloopMessage, { type: 'review_request' }>) => Promise<void>;
+  /** Internal fence for one checkpoint-bound Reviewer recovery delivery. */
+  recoveryReviewOnly?: boolean;
   /**
    * Phase-error circuit threshold. After this many consecutive `phase_error`
    * messages the runner auto-terminates with reason `phase_error_circuit`

@@ -139,6 +139,102 @@ describe('AutoloopRunner', () => {
     expect(iterDoneEvent).toEqual({ iter: 0, verdict: 'advance', metric: 0.9 });
   });
 
+  it('persists the exact Reviewer envelope before its first dispatcher delivery', async () => {
+    const order: string[] = [];
+    const dispatcher: AgentDispatcher = {
+      async deliver(env) {
+        if (env.type === 'review_request') order.push(`deliver:${env.msg_id}`);
+        return [];
+      },
+    };
+    const { runner } = makeRunner(dispatcher, [], {
+      persistReviewEnvelope: async (envelope) => {
+        order.push(`persist:${envelope.msg_id}`);
+      },
+    });
+    await runner.start();
+
+    await runner.send(Msg.iterArtifacts(0, { diff: 'patch', eval_output: { ok: true }, files_changed: ['a.ts'] }));
+
+    expect(order).toHaveLength(2);
+    expect(order[0]).toMatch(/^persist:/);
+    expect(order[1]).toBe(order[0].replace('persist:', 'deliver:'));
+  });
+
+  it('delivers a recovery review once without advancing its verdict to Planner', async () => {
+    const observed: string[] = [];
+    const dispatcher: AgentDispatcher = {
+      async deliver(env) {
+        observed.push(`${env.to}:${env.type}`);
+        if (env.type === 'review_request') {
+          return [Msg.reviewVerdict(env.iter, { decision: 'advance', metric: 1, audit_notes: 'verified' })];
+        }
+        return [
+          Msg.directive(env.iter, { goal: 'must not run', constraints: [], success_criteria: [], max_attempts: 1 }),
+        ];
+      },
+    };
+    const { runner } = makeRunner(dispatcher, [], {
+      persistReviewEnvelope: async () => undefined,
+      recoveryReviewOnly: true,
+    });
+    await runner.start();
+    const envelope = Msg.reviewRequest(0, {
+      iter: 0,
+      ledger_path: '/tmp/test/ledger',
+      prior_metrics: [],
+      checkpoint_sha: 'a'.repeat(40),
+      source_run_id: 'test-run',
+      source_iter: 0,
+      scope: ['verification-only'],
+      idempotency_key: 'review-test-run-0',
+      artifact_sha256: {
+        'directive.json': '1'.repeat(64),
+        'coder_summary.txt': '2'.repeat(64),
+        'eval_output.json': '3'.repeat(64),
+        'diff.patch': '4'.repeat(64),
+      },
+    });
+
+    await runner.sendRecoveryReview(envelope);
+
+    expect(observed).toEqual(['reviewer:review_request']);
+    expect(runner.state.iter).toBe(0);
+  });
+
+  it('terminates a one-shot recovery runner when envelope revalidation fails', async () => {
+    const shutdown = vi.fn(async () => undefined);
+    const dispatcher: AgentDispatcher = { deliver: vi.fn(async () => []), shutdown };
+    const { runner } = makeRunner(dispatcher, [], {
+      persistReviewEnvelope: async () => {
+        throw new Error('snapshot missing');
+      },
+      recoveryReviewOnly: true,
+    });
+    await runner.start();
+    const envelope = Msg.reviewRequest(0, {
+      iter: 0,
+      ledger_path: '/tmp/test/ledger',
+      prior_metrics: [],
+      checkpoint_sha: 'a'.repeat(40),
+      source_run_id: 'test-run',
+      source_iter: 0,
+      scope: ['verification-only'],
+      idempotency_key: 'review-test-run-failed',
+      artifact_sha256: {
+        'directive.json': '1'.repeat(64),
+        'coder_summary.txt': '2'.repeat(64),
+        'eval_output.json': '3'.repeat(64),
+        'diff.patch': '4'.repeat(64),
+      },
+    });
+
+    await expect(runner.sendRecoveryReview(envelope)).rejects.toThrow('snapshot missing');
+
+    expect(runner.state).toMatchObject({ status: 'terminated', status_reason: 'reviewer_recovery_failed' });
+    expect(shutdown).toHaveBeenCalledWith('reviewer_recovery_failed');
+  });
+
   it('terminate halts further dispatch', async () => {
     const dispatcher: AgentDispatcher = {
       async deliver() {

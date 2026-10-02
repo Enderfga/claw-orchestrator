@@ -46,11 +46,32 @@ export interface IterArtifactsPayload {
   files_changed: string[];
 }
 
-export interface ReviewRequestPayload {
+export interface LegacyReviewRequestPayload {
   iter: number;
   ledger_path: string;
   prior_metrics: number[];
 }
+
+export interface CheckpointReviewBinding {
+  checkpoint_sha: string;
+  source_run_id: string;
+  source_iter: number;
+  scope: string[];
+  idempotency_key: string;
+}
+
+export interface CheckpointArtifactDigests {
+  'directive.json': string;
+  'coder_summary.txt': string;
+  'eval_output.json': string;
+  'diff.patch': string;
+}
+
+export interface CheckpointReviewRequestPayload extends LegacyReviewRequestPayload, CheckpointReviewBinding {
+  artifact_sha256: CheckpointArtifactDigests;
+}
+
+export type ReviewRequestPayload = LegacyReviewRequestPayload | CheckpointReviewRequestPayload;
 
 export interface ReviewVerdictPayload {
   decision: 'advance' | 'hold' | 'rollback';

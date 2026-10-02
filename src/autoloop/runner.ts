@@ -90,6 +90,7 @@ export class AutoloopRunner extends EventEmitter {
   private activityLeaseExpired = false;
   private terminationStarted = false;
   private terminationPromise: Promise<void> | null = null;
+  private recoveryReviewConsumed = false;
   /** Timeout outcomes explicitly advanced by an operator resume. Retained so a
    *  late/replayed result for the same logical dispatch cannot pause the run a
    *  second time after it has already been resolved. */
@@ -307,10 +308,63 @@ export class AutoloopRunner extends EventEmitter {
 
   /** Enqueue a message and drain the queue. Resolves when the queue is idle. */
   async send(env: AnyAutoloopMessage): Promise<void> {
+    if (this.config.recoveryReviewOnly) {
+      throw new AutoloopRoutingError('Reviewer-only recovery rejects normal queue delivery');
+    }
     validateMessage(env);
+    const persistence = this.persistReviewEnvelope(env);
+    if (persistence) await persistence;
     this.recordActivity('queue_message_accepted');
     this.queue.push(env);
     await this.drain();
+  }
+
+  /**
+   * Deliver one checkpoint-bound recovery request to Reviewer without entering
+   * the normal queue. A verdict proves the recovery effect, but deliberately
+   * does not enqueue `iter_done` for Planner: recovery must never advance into
+   * a new Coder lifecycle before its applied receipt commits.
+   */
+  async sendRecoveryReview(env: Extract<AnyAutoloopMessage, { type: 'review_request' }>): Promise<void> {
+    validateMessage(env);
+    if (!this.config.recoveryReviewOnly || this.recoveryReviewConsumed) {
+      throw new AutoloopRoutingError('Reviewer recovery delivery is unavailable or already consumed');
+    }
+    if (!('checkpoint_sha' in env.payload)) {
+      throw new AutoloopRoutingError('Reviewer recovery requires a checkpoint-bound review_request');
+    }
+    if (this.draining || this.queue.length > 0) {
+      throw new AutoloopRoutingError('Reviewer recovery requires an idle runner queue');
+    }
+    this.recoveryReviewConsumed = true;
+    try {
+      const persistence = this.persistReviewEnvelope(env);
+      if (persistence) await persistence;
+      this.recordActivity('queue_message_accepted');
+      this.emit('message', env);
+      const replies = await this.config.dispatcher.deliver(env);
+      if (
+        replies.length !== 1 ||
+        replies[0].type !== 'review_verdict' ||
+        replies[0].from !== 'reviewer' ||
+        replies[0].to !== 'runner' ||
+        replies[0].iter !== env.iter
+      ) {
+        throw new AutoloopRoutingError('Reviewer recovery did not produce one exact checkpoint verdict');
+      }
+      validateMessage(replies[0]);
+      this.recordActivity('agent_progress');
+      this.emit('message', replies[0]);
+      await this.terminate('completed');
+    } catch (error) {
+      await this.terminate('reviewer_recovery_failed');
+      throw error;
+    }
+  }
+
+  private persistReviewEnvelope(env: AnyAutoloopMessage): Promise<void> | undefined {
+    if (env.type !== 'review_request') return undefined;
+    return this.config.persistReviewEnvelope?.(env);
   }
 
   /** External entry: user typed something to Planner. */
@@ -418,6 +472,7 @@ export class AutoloopRunner extends EventEmitter {
     const replies = await this.config.dispatcher.deliver(env);
     for (const r of replies) {
       validateMessage(r);
+      await this.persistReviewEnvelope(r);
       // A dispatcher-generated deadline record is bookkeeping, not agent
       // progress. Letting it renew the lease would make a timeout extend the
       // run whose lack of progress caused it.
@@ -435,6 +490,7 @@ export class AutoloopRunner extends EventEmitter {
           ledger_path: this.config.ledger_dir,
           prior_metrics: this.state.metric_history.slice(-10),
         });
+        await this.persistReviewEnvelope(req);
         this.queue.push(req);
         return;
       }

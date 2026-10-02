@@ -29,6 +29,21 @@ function makeMockEffects(): {
         calls.push(`write:${file}:${msg ?? ''}`);
       }
     },
+    requestReview: async (args, iter) => {
+      calls.push(`requestReview:${iter}:${JSON.stringify(args)}`);
+      return {
+        iter,
+        ledger_path: '/tmp/tasks/run',
+        prior_metrics: [],
+        artifact_sha256: {
+          'directive.json': '1'.repeat(64),
+          'coder_summary.txt': '2'.repeat(64),
+          'eval_output.json': '3'.repeat(64),
+          'diff.patch': '4'.repeat(64),
+        },
+        ...args,
+      };
+    },
   };
   return { fx, calls, policyDelta, writes };
 }
@@ -87,6 +102,68 @@ then
     const { calls, parse_errors } = parsePlannerReply(reply);
     expect(calls).toEqual([]);
     expect(parse_errors).toHaveLength(1);
+  });
+});
+
+describe('request_review', () => {
+  it('emits one checkpoint-bound Reviewer request without spawning subagents', async () => {
+    const { fx, calls } = makeMockEffects();
+    const args = {
+      checkpoint_sha: 'A'.repeat(40),
+      source_run_id: 'run-1',
+      source_iter: 3,
+      scope: ['verification-only'],
+      idempotency_key: 'review-run-1-3',
+    };
+
+    const result = await applyPlannerToolCalls([{ tool: 'request_review', args }], fx, 3);
+
+    expect(result.errors).toEqual([]);
+    expect(result.emitted_messages).toHaveLength(1);
+    expect(result.emitted_messages[0]).toMatchObject({
+      iter: 3,
+      from: 'runner',
+      to: 'reviewer',
+      type: 'review_request',
+      payload: {
+        iter: 3,
+        ledger_path: '/tmp/tasks/run',
+        checkpoint_sha: 'a'.repeat(40),
+        source_run_id: 'run-1',
+        source_iter: 3,
+        scope: ['verification-only'],
+        idempotency_key: 'review-run-1-3',
+      },
+    });
+    expect(calls).toEqual([`requestReview:3:${JSON.stringify({ ...args, checkpoint_sha: 'a'.repeat(40) })}`]);
+    expect(calls.some((call) => call.startsWith('spawnSubagents:'))).toBe(false);
+  });
+
+  it('rejects request_review when it is mixed with another Planner control', async () => {
+    const { fx, calls } = makeMockEffects();
+    const result = await applyPlannerToolCalls(
+      [
+        {
+          tool: 'request_review',
+          args: {
+            checkpoint_sha: 'a'.repeat(40),
+            source_run_id: 'run-1',
+            source_iter: 0,
+            scope: ['review-only'],
+            idempotency_key: 'review-run-1-0',
+          },
+        },
+        { tool: 'notify_user', args: { summary: 'mixed control' } },
+      ],
+      fx,
+      0,
+    );
+
+    expect(result.emitted_messages).toEqual([]);
+    expect(result.errors).toEqual([
+      { tool: 'request_review', error: 'request_review must be the only Planner control in its batch' },
+    ]);
+    expect(calls).toEqual([]);
   });
 });
 

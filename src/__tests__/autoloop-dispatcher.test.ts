@@ -444,6 +444,70 @@ describe('ClaudeAgentDispatcher — role engine configuration', () => {
   });
 });
 
+describe('ClaudeAgentDispatcher — checkpoint-bound review preparation', () => {
+  it('prepares an exact Reviewer request without starting or sending to Coder', async () => {
+    initialiseGitWorkspace(tmpRoot);
+    const checkpoint = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: tmpRoot, encoding: 'utf8' }).trim();
+    const iterDir = path.join(tmpRoot, 'tasks', 'r1', 'iter', '0');
+    fs.mkdirSync(iterDir, { recursive: true });
+    fs.writeFileSync(path.join(iterDir, 'directive.json'), '{"goal":"verify"}\n');
+    fs.writeFileSync(path.join(iterDir, 'coder_summary.txt'), 'already complete\n');
+    fs.writeFileSync(path.join(iterDir, 'eval_output.json'), '{"ok":true}\n');
+    fs.writeFileSync(path.join(iterDir, 'diff.patch'), '');
+    const request = {
+      checkpoint_sha: checkpoint,
+      source_run_id: 'r1',
+      source_iter: 0,
+      scope: ['verification-only'],
+      idempotency_key: 'review-r1-0',
+    };
+    const { dispatcher, calls, ledgerDir } = makeDispatcher(
+      {},
+      { sendOutput: plannerControl('request_review', request) },
+    );
+
+    const replies = await dispatcher.deliver(Msg.chat(0, { text: 'resume verification only' }));
+
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toMatchObject({
+      iter: 0,
+      from: 'runner',
+      to: 'reviewer',
+      type: 'review_request',
+      payload: { iter: 0, ledger_path: ledgerDir, prior_metrics: [], ...request },
+    });
+    expect(calls.startSession.mock.calls.map((entry) => (entry[0] as { name: string }).name)).toEqual([
+      'autoloop-r1-planner',
+    ]);
+    expect(calls.sendMessage).toHaveBeenCalledOnce();
+  });
+
+  it('rejects cross-run checkpoint provenance before any Reviewer or Coder lifecycle effect', async () => {
+    initialiseGitWorkspace(tmpRoot);
+    const checkpoint = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: tmpRoot, encoding: 'utf8' }).trim();
+    const { dispatcher, calls } = makeDispatcher(
+      {},
+      {
+        sendOutput: plannerControl('request_review', {
+          checkpoint_sha: checkpoint,
+          source_run_id: 'another-run',
+          source_iter: 0,
+          scope: ['verification-only'],
+          idempotency_key: 'review-r1-0',
+        }),
+      },
+    );
+
+    const replies = await dispatcher.deliver(Msg.chat(0, { text: 'resume verification only' }));
+
+    expect(replies).toEqual([]);
+    expect(calls.startSession.mock.calls.map((entry) => (entry[0] as { name: string }).name)).toEqual([
+      'autoloop-r1-planner',
+    ]);
+    expect(calls.sendMessage).toHaveBeenCalledOnce();
+  });
+});
+
 describe('ClaudeAgentDispatcher — Planner control transactions', () => {
   it('rejects a malformed control batch without writes, spawn, or an initial directive', async () => {
     const originalPlan = '# original plan\n';

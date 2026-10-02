@@ -19,6 +19,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mutation, then require that token before writing a prepared receipt and restarting at a proven
   Planner boundary. Live leases, delivery evidence, legacy ambiguity, and unresolved prepared
   receipts fail closed for manual resolution.
+- **Reviewer-only Autoloop recovery is bound to an immutable checkpoint.** The
+  Planner can route an already-complete checkpoint through `request_review`; its exact
+  run/iteration/scope/idempotency envelope and four content-addressed iteration artifacts
+  are persisted before queue admission. Recovery stages only that immutable snapshot,
+  reuses the token/receipt and delivery-outbox fences, starts only Planner and Reviewer,
+  requires one generation-bound acknowledgement plus a durable verdict, and stops before
+  any Planner continuation can start, recreate, reset, or send work to Coder.
 
 ### Fixed
 

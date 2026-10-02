@@ -20,11 +20,19 @@
  */
 
 import { ENGINE_TYPES, type EngineType } from '../types.js';
-import { type AnyAutoloopMessage, Msg, type PushChannel, type PushLevel } from './messages.js';
+import {
+  type AnyAutoloopMessage,
+  type CheckpointReviewBinding,
+  type CheckpointReviewRequestPayload,
+  Msg,
+  type PushChannel,
+  type PushLevel,
+} from './messages.js';
 
 export type PlannerToolName =
   | 'notify_user'
   | 'spawn_subagents'
+  | 'request_review'
   | 'send_directive'
   | 'pause_loop'
   | 'resume_loop'
@@ -100,6 +108,8 @@ export interface PlannerToolEffects {
   updatePushPolicy: (delta: Record<string, unknown>) => void;
   /** Atomically materialize the complete plan/goal write set. */
   writePlanFiles: (writes: readonly PlannerArtifactWrite[]) => Promise<void>;
+  /** Bind an immutable checkpoint to one Runner-routed Reviewer request. */
+  requestReview: (args: CheckpointReviewBinding, targetIter: number) => Promise<CheckpointReviewRequestPayload>;
 }
 
 export interface PlannerArtifactWrite {
@@ -123,6 +133,7 @@ interface PreparedPlannerCall {
   message?: AnyAutoloopMessage;
   policyDelta?: Record<string, unknown>;
   spawnArgs?: SpawnSubagentsArgs;
+  reviewArgs?: CheckpointReviewBinding;
 }
 
 interface PreparedDirective {
@@ -155,6 +166,53 @@ function prepareDirective(raw: Record<string, unknown>, tool: string): PreparedD
     constraints: optionalStringArray(raw.constraints, `${tool} constraints`),
     success_criteria: optionalStringArray(raw.success_criteria, `${tool} success_criteria`),
     max_attempts: maxAttempts,
+  };
+}
+
+function prepareReviewRequest(raw: Record<string, unknown>): CheckpointReviewBinding {
+  const expected = ['checkpoint_sha', 'source_run_id', 'source_iter', 'scope', 'idempotency_key'];
+  const keys = Object.keys(raw);
+  if (keys.length !== expected.length || keys.some((key) => !expected.includes(key))) {
+    throw new Error(`request_review requires exactly ${expected.join(', ')}`);
+  }
+  const { checkpoint_sha, source_run_id, source_iter, scope, idempotency_key } = raw;
+  if (typeof checkpoint_sha !== 'string' || !/^[0-9a-f]{40}$/i.test(checkpoint_sha)) {
+    throw new Error('request_review checkpoint_sha must be a full 40-character Git SHA');
+  }
+  if (typeof source_run_id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(source_run_id)) {
+    throw new Error('request_review source_run_id is invalid');
+  }
+  if (!Number.isSafeInteger(source_iter) || (source_iter as number) < 0) {
+    throw new Error('request_review source_iter must be a nonnegative safe integer');
+  }
+  if (
+    !Array.isArray(scope) ||
+    scope.length === 0 ||
+    scope.length > 128 ||
+    scope.some(
+      (entry) =>
+        typeof entry !== 'string' ||
+        !entry.trim() ||
+        entry.trim() !== entry ||
+        Buffer.byteLength(entry, 'utf8') > 8_192,
+    )
+  ) {
+    throw new Error('request_review scope must contain 1..128 non-empty unpadded strings');
+  }
+  if (
+    typeof idempotency_key !== 'string' ||
+    !idempotency_key.trim() ||
+    idempotency_key.trim() !== idempotency_key ||
+    Buffer.byteLength(idempotency_key, 'utf8') > 8_192
+  ) {
+    throw new Error('request_review idempotency_key must be a non-empty unpadded string');
+  }
+  return {
+    checkpoint_sha: checkpoint_sha.toLowerCase(),
+    source_run_id,
+    source_iter: source_iter as number,
+    scope: [...scope] as string[],
+    idempotency_key,
   };
 }
 
@@ -230,6 +288,8 @@ function preparePlannerCall(call: PlannerToolCall, iter: number): PreparedPlanne
       }
       return { call, message, spawnArgs: args };
     }
+    case 'request_review':
+      return { call, reviewArgs: prepareReviewRequest(call.args) };
     case 'send_directive': {
       const directive = prepareDirective(call.args, 'send_directive');
       return { call, message: Msg.directive(iter, directive) };
@@ -312,12 +372,19 @@ export async function applyPlannerToolCalls(
 
   if (errors.length > 0) return { emitted_messages: [], errors };
 
-  for (const singleton of ['write_plan', 'write_goal', 'spawn_subagents'] as const) {
+  for (const singleton of ['write_plan', 'write_goal', 'spawn_subagents', 'request_review'] as const) {
     if (prepared.filter(({ call }) => call.tool === singleton).length > 1) {
       errors.push({ tool: singleton, error: `duplicate ${singleton} control in one Planner batch` });
     }
   }
   if (errors.length > 0) return { emitted_messages: [], errors };
+  const reviewCall = prepared.find(({ reviewArgs }) => reviewArgs !== undefined);
+  if (reviewCall && prepared.length !== 1) {
+    return {
+      emitted_messages: [],
+      errors: [{ tool: 'request_review', error: 'request_review must be the only Planner control in its batch' }],
+    };
+  }
 
   const artifacts = prepared.flatMap(({ artifact }) => (artifact ? [artifact] : []));
   if (artifacts.length > 0) {
@@ -346,6 +413,15 @@ export async function applyPlannerToolCalls(
       await fx.spawnSubagents(spawnCall.spawnArgs);
     } catch (err) {
       return { emitted_messages: [], errors: [{ tool: spawnCall.call.tool, error: (err as Error).message }] };
+    }
+  }
+
+  if (reviewCall?.reviewArgs) {
+    try {
+      const payload = await fx.requestReview(reviewCall.reviewArgs, iter);
+      reviewCall.message = Msg.reviewRequest(iter, payload);
+    } catch (err) {
+      return { emitted_messages: [], errors: [{ tool: reviewCall.call.tool, error: (err as Error).message }] };
     }
   }
 

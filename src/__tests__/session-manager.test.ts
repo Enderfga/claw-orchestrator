@@ -8,6 +8,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { EventEmitter } from 'node:events';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -1732,6 +1733,212 @@ describe('SessionManager', () => {
       expect(applied.receipt).toMatchObject({ status: 'applied', action: { type: 'resume_planner', run_id: runId } });
       expect(mgr.getAutoloop(runId)).toBeDefined();
       expect(createdConfigs).toHaveLength(startsBeforeRecovery + 1);
+    });
+
+    it('wires checkpoint Reviewer envelopes to the durable recovery ledger before queue admission', async () => {
+      const runId = 'review-envelope-persistence';
+      const workspace = path.join(TEST_WF_DIR, 'workspaces', runId);
+      fs.mkdirSync(workspace, { recursive: true });
+      await mgr.autoloopStart({ runId, workspace });
+      const handle = mgr.getAutoloop(runId)!;
+      const ledgerDir = path.join(workspace, 'tasks', runId);
+      const iterDir = path.join(ledgerDir, 'iter', '0');
+      fs.mkdirSync(iterDir, { recursive: true });
+      for (const [name, content] of Object.entries({
+        'directive.json': '{"iter":0}\n',
+        'coder_summary.txt': 'complete\n',
+        'eval_output.json': '{"ok":true}\n',
+        'diff.patch': 'diff --git a/a b/a\n',
+      })) {
+        fs.writeFileSync(path.join(iterDir, name), content);
+      }
+      const persist = (
+        handle.runner as unknown as {
+          config: { persistReviewEnvelope?: (envelope: ReturnType<typeof AutoloopMsg.reviewRequest>) => Promise<void> };
+        }
+      ).config.persistReviewEnvelope;
+      const envelope = AutoloopMsg.reviewRequest(0, {
+        iter: 0,
+        ledger_path: ledgerDir,
+        prior_metrics: [],
+        checkpoint_sha: 'a'.repeat(40),
+        source_run_id: runId,
+        source_iter: 0,
+        scope: ['verification-only'],
+        idempotency_key: 'review-envelope-persistence-0',
+        artifact_sha256: Object.fromEntries(
+          ['directive.json', 'coder_summary.txt', 'eval_output.json', 'diff.patch'].map((name) => [
+            name,
+            createHash('sha256')
+              .update(fs.readFileSync(path.join(iterDir, name)))
+              .digest('hex'),
+          ]),
+        ) as {
+          'directive.json': string;
+          'coder_summary.txt': string;
+          'eval_output.json': string;
+          'diff.patch': string;
+        },
+      });
+
+      expect(persist).toBeTypeOf('function');
+      await persist!(envelope);
+
+      const rows = fs
+        .readFileSync(path.join(workspace, 'tasks', runId, 'decisions.jsonl'), 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      expect(rows).toContainEqual({
+        schema_version: 1,
+        record_type: 'autoloop_recovery_review_envelope',
+        run_id: runId,
+        envelope,
+      });
+    });
+
+    it('recovers an immutable checkpoint through Reviewer only and never recreates Coder', async () => {
+      const runId = 'reviewer-only-recovery';
+      const workspace = path.join(TEST_WF_DIR, 'workspaces', runId);
+      const ledgerDir = path.join(workspace, 'tasks', runId);
+      const iterDir = path.join(ledgerDir, 'iter', '0');
+      fs.mkdirSync(iterDir, { recursive: true });
+      fs.writeFileSync(path.join(iterDir, 'directive.json'), '{"goal":"review only"}\n');
+      fs.writeFileSync(path.join(iterDir, 'coder_summary.txt'), 'implementation already complete\n');
+      fs.writeFileSync(path.join(iterDir, 'eval_output.json'), '{"ok":true}\n');
+      fs.writeFileSync(path.join(iterDir, 'diff.patch'), 'diff --git a/a b/a\n');
+      await mgr.autoloopStart({ runId, workspace });
+      const envelope = AutoloopMsg.reviewRequest(0, {
+        iter: 0,
+        ledger_path: ledgerDir,
+        prior_metrics: [],
+        checkpoint_sha: 'a'.repeat(40),
+        source_run_id: runId,
+        source_iter: 0,
+        scope: ['verification-only'],
+        idempotency_key: 'reviewer-only-recovery-0',
+        artifact_sha256: Object.fromEntries(
+          ['directive.json', 'coder_summary.txt', 'eval_output.json', 'diff.patch'].map((name) => [
+            name,
+            createHash('sha256')
+              .update(fs.readFileSync(path.join(iterDir, name)))
+              .digest('hex'),
+          ]),
+        ) as {
+          'directive.json': string;
+          'coder_summary.txt': string;
+          'eval_output.json': string;
+          'diff.patch': string;
+        },
+      });
+      const initial = mgr.getAutoloop(runId)!;
+      const persist = (
+        initial.runner as unknown as {
+          config: { persistReviewEnvelope: (value: typeof envelope) => Promise<void> };
+        }
+      ).config.persistReviewEnvelope;
+      await persist(envelope);
+      fs.writeFileSync(path.join(iterDir, 'diff.patch'), 'mutated after durable admission\n');
+      fs.writeFileSync(path.join(iterDir, 'unbound.txt'), 'must not reach reviewer\n');
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const kernel = (mgr as any).kernel;
+      kernel.cancel(runId);
+      await kernel.wait(runId);
+
+      let plannerTurns = 0;
+      let signalReviewerEntered!: () => void;
+      let releaseReviewer!: () => void;
+      const reviewerEntered = new Promise<void>((resolve) => {
+        signalReviewerEntered = resolve;
+      });
+      const reviewerRelease = new Promise<void>((resolve) => {
+        releaseReviewer = resolve;
+      });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (mgr as any)._createSession = (_engine: string, config: SessionConfig): ISession => {
+        const mock = new MockSession();
+        if (config.name?.endsWith('-planner')) {
+          mock.sendImplementation = async () => {
+            plannerTurns += 1;
+            return {
+              text: `\`\`\`autoloop\n${JSON.stringify({ tool: 'spawn_subagents', args: {} })}\n\`\`\``,
+              event: { type: 'result', result: 'done' },
+            };
+          };
+        } else if (config.name?.endsWith('-reviewer')) {
+          mock.sendImplementation = async (message) => {
+            signalReviewerEntered();
+            await reviewerRelease;
+            const prompt = String(message);
+            const deliveryId = prompt.match(/delivery_id="([^"]+)"/)?.[1];
+            const payloadSha256 = prompt.match(/payload_sha256="([a-f0-9]{64})"/)?.[1];
+            return {
+              text: `\`\`\`autoloop\n${JSON.stringify({
+                tool: 'review_complete',
+                args: {
+                  decision: 'advance',
+                  metric: 1,
+                  audit_notes: 'checkpoint verified',
+                  delivery_id: deliveryId,
+                  payload_sha256: payloadSha256,
+                },
+              })}\n\`\`\``,
+              event: { type: 'result', result: 'done' },
+            };
+          };
+        }
+        mockSessions.push(mock);
+        createdConfigs.push(config);
+        return mock;
+      };
+
+      const inspected = await mgr.autoloopRecover(runId);
+      expect(inspected.assessment).toMatchObject({
+        phase: 'REVIEWER_BOUNDARY',
+        next_safe_action: 'request_review',
+        action: { type: 'request_review', target_role: 'reviewer', target_generation: 1 },
+      });
+      const startsBeforeApply = createdConfigs.length;
+      const applying = mgr.autoloopRecover(runId, {
+        apply: true,
+        recovery_token: inspected.assessment.recovery_token,
+      });
+      await reviewerEntered;
+      await expect(mgr.autoloopChat(runId, 'race the recovery')).rejects.toThrow(
+        'Reviewer-only recovery rejects normal queue delivery',
+      );
+      await expect(mgr.autoloopResetAgent(runId, 'coder', { eagerRestart: true })).rejects.toThrow(
+        'Reviewer-only recovery rejects role reset',
+      );
+      releaseReviewer();
+      const applied = await applying;
+
+      expect(applied.receipt).toMatchObject({ status: 'applied', action: { type: 'request_review' } });
+      const recoveryStarts = createdConfigs.slice(startsBeforeApply).map((config) => config.name);
+      expect(recoveryStarts).toEqual([`autoloop-${runId}-planner`, `autoloop-${runId}-reviewer`]);
+      expect(plannerTurns).toBe(0);
+      expect(recoveryStarts.some((name) => name?.endsWith('-coder'))).toBe(false);
+      const rows = fs
+        .readFileSync(path.join(ledgerDir, 'decisions.jsonl'), 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      expect(rows.filter((row) => row.record_type === 'delivery_intent')).toHaveLength(1);
+      expect(rows.filter((row) => row.record_type === 'delivery_acknowledgement')).toHaveLength(1);
+      expect(fs.existsSync(path.join(iterDir, 'verdict.json'))).toBe(true);
+      const stagedIter = path.join(ledgerDir, 'reviewer_sandbox', 'iter-0');
+      expect(fs.readdirSync(stagedIter).sort()).toEqual(
+        ['directive.json', 'coder_summary.txt', 'eval_output.json', 'diff.patch'].sort(),
+      );
+      expect(fs.readFileSync(path.join(stagedIter, 'diff.patch'), 'utf8')).toBe('diff --git a/a b/a\n');
+
+      const startsBeforeReplay = createdConfigs.length;
+      const replay = await mgr.autoloopRecover(runId, {
+        apply: true,
+        recovery_token: inspected.assessment.recovery_token,
+      });
+      expect(replay.receipt).toEqual(applied.receipt);
+      expect(createdConfigs).toHaveLength(startsBeforeReplay);
     });
 
     it('does not reconcile a pending kernel transaction during recovery inspection', async () => {

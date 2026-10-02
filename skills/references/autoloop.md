@@ -197,8 +197,9 @@ These fenced reply blocks are the only Planner control channel. Native shell or
 file-tool activity is never interpreted as a control, and the read-only Planner
 still cannot write the artifacts directly. The dispatcher parses and validates
 the complete block batch before applying any effect, including rejecting
-malformed blocks and duplicate `write_plan`, `write_goal`, or
-`spawn_subagents` controls. A valid batch has fixed ordering even when the
+malformed blocks and duplicate `write_plan`, `write_goal`, `spawn_subagents`,
+or `request_review` controls. `request_review` must be the only control in its
+batch. A valid ordinary batch has fixed ordering even when the
 blocks appear in another order: all plan/goal bodies are staged and replaced as
 one failure-atomic artifact transaction, then policy effects run, then at most
 one subagent spawn runs, and only then are directive messages returned to the
@@ -209,6 +210,7 @@ removes partial files, and suppresses both spawn and directives.
 | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `notify_user`        | `level` ('info' / 'warn' / 'decision' / 'error'), `summary`, `detail?`, `channel?` ('auto' / 'wechat' / 'webchat' / 'both' / 'email') | Push you out-of-band.                                                                                                                                                                                                                                                                |
 | `spawn_subagents`    | `coder_engine?`, `coder_model?`, `reviewer_engine?`, `reviewer_model?`, `initial_directive?`                                          | Start Coder + Reviewer. Omitted values inherit run defaults. An engine change without a model uses the new engine's default. Once a role session has started, changing its engine/model is rejected. Custom configs cannot be emitted by Planner. Only after explicit user approval. |
+| `request_review`     | `checkpoint_sha`, `source_run_id`, `source_iter`, `scope`, `idempotency_key`                                                          | Send one already-complete checkpoint to Reviewer without starting or sending to Coder. The full Git SHA must match workspace HEAD; run and iteration are validated, and the four required artifacts are hashed into an immutable content-addressed snapshot before admission.      |
 | `send_directive`     | `goal`, `constraints?`, `success_criteria?`, `max_attempts?`                                                                          | Next iter's instruction to Coder.                                                                                                                                                                                                                                                    |
 | `pause_loop`         | `reason`                                                                                                                              | Halt subloop at next iter boundary; chat keeps working.                                                                                                                                                                                                                              |
 | `resume_loop`        | —                                                                                                                                     | Resume after pause.                                                                                                                                                                                                                                                                  |
@@ -342,25 +344,35 @@ blocks automatic restart for manual resolution.
 
 `autoloop_recover` and `POST /autoloop/<id>/recover` inspect first and do not
 write during inspection. The assessment classifies the run as a proven cold
-`PLANNER_BOUNDARY`, `LIVE`, `COMPLETED`, or `BLOCKED`; binds the run checkpoint,
-ledger directory identity, exact decision-ledger digest, lease fence, and
-proposed Planner action; and returns a SHA-256 `recovery_token`.
+`PLANNER_BOUNDARY`, `REVIEWER_BOUNDARY`, `LIVE`, `COMPLETED`, or `BLOCKED`;
+binds the run checkpoint, ledger directory identity, exact decision-ledger
+digest, lease fence, and proposed action; and returns a SHA-256
+`recovery_token`.
 
 Apply is a second call with `apply: true` and the exact latest token. Under both
 the recovery-receipt and delivery-outbox locks, the runtime re-inspects the
 evidence, rejects a stale token, and flushes a versioned `prepared` receipt
-before starting anything. It appends `applied` only after the replacement run
-has started successfully. If the effect fails or its result is unknown, the
+before starting anything. A Planner-boundary action appends `applied` only after
+the replacement run has started successfully. A Reviewer-boundary action uses
+the exact envelope and content-addressed four-file snapshot persisted before
+queue admission, starts only Planner and Reviewer, delivers that snapshot once
+without forwarding the verdict into a Planner turn, and appends `applied` only
+after one generation-bound delivery ACK and `verdict.json` exist. A second
+apply of the same token returns the existing receipt without delivery. If the
+effect fails or its result is unknown, the
 unresolved prepared receipt remains evidence and blocks replay.
 
-Automatic recovery is deliberately limited to a cold Planner boundary. It
-fails closed for live processes or leases, any durable Coder/Reviewer delivery,
-spawned subagents, pending or legacy timeout evidence, legacy delivery rows,
-earlier recovery-receipt shapes, pending kernel transactions, missing
-custom-engine restart configuration, malformed/truncated ledgers, and unresolved
-prepared receipts. Legacy rows are recognized read-only; recovery does not
-rewrite them or fabricate current records. Reviewer-only recovery is not
-inferred here.
+Automatic recovery is limited to a proven cold Planner boundary or an exact
+checkpoint-bound Reviewer boundary. It fails closed for live processes or
+leases, unacknowledged or ambiguous delivery evidence, pending or legacy timeout
+evidence, legacy delivery rows, earlier recovery-receipt shapes, pending kernel
+transactions, missing custom-engine restart configuration,
+malformed/truncated ledgers, and unresolved prepared receipts. Legacy rows are
+recognized read-only; recovery does not rewrite them or fabricate current
+records. Reviewer-only recovery is never inferred from role state alone: it
+requires the exact run-bound envelope, content-addressed snapshot of the four
+source artifacts, immutable Git checkpoint identity, source iteration, scope,
+idempotency key, role, and generation.
 
 ## Decisions audit
 
@@ -384,6 +396,7 @@ Delivery rows use `record_type` instead of `kind`:
 | `delivery_intent`            | Before a Coder or Reviewer transport effect                  |
 | `delivery_generation_rebind` | Before retrying the same intent on one replacement session   |
 | `delivery_acknowledgement`   | After an exact receiver echo and before releasing its result |
+| `autoloop_recovery_review_envelope` | Exact checkpoint-bound Reviewer request before queue admission |
 | `autoloop_recovery_receipt`  | `prepared` before recovery; `applied` after proven success   |
 
 JSONL, one record per line. Decision rows are `ts`-prefixed; delivery rows
@@ -398,6 +411,8 @@ carry their own creation, rebind, or acknowledgement timestamp.
 ├── push_log.jsonl       # every notify_user attempt + channel used
 ├── decisions.jsonl      # runner / dispatcher audit trail (see above)
 ├── chat.jsonl           # Planner-pane conversation, replayed by /chat_history
+├── .autoloop-recovery/review-artifacts/<sha256>
+│                         # durable content-addressed Reviewer recovery snapshot
 ├── evidence/iter-<n>/   # acceptance-contract bundle, when a contract is configured
 ├── reviewer_sandbox/    # Reviewer cwd; restaged per iter
 │   ├── plan.md          # copy
@@ -438,7 +453,7 @@ Every JSON artifact in the ledger carries a `schema_version` field (currently
 | `GET /autoloop/<id>/events`              | SSE: `snapshot` / `message` / `state` / `push` / `iter_done` / `planner_reply` / `planner_error` / `coder_reply` / `reviewer_reply` / `terminated`. For runs that are NOT in this process's memory (terminated, or live in another process), the endpoint emits a single-shot `snapshot` + `terminated` then closes — the dashboard's existing handlers render history without hanging. A run still in memory that has already reached `terminated` or `crashed` gets the same single-shot pair instead of an open stream that would never receive another event. Every such stream sets `retry: 864000000`, so an `EventSource` does not keep reconnecting to a stream that can only end again.                                                                                                                                                                                                                                                                                            |
 | `POST /autoloop/<id>/chat`               | **202** `{ ok, queued: true }` — body `{ text }`. Fire-and-forget: the Planner's reply streams back via the `/events` SSE channel as a `planner_reply` event (or `planner_error` on failure); the HTTP response intentionally does NOT wait for it, because first-contact replies routinely exceed reverse-proxy idle limits (e.g. Cloudflare Tunnel cuts at ~100s → 524). 400 on empty text. 404 when the run is not in this process's memory: if the store still holds it, the error says so and names `POST /autoloop/<id>/resume`; an unknown or malformed id is plain `not found`. The MCP `autoloop_chat` tool path keeps the synchronous await-and-return-reply semantics (it runs in-process).                                                                                                                                                                                                                                                                                      |
 | `GET /autoloop/<id>/resume-requirements` | `{ ok, runId, rolesNeedingCustomEngine }` — the roles whose engine was `custom`, so a caller knows which secret references a resume needs. Role names only; nothing sensitive. 404 when there is no such run.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| `POST /autoloop/<id>/recover`            | Inspect by default with body `{}` and return `{ ok, assessment }`. Apply with `{ apply: true, recovery_token }`; the token must be from the exact current evidence. Recovery is limited to a proven cold Planner boundary and writes durable `prepared` / `applied` receipts. Ambiguous evidence returns 409; malformed input returns 400. Custom-engine runs remain blocked here because this endpoint does not accept executable configuration or secret references.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `POST /autoloop/<id>/recover`            | Inspect by default with body `{}` and return `{ ok, assessment }`. Apply with `{ apply: true, recovery_token }`; the token must be from the exact current evidence. Recovery accepts a proven cold Planner boundary or an exact checkpoint-bound Reviewer boundary and writes durable `prepared` / `applied` receipts. Ambiguous evidence returns 409; malformed input returns 400. Custom-engine runs remain blocked here because this endpoint does not accept executable configuration or secret references.                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `POST /autoloop/<id>/resume`             | `{ ok, state }` — restore the role engine/model choices from the run's spec and re-create dispatcher + runner. For recoverable send timeouts, body fields `send_timeout_ms` and `pending_dispatch_id` apply the increase-only migration described above; `allow_decrease`, lease overrides, and hard-cap overrides are rejected. A custom-engine config is never persisted and is never accepted over HTTP, so a role using `custom` is re-supplied by **reference**: `plannerCustomEngineRef` / `coderCustomEngineRef` / `reviewerCustomEngineRef` name an environment variable `CLAWO_CUSTOM_ENGINE_<NAME>` on the orchestrator host, which the server reads and resolves. The name is not sensitive, the value never crosses the wire, and an unknown name is an error rather than a silent start without credentials. Existing engine-specific conversation resume behavior is reused where supported; `chat.jsonl` remains the visual history fallback. 404 when there is no such run. |
 | `POST /autoloop/<id>/delete`             | `{ ok }` — stops the loop if still live, deletes the run record from the run store, and purges the role sessions' persisted resume ids so the run cannot be resumed. The ledger directory under `<workspace>/tasks/<run_id>/` is kept on disk. 404 when there is no such run.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 
@@ -512,7 +527,8 @@ show a run's real state after it stops or the process restarts.
 Resume is explicit. For an ordinary cold run,
 `POST /autoloop/<id>/resume` (or `SessionManager.autoloopResume()`) uses the
 same inspect-and-token-fenced recovery path as `autoloop_recover`; it restarts
-only from a proven Planner boundary. The separate increase-only timeout
+only from a proven Planner boundary or performs the exact Reviewer-only
+checkpoint action described above. The separate increase-only timeout
 migration remains available for a matching `awaiting_resume` dispatch.
 Custom-engine configs are the one thing the spec does not carry (they can hold
 secrets), so a resume must be given them again. Cancelling a run stops all three

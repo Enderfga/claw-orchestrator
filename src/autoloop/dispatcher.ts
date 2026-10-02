@@ -39,7 +39,14 @@ import { capturePatch, changedFilesSince } from '../verify/baseline.js';
 import { runContract } from '../verify/runner.js';
 import { writeEvidence } from '../verify/evidence.js';
 import type { AcceptanceContract } from '../verify/contract.js';
-import { type AnyAutoloopMessage, Msg, type SendTimeoutPayload } from './messages.js';
+import {
+  type AnyAutoloopMessage,
+  type CheckpointArtifactDigests,
+  type CheckpointReviewBinding,
+  type CheckpointReviewRequestPayload,
+  Msg,
+  type SendTimeoutPayload,
+} from './messages.js';
 import {
   DEFAULT_SEND_TIMEOUT_MS,
   LEDGER_SCHEMA_VERSION,
@@ -71,6 +78,7 @@ import {
   rebindDelivery,
   type DeliveryIntent,
 } from './outbox.js';
+import { stageAutoloopRecoveryReviewSnapshot } from './recovery.js';
 
 /**
  * Character budget for the replayed transcript handed to engines without native
@@ -122,6 +130,8 @@ export interface ClaudeAgentDispatcherConfig {
   sendTimeoutMs?: number;
   /** Internal failure-atomic resume marker; never accepted from an agent. */
   suppressFailedStartAudit?: boolean;
+  /** Internal fence: allow only the one checkpoint-bound Reviewer dispatch. */
+  recoveryReviewOnly?: boolean;
   /**
    * Optional acceptance contract. When present the Reviewer's `advance` is no
    * longer sufficient on its own: the contract runs against the workspace and a
@@ -346,6 +356,12 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
   }
 
   async deliver(env: AnyAutoloopMessage): Promise<AnyAutoloopMessage[]> {
+    if (
+      this.config.recoveryReviewOnly &&
+      !(env.type === 'review_request' && env.to === 'reviewer' && 'checkpoint_sha' in env.payload)
+    ) {
+      throw new Error('Reviewer-only recovery rejects non-Reviewer delivery');
+    }
     const dispatchId = deriveDispatchId(this.config.runId, env);
     const existing = this.logicalDispatches.get(dispatchId);
     if (existing) return await existing;
@@ -518,6 +534,9 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
    * onSpawnSubagents).
    */
   async spawnSubagents(args: SpawnSubagentsArgs = {}): Promise<void> {
+    if (this.config.recoveryReviewOnly) {
+      throw new Error('Reviewer-only recovery cannot start Coder');
+    }
     const nextCoderEngine = args.coder_engine ?? this.coderSelection.engine;
     const nextReviewerEngine = args.reviewer_engine ?? this.reviewerSelection.engine;
     const nextCoder: AutoloopRoleSelection = {
@@ -616,6 +635,9 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
     agent: 'planner' | 'coder' | 'reviewer',
     opts: { force?: boolean; eagerRestart?: boolean } = {},
   ): Promise<void> {
+    if (this.config.recoveryReviewOnly) {
+      throw new Error('Reviewer-only recovery rejects role reset');
+    }
     if (agent === 'planner' && !opts.force) {
       throw new Error('Refusing to reset Planner without force=true (would discard chat context)');
     }
@@ -1043,6 +1065,7 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
           `autoloop: planner writes ${filenames}`;
         await this.gitCommit(filenames, commitMessage);
       },
+      requestReview: async (args, targetIter) => await this.prepareCheckpointReview(args, targetIter),
     };
     // After iter_done(N) the run has advanced to iter N+1 in runner state;
     // any directive Planner emits in response targets the new iter.
@@ -1069,6 +1092,53 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
     // Auto-compact after each Planner turn if context is filling up.
     await this.maybeCompact('planner', this.plannerName);
     return handlerResult.emitted_messages;
+  }
+
+  /**
+   * Validate an already-materialized iteration before the Planner can create a
+   * Reviewer-only request. This method has no role lifecycle side effects.
+   */
+  private async prepareCheckpointReview(
+    args: CheckpointReviewBinding,
+    targetIter: number,
+  ): Promise<CheckpointReviewRequestPayload> {
+    if (args.source_run_id !== this.config.runId) {
+      throw new Error('request_review source_run_id does not match the current Autoloop run');
+    }
+    if (args.source_iter !== targetIter) {
+      throw new Error('request_review source_iter does not match the target iteration');
+    }
+    const head = await this.runGit(['git', 'rev-parse', '--verify', 'HEAD']);
+    if (head.code !== 0 || !/^[0-9a-f]{40}$/i.test(head.out.trim())) {
+      throw new Error('request_review cannot resolve the source checkpoint');
+    }
+    if (head.out.trim().toLowerCase() !== args.checkpoint_sha) {
+      throw new Error('request_review checkpoint_sha does not match the workspace HEAD');
+    }
+    const iterDir = path.join(this.ledgerDir, 'iter', String(args.source_iter));
+    const artifactSha256 = {} as CheckpointArtifactDigests;
+    for (const name of ['directive.json', 'coder_summary.txt', 'eval_output.json', 'diff.patch']) {
+      const artifact = path.join(iterDir, name);
+      let stats: fs.Stats;
+      try {
+        stats = fs.lstatSync(artifact);
+      } catch {
+        throw new Error(`request_review checkpoint artifact '${name}' is missing`);
+      }
+      if (!stats.isFile() || stats.isSymbolicLink() || stats.nlink !== 1) {
+        throw new Error(`request_review checkpoint artifact '${name}' is not a safe regular file`);
+      }
+      artifactSha256[name as keyof CheckpointArtifactDigests] = createHash('sha256')
+        .update(fs.readFileSync(artifact))
+        .digest('hex');
+    }
+    return {
+      iter: targetIter,
+      ledger_path: this.ledgerDir,
+      prior_metrics: [],
+      artifact_sha256: artifactSha256,
+      ...args,
+    };
   }
 
   // ─── Coder ──────────────────────────────────────────────────────────────
@@ -1403,7 +1473,7 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
    * persistent session whose cwd is fixed at <ledger>/reviewer_sandbox/, so
    * every review must rewrite the sandbox to "this iter's view".
    */
-  private stageReviewSandbox(iter: number): void {
+  private stageReviewSandbox(iter: number, payload: CheckpointReviewRequestPayload | undefined): void {
     fs.mkdirSync(this.reviewerSandboxDir, { recursive: true });
     // Wipe top-level files but preserve the Reviewer's cross-iter memory and
     // append-only audit log (see REVIEWER_SANDBOX_PERSIST). The Reviewer prompt
@@ -1422,9 +1492,13 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
       }
     }
     const iterSrc = path.join(this.ledgerDir, 'iter', String(iter));
-    if (!fs.existsSync(iterSrc)) return;
     const dest = path.join(this.reviewerSandboxDir, `iter-${iter}`);
     fs.mkdirSync(dest, { recursive: true });
+    if (payload) {
+      stageAutoloopRecoveryReviewSnapshot(this.ledgerDir, dest, payload.artifact_sha256);
+      return;
+    }
+    if (!fs.existsSync(iterSrc)) return;
     for (const ent of fs.readdirSync(iterSrc)) {
       fs.copyFileSync(path.join(iterSrc, ent), path.join(dest, ent));
     }
@@ -1447,7 +1521,10 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
       throw new Error(`[autoloop] reviewer does not accept message type=${env.type}`);
     }
     await this.ensureReviewer();
-    this.stageReviewSandbox(env.payload.iter);
+    this.stageReviewSandbox(
+      env.payload.iter,
+      'artifact_sha256' in env.payload ? (env.payload as CheckpointReviewRequestPayload) : undefined,
+    );
 
     const promptText = [
       `[review_request iter=${env.payload.iter}]`,

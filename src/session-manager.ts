@@ -214,10 +214,12 @@ import type { AutoloopState, PushPolicy } from './autoloop/types.js';
 import { DEFAULT_PUSH_POLICY, DEFAULT_SEND_TIMEOUT_MS, validateAutoloopTimeoutConfig } from './autoloop/types.js';
 import { Msg as AutoloopMsg, type PushChannel, type PushLevel, type SendTimeoutPayload } from './autoloop/messages.js';
 import { appendPushLog, notifyUserFallbackChain } from './autoloop/notify.js';
+import { canonicalPayloadSha256, inspectDeliveryOutbox } from './autoloop/outbox.js';
 import {
   applyAutoloopRecovery,
   AutoloopRecoveryError,
   inspectAutoloopRecovery,
+  persistAutoloopRecoveryReviewEnvelope,
   type AutoloopRecoveryInspectionInput,
   type AutoloopRecoveryResult,
 } from './autoloop/recovery.js';
@@ -3304,6 +3306,8 @@ export class SessionManager {
     _resumeTimeoutMigration?: boolean;
     /** In-memory commit barrier for a prepared append-only migration record. */
     _commitTimeoutMigration?: () => void;
+    /** Internal fence installed before publishing a Reviewer-only recovery handle. */
+    _recoveryReviewOnly?: boolean;
   }): Promise<{
     runner: AutoloopRunner;
     dispatcher: ClaudeAgentDispatcher;
@@ -3351,6 +3355,7 @@ export class SessionManager {
       reviewerCustomEngine: opts.reviewerCustomEngine,
       sendTimeoutMs: opts.sendTimeoutMs,
       suppressFailedStartAudit: opts._resumeTimeoutMigration,
+      recoveryReviewOnly: opts._recoveryReviewOnly,
       logger: this.logger,
       pushPolicyRef: pushPolicy,
       onSpawnSubagents: async (args) => {
@@ -3394,6 +3399,11 @@ export class SessionManager {
         );
       },
       dispatcher,
+      persistReviewEnvelope: async (envelope) => {
+        if (!('checkpoint_sha' in envelope.payload)) return;
+        persistAutoloopRecoveryReviewEnvelope(ledgerDir, runId, envelope);
+      },
+      recoveryReviewOnly: opts._recoveryReviewOnly,
       sendTimeoutMs: opts.sendTimeoutMs,
       activityLeaseMs: opts.activityLeaseMs,
       autoloopHardTimeoutMs: opts.autoloopHardTimeoutMs,
@@ -3746,10 +3756,63 @@ export class SessionManager {
             `Autoloop run '${runId}' changed before its recovery effect`,
           );
         }
-        await this._resumeAutoloopRun(runId, {
-          ...latest.config,
-          ...bootOverrides,
-        } as Parameters<SessionManager['_bootAutoloop']>[0]);
+        await this._resumeAutoloopRun(
+          runId,
+          {
+            ...latest.config,
+            ...bootOverrides,
+          } as Parameters<SessionManager['_bootAutoloop']>[0],
+          { reviewerRecoveryOnly: action.type === 'request_review' },
+        );
+        if (action.type !== 'request_review') return;
+        const handle = this.getAutoloop(runId);
+        if (!handle) {
+          throw new AutoloopRecoveryError(
+            'AUTOLOOP_RECOVERY_INCOMPLETE',
+            `Autoloop run '${runId}' Reviewer recovery has no live runner`,
+          );
+        }
+        try {
+          await handle.runner.sendRecoveryReview(action.envelope);
+        } catch (error) {
+          throw new AutoloopRecoveryError(
+            'AUTOLOOP_RECOVERY_INCOMPLETE',
+            `Autoloop run '${runId}' Reviewer recovery did not reach a durable verdict`,
+            { cause: error },
+          );
+        }
+        const graph = inspectDeliveryOutbox(path.join(latest.input.ledgerDir, 'decisions.jsonl'));
+        const expectedLogicalMessageSha256 = canonicalPayloadSha256({
+          msg_id: action.envelope.msg_id,
+          iter: action.envelope.iter,
+          from: action.envelope.from,
+          to: action.envelope.to,
+          type: action.envelope.type,
+          payload: action.envelope.payload,
+        });
+        const deliveries = graph.intents.filter(
+          (intent) =>
+            intent.kind === 'review_request' &&
+            intent.target_role === action.target_role &&
+            intent.target_generation === action.target_generation &&
+            (intent.payload as { logical_message_sha256?: unknown }).logical_message_sha256 ===
+              expectedLogicalMessageSha256,
+        );
+        const acknowledgements = deliveries.flatMap((intent) =>
+          graph.acknowledgements.filter(
+            (ack) =>
+              ack.delivery_id === intent.delivery_id &&
+              ack.payload_sha256 === intent.payload_sha256 &&
+              ack.target_generation === action.target_generation,
+          ),
+        );
+        const verdictPath = path.join(latest.input.ledgerDir, 'iter', String(action.source_iter), 'verdict.json');
+        if (deliveries.length !== 1 || acknowledgements.length !== 1 || !fs.existsSync(verdictPath)) {
+          throw new AutoloopRecoveryError(
+            'AUTOLOOP_RECOVERY_INCOMPLETE',
+            `Autoloop run '${runId}' Reviewer recovery has no proven delivery acknowledgement and verdict`,
+          );
+        }
       },
     });
   }
@@ -3949,7 +4012,7 @@ export class SessionManager {
   private async _resumeAutoloopRun(
     runId: string,
     config: Parameters<SessionManager['_bootAutoloop']>[0],
-    opts: { timeoutMigration?: boolean; commitTimeoutMigration?: () => void } = {},
+    opts: { timeoutMigration?: boolean; commitTimeoutMigration?: () => void; reviewerRecoveryOnly?: boolean } = {},
   ): Promise<AutoloopState> {
     const tag = `${runId}:${randomUUID()}`;
     const ready = new Promise<{ plannerSession: string; state: AutoloopState }>((resolve, reject) => {
@@ -3969,6 +4032,7 @@ export class SessionManager {
       sendTimeoutMs: config.sendTimeoutMs,
       _resumeTimeoutMigration: opts.timeoutMigration || undefined,
       _commitTimeoutMigration: opts.commitTimeoutMigration,
+      _recoveryReviewOnly: opts.reviewerRecoveryOnly || undefined,
     };
     try {
       // `restart: true` because an autoloop resume means "bring the loop back
