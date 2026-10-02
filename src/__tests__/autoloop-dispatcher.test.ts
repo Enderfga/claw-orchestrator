@@ -11,6 +11,7 @@ import fsDefault, * as fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { execFileSync } from 'node:child_process';
 
 import { ClaudeAgentDispatcher } from '../autoloop/dispatcher.js';
 import { AutoloopRunner } from '../autoloop/runner.js';
@@ -139,6 +140,15 @@ function sendTimeout(replies: AnyAutoloopMessage[]): ObservedSendTimeout {
 
 function genuineSendTimeout(): Error {
   return new Error('Timeout waiting for response');
+}
+
+function initialiseGitWorkspace(workspace: string): void {
+  execFileSync('git', ['init'], { cwd: workspace });
+  execFileSync('git', ['config', 'user.email', 'tests@example.com'], { cwd: workspace });
+  execFileSync('git', ['config', 'user.name', 'Autoloop Tests'], { cwd: workspace });
+  fs.writeFileSync(path.join(workspace, 'seed.txt'), 'seed\n');
+  execFileSync('git', ['add', 'seed.txt'], { cwd: workspace });
+  execFileSync('git', ['commit', '-m', 'seed'], { cwd: workspace });
 }
 
 function plannerControl(tool: string, args: Record<string, unknown>): string {
@@ -621,6 +631,302 @@ describe('ClaudeAgentDispatcher — phase_error surfacing', () => {
       expect(replies[0].payload.agent).toBe('coder');
       expect(replies[0].payload.phase).toBe('send');
     }
+  });
+});
+
+describe('ClaudeAgentDispatcher — durable Coder delivery', () => {
+  it('persists the exact intent before send and accepts the observed nested delivery echo', async () => {
+    const { dispatcher, calls, ledgerDir, workspace } = makeDispatcher();
+    initialiseGitWorkspace(workspace);
+    await dispatcher.spawnSubagents();
+    let rowsObservedDuringSend: Array<Record<string, unknown>> = [];
+    calls.sendMessage.mockImplementation(async (_name: string, prompt: string) => {
+      rowsObservedDuringSend = fs
+        .readFileSync(path.join(ledgerDir, 'decisions.jsonl'), 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      const deliveryId = prompt.match(/delivery_id="([^"]+)"/)?.[1];
+      const payloadSha256 = prompt.match(/payload_sha256="([a-f0-9]{64})"/)?.[1];
+      expect(deliveryId).toBeTruthy();
+      expect(payloadSha256).toBeTruthy();
+      return {
+        output: `\`\`\`autoloop\n${JSON.stringify({
+          tool: 'iter_complete',
+          args: {
+            summary: 'verified',
+            eval_output: {
+              metric: 1,
+              extra: { delivery_id: deliveryId, payload_sha256: payloadSha256 },
+            },
+            files_changed: [],
+          },
+        })}\n\`\`\``,
+        error: undefined,
+      };
+    });
+
+    const replies = await dispatcher.deliver(
+      fixedIdentity(
+        Msg.directive(0, { goal: 'g', constraints: [], success_criteria: [], max_attempts: 1 }),
+        'logical-coder-0',
+      ),
+    );
+
+    expect(rowsObservedDuringSend.filter((row) => row.record_type === 'delivery_intent')).toHaveLength(1);
+    expect(rowsObservedDuringSend.filter((row) => row.record_type === 'delivery_acknowledgement')).toHaveLength(0);
+    const finalRows = fs
+      .readFileSync(path.join(ledgerDir, 'decisions.jsonl'), 'utf8')
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(finalRows.filter((row) => row.record_type === 'delivery_acknowledgement')).toHaveLength(1);
+    expect(replies.map((reply) => reply.type)).toEqual(['iter_artifacts']);
+  });
+
+  it('does not acknowledge or release a Coder result with mismatched delivery provenance', async () => {
+    const { dispatcher, calls, ledgerDir } = makeDispatcher();
+    await dispatcher.spawnSubagents();
+    calls.sendMessage.mockResolvedValue({
+      output: `\`\`\`autoloop\n${JSON.stringify({
+        tool: 'iter_complete',
+        args: {
+          summary: 'wrong delivery',
+          eval_output: {},
+          files_changed: [],
+          delivery_id: 'wrong',
+          payload_sha256: 'f'.repeat(64),
+        },
+      })}\n\`\`\``,
+      error: undefined,
+    });
+
+    await expect(
+      dispatcher.deliver(
+        fixedIdentity(
+          Msg.directive(0, { goal: 'g', constraints: [], success_criteria: [], max_attempts: 1 }),
+          'logical-coder-0',
+        ),
+      ),
+    ).rejects.toThrow(/did not echo delivery/);
+
+    const rows = fs
+      .readFileSync(path.join(ledgerDir, 'decisions.jsonl'), 'utf8')
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(rows.filter((row) => row.record_type === 'delivery_intent')).toHaveLength(1);
+    expect(rows.filter((row) => row.record_type === 'delivery_acknowledgement')).toHaveLength(0);
+  });
+
+  it('acknowledges a structured clarification before releasing it to Planner', async () => {
+    const { dispatcher, calls, ledgerDir } = makeDispatcher();
+    await dispatcher.spawnSubagents();
+    calls.sendMessage.mockImplementation(async (_name: string, prompt: string) => {
+      const deliveryId = prompt.match(/delivery_id="([^"]+)"/)?.[1];
+      const payloadSha256 = prompt.match(/payload_sha256="([a-f0-9]{64})"/)?.[1];
+      return {
+        output: `\`\`\`autoloop\n${JSON.stringify({
+          tool: 'request_clarification',
+          args: {
+            question: 'Should I update the generated fixture?',
+            delivery_id: deliveryId,
+            payload_sha256: payloadSha256,
+          },
+        })}\n\`\`\``,
+        error: undefined,
+      };
+    });
+
+    const replies = await dispatcher.deliver(
+      fixedIdentity(
+        Msg.directive(0, { goal: 'g', constraints: [], success_criteria: [], max_attempts: 1 }),
+        'logical-coder-clarification',
+      ),
+    );
+
+    expect(replies).toEqual([
+      expect.objectContaining({
+        type: 'directive_ack',
+        payload: expect.objectContaining({
+          understood: false,
+          clarification: 'Should I update the generated fixture?',
+        }),
+      }),
+    ]);
+    const rows = fs
+      .readFileSync(path.join(ledgerDir, 'decisions.jsonl'), 'utf8')
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(rows.filter((row) => row.record_type === 'delivery_acknowledgement')).toHaveLength(1);
+  });
+
+  it('persists a generation rebind before reset retry sends to the replacement Coder', async () => {
+    vi.useFakeTimers();
+    const { dispatcher, calls, ledgerDir, workspace } = makeDispatcher();
+    initialiseGitWorkspace(workspace);
+    await dispatcher.spawnSubagents();
+    let attempt = 0;
+    calls.sendMessage.mockImplementation(async (_name: string, prompt: string) => {
+      attempt += 1;
+      if (attempt === 1) throw new Error('transient transport failure');
+      const rows = fs
+        .readFileSync(path.join(ledgerDir, 'decisions.jsonl'), 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      expect(rows.filter((row) => row.record_type === 'delivery_generation_rebind')).toEqual([
+        expect.objectContaining({ from_generation: 1, to_generation: 2, target_role: 'coder' }),
+      ]);
+      const deliveryId = prompt.match(/delivery_id="([^"]+)"/)?.[1];
+      const payloadSha256 = prompt.match(/payload_sha256="([a-f0-9]{64})"/)?.[1];
+      return {
+        output: `\`\`\`autoloop\n${JSON.stringify({
+          tool: 'iter_complete',
+          args: {
+            summary: 'retried safely',
+            eval_output: {},
+            files_changed: [],
+            delivery_id: deliveryId,
+            payload_sha256: payloadSha256,
+          },
+        })}\n\`\`\``,
+        error: undefined,
+      };
+    });
+
+    const pending = dispatcher.deliver(
+      fixedIdentity(
+        Msg.directive(0, { goal: 'g', constraints: [], success_criteria: [], max_attempts: 1 }),
+        'logical-coder-retry',
+      ),
+    );
+    void pending.catch(() => undefined);
+    await vi.runAllTimersAsync();
+    const replies = await pending;
+
+    expect(replies.map((reply) => reply.type)).toEqual(['iter_artifacts']);
+    expect(calls.sendMessage).toHaveBeenCalledTimes(2);
+  });
+
+  it('refuses to replay a pending intent into a later dispatcher generation', async () => {
+    vi.useFakeTimers();
+    const first = makeDispatcher({ sendTimeoutMs: 7_200_000 });
+    await first.dispatcher.spawnSubagents();
+    first.calls.sendMessage.mockRejectedValue(genuineSendTimeout());
+    const message = fixedIdentity(
+      Msg.directive(0, { goal: 'g', constraints: [], success_criteria: [], max_attempts: 1 }),
+      'logical-coder-pending',
+    );
+    const pending = first.dispatcher.deliver(message);
+    void pending.catch(() => undefined);
+    await vi.runAllTimersAsync();
+    expect((await pending).map((reply) => reply.type)).toEqual(['send_timeout']);
+
+    const second = makeDispatcher();
+    await second.dispatcher.spawnSubagents();
+    await expect(second.dispatcher.deliver(message)).rejects.toThrow(/conflicts with its durable intent/);
+    expect(second.calls.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('does not redeliver after an acknowledgement when later artifact persistence fails', async () => {
+    const first = makeDispatcher();
+    initialiseGitWorkspace(first.workspace);
+    await first.dispatcher.spawnSubagents();
+    first.calls.sendMessage.mockImplementation(async (_name: string, prompt: string) => {
+      const deliveryId = prompt.match(/delivery_id="([^"]+)"/)?.[1];
+      const payloadSha256 = prompt.match(/payload_sha256="([a-f0-9]{64})"/)?.[1];
+      return {
+        output: `\`\`\`autoloop\n${JSON.stringify({
+          tool: 'iter_complete',
+          args: {
+            summary: 'acknowledged before artifact failure',
+            eval_output: {},
+            files_changed: [],
+            delivery_id: deliveryId,
+            payload_sha256: payloadSha256,
+          },
+        })}\n\`\`\``,
+        error: undefined,
+      };
+    });
+    const message = fixedIdentity(
+      Msg.directive(0, { goal: 'g', constraints: [], success_criteria: [], max_attempts: 1 }),
+      'logical-coder-acked',
+    );
+
+    const originalWriteFileSync = fsDefault.writeFileSync;
+    fsDefault.writeFileSync = ((file: fs.PathOrFileDescriptor, ...args: unknown[]) => {
+      if (String(file).endsWith(`${path.sep}eval_output.json`)) {
+        throw new Error('simulated post-ack artifact failure');
+      }
+      return (originalWriteFileSync as (...values: unknown[]) => void)(file, ...args);
+    }) as typeof fs.writeFileSync;
+    syncBuiltinESMExports();
+    try {
+      await expect(first.dispatcher.deliver(message)).rejects.toThrow('simulated post-ack artifact failure');
+    } finally {
+      fsDefault.writeFileSync = originalWriteFileSync;
+      syncBuiltinESMExports();
+    }
+
+    const rows = fs
+      .readFileSync(path.join(first.ledgerDir, 'decisions.jsonl'), 'utf8')
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(rows.filter((row) => row.record_type === 'delivery_acknowledgement')).toHaveLength(1);
+
+    const second = makeDispatcher();
+    await second.dispatcher.spawnSubagents();
+    await expect(second.dispatcher.deliver(message)).rejects.toThrow(/conflicts with its durable intent/);
+    expect(second.calls.sendMessage).not.toHaveBeenCalled();
+  });
+});
+
+describe('ClaudeAgentDispatcher — durable Reviewer delivery', () => {
+  it('persists the review request before send and acknowledges only the matching verdict', async () => {
+    const { dispatcher, calls, ledgerDir } = makeDispatcher();
+    await dispatcher.spawnSubagents();
+    calls.sendMessage.mockImplementation(async (_name: string, prompt: string) => {
+      const rows = fs
+        .readFileSync(path.join(ledgerDir, 'decisions.jsonl'), 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      expect(rows.filter((row) => row.record_type === 'delivery_intent')).toEqual([
+        expect.objectContaining({ kind: 'review_request', target_role: 'reviewer', target_generation: 1 }),
+      ]);
+      expect(rows.filter((row) => row.record_type === 'delivery_acknowledgement')).toHaveLength(0);
+      const deliveryId = prompt.match(/delivery_id="([^"]+)"/)?.[1];
+      const payloadSha256 = prompt.match(/payload_sha256="([a-f0-9]{64})"/)?.[1];
+      return {
+        output: `\`\`\`autoloop\n${JSON.stringify({
+          tool: 'review_complete',
+          args: {
+            decision: 'advance',
+            metric: 1,
+            audit_notes: 'verified',
+            delivery_id: deliveryId,
+            payload_sha256: payloadSha256,
+          },
+        })}\n\`\`\``,
+        error: undefined,
+      };
+    });
+
+    const replies = await dispatcher.deliver(
+      fixedIdentity(Msg.reviewRequest(0, { iter: 0, ledger_path: ledgerDir, prior_metrics: [] }), 'logical-reviewer-0'),
+    );
+
+    expect(replies.map((reply) => reply.type)).toEqual(['review_verdict']);
+    const finalRows = fs
+      .readFileSync(path.join(ledgerDir, 'decisions.jsonl'), 'utf8')
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(finalRows.filter((row) => row.record_type === 'delivery_acknowledgement')).toHaveLength(1);
   });
 });
 

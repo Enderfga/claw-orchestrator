@@ -316,10 +316,32 @@ Reviewer can append fresh observations to the file on disk; those edits
 become visible only on the next Reviewer reset (`autoloop_reset_agent`
 with `agent: 'reviewer', eager_restart: true`).
 
+## Durable Coder and Reviewer deliveries
+
+Coder directives and Reviewer requests are recorded before they are sent. The
+dispatcher serializes each delivery-graph update, appends and flushes a
+`delivery_intent` containing the logical dispatch identity, exact canonical
+payload digest, target role, and target generation, and only then calls the
+session transport. A reset retry first appends and flushes a
+`delivery_generation_rebind` to the replacement generation.
+
+The receiver must echo the delivery id and payload digest in its structured
+completion. The dispatcher accepts an exact Coder echo either beside the other
+`iter_complete` arguments or, for engine compatibility, under
+`eval_output.extra`; partial or conflicting copies are rejected. An exact
+completion appends and flushes one `delivery_acknowledgement` bound to the
+effective generation before the result is released to the loop. Unknown ids,
+digest or generation mismatches, duplicate graph records, truncated rows, and
+lock contention fail closed.
+
+These records provide durable delivery evidence; they do not by themselves
+enable automatic replay after a process restart. Inspect-first recovery and
+the policy for ambiguous or legacy records are separate follow-up behavior.
+
 ## Decisions audit
 
-`<ledger>/decisions.jsonl` is the auditable trail of runner / dispatcher
-decisions:
+`<ledger>/decisions.jsonl` is the append-only trail of runner / dispatcher
+decisions and durable delivery records:
 
 | Kind                     | When                                               |
 | ------------------------ | -------------------------------------------------- |
@@ -331,7 +353,16 @@ decisions:
 | `phase_error`            | Surfaced from dispatcher to runner                 |
 | `terminate`              | Run ends (planner reason or `phase_error_circuit`) |
 
-JSONL, one entry per line, ts-prefixed.
+Delivery rows use `record_type` instead of `kind`:
+
+| Record type                  | When                                                         |
+| ---------------------------- | ------------------------------------------------------------ |
+| `delivery_intent`            | Before a Coder or Reviewer transport effect                  |
+| `delivery_generation_rebind` | Before retrying the same intent on one replacement session   |
+| `delivery_acknowledgement`   | After an exact receiver echo and before releasing its result |
+
+JSONL, one record per line. Decision rows are `ts`-prefixed; delivery rows
+carry their own creation, rebind, or acknowledgement timestamp.
 
 ## Ledger layout
 

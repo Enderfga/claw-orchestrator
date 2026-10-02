@@ -57,7 +57,20 @@ import {
   type PlannerToolEffects,
   type SpawnSubagentsArgs,
 } from './planner-tools.js';
-import { extractIterComplete, extractReviewComplete, parseAgentReply } from './agent-tools.js';
+import {
+  extractClarificationCompletion,
+  extractIterComplete,
+  extractReviewComplete,
+  parseAgentReply,
+} from './agent-tools.js';
+import {
+  acknowledgeDelivery,
+  canonicalPayloadSha256,
+  latestTargetGeneration,
+  prepareDelivery,
+  rebindDelivery,
+  type DeliveryIntent,
+} from './outbox.js';
 
 /**
  * Character budget for the replayed transcript handed to engines without native
@@ -245,6 +258,8 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
   /** Where Reviewer reads from. Created lazily by stageReviewSandbox(). */
   private reviewerSandboxDir: string;
   private ledgerDir: string;
+  private coderGeneration: number;
+  private reviewerGeneration: number;
   /**
    * One promise per immutable logical dispatch, so a re-delivered message is
    * coalesced onto the first send instead of spending a second agent turn.
@@ -295,6 +310,9 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
     };
     this.ledgerDir = path.join(config.workspace, 'tasks', config.runId);
     this.reviewerSandboxDir = path.join(this.ledgerDir, 'reviewer_sandbox');
+    const decisionsPath = path.join(this.ledgerDir, 'decisions.jsonl');
+    this.coderGeneration = latestTargetGeneration(decisionsPath, 'coder');
+    this.reviewerGeneration = latestTargetGeneration(decisionsPath, 'reviewer');
   }
 
   get sessionNames(): { planner: string; coder: string; reviewer: string } {
@@ -674,6 +692,7 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
     name: string,
     promptText: string,
     pending: PendingSendTimeout,
+    beforeRetry?: () => string,
   ): Promise<SendMessageResult> {
     try {
       const result = await this.sendAttempt(name, promptText, pending);
@@ -682,13 +701,14 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
     } catch (err) {
       this.logger.warn?.(`[autoloop] ${agent} send threw, attempting reset+retry: ${(err as Error).message}`);
       await this.resetAgent(agent, { eagerRestart: true });
+      const retryPrompt = beforeRetry?.() ?? promptText;
       // Let the freshly-restarted subprocess settle before retrying — an
       // immediate retry routinely hits the same transient failure (e.g. the
       // old socket still in TIME_WAIT → ECONNREFUSED). Small jitter avoids
       // lockstep retries across concurrent runs.
       await new Promise((r) => setTimeout(r, 500 + Math.floor(Math.random() * 250)));
       try {
-        const result = await this.sendAttempt(name, promptText, pending);
+        const result = await this.sendAttempt(name, retryPrompt, pending);
         if (result.recoverable_timeout || !result.error) return result;
         throw new Error(result.error);
       } catch (err2) {
@@ -1067,6 +1087,59 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
       systemPrompt: this.coderSystemPrompt,
     });
     this.coderStarted = true;
+    this.coderGeneration += 1;
+  }
+
+  private prepareDurableDelivery(
+    env: AnyAutoloopMessage,
+    dispatchId: string,
+    kind: 'coder_directive' | 'review_request',
+    role: 'coder' | 'reviewer',
+    generation: number,
+    prompt: string,
+  ): { intent: DeliveryIntent; prompt: string } {
+    const logicalMessageSha256 = canonicalPayloadSha256({
+      msg_id: env.msg_id,
+      iter: env.iter,
+      from: env.from,
+      to: env.to,
+      type: env.type,
+      payload: env.payload,
+    });
+    const intent = prepareDelivery(path.join(this.ledgerDir, 'decisions.jsonl'), {
+      idempotency_key: dispatchId,
+      kind,
+      target_role: role,
+      target_generation: generation,
+      payload: { prompt, logical_message_sha256: logicalMessageSha256 },
+    });
+    const persistedPrompt = (intent.payload as { prompt: string }).prompt;
+    return {
+      intent,
+      prompt:
+        `${persistedPrompt}\n\n<autoloop_delivery delivery_id="${intent.delivery_id}" ` +
+        `payload_sha256="${intent.payload_sha256}">\n` +
+        'Echo delivery_id and payload_sha256 unchanged as direct siblings inside the control args.\n' +
+        '</autoloop_delivery>',
+    };
+  }
+
+  private acknowledgeReceiver(
+    completion: { delivery_id?: string; payload_sha256?: string },
+    intent: DeliveryIntent,
+    targetGeneration: number,
+  ): void {
+    if (completion.delivery_id !== intent.delivery_id || completion.payload_sha256 !== intent.payload_sha256) {
+      throw new Error(
+        `Autoloop receiver completion did not echo delivery '${intent.delivery_id}' and its exact payload digest`,
+      );
+    }
+    acknowledgeDelivery(
+      path.join(this.ledgerDir, 'decisions.jsonl'),
+      intent.delivery_id,
+      intent.payload_sha256,
+      targetGeneration,
+    );
   }
 
   private async deliverToCoder(env: AnyAutoloopMessage, dispatchId: string): Promise<AnyAutoloopMessage[]> {
@@ -1127,11 +1200,28 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
       ts: new Date().toISOString(),
     });
 
+    const delivery = this.prepareDurableDelivery(
+      env,
+      dispatchId,
+      'coder_directive',
+      'coder',
+      this.coderGeneration,
+      promptText,
+    );
     const result = await this.sendWithRecovery(
       'coder',
       this.coderName,
-      this.withRoleInstructions('coder', this.coderSelection, this.coderSystemPrompt, promptText),
+      this.withRoleInstructions('coder', this.coderSelection, this.coderSystemPrompt, delivery.prompt),
       this.pendingSendTimeout(env, 'coder', dispatchId),
+      () => {
+        rebindDelivery(
+          path.join(this.ledgerDir, 'decisions.jsonl'),
+          delivery.intent.delivery_id,
+          delivery.intent.payload_sha256,
+          this.coderGeneration,
+        );
+        return delivery.prompt;
+      },
     );
     if (result.recoverable_timeout) {
       return [Msg.sendTimeout(env.iter, result.recoverable_timeout)];
@@ -1177,16 +1267,21 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
 
     const ic = extractIterComplete(parsed.calls);
     if (!ic) {
+      const clarification = extractClarificationCompletion(parsed.calls);
+      if (clarification) {
+        this.acknowledgeReceiver(clarification, delivery.intent, this.coderGeneration);
+      }
       // No iter_complete emitted — could be a clarification request. Return a
       // directive_ack so Planner sees it next turn.
       await this.maybeCompact('coder', this.coderName);
       return [
         Msg.directiveAck(env.iter, {
           understood: false,
-          clarification: parsed.cleaned_reply.slice(0, 500),
+          clarification: (clarification?.question ?? parsed.cleaned_reply).slice(0, 500),
         }),
       ];
     }
+    this.acknowledgeReceiver(ic, delivery.intent, this.coderGeneration);
 
     // Persist eval output to ledger.
     fs.writeFileSync(
@@ -1296,6 +1391,7 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
         systemPrompt: sessionPrompt,
       });
       this.reviewerStarted = true;
+      this.reviewerGeneration += 1;
     } catch (err) {
       this.reviewerSessionPrompt = null;
       throw err;
@@ -1370,6 +1466,14 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
       ts: new Date().toISOString(),
     });
 
+    const delivery = this.prepareDurableDelivery(
+      env,
+      dispatchId,
+      'review_request',
+      'reviewer',
+      this.reviewerGeneration,
+      promptText,
+    );
     const result = await this.sendWithRecovery(
       'reviewer',
       this.reviewerName,
@@ -1377,9 +1481,18 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
         'reviewer',
         this.reviewerSelection,
         this.reviewerSessionPrompt ?? this.reviewerSystemPrompt,
-        promptText,
+        delivery.prompt,
       ),
       this.pendingSendTimeout(env, 'reviewer', dispatchId),
+      () => {
+        rebindDelivery(
+          path.join(this.ledgerDir, 'decisions.jsonl'),
+          delivery.intent.delivery_id,
+          delivery.intent.payload_sha256,
+          this.reviewerGeneration,
+        );
+        return delivery.prompt;
+      },
     );
     if (result.recoverable_timeout) {
       return [Msg.sendTimeout(env.iter, result.recoverable_timeout)];
@@ -1428,7 +1541,7 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
       await this.maybeCompact('reviewer', this.reviewerName);
       return [verdict];
     }
-
+    this.acknowledgeReceiver(rc, delivery.intent, this.reviewerGeneration);
     const gated = await this.gateVerdict(env.payload.iter, rc);
     this.persistVerdict(env.payload.iter, gated);
     await this.maybeCompact('reviewer', this.reviewerName);

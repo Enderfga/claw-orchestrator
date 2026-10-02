@@ -8,6 +8,7 @@ import {
   extractIterComplete,
   extractReviewComplete,
   extractClarification,
+  extractClarificationCompletion,
 } from '../autoloop/agent-tools.js';
 
 describe('parseAgentReply', () => {
@@ -45,6 +46,31 @@ describe('extractIterComplete', () => {
       { tool: 'iter_complete', args: { summary: 's', eval_output: {}, files_changed: ['a.py', 42, 'b.py'] } },
     ]);
     expect(ic?.files_changed).toEqual(['a.py', 'b.py']);
+  });
+
+  it('rejects partial or conflicting delivery provenance across supported locations', () => {
+    const base = {
+      summary: 'done',
+      eval_output: {
+        extra: { delivery_id: 'delivery-1', payload_sha256: 'a'.repeat(64) },
+      },
+    };
+
+    for (const args of [
+      { ...base, delivery_id: 'delivery-1' },
+      { ...base, delivery_id: 'delivery-2', payload_sha256: 'a'.repeat(64) },
+      {
+        ...base,
+        eval_output: { extra: { delivery_id: 'delivery-1' } },
+        delivery_id: 'delivery-1',
+        payload_sha256: 'a'.repeat(64),
+      },
+    ]) {
+      expect(extractIterComplete([{ tool: 'iter_complete', args }])).not.toMatchObject({
+        delivery_id: expect.anything(),
+        payload_sha256: expect.anything(),
+      });
+    }
   });
 });
 
@@ -98,5 +124,24 @@ describe('extractClarification', () => {
   });
   it('returns null when not present', () => {
     expect(extractClarification([])).toBeNull();
+  });
+
+  it('extracts exact delivery provenance for a structured clarification', () => {
+    expect(
+      extractClarificationCompletion([
+        {
+          tool: 'request_clarification',
+          args: {
+            question: 'should I touch the eval script?',
+            delivery_id: 'delivery-1',
+            payload_sha256: 'a'.repeat(64),
+          },
+        },
+      ]),
+    ).toEqual({
+      question: 'should I touch the eval script?',
+      delivery_id: 'delivery-1',
+      payload_sha256: 'a'.repeat(64),
+    });
   });
 });

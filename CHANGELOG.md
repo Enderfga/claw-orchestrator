@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [7.6.2] - 2026-10-01
 
+### Added
+
+- **Autoloop persists idempotent Coder and Reviewer delivery intents before sending.** Each
+  intent binds the logical dispatch, canonical payload digest, target role, and session
+  generation; reset retries append a generation rebind, and an exact receiver echo appends an
+  acknowledgement before its result is released. Corrupt, conflicting, truncated, or contended
+  delivery graphs fail closed.
+
 ### Fixed
 
 - **Autoloop agent reset no longer reports success while reusing a session that failed to stop.**
