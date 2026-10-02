@@ -509,6 +509,34 @@ describe('POST /autoloop/:id/resume + GET /autoloop/:id/chat_history', () => {
     await manager.shutdown();
   });
 
+  it('exposes inspect-first recovery and forwards apply only with its exact token', async () => {
+    const recover = vi.spyOn(manager, 'autoloopRecover').mockResolvedValue({
+      assessment: {
+        schema_version: 1,
+        run_id: 'recover-http',
+        phase: 'PLANNER_BOUNDARY',
+        evidence: ['kernel:lease:stale'],
+        next_safe_action: 'resume_planner',
+        evidence_sha256: 'a'.repeat(64),
+        action_sha256: 'b'.repeat(64),
+        action: { type: 'resume_planner', run_id: 'recover-http', iter: 0 },
+        recovery_token: 'c'.repeat(64),
+      },
+    });
+    const r = await fetch(`http://127.0.0.1:${port}/autoloop/recover-http/recover`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ apply: true, recovery_token: 'c'.repeat(64) }),
+    });
+
+    expect(r.status).toBe(200);
+    expect(recover).toHaveBeenCalledWith('recover-http', {
+      apply: true,
+      recovery_token: 'c'.repeat(64),
+    });
+    await expect(r.json()).resolves.toMatchObject({ ok: true, assessment: { run_id: 'recover-http' } });
+  });
+
   it('resume returns the new in-memory state', async () => {
     vi.spyOn(manager, 'autoloopResume').mockResolvedValue({
       run_id: 'run-rsm',

@@ -48,6 +48,15 @@ export { ClaudeAgentDispatcher } from './autoloop/dispatcher.js';
 export { Msg as AutoloopMsg, validateMessage as autoloopValidate } from './autoloop/messages.js';
 export type { AutoloopEnvelope, AnyAutoloopMessage, AutoloopMessageType, AutoloopRole } from './autoloop/messages.js';
 export type { AgentDispatcher, AutoloopConfig, AutoloopState, AutoloopStatus, PushPolicy } from './autoloop/types.js';
+export { applyAutoloopRecovery, AutoloopRecoveryError, inspectAutoloopRecovery } from './autoloop/recovery.js';
+export type {
+  AutoloopRecoveryAction,
+  AutoloopRecoveryAssessment,
+  AutoloopRecoveryInspectionInput,
+  AutoloopRecoveryPhase,
+  AutoloopRecoveryReceipt,
+  AutoloopRecoveryResult,
+} from './autoloop/recovery.js';
 export { parseConsensus, stripConsensusTags, hasConsensusMarker } from './consensus.js';
 export { sanitizeCwd, validateRegex, validateName } from './validation.js';
 export { type Logger, createConsoleLogger, nullLogger } from './logger.js';
@@ -2108,6 +2117,36 @@ const plugin = {
       execute: async () => {
         if (!manager) return { ok: true, runs: [] };
         return { ok: true, runs: getManager().autoloopList() };
+      },
+    });
+
+    // ─── Tool: autoloop_recover ──────────────────────────────────
+
+    registerTool({
+      name: 'autoloop_recover',
+      description: 'Inspect durable Autoloop recovery evidence, or apply its exact current token.',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          run_id: { type: 'string', description: 'Run id to inspect or recover' },
+          apply: { type: 'boolean', description: 'Apply the next safe action (default false)' },
+          recovery_token: { type: 'string', description: 'Exact token returned by the latest inspection' },
+        },
+        required: ['run_id'],
+      },
+      execute: async (_id, args) => {
+        if (args.apply !== undefined && typeof args.apply !== 'boolean') {
+          throw new Error('autoloop_recover apply must be a boolean');
+        }
+        if (args.recovery_token !== undefined && typeof args.recovery_token !== 'string') {
+          throw new Error('autoloop_recover recovery_token must be a string');
+        }
+        const options: { apply?: boolean; recovery_token?: string } = {};
+        if (args.apply !== undefined) options.apply = args.apply;
+        if (args.recovery_token !== undefined) options.recovery_token = args.recovery_token;
+        const result = await getManager().autoloopRecover(args.run_id as string, options);
+        return { ok: true, ...result };
       },
     });
 

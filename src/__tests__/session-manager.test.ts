@@ -257,6 +257,7 @@ vi.mock('node:fs', async () => {
 // Import AFTER mocking fs
 const { SessionManager } = await import('../session-manager.js');
 const { Msg: AutoloopMsg } = await import('../autoloop/messages.js');
+const { prepareDelivery } = await import('../autoloop/outbox.js');
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -1483,32 +1484,59 @@ describe('SessionManager', () => {
     });
 
     it('persists role efforts and restores them on resume', async () => {
+      const runId = 'effort-resume';
+      const workspace = path.join(TEST_WF_DIR, 'workspaces', runId);
+      fs.mkdirSync(workspace, { recursive: true });
       await mgr.autoloopStart({
-        runId: 'effort-resume',
-        workspace: '/tmp',
+        runId,
+        workspace,
         plannerEffort: 'high',
         coderEffort: 'ultra',
         reviewerEffort: 'low',
       });
-      await mgr.getAutoloop('effort-resume')!.dispatcher.spawnSubagents();
 
-      const before = mgr.workflowStatus('effort-resume');
+      const before = mgr.workflowStatus(runId);
       expect(before.spec.nodes[0]).toMatchObject({
         config: { plannerEffort: 'high', coderEffort: 'ultra', reviewerEffort: 'low' },
       });
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const kernel = (mgr as any).kernel;
-      kernel.cancel('effort-resume');
-      await kernel.wait('effort-resume');
+      kernel.cancel(runId);
+      await kernel.wait(runId);
       createdConfigs = [];
 
-      await mgr.autoloopResume('effort-resume');
-      await mgr.getAutoloop('effort-resume')!.dispatcher.spawnSubagents();
+      await mgr.autoloopResume(runId);
+      await mgr.getAutoloop(runId)!.dispatcher.spawnSubagents();
 
       expect(createdConfigs.find((config) => config.name.endsWith('-planner'))).toMatchObject({ effort: 'high' });
       expect(createdConfigs.find((config) => config.name.endsWith('-coder'))).toMatchObject({ effort: 'ultra' });
       expect(createdConfigs.find((config) => config.name.endsWith('-reviewer'))).toMatchObject({ effort: 'low' });
+    });
+
+    it('blocks a plain stored resume when durable state cannot justify restarting at Planner', async () => {
+      const runId = 'resume-ambiguous-subagents';
+      const workspace = path.join(TEST_WF_DIR, 'workspaces', runId);
+      fs.mkdirSync(workspace, { recursive: true });
+      await mgr.autoloopStart({ runId, workspace });
+      prepareDelivery(path.join(workspace, 'tasks', runId, 'decisions.jsonl'), {
+        idempotency_key: 'dispatch-ambiguous',
+        kind: 'coder_directive',
+        target_role: 'coder',
+        target_generation: 1,
+        payload: { prompt: 'effect outcome unknown', logical_message_sha256: 'a'.repeat(64) },
+      });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const kernel = (mgr as any).kernel;
+      kernel.cancel(runId);
+      await kernel.wait(runId);
+      const startsBeforeResume = createdConfigs.length;
+
+      await expect(mgr.autoloopResume(runId)).rejects.toMatchObject({
+        code: 'AUTOLOOP_RECOVERY_MANUAL_RESOLUTION_REQUIRED',
+      });
+      expect(createdConfigs).toHaveLength(startsBeforeResume);
+      expect(mgr.getAutoloop(runId)).toBeUndefined();
     });
 
     it('suppresses a global default model for non-Claude roles with no explicit model', async () => {
@@ -1637,13 +1665,16 @@ describe('SessionManager', () => {
       // must not destroy the record, or the run becomes unrecoverable. It used
       // to be phrased against an append-only registry file; the record is the
       // registry now, so that is what gets checked.
-      await mgr.autoloopStart({ runId: 'resume-fail', workspace: '/tmp' });
+      const runId = 'resume-fail';
+      const workspace = path.join(TEST_WF_DIR, 'workspaces', runId);
+      fs.mkdirSync(workspace, { recursive: true });
+      await mgr.autoloopStart({ runId, workspace });
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const kernel = (mgr as any).kernel;
-      kernel.cancel('resume-fail');
-      await kernel.wait('resume-fail');
+      kernel.cancel(runId);
+      await kernel.wait(runId);
 
-      const before = mgr.workflowStatus('resume-fail');
+      const before = mgr.workflowStatus(runId);
       expect(before).toBeDefined();
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1654,11 +1685,81 @@ describe('SessionManager', () => {
         };
         return mock;
       };
-      await expect(mgr.autoloopResume('resume-fail')).rejects.toThrow('resume planner failed');
+      await expect(mgr.autoloopResume(runId)).rejects.toThrow('resume planner failed');
 
-      const after = mgr.workflowStatus('resume-fail');
+      const after = mgr.workflowStatus(runId);
       expect(after).toBeDefined();
       expect(after.spec).toEqual(before!.spec);
+      const recoveryReceipts = fs
+        .readFileSync(path.join(workspace, 'tasks', runId, 'decisions.jsonl'), 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line) as Record<string, unknown>)
+        .filter((row) => row.record_type === 'autoloop_recovery_receipt');
+      expect(recoveryReceipts).toMatchObject([{ status: 'prepared' }]);
+    });
+
+    it('inspects a cold Planner boundary before token-fenced recovery starts a replacement', async () => {
+      const runId = 'inspect-first-planner';
+      const workspace = path.join(TEST_WF_DIR, 'workspaces', runId);
+      fs.mkdirSync(workspace, { recursive: true });
+      await mgr.autoloopStart({ runId, workspace });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const kernel = (mgr as any).kernel;
+      kernel.cancel(runId);
+      await kernel.wait(runId);
+      const decisionsPath = path.join(workspace, 'tasks', runId, 'decisions.jsonl');
+      const before = fs.existsSync(decisionsPath) ? fs.readFileSync(decisionsPath) : undefined;
+      const startsBeforeRecovery = createdConfigs.length;
+
+      const inspected = await mgr.autoloopRecover(runId);
+
+      expect(inspected).toMatchObject({
+        assessment: {
+          run_id: runId,
+          phase: 'PLANNER_BOUNDARY',
+          next_safe_action: 'resume_planner',
+        },
+      });
+      expect(fs.existsSync(decisionsPath) ? fs.readFileSync(decisionsPath) : undefined).toEqual(before);
+      expect(createdConfigs).toHaveLength(startsBeforeRecovery);
+
+      const applied = await mgr.autoloopRecover(runId, {
+        apply: true,
+        recovery_token: inspected.assessment.recovery_token,
+      });
+
+      expect(applied.receipt).toMatchObject({ status: 'applied', action: { type: 'resume_planner', run_id: runId } });
+      expect(mgr.getAutoloop(runId)).toBeDefined();
+      expect(createdConfigs).toHaveLength(startsBeforeRecovery + 1);
+    });
+
+    it('does not reconcile a pending kernel transaction during recovery inspection', async () => {
+      const runId = 'inspect-read-only-kernel';
+      const workspace = path.join(TEST_WF_DIR, 'workspaces', runId);
+      fs.mkdirSync(workspace, { recursive: true });
+      await mgr.autoloopStart({ runId, workspace });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const kernel = (mgr as any).kernel;
+      kernel.cancel(runId);
+      await kernel.wait(runId);
+      const runPath = path.join(TEST_WF_DIR, runId, 'run.json');
+      const before = fs.readFileSync(runPath);
+      const pendingTransaction = path.join(TEST_WF_DIR, runId, '.tx');
+      fs.mkdirSync(pendingTransaction);
+      fs.writeFileSync(path.join(pendingTransaction, 'sentinel'), 'must remain untouched');
+
+      await expect(mgr.autoloopRecover(runId)).rejects.toMatchObject({
+        code: 'AUTOLOOP_RECOVERY_INCOMPLETE',
+      });
+      expect(fs.readFileSync(runPath)).toEqual(before);
+      expect(fs.readFileSync(path.join(pendingTransaction, 'sentinel'), 'utf8')).toBe('must remain untouched');
+
+      await expect(mgr.autoloopResume(runId)).rejects.toMatchObject({
+        code: 'AUTOLOOP_RECOVERY_INCOMPLETE',
+      });
+      expect(fs.readFileSync(runPath)).toEqual(before);
+      expect(fs.readFileSync(path.join(pendingTransaction, 'sentinel'), 'utf8')).toBe('must remain untouched');
     });
 
     describe('Autoloop send-timeout resume migration', () => {
@@ -1878,7 +1979,24 @@ describe('SessionManager', () => {
         expect(beforePlainResume.startsWith(afterFirstAudit)).toBe(true);
         await mgr.autoloopResume(runId);
         expect(mgr.getAutoloop(runId)!.dispatcher.config.sendTimeoutMs).toBe(700_000);
-        expect(fs.readFileSync(auditPath, 'utf8')).toBe(beforePlainResume);
+        const afterPlainResume = fs.readFileSync(auditPath, 'utf8');
+        expect(afterPlainResume.startsWith(beforePlainResume)).toBe(true);
+        const plainResumeRows = afterPlainResume
+          .slice(beforePlainResume.length)
+          .trim()
+          .split('\n')
+          .map((line) => JSON.parse(line) as Record<string, unknown>);
+        expect(plainResumeRows).toMatchObject([
+          { record_type: 'autoloop_recovery_receipt', status: 'prepared' },
+          { record_type: 'autoloop_recovery_receipt', status: 'applied' },
+        ]);
+        expect(
+          afterPlainResume
+            .trim()
+            .split('\n')
+            .map((line) => JSON.parse(line) as Record<string, unknown>)
+            .filter((row) => row.kind === 'timeout_migration'),
+        ).toHaveLength(1);
 
         await terminateAndReconstructManager(runId);
         const beforeRejectedEqual = fs.readFileSync(auditPath, 'utf8');

@@ -14,6 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   generation; reset retries append a generation rebind, and an exact receiver echo appends an
   acknowledgement before its result is released. Corrupt, conflicting, truncated, or contended
   delivery graphs fail closed.
+- **Autoloop recovery is inspect-first and token-fenced.** `autoloop_recover` and
+  `POST /autoloop/<id>/recover` derive a recovery token from the exact durable evidence without
+  mutation, then require that token before writing a prepared receipt and restarting at a proven
+  Planner boundary. Live leases, delivery evidence, legacy ambiguity, and unresolved prepared
+  receipts fail closed for manual resolution.
 
 ### Fixed
 

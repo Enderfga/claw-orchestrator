@@ -156,7 +156,7 @@ function readRows(decisionsPath: string): unknown[] {
     });
 }
 
-interface DeliveryGraph {
+export interface DeliveryGraph {
   intents: DeliveryIntent[];
   acknowledgements: DeliveryAcknowledgement[];
   rebinds: DeliveryGenerationRebind[];
@@ -338,6 +338,11 @@ function deliveryGraph(decisionsPath: string): DeliveryGraph {
     }
   }
   return graph;
+}
+
+/** Read and validate the complete delivery graph without mutating its ledger. */
+export function inspectDeliveryOutbox(decisionsPath: string): DeliveryGraph {
+  return deliveryGraph(decisionsPath);
 }
 
 function appendDurably(decisionsPath: string, row: unknown): void {

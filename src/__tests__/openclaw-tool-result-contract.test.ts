@@ -33,6 +33,7 @@ function collectTools(): { tools: Map<string, RegisteredTool>; stop: () => void 
 describe('OpenClaw tool result contract', () => {
   const registration = collectTools();
   const codexModels = vi.spyOn(SessionManager.prototype, 'codexModels');
+  const autoloopRecover = vi.spyOn(SessionManager.prototype, 'autoloopRecover');
 
   beforeAll(() => {
     vi.stubEnv('CLAWO_NO_EMBEDDED_SERVER', '1');
@@ -104,8 +105,32 @@ describe('OpenClaw tool result contract', () => {
   });
 
   it('registers only the namespaced Codex thread-listing tool', () => {
-    expect(registration.tools).toHaveLength(78);
+    expect(registration.tools).toHaveLength(79);
     expect(registration.tools.has('codex_thread_list')).toBe(true);
     expect(registration.tools.has('codex_threads')).toBe(false);
+  });
+
+  it('keeps Autoloop recovery inspect-only unless apply and its exact token are supplied', async () => {
+    const payload = {
+      assessment: {
+        schema_version: 1 as const,
+        run_id: 'recover-me',
+        phase: 'PLANNER_BOUNDARY' as const,
+        evidence: ['kernel:lease:stale'],
+        next_safe_action: 'resume_planner' as const,
+        evidence_sha256: 'a'.repeat(64),
+        action_sha256: 'b'.repeat(64),
+        action: { type: 'resume_planner' as const, run_id: 'recover-me', iter: 0 },
+        recovery_token: 'c'.repeat(64),
+      },
+    };
+    autoloopRecover.mockResolvedValueOnce(payload);
+
+    const result = (await registration.tools.get('autoloop_recover')!.execute('call-recover', {
+      run_id: 'recover-me',
+    })) as AgentToolResult;
+
+    expect(autoloopRecover).toHaveBeenCalledWith('recover-me', {});
+    expect(result.details).toEqual({ ok: true, ...payload });
   });
 });

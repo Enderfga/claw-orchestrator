@@ -164,6 +164,7 @@
       "autoloop_chat",
       "autoloop_status",
       "autoloop_list",
+      "autoloop_recover",
       "autoloop_reset_agent",
       "autoloop_stop",
       "session_send_to",

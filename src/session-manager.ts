@@ -125,7 +125,7 @@ import { detectRepoLang } from './kernel/repo.js';
 import { RunKernel, runDir as kernelRunDir } from './kernel/engine.js';
 import { registerDefaultExecutors } from './kernel/nodes/index.js';
 import { autoloopStateFromRecord, makeAutoloopExecutor, type AutoloopHandle } from './kernel/nodes/autoloop.js';
-import { loadRun, readNodeOutput, type RunSummary } from './kernel/store.js';
+import { leaseIsStale, loadRun, readLease, readNodeOutput, type RunSummary } from './kernel/store.js';
 import {
   LEGACY_NODE,
   joinFindings,
@@ -214,6 +214,13 @@ import type { AutoloopState, PushPolicy } from './autoloop/types.js';
 import { DEFAULT_PUSH_POLICY, DEFAULT_SEND_TIMEOUT_MS, validateAutoloopTimeoutConfig } from './autoloop/types.js';
 import { Msg as AutoloopMsg, type PushChannel, type PushLevel, type SendTimeoutPayload } from './autoloop/messages.js';
 import { appendPushLog, notifyUserFallbackChain } from './autoloop/notify.js';
+import {
+  applyAutoloopRecovery,
+  AutoloopRecoveryError,
+  inspectAutoloopRecovery,
+  type AutoloopRecoveryInspectionInput,
+  type AutoloopRecoveryResult,
+} from './autoloop/recovery.js';
 import { UltraappManager } from './ultraapp/manager.js';
 import { UltraappStore, defaultStoreRoot } from './ultraapp/store.js';
 import type { UltraappRouter } from './ultraapp/router.js';
@@ -332,6 +339,48 @@ interface StoredAutoloopResumeContext {
 interface PreparedSendTimeoutMigrationAppend {
   fd: number;
   line: string;
+}
+
+function loadRunForRecoveryInspection(runId: string): RunRecord | undefined {
+  let directory: string;
+  try {
+    directory = kernelRunDir(runId);
+  } catch {
+    return undefined;
+  }
+  const transaction = path.join(directory, '.tx');
+  const rejectPendingTransaction = (): void => {
+    if (fs.existsSync(transaction)) {
+      throw new AutoloopRecoveryError(
+        'AUTOLOOP_RECOVERY_INCOMPLETE',
+        `Autoloop run '${runId}' has a pending kernel transaction`,
+      );
+    }
+  };
+
+  rejectPendingTransaction();
+  const specPath = path.join(directory, 'spec.json');
+  if (!fs.existsSync(specPath)) return undefined;
+  let spec: WorkflowSpec;
+  let record: RunRecord;
+  try {
+    spec = JSON.parse(fs.readFileSync(specPath, 'utf8')) as WorkflowSpec;
+    record = JSON.parse(fs.readFileSync(path.join(directory, 'run.json'), 'utf8')) as RunRecord;
+  } catch (error) {
+    throw new AutoloopRecoveryError(
+      'AUTOLOOP_RECOVERY_INCOMPLETE',
+      `Autoloop run '${runId}' has no complete read-only checkpoint`,
+      { cause: error },
+    );
+  }
+  rejectPendingTransaction();
+  if (record.runId !== runId || !record.nodes || typeof record.nodes !== 'object') {
+    throw new AutoloopRecoveryError(
+      'AUTOLOOP_RECOVERY_INCOMPLETE',
+      `Autoloop run '${runId}' has an invalid read-only checkpoint`,
+    );
+  }
+  return { ...record, spec: record.spec ?? spec };
 }
 
 function isSendTimeoutPayload(value: unknown): value is SendTimeoutPayload {
@@ -3592,6 +3641,119 @@ export class SessionManager {
     return { runId, rolesNeedingCustomEngine: roles };
   }
 
+  private _autoloopRecoveryContext(
+    runId: string,
+    bootOverrides: {
+      plannerCustomEngine?: CustomEngineConfig;
+      coderCustomEngine?: CustomEngineConfig;
+      reviewerCustomEngine?: CustomEngineConfig;
+    } = {},
+  ): {
+    input: AutoloopRecoveryInspectionInput;
+    config: Record<string, unknown>;
+  } {
+    const live = this.kernel.handle<AutoloopHandle & { runner: AutoloopRunner }>(runId, LEGACY_NODE);
+    const record = loadRunForRecoveryInspection(runId);
+    if (!record || record.workflow !== 'autoloop') throw new Error(`Autoloop run '${runId}' not found`);
+    const state = live?.runner.state ?? autoloopStateFromRecord(record);
+    if (!state) throw new Error(`Autoloop run '${runId}' has no durable state checkpoint`);
+    const config = (
+      record.spec.nodes.find((node) => node.id === LEGACY_NODE) as { config?: Record<string, unknown> } | undefined
+    )?.config;
+    if (!config) throw new Error(`Autoloop run '${runId}' has no stored configuration to recover`);
+    const workspace = typeof config.workspace === 'string' ? config.workspace : record.cwd;
+    let effectiveSendTimeoutMs: number;
+    try {
+      effectiveSendTimeoutMs = readStoredAutoloopResumeContext(
+        workspace,
+        runId,
+        config.sendTimeoutMs,
+      ).effectiveSendTimeoutMs;
+    } catch (error) {
+      throw new AutoloopRecoveryError(
+        'AUTOLOOP_RECOVERY_INCOMPLETE',
+        `Autoloop run '${runId}' has invalid timeout recovery evidence`,
+        { cause: error },
+      );
+    }
+    const lease = readLease(runId);
+    const leaseEvidence = lease
+      ? {
+          incarnationId: lease.incarnationId,
+          ownerId: lease.ownerId,
+          acquisitionId: lease.acquisitionId,
+          fence: lease.fence,
+          pid: lease.pid,
+          host: lease.host,
+          acquiredAt: lease.acquiredAt,
+          renewedAt: lease.renewedAt,
+        }
+      : null;
+    const restartReady = !(['planner', 'coder', 'reviewer'] as const).some(
+      (role) => config[`${role}Engine`] === 'custom' && bootOverrides[`${role}CustomEngine`] === undefined,
+    );
+    return {
+      input: {
+        runId,
+        ledgerDir: path.join(workspace, 'tasks', runId),
+        runState: record.state,
+        state,
+        liveInProcess: Boolean(live),
+        lease: leaseEvidence,
+        leaseStale: leaseIsStale(lease),
+        restartReady,
+      },
+      config: { ...config, sendTimeoutMs: effectiveSendTimeoutMs },
+    };
+  }
+
+  async autoloopRecover(
+    runId: string,
+    options: { apply?: boolean; recovery_token?: string } = {},
+  ): Promise<AutoloopRecoveryResult> {
+    return await this._autoloopRecover(runId, options);
+  }
+
+  private async _autoloopRecover(
+    runId: string,
+    options: { apply?: boolean; recovery_token?: string } = {},
+    bootOverrides: {
+      plannerCustomEngine?: CustomEngineConfig;
+      coderCustomEngine?: CustomEngineConfig;
+      reviewerCustomEngine?: CustomEngineConfig;
+    } = {},
+  ): Promise<AutoloopRecoveryResult> {
+    const context = this._autoloopRecoveryContext(runId, bootOverrides);
+    const inspect = (): ReturnType<typeof inspectAutoloopRecovery> =>
+      inspectAutoloopRecovery(this._autoloopRecoveryContext(runId, bootOverrides).input);
+    const assessment = inspect();
+    if (!options.apply) return { assessment };
+    if (!options.recovery_token) {
+      throw new AutoloopRecoveryError(
+        'AUTOLOOP_RECOVERY_TOKEN_REQUIRED',
+        'recovery_token is required when apply is true',
+      );
+    }
+    return await applyAutoloopRecovery({
+      ledgerDir: context.input.ledgerDir,
+      recoveryToken: options.recovery_token,
+      inspect,
+      effect: async (action) => {
+        const latest = this._autoloopRecoveryContext(runId, bootOverrides);
+        if (latest.input.liveInProcess || latest.input.state.iter !== action.iter) {
+          throw new AutoloopRecoveryError(
+            'AUTOLOOP_RECOVERY_INCOMPLETE',
+            `Autoloop run '${runId}' changed before its recovery effect`,
+          );
+        }
+        await this._resumeAutoloopRun(runId, {
+          ...latest.config,
+          ...bootOverrides,
+        } as Parameters<SessionManager['_bootAutoloop']>[0]);
+      },
+    });
+  }
+
   async autoloopResume(
     runId: string,
     opts: {
@@ -3656,7 +3818,7 @@ export class SessionManager {
       return live.runner.state;
     }
 
-    const record = loadRun(runId);
+    const record = hasTimeoutIncrease ? loadRun(runId) : loadRunForRecoveryInspection(runId);
     if (!record || record.workflow !== 'autoloop') throw new Error(`Autoloop run '${runId}' not found`);
     const config = (record.spec.nodes.find((n) => n.id === LEGACY_NODE) as { config?: Record<string, unknown> })
       ?.config;
@@ -3672,6 +3834,36 @@ export class SessionManager {
     validateAutoloopEffort('planner', config.plannerEffort as EffortLevel | undefined);
     validateAutoloopEffort('coder', config.coderEffort as EffortLevel | undefined);
     validateAutoloopEffort('reviewer', config.reviewerEffort as EffortLevel | undefined);
+
+    if (!hasTimeoutIncrease) {
+      const bootOverrides = {
+        plannerCustomEngine: opts.plannerCustomEngine,
+        coderCustomEngine: opts.coderCustomEngine,
+        reviewerCustomEngine: opts.reviewerCustomEngine,
+      };
+      const inspected = await this._autoloopRecover(runId, {}, bootOverrides);
+      if (inspected.assessment.next_safe_action === 'none') {
+        const stored = this.autoloopStatus(runId);
+        if (!stored) {
+          throw new AutoloopRecoveryError(
+            'AUTOLOOP_RECOVERY_INCOMPLETE',
+            `Autoloop run '${runId}' recovery has no durable state`,
+          );
+        }
+        return stored;
+      }
+      const recovered = await this._autoloopRecover(
+        runId,
+        { apply: true, recovery_token: inspected.assessment.recovery_token },
+        bootOverrides,
+      );
+      const handle = this.getAutoloop(runId);
+      if (handle) return handle.runner.state;
+      throw new AutoloopRecoveryError(
+        'AUTOLOOP_RECOVERY_INCOMPLETE',
+        `Autoloop run '${runId}' recovery receipt '${recovered.receipt?.claim_id ?? 'unknown'}' has no live state`,
+      );
+    }
 
     const workspace = typeof config.workspace === 'string' ? config.workspace : record.cwd;
     const storedContext = readStoredAutoloopResumeContext(workspace, runId, config.sendTimeoutMs);

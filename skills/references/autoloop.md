@@ -334,9 +334,33 @@ effective generation before the result is released to the loop. Unknown ids,
 digest or generation mismatches, duplicate graph records, truncated rows, and
 lock contention fail closed.
 
-These records provide durable delivery evidence; they do not by themselves
-enable automatic replay after a process restart. Inspect-first recovery and
-the policy for ambiguous or legacy records are separate follow-up behavior.
+These records provide durable delivery evidence. Recovery never interprets an
+intent or acknowledgement as permission to replay: any current delivery graph
+blocks automatic restart for manual resolution.
+
+## Inspect-first durable recovery
+
+`autoloop_recover` and `POST /autoloop/<id>/recover` inspect first and do not
+write during inspection. The assessment classifies the run as a proven cold
+`PLANNER_BOUNDARY`, `LIVE`, `COMPLETED`, or `BLOCKED`; binds the run checkpoint,
+ledger directory identity, exact decision-ledger digest, lease fence, and
+proposed Planner action; and returns a SHA-256 `recovery_token`.
+
+Apply is a second call with `apply: true` and the exact latest token. Under both
+the recovery-receipt and delivery-outbox locks, the runtime re-inspects the
+evidence, rejects a stale token, and flushes a versioned `prepared` receipt
+before starting anything. It appends `applied` only after the replacement run
+has started successfully. If the effect fails or its result is unknown, the
+unresolved prepared receipt remains evidence and blocks replay.
+
+Automatic recovery is deliberately limited to a cold Planner boundary. It
+fails closed for live processes or leases, any durable Coder/Reviewer delivery,
+spawned subagents, pending or legacy timeout evidence, legacy delivery rows,
+earlier recovery-receipt shapes, pending kernel transactions, missing
+custom-engine restart configuration, malformed/truncated ledgers, and unresolved
+prepared receipts. Legacy rows are recognized read-only; recovery does not
+rewrite them or fabricate current records. Reviewer-only recovery is not
+inferred here.
 
 ## Decisions audit
 
@@ -360,6 +384,7 @@ Delivery rows use `record_type` instead of `kind`:
 | `delivery_intent`            | Before a Coder or Reviewer transport effect                  |
 | `delivery_generation_rebind` | Before retrying the same intent on one replacement session   |
 | `delivery_acknowledgement`   | After an exact receiver echo and before releasing its result |
+| `autoloop_recovery_receipt`  | `prepared` before recovery; `applied` after proven success   |
 
 JSONL, one record per line. Decision rows are `ts`-prefixed; delivery rows
 carry their own creation, rebind, or acknowledgement timestamp.
@@ -413,6 +438,7 @@ Every JSON artifact in the ledger carries a `schema_version` field (currently
 | `GET /autoloop/<id>/events`              | SSE: `snapshot` / `message` / `state` / `push` / `iter_done` / `planner_reply` / `planner_error` / `coder_reply` / `reviewer_reply` / `terminated`. For runs that are NOT in this process's memory (terminated, or live in another process), the endpoint emits a single-shot `snapshot` + `terminated` then closes — the dashboard's existing handlers render history without hanging. A run still in memory that has already reached `terminated` or `crashed` gets the same single-shot pair instead of an open stream that would never receive another event. Every such stream sets `retry: 864000000`, so an `EventSource` does not keep reconnecting to a stream that can only end again.                                                                                                                                                                                                                                                                                            |
 | `POST /autoloop/<id>/chat`               | **202** `{ ok, queued: true }` — body `{ text }`. Fire-and-forget: the Planner's reply streams back via the `/events` SSE channel as a `planner_reply` event (or `planner_error` on failure); the HTTP response intentionally does NOT wait for it, because first-contact replies routinely exceed reverse-proxy idle limits (e.g. Cloudflare Tunnel cuts at ~100s → 524). 400 on empty text. 404 when the run is not in this process's memory: if the store still holds it, the error says so and names `POST /autoloop/<id>/resume`; an unknown or malformed id is plain `not found`. The MCP `autoloop_chat` tool path keeps the synchronous await-and-return-reply semantics (it runs in-process).                                                                                                                                                                                                                                                                                      |
 | `GET /autoloop/<id>/resume-requirements` | `{ ok, runId, rolesNeedingCustomEngine }` — the roles whose engine was `custom`, so a caller knows which secret references a resume needs. Role names only; nothing sensitive. 404 when there is no such run.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `POST /autoloop/<id>/recover`            | Inspect by default with body `{}` and return `{ ok, assessment }`. Apply with `{ apply: true, recovery_token }`; the token must be from the exact current evidence. Recovery is limited to a proven cold Planner boundary and writes durable `prepared` / `applied` receipts. Ambiguous evidence returns 409; malformed input returns 400. Custom-engine runs remain blocked here because this endpoint does not accept executable configuration or secret references.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | `POST /autoloop/<id>/resume`             | `{ ok, state }` — restore the role engine/model choices from the run's spec and re-create dispatcher + runner. For recoverable send timeouts, body fields `send_timeout_ms` and `pending_dispatch_id` apply the increase-only migration described above; `allow_decrease`, lease overrides, and hard-cap overrides are rejected. A custom-engine config is never persisted and is never accepted over HTTP, so a role using `custom` is re-supplied by **reference**: `plannerCustomEngineRef` / `coderCustomEngineRef` / `reviewerCustomEngineRef` name an environment variable `CLAWO_CUSTOM_ENGINE_<NAME>` on the orchestrator host, which the server reads and resolves. The name is not sensitive, the value never crosses the wire, and an unknown name is an error rather than a silent start without credentials. Existing engine-specific conversation resume behavior is reused where supported; `chat.jsonl` remains the visual history fallback. 404 when there is no such run. |
 | `POST /autoloop/<id>/delete`             | `{ ok }` — stops the loop if still live, deletes the run record from the run store, and purges the role sessions' persisted resume ids so the run cannot be resumed. The ledger directory under `<workspace>/tasks/<run_id>/` is kept on disk. 404 when there is no such run.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 
@@ -483,8 +509,11 @@ lives. The run record holds the last state the loop published and the engines
 `spawn_subagents` chose, so `autoloop_status` and `GET /autoloop/<id>/state`
 show a run's real state after it stops or the process restarts.
 
-Resume is explicit. `POST /autoloop/<id>/resume` (or
-`SessionManager.autoloopResume()`) restarts a run from its stored spec.
+Resume is explicit. For an ordinary cold run,
+`POST /autoloop/<id>/resume` (or `SessionManager.autoloopResume()`) uses the
+same inspect-and-token-fenced recovery path as `autoloop_recover`; it restarts
+only from a proven Planner boundary. The separate increase-only timeout
+migration remains available for a matching `awaiting_resume` dispatch.
 Custom-engine configs are the one thing the spec does not carry (they can hold
 secrets), so a resume must be given them again. Cancelling a run stops all three
 agents, the same as `autoloop_stop`.
@@ -503,7 +532,8 @@ agents, the same as `autoloop_stop`.
   is bounded by `autoloop_hard_timeout_ms` (default 24 h); the iteration count
   is bounded only by the Planner honouring `max_iters` in `goal.json`.
 - **Resume is not automatic.** After a restart a run is not live in the new
-  process until it is resumed, and a send that was in flight is not retried.
+  process until recovery is explicitly inspected/applied or resume is called.
+  A send that was in flight is not retried.
 - **Multi-run / same workspace** races on `git index.lock`. Run separate
   workspaces (or git worktrees) for concurrent runs.
 

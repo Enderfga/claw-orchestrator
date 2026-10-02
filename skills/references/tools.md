@@ -1,6 +1,6 @@
 # Tools Reference
 
-All 78 tools are registered as OpenClaw plugin tools and exposed over MCP by `clawo-mcp` (see [mcp.md](./mcp.md)). The embedded HTTP server covers a subset of them.
+All 79 tools are registered as OpenClaw plugin tools and exposed over MCP by `clawo-mcp` (see [mcp.md](./mcp.md)). The embedded HTTP server covers a subset of them.
 
 ## Session Lifecycle (6)
 
@@ -570,7 +570,7 @@ Get status and findings when completed.
 
 ---
 
-## Autoloop (6)
+## Autoloop (7)
 
 Three-agent autonomous iteration loop (Planner / Coder / Reviewer) over a git workspace. See [`autoloop.md`](./autoloop.md) for the operator reference (push policy, ledger layout, smoke test).
 
@@ -642,6 +642,28 @@ Each successful increase appends one migration row to `decisions.jsonl`; the
 original run spec, history, and prior audit bytes are not rewritten. The
 matching live awaiting-resume condition is advanced without replaying the
 timed-out logical dispatch.
+
+### `autoloop_recover`
+
+Inspect durable recovery evidence without mutation, or apply the exact action
+authorized by the most recent inspection. Inspection is the default and
+returns `assessment`, including `phase`, `evidence`, `next_safe_action`, and a
+SHA-256 `recovery_token`. To apply, call the tool again with `apply: true` and
+that exact token.
+
+| Parameter        | Type    | Required | Description                                       |
+| ---------------- | ------- | -------- | ------------------------------------------------- |
+| `run_id`         | string  | yes      | Stored Autoloop run id                            |
+| `apply`          | boolean |          | Apply the inspected safe action (default false)   |
+| `recovery_token` | string  |          | Exact latest token; required when `apply` is true |
+
+Automatic apply is limited to a proven cold Planner boundary. A live process,
+live foreign lease, durable Coder/Reviewer delivery, legacy ambiguous evidence,
+pending kernel transaction, missing custom-engine restart config, or unresolved
+prepared receipt returns `manual_resolution` or fails closed. Apply writes a
+durable `prepared` receipt before restarting and an `applied` receipt only after
+the restart succeeds. Changing any bound evidence invalidates the token. A plain cold
+`autoloopResume()` follows this same inspect-and-apply path.
 
 ### `autoloop_chat`
 

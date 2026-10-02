@@ -186,6 +186,21 @@ describe('plugin tool registration', () => {
     }
   });
 
+  it('registers inspect-first Autoloop recovery with an explicit apply token', () => {
+    const tool = byName.get('autoloop_recover');
+    expect(tool).toBeDefined();
+    expect(tool!.parameters).toMatchObject({
+      type: 'object',
+      additionalProperties: false,
+      required: ['run_id'],
+      properties: {
+        run_id: { type: 'string' },
+        apply: { type: 'boolean' },
+        recovery_token: { type: 'string' },
+      },
+    });
+  });
+
   it('declares exact Autoloop timeout bounds/defaults and forwards the snake_case values once', async () => {
     const registration = collectRegistration();
     const tool = registration.tools.find((candidate) => candidate.name === 'autoloop_start');

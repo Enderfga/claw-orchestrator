@@ -16,6 +16,7 @@ import { SessionManager } from './session-manager.js';
 import { sanitizeCwd, validateRegex } from './validation.js';
 import { resolveSecretRefs } from './kernel/secrets.js';
 import { validateAutoloopTimeoutConfig } from './autoloop/types.js';
+import { AutoloopRecoveryError } from './autoloop/recovery.js';
 import type { EffortLevel, EngineType } from './types.js';
 import { handleChatCompletion } from './openai-compat.js';
 import { getModelList } from './models.js';
@@ -33,8 +34,11 @@ import {
 const SERVER_CLOSE_GRACE_MS = 5000;
 
 function autoloopErrorStatus(error: unknown): number {
+  if (error instanceof AutoloopRecoveryError) {
+    return error.code === 'AUTOLOOP_RECOVERY_TOKEN_REQUIRED' ? 400 : 409;
+  }
   const message = error instanceof Error ? error.message : String(error);
-  if (/^Autoloop run '.+' not found in registry$/.test(message)) return 404;
+  if (/^Autoloop run '.+' not found(?: in registry)?$/.test(message)) return 404;
   if (/^Autoloop with id '.+' (?:already exists|is being deleted|is still starting)$/.test(message)) return 409;
   if (/^Autoloop session name '.+' is already in use$/.test(message)) return 409;
   if (/^(?:Planner|Coder|Reviewer) engine '.+' is not supported$/.test(message)) return 400;
@@ -1312,6 +1316,37 @@ export class EmbeddedServer {
       // runs that ended via terminate, NOT for autoloopDelete), Claude will
       // resume the original conversation. Otherwise a fresh Planner is
       // spawned and the dashboard replays chat.jsonl visually.
+      // ─── Autoloop — inspect or apply durable recovery ─────────
+      const v2RecoverMatch = path.match(/^\/autoloop\/([^/]+)\/recover$/);
+      if (v2RecoverMatch) {
+        try {
+          if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+            throw new Error('autoloop_recover body must be an object');
+          }
+          const input = body as Record<string, unknown>;
+          const unsupported = Object.keys(input).find((key) => key !== 'apply' && key !== 'recovery_token');
+          if (unsupported) throw new Error(`autoloop_recover contains unsupported field '${unsupported}'`);
+          if (input.apply !== undefined && typeof input.apply !== 'boolean') {
+            throw new Error('autoloop_recover apply must be a boolean');
+          }
+          if (input.recovery_token !== undefined && typeof input.recovery_token !== 'string') {
+            throw new Error('autoloop_recover recovery_token must be a string');
+          }
+          const options: { apply?: boolean; recovery_token?: string } = {};
+          if (input.apply !== undefined) options.apply = input.apply;
+          if (input.recovery_token !== undefined) options.recovery_token = input.recovery_token;
+          const result = await this.manager.autoloopRecover(v2RecoverMatch[1], options);
+          json(200, { ok: true, ...result });
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          const callerError = /^autoloop_recover (?:body|contains unsupported field|apply|recovery_token)/.test(
+            message,
+          );
+          json(callerError ? 400 : autoloopErrorStatus(err), { ok: false, error: message });
+        }
+        return;
+      }
+
       // ─── Autoloop — what a resume needs before it can run ─────
       //
       // GET /autoloop/<run_id>/resume-requirements
