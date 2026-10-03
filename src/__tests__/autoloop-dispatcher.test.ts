@@ -622,6 +622,27 @@ describe('ClaudeAgentDispatcher — phase_error surfacing', () => {
       expect(replies[0].payload.phase).toBe('send');
     }
   });
+
+  it('returns a phase_error when automatic reset cannot stop a live Coder', async () => {
+    const { dispatcher, calls } = makeDispatcher({}, { sendThrows: 1 });
+    await dispatcher.spawnSubagents();
+    calls.stopSession.mockRejectedValueOnce(new Error('coder still live'));
+
+    const replies = await dispatcher.deliver(
+      Msg.directive(0, { goal: 'g', constraints: [], success_criteria: [], max_attempts: 1 }),
+    );
+
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toMatchObject({
+      type: 'phase_error',
+      payload: { agent: 'coder', phase: 'send', error: 'coder still live' },
+    });
+    expect(calls.sendMessage).toHaveBeenCalledTimes(1);
+    expect(calls.stopSession).toHaveBeenCalledTimes(1);
+    expect(
+      calls.startSession.mock.calls.filter((entry) => (entry[0] as { name: string }).name === 'autoloop-r1-coder'),
+    ).toHaveLength(1);
+  });
 });
 
 describe('ClaudeAgentDispatcher — recoverable send timeout and dispatch identity', () => {

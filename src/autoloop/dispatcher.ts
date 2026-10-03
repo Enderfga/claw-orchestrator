@@ -681,7 +681,12 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
       throw new Error(result.error);
     } catch (err) {
       this.logger.warn?.(`[autoloop] ${agent} send threw, attempting reset+retry: ${(err as Error).message}`);
-      await this.resetAgent(agent, { eagerRestart: true });
+      try {
+        await this.resetAgent(agent, { eagerRestart: true });
+      } catch (resetError) {
+        this.logger.error?.(`[autoloop] ${agent} reset failed after send error: ${(resetError as Error).message}`);
+        return { output: '', error: (resetError as Error).message, fatal: true };
+      }
       // Let the freshly-restarted subprocess settle before retrying — an
       // immediate retry routinely hits the same transient failure (e.g. the
       // old socket still in TIME_WAIT → ECONNREFUSED). Small jitter avoids
