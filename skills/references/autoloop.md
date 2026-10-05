@@ -171,6 +171,11 @@ autoloop_reset_agent({ "run_id": "my-run", "agent": "coder", "eager_restart": tr
 autoloop_stop({ "run_id": "my-run", "reason": "done" })
 ```
 
+Agent reset is fail-closed. If the old session cannot be stopped and its name is
+still live (or liveness cannot be checked), the reset fails without clearing the
+role's started state or attempting a replacement. If the manager confirms that
+the old name is already absent, reset may continue and create the replacement.
+
 ## Plugin tools
 
 | Tool                   | Args                                                                                                                                                            | What                                                                                                                                |
