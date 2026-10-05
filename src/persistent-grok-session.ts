@@ -26,7 +26,7 @@
  * codex, where the same-looking field is a running total.
  */
 
-import { spawn } from 'node:child_process';
+import { spawnEngine } from './engine-spawn.js';
 
 import type { SessionConfig, SessionSendOptions, StreamEvent, TurnResult } from './types.js';
 import { sanitizeSecrets } from './sanitize.js';
@@ -180,7 +180,7 @@ export class PersistentGrokSession extends BaseOneShotSession {
       let stderr = '';
       let settled = false;
 
-      const proc = spawn(this.engineBin, args, {
+      const proc = spawnEngine(this.engineBin, args, {
         cwd: this.options.cwd,
         env: { ...process.env },
         stdio: ['pipe', 'pipe', 'pipe'],

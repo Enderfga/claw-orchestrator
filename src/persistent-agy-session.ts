@@ -29,7 +29,7 @@
  * nothing on stderr. Treat a wrong model as a failed turn, not a quiet swap.
  */
 
-import { spawn } from 'node:child_process';
+import { spawnEngine } from './engine-spawn.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -270,7 +270,7 @@ export class PersistentAgySession extends BaseOneShotSession {
       let turnError: string | undefined;
 
       const startedAt = Date.now();
-      const proc = spawn(this.engineBin, args, {
+      const proc = spawnEngine(this.engineBin, args, {
         cwd: this.options.cwd,
         env: { ...process.env },
         stdio: ['ignore', 'pipe', 'pipe'],

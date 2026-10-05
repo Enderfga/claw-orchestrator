@@ -11,7 +11,7 @@
  *   - Consistent lifecycle semantics (start/stop/pause/resume)
  */
 
-import { spawn } from 'node:child_process';
+import { spawnEngine } from './engine-spawn.js';
 import * as readline from 'node:readline';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -151,7 +151,7 @@ export class PersistentCursorSession extends BaseOneShotSession {
       let settled = false;
       let gotUsageFromEvents = false;
 
-      const proc = spawn(this.engineBin, args, {
+      const proc = spawnEngine(this.engineBin, args, {
         cwd: spawnCwd,
         env: { ...process.env },
         stdio: ['pipe', 'pipe', 'pipe'],

@@ -14,7 +14,7 @@
  *     conversation continuity (Codex 0.119+).
  */
 
-import { spawn } from 'node:child_process';
+import { killEngineTree, spawnEngine } from './engine-spawn.js';
 import { writeFileSync, unlinkSync, readFileSync, readdirSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
@@ -242,7 +242,7 @@ export class PersistentCodexSession extends BaseOneShotSession {
    * First turn:    `codex exec [--sandbox W] --skip-git-repo-check --json --model M -C cwd <msg>`
    * Resume turns:  `codex exec resume <thread_id> [--sandbox W] --skip-git-repo-check --json --model M -C cwd <msg>`
    */
-  private _buildArgs(message: string): string[] {
+  private _buildArgs(): string[] {
     const args: string[] = ['exec'];
     const isResume = !!this.codexThreadId;
     const sandbox = this.options.sandboxMode || 'workspace-write';
@@ -288,7 +288,10 @@ export class PersistentCodexSession extends BaseOneShotSession {
     if (!isResume && this.options.addDir?.length) {
       for (const dir of this.options.addDir) args.push('--add-dir', dir);
     }
-    args.push(message);
+    // `-` reads the prompt from stdin. On Windows `codex` is an npm `.cmd` shim
+    // that runs through cmd.exe, which would cut a prompt at its first newline
+    // and mis-split one with an unbalanced quote; stdin carries it unchanged.
+    args.push('-');
     return args;
   }
 
@@ -346,7 +349,7 @@ export class PersistentCodexSession extends BaseOneShotSession {
     // cumulative total as of the *previous* turn, and this turn is about to
     // append its own to the same file.
     this._readRollout();
-    const args = this._buildArgs(message);
+    const args = this._buildArgs();
     const timeout = options.timeout || 300_000;
 
     return new Promise<TurnResult>((resolve, reject) => {
@@ -357,17 +360,21 @@ export class PersistentCodexSession extends BaseOneShotSession {
       let turnError: string | undefined;
       let settled = false;
 
-      const proc = spawn(this.engineBin, args, {
+      const proc = spawnEngine(this.engineBin, args, {
         cwd: this.options.cwd,
         env: { ...process.env },
-        stdio: ['ignore', 'pipe', 'pipe'],
+        stdio: ['pipe', 'pipe', 'pipe'],
       });
       this.currentProc = proc;
+      // A process that dies before reading surfaces through 'close'; the write
+      // error itself carries nothing more.
+      proc.stdin?.on('error', () => {});
+      proc.stdin?.end(message);
 
       const timer = setTimeout(() => {
         if (!settled) {
           settled = true;
-          proc.kill('SIGTERM');
+          killEngineTree(proc);
           reject(new Error('Timeout waiting for Codex response'));
         }
       }, timeout);

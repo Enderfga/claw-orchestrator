@@ -14,8 +14,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const mockSpawn = vi.fn();
-vi.mock('node:child_process', () => ({
-  spawn: (...args: unknown[]) => mockSpawn(...args),
+vi.mock('../engine-spawn.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../engine-spawn.js')>()),
+  spawnEngine: (...args: unknown[]) => mockSpawn(...args),
 }));
 
 const { PersistentCodexSession } = await import('../persistent-codex-session.js');
@@ -24,12 +25,20 @@ function createMockProcess() {
   const proc = new EventEmitter() as EventEmitter & {
     stdout: Readable;
     stderr: EventEmitter;
+    stdin: { written: string; on: ReturnType<typeof vi.fn>; end: (text?: string) => void };
     kill: ReturnType<typeof vi.fn>;
     pid: number;
     exitCode: null;
   };
   proc.stdout = new Readable({ read() {} });
   proc.stderr = new EventEmitter();
+  proc.stdin = {
+    written: '',
+    on: vi.fn(),
+    end(text?: string) {
+      this.written += text ?? '';
+    },
+  };
   proc.kill = vi.fn();
   proc.pid = 4242;
   proc.exitCode = null;
@@ -117,7 +126,8 @@ describe('PersistentCodexSession', () => {
     const first = session.send('hi', { waitForComplete: true });
     setTimeout(() => runTurn(mockProc, 'thread-7'), 10);
     await first;
-    expect((mockSpawn.mock.calls[0][1] as string[]).at(-1)).toBe('SEAT RULES\n\n---\n\nhi');
+    expect((mockSpawn.mock.calls[0][1] as string[]).at(-1)).toBe('-');
+    expect(mockProc.stdin.written).toBe('SEAT RULES\n\n---\n\nhi');
 
     const secondProc = createMockProcess();
     mockSpawn.mockReturnValueOnce(secondProc);
@@ -126,7 +136,26 @@ describe('PersistentCodexSession', () => {
     await second;
     const secondArgs = mockSpawn.mock.calls[1][1] as string[];
     expect(secondArgs.slice(0, 3)).toEqual(['exec', 'resume', 'thread-7']);
-    expect(secondArgs.at(-1)).toBe('again');
+    expect(secondArgs.at(-1)).toBe('-');
+    expect(secondProc.stdin.written).toBe('again');
+  });
+
+  // On Windows `codex` is an npm .cmd shim run through cmd.exe, which cuts an
+  // argument at its first newline and mis-splits an unbalanced quote. The
+  // prompt therefore never travels on argv.
+  it('sends the prompt on stdin, never on argv', async () => {
+    const session = new PersistentCodexSession({ name: 'test', cwd: '/tmp' });
+    await session.start();
+    const prompt = 'line one says "hi\nline two';
+
+    const p = session.send(prompt, { waitForComplete: true });
+    setTimeout(() => runTurn(mockProc, 'thread-stdin'), 10);
+    await p;
+
+    const args = mockSpawn.mock.calls[0][1] as string[];
+    expect(args.at(-1)).toBe('-');
+    expect(args.some((a) => a.includes('line one'))).toBe(false);
+    expect(mockProc.stdin.written).toBe(prompt);
   });
 
   it('does not repeat appendSystemPrompt when the session resumes an existing thread', async () => {
@@ -141,7 +170,7 @@ describe('PersistentCodexSession', () => {
     const sendPromise = session.send('continue', { waitForComplete: true });
     setTimeout(() => runTurn(mockProc, '019c6dcb-93ad-7dc1-b531-418d213b8761'), 10);
     await sendPromise;
-    expect((mockSpawn.mock.calls[0][1] as string[]).at(-1)).toBe('continue');
+    expect(mockProc.stdin.written).toBe('continue');
   });
 
   it('starts with exec resume when resumeSessionId contains a Codex thread ID', async () => {

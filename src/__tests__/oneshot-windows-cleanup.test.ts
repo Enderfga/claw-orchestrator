@@ -11,8 +11,11 @@ import { Readable } from 'node:stream';
 const mockSpawn = vi.fn();
 const mockExecFileSync = vi.fn();
 vi.mock('node:child_process', () => ({
-  spawn: (...args: unknown[]) => mockSpawn(...args),
   execFileSync: (...args: unknown[]) => mockExecFileSync(...args),
+}));
+vi.mock('../engine-spawn.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../engine-spawn.js')>()),
+  spawnEngine: (...args: unknown[]) => mockSpawn(...args),
 }));
 
 const { PersistentCodexSession } = await import('../persistent-codex-session.js');

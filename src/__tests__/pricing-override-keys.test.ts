@@ -48,6 +48,13 @@ vi.mock('node:child_process', async (importOriginal) => {
     }),
   };
 });
+// Engine sessions spawn through engine-spawn.js, not node:child_process.
+vi.mock('../engine-spawn.js', () => ({
+  spawnEngine: vi.fn(() => {
+    mockProc = new MockProcess();
+    return mockProc;
+  }),
+}));
 
 const { SessionManager } = await import('../session-manager.js');
 const { PersistentCustomSession } = await import('../persistent-custom-session.js');

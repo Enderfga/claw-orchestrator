@@ -6,7 +6,7 @@
  * and optionally override _cleanupProc() for extra cleanup (readline, streams).
  */
 
-import { ChildProcess, execFileSync } from 'node:child_process';
+import { ChildProcess } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -23,6 +23,7 @@ import {
   getModelPricing as _getModelPricingBase,
 } from './types.js';
 import { resolveAlias, getContextWindow } from './models.js';
+import { killEngineTree } from './engine-spawn.js';
 import { MAX_HISTORY_ITEMS, DEFAULT_HISTORY_LIMIT, SESSION_EVENT } from './constants.js';
 
 // ─── Engine Configuration ──────────────────────────────────────────────────
@@ -419,27 +420,7 @@ export abstract class BaseOneShotSession extends EventEmitter implements ISessio
   /** Override in subclasses that need extra cleanup (readline, stream destroy). */
   protected _cleanupProc(): void {
     if (this.currentProc) {
-      try {
-        // On Windows `kill` ends only the process it is given, and the engine
-        // CLI's own children keep running; taskkill /T takes the whole tree. It
-        // runs synchronously on the cleanup path, so it is bounded: a hung
-        // taskkill must not stall the server's event loop.
-        if (process.platform === 'win32' && this.currentProc.pid) {
-          try {
-            execFileSync('taskkill', ['/pid', String(this.currentProc.pid), '/T', '/F'], {
-              stdio: 'ignore',
-              timeout: 5_000,
-              windowsHide: true,
-            });
-          } catch {
-            this.currentProc.kill('SIGTERM');
-          }
-        } else {
-          this.currentProc.kill('SIGTERM');
-        }
-      } catch {
-        // Process may have already exited
-      }
+      killEngineTree(this.currentProc);
       this.currentProc = null;
     }
   }
