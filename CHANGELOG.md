@@ -13,6 +13,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A live or unprovable old session now makes reset fail without clearing the role's started state
   or attempting a replacement; a session confirmed absent can still be recreated.
 
+## [Unreleased]
+
+### Fixed
+
+- **Codex and OpenCode run on Windows.** npm installs both as `.cmd` shims, which
+  `child_process.spawn` cannot launch without a shell, so every turn failed with `spawn <bin> ENOENT`.
+  Engines now launch through `src/engine-spawn.ts` (cross-spawn), which resolves `PATH`/`PATHEXT`
+  and escapes arguments for `cmd.exe` only when the target needs it; direct executables and
+  non-Windows platforms are unchanged. Codex and OpenCode now receive the prompt on stdin, since
+  `cmd.exe` cuts an argument at its first newline; any other argument `cmd.exe` cannot carry
+  unchanged is refused before spawning. A timed-out turn ends the engine's whole process tree on
+  Windows, not only `cmd.exe`. (#121, thanks @tearz1986)
+
 ## [7.6.1] - 2026-10-01
 
 ### Fixed

@@ -13,7 +13,8 @@ import { Readable } from 'node:stream';
 
 // Mock child_process before importing the session
 const mockSpawn = vi.fn();
-vi.mock('../engine-spawn.js', () => ({
+vi.mock('../engine-spawn.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../engine-spawn.js')>()),
   spawnEngine: (...args: unknown[]) => mockSpawn(...args),
 }));
 
@@ -25,7 +26,7 @@ function createMockProcess() {
   const proc = new EventEmitter() as EventEmitter & {
     stdout: Readable & { destroy: ReturnType<typeof vi.fn> };
     stderr: EventEmitter & { destroy: ReturnType<typeof vi.fn> };
-    stdin: { end: ReturnType<typeof vi.fn> };
+    stdin: { end: ReturnType<typeof vi.fn>; on: ReturnType<typeof vi.fn> };
     kill: ReturnType<typeof vi.fn>;
     pid: number;
     exitCode: null;
@@ -35,7 +36,7 @@ function createMockProcess() {
   const stderrEmitter = new EventEmitter() as EventEmitter & { destroy: ReturnType<typeof vi.fn> };
   stderrEmitter.destroy = vi.fn();
   proc.stderr = stderrEmitter;
-  proc.stdin = { end: vi.fn() };
+  proc.stdin = { end: vi.fn(), on: vi.fn() };
   proc.kill = vi.fn();
   proc.pid = 23456;
   proc.exitCode = null;
@@ -197,7 +198,10 @@ describe('PersistentOpencodeSession', () => {
 
       const spawnArgs = mockSpawn.mock.calls[0][1] as string[];
       expect(spawnArgs[0]).toBe('run');
-      expect(spawnArgs[1]).toBe('hello');
+      // The message goes on stdin: on Windows `opencode` is an npm .cmd shim,
+      // and cmd.exe would cut an argv message at its first newline.
+      expect(spawnArgs).not.toContain('hello');
+      expect(mockProc.stdin.end).toHaveBeenCalledWith('hello');
       expect(spawnArgs).toContain('--format');
       expect(spawnArgs).toContain('json');
       // 1.1.40 does not have / does not need --dangerously-skip-permissions.
@@ -256,8 +260,8 @@ describe('PersistentOpencodeSession', () => {
       setTimeout(() => closeProc(proc2, 0), 10);
       await p2;
 
-      expect((mockSpawn.mock.calls[0][1] as string[])[1]).toBe('SEAT RULES\n\n---\n\nfirst');
-      expect((mockSpawn.mock.calls[1][1] as string[])[1]).toBe('second');
+      expect(mockProc.stdin.end).toHaveBeenCalledWith('SEAT RULES\n\n---\n\nfirst');
+      expect(proc2.stdin.end).toHaveBeenCalledWith('second');
     });
 
     it('resumes a persisted opencode session id from config', async () => {

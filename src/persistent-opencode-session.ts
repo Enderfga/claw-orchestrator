@@ -33,7 +33,7 @@
  * ever wanted — verified against 1.17.15.)
  */
 
-import { spawnEngine } from './engine-spawn.js';
+import { killEngineTree, spawnEngine } from './engine-spawn.js';
 import * as readline from 'node:readline';
 
 import type { SessionConfig, SessionSendOptions, StreamEvent, TurnResult } from './types.js';
@@ -152,8 +152,10 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
   }
 
   protected _run(message: string, options: SessionSendOptions): Promise<TurnResult> {
-    // opencode run <message..> --format json [--session <id>]
-    const args: string[] = ['run', message, '--format', 'json'];
+    // opencode run --format json [--session <id>], with the message on stdin.
+    // On Windows `opencode` is an npm `.cmd` shim that runs through cmd.exe,
+    // which would cut a message at its first newline; stdin carries it unchanged.
+    const args: string[] = ['run', '--format', 'json'];
 
     // Continue OpenCode's own session rather than starting a fresh one. Verified
     // against 1.18.18: without this the second turn answers "you never asked me
@@ -210,14 +212,14 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
         stdio: ['pipe', 'pipe', 'pipe'],
       });
       this.currentProc = proc;
-      // opencode reads stdin even when the prompt is on argv. Close it
-      // immediately so the subprocess doesn't hang waiting for EOF.
-      proc.stdin?.end();
+      // Writing the message closes stdin too; opencode waits for EOF before it starts.
+      proc.stdin?.on('error', () => {});
+      proc.stdin?.end(message);
 
       const timer = setTimeout(() => {
         if (!settled) {
           settled = true;
-          proc.kill('SIGTERM');
+          killEngineTree(proc);
           reject(new Error('Timeout waiting for OpenCode response'));
         }
       }, timeout);

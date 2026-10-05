@@ -15,7 +15,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import type { ChildProcess } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execEngine, isWindowsBatchTarget, spawnEngine } from '../engine-spawn.js';
@@ -26,8 +26,8 @@ const isWin = process.platform === 'win32';
  * Args verified (battery-probed through a real `.cmd` shim) to round-trip
  * exactly: spaces, shell metacharacters, balanced quotes, unicode.
  * Deliberately EXCLUDED: unbalanced double-quotes (derail cmd.exe parsing)
- * and newlines (cmd.exe truncates the argument) — both are documented limits
- * of the shim path, not regressions: direct executables keep them intact.
+ * and newlines (cmd.exe truncates the argument). The shim path refuses both
+ * before spawning; prompts reach codex and opencode on stdin instead.
  */
 const SAFE_ARGS = ['a b', 'c&d', '100%', 'read "config" & go', "i'j", 'k|l', 'plain', 'ünïcodé'];
 
@@ -76,7 +76,8 @@ describe('spawnEngine', () => {
       expect(code).toBe(0);
       const parsed = JSON.parse(stdout) as { argv: string[]; cwd: string };
       expect(parsed.argv).toEqual(fullArgs);
-      expect(parsed.cwd).toBe(cwd);
+      // macOS tmpdir is a symlink (/var → /private/var); the child reports the real path.
+      expect(realpathSync(parsed.cwd)).toBe(realpathSync(cwd));
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
@@ -109,7 +110,8 @@ describe('spawnEngine', () => {
   });
 });
 
-describe('execEngine', () => {  it('captures stdout/stderr and resolves on exit 0', async () => {
+describe('execEngine', () => {
+  it('captures stdout/stderr and resolves on exit 0', async () => {
     const res = await execEngine(process.execPath, ['-e', 'console.log("out");console.error("err")']);
     expect(res.stdout).toContain('out');
     expect(res.stderr).toContain('err');
@@ -186,7 +188,7 @@ describe('isWindowsBatchTarget', () => {
   });
 });
 
-describe('newline flattening', () => {
+describe('argv cmd.exe cannot carry', () => {
   it('keeps newlines intact through a direct executable', async () => {
     const child = spawnEngine(process.execPath, ['-e', ECHO_SCRIPT, 'line1\nline2\r\nline3'], {
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -197,14 +199,22 @@ describe('newline flattening', () => {
     expect(parsed.argv).toEqual(['line1\nline2\r\nline3']);
   });
 
-  it.runIf(isWin)('flattens newlines to spaces through a .cmd shim', async () => {
-    const { cmdPath, dir } = writeCmdFixture();
+  // cmd.exe cuts an argument at a newline and mis-splits an unbalanced quote,
+  // so such argv is refused before spawning rather than delivered altered.
+  // Platform and PATH are faked, so this runs on every OS.
+  it.each([
+    ['a newline', 'line1\nline2'],
+    ['an unbalanced quote', 'say "hi'],
+  ])('refuses %s for a batch target', (_label, arg) => {
+    const realPlatform = process.platform;
+    const dir = mkdtempSync(join(tmpdir(), 'clawo-batchrefuse-'));
+    writeFileSync(join(dir, 'shim.cmd'), '@echo off', 'utf8');
+    Object.defineProperty(process, 'platform', { value: 'win32' });
     try {
-      const { stdout, stderr } = await execEngine(cmdPath, ['line1\nline2\r\nline3']);
-      expect(stderr).toBe('');
-      const parsed = JSON.parse(stdout) as { argv: string[] };
-      expect(parsed.argv).toEqual([join(dir, 'echo-argv.cjs'), 'line1 line2 line3']);
+      const env = { PATH: dir, PATHEXT: '.COM;.EXE;.BAT;.CMD' };
+      expect(() => spawnEngine('shim', ['run', arg], { env })).toThrow(/cmd\.exe/);
     } finally {
+      Object.defineProperty(process, 'platform', { value: realPlatform });
       rmSync(dir, { recursive: true, force: true });
     }
   });

@@ -19,7 +19,7 @@ SessionManager
 ├── engine: 'cursor'    → PersistentCursorSession (legacy)
 │   └── Wraps: cursor-agent -p --trust --output-format stream-json (per-message spawning)
 ├── engine: 'opencode'  → PersistentOpencodeSession
-│   └── Wraps: opencode run --format json (per-message spawning)
+│   └── Wraps: opencode run --format json, message on stdin (per-message spawning)
 └── engine: 'custom'    → PersistentCustomSession
     └── Wraps: any CLI via user-provided CustomEngineConfig
 ```
@@ -81,7 +81,8 @@ Wraps the `codex exec` subcommand. Each `send()` spawns a new process. Tested wi
 - Working directory passed via `-C` on the first turn
 - Model: with no `model`, codex runs its own default — the `model` in `~/.codex/config.toml` if set. Cost is then priced as the model codex reports it ran (the rollout's `turn_context`; `thread/start` on `codex-app`), and as `gpt-5.5` only when that cannot be read
 - Requires `codex` CLI >= 0.119 (for `exec resume`): `npm install -g @openai/codex`
-- **Windows:** npm `.cmd` shims launch via `src/engine-spawn.ts` (cross-spawn). Arguments keep spaces, balanced quotes and `%`; newlines are flattened to spaces for batch targets (cmd.exe cannot carry them); an unbalanced `"` in one argument is a cmd.exe limit.
+- The prompt is sent on stdin (`codex exec … -`), never on the command line.
+- **Windows:** the npm `.cmd` shim launches through `src/engine-spawn.ts` (cross-spawn), which escapes the remaining arguments for `cmd.exe`. Because the prompt is on stdin it arrives unchanged, newlines and quotes included. A timed-out turn ends the whole process tree (`taskkill /T /F`), not only `cmd.exe`.
 - **Does not support `/goal`** — for that, use `engine: 'codex-app'` below
 
 ```typescript
@@ -345,7 +346,7 @@ Wraps the [sst/opencode](https://github.com/sst/opencode) CLI with `run --format
   - if the `clawo-readonly` agent fails to load, the turn is refused rather than run with write access
   - to test a change to this config, use adversarial prompts that include asking the agent to delegate; `opencode agent list` shows compiled rules that look the same for a safe and an unsafe agent
 - Requires opencode installed: `brew install sst/tap/opencode` or `npm install -g opencode-ai`. Auth via `opencode auth login` **or** any provider env var (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, etc.) — opencode picks up either path
-- Binary: `opencode` (set `OPENCODE_BIN` env var to override). **Windows:** npm `.cmd` shims launch via `src/engine-spawn.ts` (cross-spawn) — same quoting limits as the codex entry above.
+- Binary: `opencode` (set `OPENCODE_BIN` env var to override). The message is sent on stdin, never on the command line. **Windows:** the npm `.cmd` shim launches through `src/engine-spawn.ts` (cross-spawn), as for codex above.
 
 ```typescript
 await manager.startSession({

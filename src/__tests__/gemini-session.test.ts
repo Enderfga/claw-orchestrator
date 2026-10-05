@@ -12,7 +12,8 @@ import { readFileSync } from 'node:fs';
 
 // Mock child_process before importing the session
 const mockSpawn = vi.fn();
-vi.mock('../engine-spawn.js', () => ({
+vi.mock('../engine-spawn.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../engine-spawn.js')>()),
   spawnEngine: (...args: unknown[]) => mockSpawn(...args),
 }));
 
