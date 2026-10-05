@@ -5,19 +5,81 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [7.6.2] - 2026-10-01
 
 ### Fixed
 
-- **Codex and OpenCode launch on Windows.** npm `.cmd` shims (`codex`, `opencode`) failed every turn
-  with `spawn <bin> ENOENT`, because `node:child_process` cannot execute batch files without a shell
-  while true executables (`claude.exe`, `agy.exe`) worked. All engine spawns now go through the new
-  `src/engine-spawn.ts` (cross-spawn: PATH/PATHEXT resolution plus `cmd.exe` argv escaping only when
-  the target needs it; direct executables and non-Windows spawns are unchanged). `shell: true` was
-  deliberately not used — Node concatenates argv unescaped there. Follow-up: `cmd.exe` cannot carry
-  newlines, so prompts sent to a batch target are flattened (`\n` → space, batch targets only,
-  detected via PATH/PATHEXT lookup) instead of being silently truncated after the first line. An
-  unbalanced `"` in one argument remains a `cmd.exe` limit.
+- **Autoloop agent reset no longer reports success while reusing a session that failed to stop.**
+  A live or unprovable old session now makes reset fail without clearing the role's started state
+  or attempting a replacement; a session confirmed absent can still be recreated.
+
+## [7.6.1] - 2026-10-01
+
+### Fixed
+
+- **A Codex session with no model is priced as the model Codex ran.** Without `model`, Codex runs
+  its own default — the `model` in `~/.codex/config.toml` if one is set — but the cost was
+  computed at `gpt-5.5` rates regardless, so a session on `gpt-6-astra` was reported at half its
+  input price and `maxBudgetUsd` let it spend past the cap. Both Codex engines now price the model
+  Codex reports: `codex` from the thread's rollout, `codex-app` from the `thread/start` response.
+- **An empty Coder reply no longer masquerades as a clarification request.** A successful
+  transport with no response now surfaces as `phase_error`, allowing the existing circuit breaker
+  to stop repeated logically empty turns. (#125, thanks @ajmtrz)
+
+### Added
+
+- `gpt-6.1-sol` (Codex 0.159.3) registered at its published rates: $2/$10 per Mtok, with cache
+  reads at $0.10 (5% of input), and a 1.05M-token context window.
+
+### Changed
+
+- Tested with Claude Code 2.1.286, Codex 0.159.3, agy 1.2.14 and OpenCode 1.18.34.
+
+## [7.6.0] - 2026-09-29
+
+### Added
+
+- **Unified optional reasoning-effort bindings for orchestrated agents.** Fan-out agents and
+  built-in workflow agents/reviewers now accept per-agent `effort`, matching Council's existing
+  support. Autoloop accepts fixed `planner_effort`, `coder_effort`, and `reviewer_effort`; these
+  survive durable resume and role reset, and Planner engine/model overrides cannot replace them.
+  Omitting effort preserves existing defaults and older stored runs remain compatible.
+
+### Fixed
+
+- **Fan-out personas no longer replace the shared task.** Agents can now receive optional
+  `persona` role instructions composed before the common task, while a non-empty per-agent
+  `prompt` retains its documented full-override behavior. Both fields remain distinct in the
+  durable workflow spec, so resumed fan-outs reproduce the same message.
+
+### Changed
+
+- **The `sonnet` alias resolves to Claude Sonnet 5.5.** Claude Code 2.1.284 made `claude-sonnet-5-5`
+  the model `--model sonnet` runs, so the alias moved with it and the model is registered at its
+  published rates ($2/$10 per Mtok, $0.20 cache reads, 1M-token context). These match Sonnet 5, so
+  no cost figure changes; sessions started with `sonnet` now report the model they really run.
+  `claude-sonnet-5` stays selectable by id.
+- Tested with Claude Code 2.1.284, Codex 0.159.0, agy 1.2.13, grok 1.0.44 and OpenCode 1.18.33.
+
+## [7.5.6] - 2026-09-26
+
+### Fixed
+
+- **An agy turn that started a background task no longer fails as a timeout.** Since agy 1.2.9 a
+  headless run whose agent started a background task — a dev server, a watcher — stays open until
+  its `--print-timeout` deadline, and prints the reply only when it exits. The wrapper set that
+  deadline 5s after its own timer, so it killed the run first and reported a finished turn as a
+  timeout. agy's deadline is now set just inside the send timeout, so agy ends the background task
+  and delivers the reply. A run that reaches the deadline while the agent is still working is
+  reported as a timeout: agy marks it `SUCCESS` with a partial reply and says otherwise only on
+  stderr.
+- **An effort-qualified agy model is priced as its base model.** A session on
+  `gemini-3.1-pro-high` was not found in the model registry and fell back to the Gemini Flash rates;
+  it is now priced as `gemini-3.1-pro`.
+
+### Changed
+
+- Tested with Claude Code 2.1.283, Codex 0.157.1 and agy 1.2.11.
 
 ## [7.5.5] - 2026-09-24
 
@@ -44,7 +106,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **Ultrareview reviewers are read-only on every engine.** They were started with `permissionMode:
-  'plan'`, which constrains Claude only, so a reviewer assigned to another engine through `engines`
+'plan'`, which constrains Claude only, so a reviewer assigned to another engine through `engines`
   ran under that engine's default sandbox — for Codex, one that can write — in the project directory
   it was reviewing. Reviewers now also get `sandboxMode: 'read-only'`, which reaches the session
   through the fan-out, and `ultrareview_start` refuses `grok`, which declines a read-only session

@@ -106,6 +106,13 @@ export class PersistentCodexSession extends BaseOneShotSession {
   /** Guards the rollout lookup so it runs at most once per session. */
   private _rolloutRead = false;
 
+  /**
+   * The model codex reports it ran, from the rollout's `turn_context`. With no
+   * `--model`, codex runs the `model` in the user's `~/.codex/config.toml`, and
+   * pricing that session at this wrapper's default misstates its cost.
+   */
+  private _codexModel?: string;
+
   constructor(config: SessionConfig, codexBin?: string) {
     super(config, codexBin || process.env.CODEX_BIN || 'codex', {
       enginePrefix: 'codex',
@@ -136,6 +143,10 @@ export class PersistentCodexSession extends BaseOneShotSession {
   // ── Context accounting ─────────────────────────────────────────────────
 
   /** Codex's enforced limit when we know it, else the model registry's. */
+  protected override _billedModel(): string | undefined {
+    return this.options.model || this._codexModel;
+  }
+
   protected override _effectiveContextWindow(): number {
     return this._codexContextWindow ?? super._effectiveContextWindow();
   }
@@ -162,6 +173,25 @@ export class PersistentCodexSession extends BaseOneShotSession {
 
       const windowMatch = /"model_context_window":\s*(\d+)/.exec(text);
       if (windowMatch) this._codexContextWindow = Number(windowMatch[1]);
+
+      if (!this.options.model) {
+        let lastModel: string | undefined;
+        for (const line of text.split('\n')) {
+          if (!line.includes('"turn_context"')) continue;
+          try {
+            const entry = JSON.parse(line) as { type?: string; payload?: { model?: unknown } };
+            if (entry.type === 'turn_context' && typeof entry.payload?.model === 'string') {
+              lastModel = entry.payload.model;
+            }
+          } catch {
+            /* a torn last line is expected while codex is still writing */
+          }
+        }
+        if (lastModel) {
+          this._codexModel = lastModel;
+          this._updateCost();
+        }
+      }
 
       // Last entry wins — it is the thread total as of the most recent turn.
       if (this._prevCumulativeIn === undefined) {

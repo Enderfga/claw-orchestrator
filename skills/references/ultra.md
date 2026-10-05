@@ -116,12 +116,12 @@ if (status?.status === 'completed') {
 
 ### Configuration
 
-| Parameter            | Default                   | Range | Description                                                                     |
-| -------------------- | ------------------------- | ----- | ------------------------------------------------------------------------------- |
-| `agentCount`         | 5                         | 1-20  | Number of reviewer agents                                                       |
-| `maxDurationMinutes` | 10                        | 5-25  | Per-agent timeout                                                               |
-| `model`              | session default           | —     | Model for all reviewers                                                         |
-| `focus`              | bugs + security + quality | —     | Review focus description                                                        |
+| Parameter            | Default                   | Range | Description                                                                                           |
+| -------------------- | ------------------------- | ----- | ----------------------------------------------------------------------------------------------------- |
+| `agentCount`         | 5                         | 1-20  | Number of reviewer agents                                                                             |
+| `maxDurationMinutes` | 10                        | 5-25  | Per-agent timeout                                                                                     |
+| `model`              | session default           | —     | Model for all reviewers                                                                               |
+| `focus`              | bugs + security + quality | —     | Review focus description                                                                              |
 | `engines`            | `['claude']`              | —     | Engines assigned to reviewers round-robin. Not `grok`, which refuses a read-only session, or `custom` |
 
 Reviewers run once each (up to 20 turns); there is no cross-review round. Results are stored as a durable run and remain queryable after a restart.

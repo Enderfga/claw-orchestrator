@@ -201,8 +201,21 @@ describe('PersistentAgySession', () => {
       const spawnArgs = mockSpawn.mock.calls[0][1] as string[];
       const idx = spawnArgs.indexOf('--print-timeout');
       expect(idx).toBeGreaterThan(-1);
-      // 60s send timeout + 5s margin so the wrapper timer, not agy, decides
-      expect(spawnArgs[idx + 1]).toBe('65s');
+      // agy's deadline comes first (60s less 10%), so a turn waiting on a
+      // background task is ended by agy with its reply, not killed by our timer
+      expect(spawnArgs[idx + 1]).toBe('54s');
+    });
+
+    it('caps the deadline margin at 10 seconds', async () => {
+      const session = new PersistentAgySession({ name: 'test', cwd: '/tmp', permissionMode: 'bypassPermissions' });
+      await session.start();
+
+      const sendPromise = session.send('hello', { waitForComplete: true, timeout: 300_000 });
+      setTimeout(() => succeedProc(mockProc), 10);
+      await sendPromise;
+
+      const spawnArgs = mockSpawn.mock.calls[0][1] as string[];
+      expect(spawnArgs[spawnArgs.indexOf('--print-timeout') + 1]).toBe('290s');
     });
 
     it('resolves agy model aliases before passing --model', async () => {
@@ -965,6 +978,16 @@ describe('PersistentAgySession', () => {
       expect(result.text).toContain('does not support compaction');
     });
 
+    it('prices an effort-qualified slug as its base model', async () => {
+      const session = new PersistentAgySession({ name: 'test', cwd: '/tmp', model: 'gemini-3.1-pro-high' });
+      await session.start();
+
+      // gemini-3.1-pro is $2/$12; the Flash fallback it used to get is $0.75/$3.75
+      const cost = session.getCost();
+      expect(cost.pricing.inputPer1M).toBe(2);
+      expect(cost.pricing.outputPer1M).toBe(12);
+    });
+
     it('getCost() uses gemini-3.8-flash pricing by default', async () => {
       const session = new PersistentAgySession({
         name: 'test',
@@ -1104,6 +1127,81 @@ describe('PersistentAgySession', () => {
       if (!('text' in result)) throw new Error('expected a completed turn');
       expect(result.event.stop_reason).toBe('error');
       expect(session.getStats().turnsSucceeded).toBe(0);
+    });
+
+    // agy 1.2.9+: a run whose deadline passes mid-turn exits 0 with SUCCESS and
+    // a partial reply, and says so only on stderr.
+    it('fails a turn that reached the agy deadline while still working', async () => {
+      const session = new PersistentAgySession({ name: 'test', cwd: '/tmp', permissionMode: 'default' });
+      await session.start();
+
+      const observed = session.send('hello', { waitForComplete: true }).catch((err: Error) => err);
+      feedText(mockProc, JSON.stringify({ event: 'init', conversation_id: 'c1' }) + '\n');
+      mockProc.stderr.emit(
+        'data',
+        Buffer.from('[agy] print timeout after 270s with turn in progress; returning partial output\n'),
+      );
+      feedText(
+        mockProc,
+        JSON.stringify({ event: 'result', result: { conversation_id: 'c1', status: 'SUCCESS', response: 'Half' } }) +
+          '\n',
+      );
+      setTimeout(() => closeProc(mockProc, 0), 10);
+
+      expect(((await observed) as Error).message).toContain('Timeout waiting for Antigravity response');
+      expect(session.getStats().turnsSucceeded).toBe(0);
+      expect(session.conversationId).toBe('c1');
+    });
+
+    it('counts a turn that ended at the deadline while waiting on a background task', async () => {
+      const session = new PersistentAgySession({ name: 'test', cwd: '/tmp', permissionMode: 'default' });
+      await session.start();
+
+      const sendPromise = session.send('start the dev server', { waitForComplete: true });
+      mockProc.stderr.emit('data', Buffer.from('root agent idle; waiting up to 4m30s for 1 background task(s)\n'));
+      mockProc.stderr.emit('data', Buffer.from('terminating 1 background task(s) on exit\n'));
+      feedText(
+        mockProc,
+        JSON.stringify({ event: 'result', result: { conversation_id: 'c1', status: 'SUCCESS', response: 'STARTED' } }) +
+          '\n',
+      );
+      setTimeout(() => closeProc(mockProc, 0), 10);
+
+      expect((await sendPromise).text).toBe('STARTED');
+      expect(session.getStats().turnsSucceeded).toBe(1);
+    });
+
+    // Backstop for a reworded stderr line: a run that lasted until agy's deadline
+    // without ever going idle was cut off mid-turn.
+    it.each([
+      ['fails', ''],
+      ['counts', 'root agent idle; waiting up to 54s for 1 background task(s)\n'],
+    ])('%s a turn that ran to the agy deadline by elapsed time', async (verdict, stderrLine) => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      try {
+        const session = new PersistentAgySession({ name: 'test', cwd: '/tmp', permissionMode: 'default' });
+        await session.start();
+
+        const observed = session.send('hello', { waitForComplete: true, timeout: 60_000 }).catch((err: Error) => err);
+        if (stderrLine) mockProc.stderr.emit('data', Buffer.from(stderrLine));
+        feedText(
+          mockProc,
+          JSON.stringify({ event: 'result', result: { status: 'SUCCESS', response: 'Partial' } }) + '\n',
+        );
+        vi.setSystemTime(Date.now() + 55_000); // past agy's 54s, short of our 60s
+        setTimeout(() => closeProc(mockProc, 0), 10);
+
+        const outcome = await observed;
+        if (verdict === 'fails') {
+          expect((outcome as Error).message).toContain('Timeout waiting for Antigravity response');
+          expect(session.getStats().turnsSucceeded).toBe(0);
+        } else {
+          expect((outcome as { text: string }).text).toBe('Partial');
+          expect(session.getStats().turnsSucceeded).toBe(1);
+        }
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('counts a SUCCESS status', async () => {

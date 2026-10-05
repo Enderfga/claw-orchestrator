@@ -50,6 +50,7 @@ describe('lookupModel', () => {
       'claude-opus-4-8',
       'claude-opus-4-7',
       'claude-opus-4-6',
+      'claude-sonnet-5-5',
       'claude-sonnet-5',
       'claude-sonnet-4-6',
       'claude-haiku-4-5',
@@ -85,7 +86,7 @@ describe('lookupModel', () => {
 describe('resolveAlias', () => {
   it('resolves known aliases', () => {
     expect(resolveAlias('opus')).toBe('claude-opus-5-5');
-    expect(resolveAlias('sonnet')).toBe('claude-sonnet-5');
+    expect(resolveAlias('sonnet')).toBe('claude-sonnet-5-5');
     expect(resolveAlias('haiku')).toBe('claude-haiku-4-5');
     expect(resolveAlias('gemini-pro')).toBe('gemini-3.1-pro-preview');
     expect(resolveAlias('gemini-flash')).toBe('gemini-3-flash-preview');
@@ -297,9 +298,22 @@ describe('claude-sonnet-5', () => {
     expect(m!.pricing.output).not.toBe(15);
   });
 
+  it('stays selectable by id after the `sonnet` alias moved on', () => {
+    expect(resolveAlias('claude-sonnet-5')).toBe('claude-sonnet-5');
+    expect(resolveAlias('sonnet')).not.toBe('claude-sonnet-5');
+  });
+});
+
+// Claude Code 2.1.284 made Sonnet 5.5 the model `--model sonnet` resolves to.
+describe('claude-sonnet-5-5', () => {
   it('owns the `sonnet` alias so it tracks the CLI default', () => {
-    expect(resolveAlias('sonnet')).toBe('claude-sonnet-5');
+    expect(resolveAlias('sonnet')).toBe('claude-sonnet-5-5');
     expect(getContextWindow('sonnet')).toBe(1_000_000);
+  });
+
+  it('is priced from the published table, the same as Sonnet 5', () => {
+    expect(lookupModel('claude-sonnet-5-5')!.pricing).toEqual({ input: 2, output: 10, cached: 0.2 });
+    expect(lookupModel('claude-sonnet-5-5')!.pricing).toEqual(lookupModel('claude-sonnet-5')!.pricing);
   });
 });
 
@@ -417,7 +431,7 @@ describe('getAliases', () => {
   it('returns all aliases as Record', () => {
     const aliases = getAliases();
     expect(aliases.opus).toBe('claude-opus-5-5');
-    expect(aliases.sonnet).toBe('claude-sonnet-5');
+    expect(aliases.sonnet).toBe('claude-sonnet-5-5');
     expect(aliases['gemini-pro']).toBe('gemini-3.1-pro-preview');
   });
 });
@@ -545,6 +559,17 @@ describe('registry covers what the engines actually offer', () => {
 // opus` resolves to, and Codex 0.156.1 added GPT-6 Sol and Luna. Every number
 // here comes from the vendors' own price tables, and each has a reverse
 // assertion so a blanket edit across the family fails the suite.
+describe('gpt-6.1-sol (Codex 0.159.3)', () => {
+  it('is priced from the published table, with a 5% cache read', () => {
+    const p = lookupModel('gpt-6.1-sol')!.pricing;
+    expect(p).toEqual({ input: 2, output: 10, cached: 0.1 });
+    expect(p.cached).toBeCloseTo(p.input * 0.05, 10);
+    expect(getContextWindow('gpt-6.1-sol')).toBe(1_050_000);
+    // Reverse: GPT-6 Sol keeps its 10% cache read.
+    expect(lookupModel('gpt-6-sol')!.pricing.cached).toBe(0.2);
+  });
+});
+
 describe('models registered on 2026-09-23', () => {
   it('prices Opus 5.5 below Opus 5, with its half-rate cache read', () => {
     expect(lookupModel('claude-opus-5-5')!.pricing).toEqual({ input: 4, output: 20, cached: 0.2 });

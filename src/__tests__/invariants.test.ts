@@ -245,13 +245,20 @@ afterEach(async () => {
 // ─── 1. Every legacy field reaches the session ──────────────────────────────
 
 describe('the legacy API contract survives the adapter', () => {
-  it('fan-out delivers each agent its own prompt, engine, model, and permission mode', async () => {
+  it('fan-out delivers each agent its own prompt, engine, model, effort, and permission mode', async () => {
     const cwd = gitRepo();
     const fan = await mgr.fanoutStart({
       task: 'SHARED TASK',
       projectDir: cwd,
       agents: [
-        { name: 'alpha', engine: 'codex', model: 'm-alpha', prompt: 'ALPHA PROMPT', permissionMode: 'plan' },
+        {
+          name: 'alpha',
+          engine: 'codex',
+          model: 'm-alpha',
+          effort: 'ultra',
+          prompt: 'ALPHA PROMPT',
+          permissionMode: 'plan',
+        },
         { name: 'beta', engine: 'claude', model: 'm-beta', prompt: 'BETA PROMPT' },
       ],
       maxTurnsPerAgent: 7,
@@ -262,13 +269,78 @@ describe('the legacy API contract survives the adapter', () => {
     const alpha = observed.find((o) => o.config.name?.endsWith('-alpha'))!;
     const beta = observed.find((o) => o.config.name?.endsWith('-beta'))!;
 
-    expect(alpha.config).toMatchObject({ engine: 'codex', model: 'm-alpha', permissionMode: 'plan' });
+    expect(alpha.config).toMatchObject({
+      engine: 'codex',
+      model: 'm-alpha',
+      effort: 'ultra',
+      permissionMode: 'plan',
+    });
     expect(beta.config).toMatchObject({ engine: 'claude', model: 'm-beta' });
     expect(alpha.config.maxTurns).toBe(7);
     expect(alpha.config.maxBudgetUsd).toBe(1.25);
     // The per-agent prompt, not the shared task.
     expect(alpha.messages[0]).toBe('ALPHA PROMPT');
     expect(beta.messages[0]).toBe('BETA PROMPT');
+
+    fs.rmSync(cwd, { recursive: true, force: true });
+  });
+
+  it('fan-out preserves persona separately and composes it with the shared task', async () => {
+    const cwd = gitRepo();
+    const fan = await mgr.fanoutStart({
+      task: 'SHARED TASK',
+      projectDir: cwd,
+      agents: [{ name: 'role-agent', persona: 'ROLE INSTRUCTIONS' }],
+    });
+    await (mgr as unknown as { kernel: { wait(id: string): Promise<unknown> } }).kernel.wait(fan.id);
+
+    const roleAgent = observed.find((o) => o.config.name?.endsWith('-role-agent'))!;
+    expect(roleAgent.messages).toEqual(['ROLE INSTRUCTIONS\n\n## Shared task\n\nSHARED TASK']);
+
+    const { loadRun } = await import('../kernel/store.js');
+    const record = loadRun(fan.id)!;
+    const node = Object.values(record.spec.nodes).find((candidate) => candidate.kind === 'fanout');
+    expect(node).toMatchObject({
+      prompt: 'SHARED TASK',
+      agents: [{ name: 'role-agent', persona: 'ROLE INSTRUCTIONS' }],
+    });
+
+    fs.rmSync(cwd, { recursive: true, force: true });
+  });
+
+  it('a resumed fan-out replays the same composed persona and task from its stored spec', async () => {
+    const cwd = gitRepo();
+    const fan = await mgr.fanoutStart({
+      task: 'SHARED TASK',
+      projectDir: cwd,
+      agents: [{ name: 'role-agent', persona: 'ROLE INSTRUCTIONS' }],
+    });
+    const kernel = (mgr as unknown as { kernel: { wait(id: string): Promise<unknown> } }).kernel;
+    await kernel.wait(fan.id);
+
+    const { acquireLease, commit, loadRun, releaseLease } = await import('../kernel/store.js');
+    const record = loadRun(fan.id)!;
+    const nodeId = Object.keys(record.nodes)[0]!;
+    record.state = 'running';
+    record.endedAt = undefined;
+    record.currentNode = nodeId;
+    record.nodes[nodeId]!.state = 'running';
+    record.nodes[nodeId]!.output = undefined;
+    record.nodes[nodeId]!.data = undefined;
+    const crashed = acquireLease(fan.id, 'crashed-process');
+    expect(commit(crashed, { record }).outcome).toBe('committed');
+    expect(releaseLease(crashed)).toBe('released');
+
+    await mgr.shutdown();
+    mgr = makeManager();
+    await mgr.workflowResume(fan.id);
+    await (mgr as unknown as { kernel: { wait(id: string): Promise<unknown> } }).kernel.wait(fan.id);
+
+    const deliveries = observed.filter((o) => o.config.name?.endsWith('-role-agent')).flatMap((o) => o.messages);
+    expect(deliveries).toEqual([
+      'ROLE INSTRUCTIONS\n\n## Shared task\n\nSHARED TASK',
+      'ROLE INSTRUCTIONS\n\n## Shared task\n\nSHARED TASK',
+    ]);
 
     fs.rmSync(cwd, { recursive: true, force: true });
   });
@@ -338,6 +410,18 @@ describe('ultrareview is read-only', () => {
     expect(reviewers.map((r) => r.config.engine)).toEqual(['claude', 'codex']);
     expect(reviewers.every((r) => r.config.sandboxMode === 'read-only')).toBe(true);
     expect(fs.existsSync(path.join(cwd, 'AGENT-WROTE-HERE.txt'))).toBe(false);
+
+    fs.rmSync(cwd, { recursive: true, force: true });
+  });
+
+  it('ultrareview keeps its complete prompt and does not duplicate the shared review task', async () => {
+    const cwd = gitRepo();
+    const review = await mgr.ultrareviewStart(cwd, { agentCount: 1 });
+    await (mgr as unknown as { kernel: { wait(id: string): Promise<unknown> } }).kernel.wait(review.id);
+
+    const reviewer = observed.find((o) => !o.config.name?.endsWith('-synthesis'))!;
+    expect(reviewer.messages[0]).toContain('You are a security expert.');
+    expect(reviewer.messages[0]?.match(/# Code Review Task/g)).toHaveLength(1);
 
     fs.rmSync(cwd, { recursive: true, force: true });
   });

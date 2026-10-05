@@ -91,6 +91,20 @@ describe('PersistentCodexAppServerSession v2 RPCs', () => {
     expect(session.codexThreadId).toBe('t1');
   });
 
+  // With no model param the app-server runs the model in ~/.codex/config.toml
+  // and names it in the thread/start response; bill that, not the default.
+  it('prices a thread with no model as the model thread/start reports', async () => {
+    const proc = createMockProc((msg) => {
+      if (msg.method === 'initialize') return {};
+      if (msg.method === 'thread/start') return { thread: { id: 't1' }, model: 'gpt-6-astra' };
+      return {};
+    });
+    const session = await startSession(proc);
+    const cost = session.getCost();
+    expect(cost.model).toBe('gpt-6-astra');
+    expect(cost.pricing.inputPer1M).toBe(10);
+  });
+
   it('interrupt() sends turn/interrupt {threadId,turnId} for the active turn', async () => {
     const proc = createMockProc(defaultResponder());
     const session = await startSession(proc);

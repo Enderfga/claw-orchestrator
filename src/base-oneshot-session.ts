@@ -355,7 +355,7 @@ export abstract class BaseOneShotSession extends EventEmitter implements ISessio
 
   getCost(): CostBreakdown {
     const pricing = this._getModelPricing();
-    const displayModel = this.options.model || this.engineCfg.defaultModelDisplay || this.engineCfg.defaultModel;
+    const displayModel = this._billedModel() || this.engineCfg.defaultModelDisplay || this.engineCfg.defaultModel;
 
     if (this.engineCfg.supportsCachedTokens) {
       const cachedPrice = pricing.cached ?? 0;
@@ -446,8 +446,16 @@ export abstract class BaseOneShotSession extends EventEmitter implements ISessio
 
   // ── Protected Helpers (for subclass _run() implementations) ────────────
 
+  /**
+   * The model this session is billed as, when known; the engine default applies
+   * otherwise. The configured model, unless an engine can report what it ran.
+   */
+  protected _billedModel(): string | undefined {
+    return this.options.model;
+  }
+
   protected _getModelPricing() {
-    return _getModelPricingBase(this.options.model, this.engineCfg.defaultModel);
+    return _getModelPricingBase(this._billedModel(), this.engineCfg.defaultModel);
   }
 
   /**

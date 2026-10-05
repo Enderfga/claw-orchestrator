@@ -35,6 +35,14 @@ uses its own default model rather than receiving the Claude `opus` / `sonnet`
 defaults. Role instructions are included in-band for engines that do not expose a
 native system-prompt flag.
 
+Each role also accepts an optional fixed reasoning effort at run start:
+`planner_effort`, `coder_effort`, and `reviewer_effort`. Accepted values are
+`low`, `medium`, `high`, `xhigh`, `max`, `ultra`, and `auto`. Omission preserves
+the session default. The values are persisted with the durable run and reused
+after role reset or run resume. Adapter behavior is unchanged: supported engines
+apply or clamp the value, while legacy engines without an effort mapping keep
+their existing behavior.
+
 Engines without native multi-turn conversation (one-shot custom engines) spawn a
 fresh process per send with nothing to resume, so the dispatcher replays that
 role's transcript in-band as a `<conversation_history>` block, oldest turns dropped
@@ -67,6 +75,8 @@ relaxed. A failed reply never reaches the control parser, so it cannot change
 Coder and Reviewer engine/model choices can be overridden by the first successful
 `spawn_subagents`; later attempts to change an already-started role are rejected
 instead of silently diverging from the running session.
+The Planner cannot override role effort: any engine/model choice it makes retains
+the Coder or Reviewer's caller-selected effort.
 
 Coder and Reviewer **never speak to you directly**. Anything they observe
 flows through the Planner. The Planner decides what to surface and what to
@@ -161,16 +171,21 @@ autoloop_reset_agent({ "run_id": "my-run", "agent": "coder", "eager_restart": tr
 autoloop_stop({ "run_id": "my-run", "reason": "done" })
 ```
 
+Agent reset is fail-closed. If the old session cannot be stopped and its name is
+still live (or liveness cannot be checked), the reset fails without clearing the
+role's started state or attempting a replacement. If the manager confirms that
+the old name is already absent, reset may continue and create the replacement.
+
 ## Plugin tools
 
-| Tool                   | Args                                                                                                                                               | What                                                                                                                                    |
-| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| `autoloop_start`       | `run_id`, `workspace`, per-role `*_engine?`, `*_model?`, `*_custom_engine?`, `send_timeout_ms?`, `activity_lease_ms?`, `autoloop_hard_timeout_ms?` | Start a run; launches Planner and stores Coder/Reviewer defaults and timeout controls. Each `custom` role requires its matching config. |
-| `autoloop_chat`        | `run_id`, `text`                                                                                                                                   | Send a chat message to the Planner; returns the Planner's reply.                                                                        |
-| `autoloop_status`      | `run_id`                                                                                                                                           | Current state (status, iter, push count, subagents_spawned).                                                                            |
-| `autoloop_list`        | —                                                                                                                                                  | All autoloop runs in the run store, live or not.                                                                                        |
-| `autoloop_stop`        | `run_id`, `reason?`                                                                                                                                | Terminate; stops Planner / Coder / Reviewer.                                                                                            |
-| `autoloop_reset_agent` | `run_id`, `agent` ('planner' / 'coder' / 'reviewer'), `force?`, `eager_restart?`                                                                   | Reset one subagent. Planner reset requires `force: true`.                                                                               |
+| Tool                   | Args                                                                                                                                                            | What                                                                                                                                |
+| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `autoloop_start`       | `run_id`, `workspace`, per-role `*_engine?`, `*_model?`, `*_effort?`, `*_custom_engine?`, `send_timeout_ms?`, `activity_lease_ms?`, `autoloop_hard_timeout_ms?` | Start a run; launches Planner and stores fixed role bindings and timeout controls. Each `custom` role requires its matching config. |
+| `autoloop_chat`        | `run_id`, `text`                                                                                                                                                | Send a chat message to the Planner; returns the Planner's reply.                                                                    |
+| `autoloop_status`      | `run_id`                                                                                                                                                        | Current state (status, iter, push count, subagents_spawned).                                                                        |
+| `autoloop_list`        | —                                                                                                                                                               | All autoloop runs in the run store, live or not.                                                                                    |
+| `autoloop_stop`        | `run_id`, `reason?`                                                                                                                                             | Terminate; stops Planner / Coder / Reviewer.                                                                                        |
+| `autoloop_reset_agent` | `run_id`, `agent` ('planner' / 'coder' / 'reviewer'), `force?`, `eager_restart?`                                                                                | Reset one subagent. Planner reset requires `force: true`.                                                                           |
 
 ## Planner-emitted control tools
 
@@ -208,7 +223,7 @@ Custom engine configs are accepted only by `autoloop_start` (and, on resume, by
 `SessionManager.autoloopResume()` or by reference in the HTTP resume body), never
 through Planner output. This keeps config fields such as `env` and static CLI
 arguments out of the Planner transcript and `decisions.jsonl`. The run record
-stores only each role's engine and model, including the effective Coder/Reviewer
+stores only each role's engine, model, and effort, including the effective Coder/Reviewer
 selection after a successful spawn. When resuming a run that uses `custom`,
 supply the matching config again (over HTTP, as a `*CustomEngineRef`, see
 [Backend HTTP / SSE](#backend-http--sse)); otherwise resume fails with a clear
@@ -278,7 +293,9 @@ Treat that warning as the signal to start a fresh session.
 
 Subprocess deaths (Claude session lost), failed `git commit` in an iter, and
 other phase-bound failures surface as `phase_error` messages instead of
-silently masquerading as a "clarification request". The runner counts
+silently masquerading as a "clarification request". An empty or whitespace-only
+Coder reply is also a phase error. Only a non-empty reply without
+`iter_complete` is treated as a clarification request. The runner counts
 consecutive `phase_error`s and:
 
 1. Fires `on_phase_error` on each one (defaults to error / both channels).

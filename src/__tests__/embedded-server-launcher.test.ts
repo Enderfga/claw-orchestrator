@@ -213,7 +213,7 @@ describe('POST /autoloop/new', () => {
     expect(j.run_id).toBe('my-custom-id');
   });
 
-  it('passes independent role engines and models to autoloopStart', async () => {
+  it('passes independent role engines, models, and efforts to autoloopStart', async () => {
     const r = await fetch(`http://127.0.0.1:${port}/autoloop/new`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
@@ -222,10 +222,13 @@ describe('POST /autoloop/new', () => {
         run_id: 'multi-engine-http',
         planner_engine: 'codex',
         planner_model: 'gpt-planner',
+        planner_effort: 'high',
         coder_engine: 'opencode',
         coder_model: 'anthropic/claude-sonnet-5',
+        coder_effort: 'ultra',
         reviewer_engine: 'gemini',
         reviewer_model: 'gemini-reviewer',
+        reviewer_effort: 'low',
       }),
     });
 
@@ -235,10 +238,13 @@ describe('POST /autoloop/new', () => {
       workspace: fs.realpathSync('/tmp'),
       plannerEngine: 'codex',
       plannerModel: 'gpt-planner',
+      plannerEffort: 'high',
       coderEngine: 'opencode',
       coderModel: 'anthropic/claude-sonnet-5',
+      coderEffort: 'ultra',
       reviewerEngine: 'gemini',
       reviewerModel: 'gemini-reviewer',
+      reviewerEffort: 'low',
       sendTimeoutMs: undefined,
       activityLeaseMs: undefined,
       autoloopHardTimeoutMs: undefined,
@@ -323,6 +329,16 @@ describe('POST /autoloop/new', () => {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
       body: JSON.stringify({ workspace: '/tmp', planner_engine: 'not-real' }),
+    });
+    expect(r.status).toBe(400);
+  });
+
+  it('returns 400 when autoloop role effort is invalid, including an empty value', async () => {
+    vi.mocked(manager.autoloopStart).mockRejectedValueOnce(new Error("Planner effort '' is not supported"));
+    const r = await fetch(`http://127.0.0.1:${port}/autoloop/new`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ workspace: '/tmp', planner_effort: '' }),
     });
     expect(r.status).toBe(400);
   });

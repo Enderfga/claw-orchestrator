@@ -28,7 +28,7 @@ SessionManager
 
 ### Claude Code (`engine: 'claude'`)
 
-Default engine. Long-running subprocess with streaming JSON I/O. Tested with Claude Code CLI **2.1.280**.
+Default engine. Long-running subprocess with streaming JSON I/O. Tested with Claude Code CLI **2.1.286**.
 
 - Persistent multi-turn conversations
 - Real-time streaming (text, tool_use, tool_result, system events)
@@ -62,7 +62,7 @@ await manager.startSession({
 
 ### OpenAI Codex (`engine: 'codex'`)
 
-Wraps the `codex exec` subcommand. Each `send()` spawns a new process. Tested with `codex` CLI **0.156.1**.
+Wraps the `codex exec` subcommand. Each `send()` spawns a new process. Tested with `codex` CLI **0.159.3**.
 
 - Non-interactive execution via `codex exec --sandbox workspace-write --skip-git-repo-check --json`
 - Real `usage` from the `turn.completed` JSON event (input, output, cached, reasoning tokens). **These are cumulative over the thread, not per turn**, so they replace the session totals rather than being added to them; subtracting consecutive values gives one turn's prompt
@@ -79,7 +79,7 @@ Wraps the `codex exec` subcommand. Each `send()` spawns a new process. Tested wi
 - One-shot execution per message (no persistent subprocess between sends)
 - Captures the real Codex thread ID and persists it, so later sends and process-level session resume use `codex exec resume <thread_id>`
 - Working directory passed via `-C` on the first turn
-- Default model: `gpt-5.5`
+- Model: with no `model`, codex runs its own default — the `model` in `~/.codex/config.toml` if set. Cost is then priced as the model codex reports it ran (the rollout's `turn_context`; `thread/start` on `codex-app`), and as `gpt-5.5` only when that cannot be read
 - Requires `codex` CLI >= 0.119 (for `exec resume`): `npm install -g @openai/codex`
 - **Windows:** npm `.cmd` shims launch via `src/engine-spawn.ts` (cross-spawn). Arguments keep spaces, balanced quotes and `%`; newlines are flattened to spaces for batch targets (cmd.exe cannot carry them); an unbalanced `"` in one argument is a cmd.exe limit.
 - **Does not support `/goal`** — for that, use `engine: 'codex-app'` below
@@ -127,7 +127,7 @@ await manager.startSession({
 
 Wraps Google's **Antigravity CLI** (`agy`) — the successor to Gemini CLI (consumer
 Gemini CLI tiers stopped serving 2026-06-18). Each `send()` spawns a new process
-in print mode. Tested with `agy` **1.2.8**.
+in print mode. Tested with `agy` **1.2.14**.
 
 - One-shot execution per message (no persistent subprocess)
 - **Structured output and real usage** — `--output-format stream-json` emits an
@@ -170,9 +170,13 @@ in print mode. Tested with `agy` **1.2.8**.
   must explicitly choose `bypassPermissions` for a write-enabled session; it is
   not a recovery mechanism. In particular, an Autoloop Planner stays on
   `--mode plan` when its preserved conversation is resumed.
-- The engine always passes `--print-timeout` (the send timeout plus 5s), so the
-  wrapper's timer decides when a turn ends; without it a stuck headless agy turn
-  can run indefinitely
+- The engine always passes `--print-timeout`, set just inside the send timeout
+  (10% earlier, at most 10s). Since agy 1.2.9 a headless run whose agent started a
+  background task (a dev server, a watcher) stays open until that deadline and
+  delivers the reply when it exits, ending the task; the earlier deadline lets it
+  do so before the send times out. A run that reaches the deadline while the agent
+  is still working fails as a timeout even though agy reports `SUCCESS` with a
+  partial reply. Without the flag a stuck headless agy turn can run indefinitely
 - Do not rely on an unknown `--model` falling back: current agy versions can
   report `status: ERROR` with no usable response. The adapter rejects result
   errors, non-success statuses, and empty responses. `agy-flash` and the engine
@@ -208,7 +212,7 @@ await manager.startSession({
 ### Grok Build (`engine: 'grok'`)
 
 Wraps xAI's **Grok Build** CLI. Each `send()` spawns `grok -p <msg> --output-format json`, which
-prints a single JSON object and exits. Tested with `grok` **1.0.41**.
+prints a single JSON object and exits. Tested with `grok` **1.0.44**.
 
 - **Cost comes from the engine, not from the price table.** The result object carries
   `total_cost_usd`, and the wrapper writes it straight into the session's spend, so the run ledger

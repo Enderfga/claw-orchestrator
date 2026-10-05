@@ -679,7 +679,7 @@ describe('SessionManager', () => {
     it('resolves sonnet alias', async () => {
       await mgr.startSession({ name: 'sonnet-test', model: 'sonnet', cwd: '/tmp' });
       const list = mgr.listSessions();
-      expect(list[0].model).toBe('claude-sonnet-5');
+      expect(list[0].model).toBe('claude-sonnet-5-5');
     });
 
     it('resolves haiku alias', async () => {
@@ -709,7 +709,7 @@ describe('SessionManager', () => {
       await mgr.startSession({ name: 'model-set', model: 'opus', cwd: '/tmp' });
       mgr.setModel('model-set', 'sonnet');
       const list = mgr.listSessions();
-      expect(list[0].model).toBe('claude-sonnet-5');
+      expect(list[0].model).toBe('claude-sonnet-5-5');
     });
   });
 
@@ -1433,17 +1433,20 @@ describe('SessionManager', () => {
   // ─── Autoloop role configuration ───────────────────────────────────
 
   describe('autoloop role configuration', () => {
-    it('passes independent role engines, models, and custom configs into dispatcher sessions', async () => {
+    it('passes independent role engines, models, efforts, and custom configs into dispatcher sessions', async () => {
       const coderCustomEngine = { name: 'coder-cli', bin: 'coder-cli', args: {} };
       await mgr.autoloopStart({
         runId: 'multi-engine',
         workspace: '/tmp',
         plannerEngine: 'codex',
+        plannerEffort: 'high',
         coderEngine: 'custom',
         coderModel: 'coder-model',
+        coderEffort: 'ultra',
         coderCustomEngine,
         reviewerEngine: 'gemini',
         reviewerModel: 'reviewer-model',
+        reviewerEffort: 'low',
       });
       await mgr.getAutoloop('multi-engine')!.dispatcher.spawnSubagents();
 
@@ -1451,27 +1454,71 @@ describe('SessionManager', () => {
         name: 'autoloop-multi-engine-planner',
         engine: 'codex',
         model: undefined,
+        effort: 'high',
       });
       expect(createdConfigs[1]).toMatchObject({
         name: 'autoloop-multi-engine-coder',
         engine: 'custom',
         model: 'coder-model',
         customEngine: coderCustomEngine,
+        effort: 'ultra',
       });
       expect(createdConfigs[2]).toMatchObject({
         name: 'autoloop-multi-engine-reviewer',
         engine: 'gemini',
         model: 'reviewer-model',
+        effort: 'low',
       });
+    });
+
+    it('rejects an unknown role effort before creating a session', async () => {
+      await expect(
+        mgr.autoloopStart({
+          runId: 'bad-effort',
+          workspace: '/tmp',
+          plannerEffort: 'impossible' as EffortLevel,
+        }),
+      ).rejects.toThrow("Planner effort 'impossible' is not supported");
+      expect(createdConfigs).toEqual([]);
+    });
+
+    it('persists role efforts and restores them on resume', async () => {
+      await mgr.autoloopStart({
+        runId: 'effort-resume',
+        workspace: '/tmp',
+        plannerEffort: 'high',
+        coderEffort: 'ultra',
+        reviewerEffort: 'low',
+      });
+      await mgr.getAutoloop('effort-resume')!.dispatcher.spawnSubagents();
+
+      const before = mgr.workflowStatus('effort-resume');
+      expect(before.spec.nodes[0]).toMatchObject({
+        config: { plannerEffort: 'high', coderEffort: 'ultra', reviewerEffort: 'low' },
+      });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const kernel = (mgr as any).kernel;
+      kernel.cancel('effort-resume');
+      await kernel.wait('effort-resume');
+      createdConfigs = [];
+
+      await mgr.autoloopResume('effort-resume');
+      await mgr.getAutoloop('effort-resume')!.dispatcher.spawnSubagents();
+
+      expect(createdConfigs.find((config) => config.name.endsWith('-planner'))).toMatchObject({ effort: 'high' });
+      expect(createdConfigs.find((config) => config.name.endsWith('-coder'))).toMatchObject({ effort: 'ultra' });
+      expect(createdConfigs.find((config) => config.name.endsWith('-reviewer'))).toMatchObject({ effort: 'low' });
     });
 
     it('suppresses a global default model for non-Claude roles with no explicit model', async () => {
       await mgr.shutdown();
-      mgr = createManager({ defaultModel: 'global-claude-default' });
+      mgr = createManager({ defaultModel: 'global-claude-default', defaultEffort: 'high' });
 
       await mgr.autoloopStart({ runId: 'no-global-model', workspace: '/tmp', plannerEngine: 'codex' });
 
       expect(createdConfigs[0]).toHaveProperty('model', undefined);
+      expect(createdConfigs[0]).toHaveProperty('effort', 'high');
     });
 
     it('rejects an unknown role engine before creating a session', async () => {

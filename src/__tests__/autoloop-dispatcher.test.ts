@@ -23,6 +23,7 @@ interface StubCalls {
   startSession: ReturnType<typeof vi.fn>;
   sendMessage: ReturnType<typeof vi.fn>;
   stopSession: ReturnType<typeof vi.fn>;
+  hasSession: ReturnType<typeof vi.fn>;
   getStatus: ReturnType<typeof vi.fn>;
   compactSession: ReturnType<typeof vi.fn>;
 }
@@ -55,6 +56,7 @@ function makeStubManager(
       return { output, error: undefined };
     }),
     stopSession: vi.fn(async () => undefined),
+    hasSession: vi.fn(() => true),
     getStatus: vi.fn(() => ({
       stats: { contextPercent: opts.contextPercent ?? 10, tokensIn: 0, tokensOut: 0, cachedTokens: 0 },
     })),
@@ -64,6 +66,7 @@ function makeStubManager(
     startSession: calls.startSession,
     sendMessage: calls.sendMessage,
     stopSession: calls.stopSession,
+    hasSession: calls.hasSession,
     getStatus: calls.getStatus,
     compactSession: calls.compactSession,
   } as unknown as SessionManager;
@@ -157,6 +160,9 @@ describe('ClaudeAgentDispatcher — role engine configuration', () => {
     });
     expect(findStart(calls, 'coder')).toMatchObject({ engine: 'claude', model: 'sonnet' });
     expect(findStart(calls, 'reviewer')).toMatchObject({ engine: 'claude', model: 'sonnet' });
+    expect(findStart(calls, 'planner')).not.toHaveProperty('effort');
+    expect(findStart(calls, 'coder')).not.toHaveProperty('effort');
+    expect(findStart(calls, 'reviewer')).not.toHaveProperty('effort');
   });
 
   it('uses each non-Claude engine without injecting a Claude model default', async () => {
@@ -178,6 +184,38 @@ describe('ClaudeAgentDispatcher — role engine configuration', () => {
       expect(start.engine).toBe(engine);
       expect(start).toHaveProperty('model', undefined);
     }
+  });
+
+  it('keeps each configured effort across Planner engine overrides and eager resets', async () => {
+    const { dispatcher, calls } = makeDispatcher({
+      plannerEffort: 'high',
+      coderEffort: 'ultra',
+      reviewerEffort: 'low',
+    });
+
+    await dispatcher.deliver(Msg.chat(0, { text: 'hello' }));
+    await dispatcher.spawnSubagents({
+      coder_engine: 'codex',
+      coder_model: 'gpt-coder',
+      reviewer_engine: 'gemini',
+      coder_effort: 'low',
+      reviewer_effort: 'max',
+    } as never);
+
+    expect(findStart(calls, 'planner')).toMatchObject({ effort: 'high' });
+    expect(findStart(calls, 'coder')).toMatchObject({ engine: 'codex', model: 'gpt-coder', effort: 'ultra' });
+    expect(findStart(calls, 'reviewer')).toMatchObject({ engine: 'gemini', effort: 'low' });
+
+    await dispatcher.resetAgent('coder', { eagerRestart: true });
+    await dispatcher.resetAgent('reviewer', { eagerRestart: true });
+
+    const latestStart = (role: 'coder' | 'reviewer') =>
+      calls.startSession.mock.calls
+        .map((entry) => entry[0] as Record<string, unknown>)
+        .filter((config) => config.name === `autoloop-r1-${role}`)
+        .at(-1);
+    expect(latestStart('coder')).toMatchObject({ effort: 'ultra' });
+    expect(latestStart('reviewer')).toMatchObject({ effort: 'low' });
   });
 
   it('delivers the Planner protocol in-band and starts non-Claude Planners read-only', async () => {
@@ -332,6 +370,39 @@ describe('ClaudeAgentDispatcher — role engine configuration', () => {
       .filter((config) => config.name === 'autoloop-r1-coder');
     expect(coderStarts).toHaveLength(2);
     expect(coderStarts[1]).toMatchObject({ engine: 'codex', model: 'gpt-coder' });
+  });
+
+  it('does not restart or clear a role when its live session cannot be stopped', async () => {
+    const { dispatcher, calls } = makeDispatcher();
+    await dispatcher.spawnSubagents();
+
+    calls.stopSession.mockRejectedValueOnce(new Error('coder still live'));
+
+    await expect(dispatcher.resetAgent('coder', { eagerRestart: true })).rejects.toThrow('coder still live');
+
+    const coderStarts = calls.startSession.mock.calls.filter(
+      (entry) => (entry[0] as { name: string }).name === 'autoloop-r1-coder',
+    );
+    expect(coderStarts).toHaveLength(1);
+    await expect(dispatcher.spawnSubagents({ coder_engine: 'codex' })).rejects.toThrow(
+      'Cannot change Coder engine or model after its session has started',
+    );
+  });
+
+  it('restarts a role once when the failed stop confirms its session is already absent', async () => {
+    const { manager, calls } = makeStubManager();
+    calls.hasSession.mockReturnValue(false);
+    const dispatcher = new ClaudeAgentDispatcher({ manager, runId: 'r1', workspace: tmpRoot });
+    await dispatcher.spawnSubagents();
+
+    calls.stopSession.mockRejectedValueOnce(new Error("Session 'autoloop-r1-coder' not found"));
+
+    await expect(dispatcher.resetAgent('coder', { eagerRestart: true })).resolves.toBeUndefined();
+
+    const coderStarts = calls.startSession.mock.calls.filter(
+      (entry) => (entry[0] as { name: string }).name === 'autoloop-r1-coder',
+    );
+    expect(coderStarts).toHaveLength(2);
   });
 
   it('rejects engine changes after a subagent session has started', async () => {
@@ -519,6 +590,21 @@ describe('ClaudeAgentDispatcher — frozen reviewer memory', () => {
 });
 
 describe('ClaudeAgentDispatcher — phase_error surfacing', () => {
+  it('returns a phase_error instead of an empty directive_ack when Coder returns no output', async () => {
+    const { dispatcher } = makeDispatcher({}, { sendOutput: '   ' });
+    await dispatcher.spawnSubagents();
+
+    const replies = await dispatcher.deliver(
+      Msg.directive(0, { goal: 'g', constraints: [], success_criteria: [], max_attempts: 1 }),
+    );
+
+    expect(replies).toHaveLength(1);
+    expect(replies[0].type).toBe('phase_error');
+    if (replies[0].type === 'phase_error') {
+      expect(replies[0].payload.agent).toBe('coder');
+    }
+  });
+
   it('returns a phase_error envelope (not a fake directive_ack) when Coder send fails twice', async () => {
     vi.useFakeTimers();
     const { dispatcher } = makeDispatcher({}, { sendThrows: 2 });
@@ -535,6 +621,27 @@ describe('ClaudeAgentDispatcher — phase_error surfacing', () => {
       expect(replies[0].payload.agent).toBe('coder');
       expect(replies[0].payload.phase).toBe('send');
     }
+  });
+
+  it('returns a phase_error when automatic reset cannot stop a live Coder', async () => {
+    const { dispatcher, calls } = makeDispatcher({}, { sendThrows: 1 });
+    await dispatcher.spawnSubagents();
+    calls.stopSession.mockRejectedValueOnce(new Error('coder still live'));
+
+    const replies = await dispatcher.deliver(
+      Msg.directive(0, { goal: 'g', constraints: [], success_criteria: [], max_attempts: 1 }),
+    );
+
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toMatchObject({
+      type: 'phase_error',
+      payload: { agent: 'coder', phase: 'send', error: 'coder still live' },
+    });
+    expect(calls.sendMessage).toHaveBeenCalledTimes(1);
+    expect(calls.stopSession).toHaveBeenCalledTimes(1);
+    expect(
+      calls.startSession.mock.calls.filter((entry) => (entry[0] as { name: string }).name === 'autoloop-r1-coder'),
+    ).toHaveLength(1);
   });
 });
 

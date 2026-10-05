@@ -180,6 +180,7 @@ describe('plugin tool registration', () => {
     for (const role of ['planner', 'coder', 'reviewer'] as const) {
       expect(properties[`${role}_engine`]?.enum).toEqual(ENGINE_TYPES);
       expect(properties[`${role}_model`]?.type).toBe('string');
+      expect(properties[`${role}_effort`]?.enum).toEqual(['low', 'medium', 'high', 'xhigh', 'max', 'ultra', 'auto']);
       expect(properties[`${role}_custom_engine`]?.type).toBe('object');
       expect(properties[`${role}_custom_engine`]?.required).toEqual(['name', 'bin', 'args']);
     }
@@ -232,6 +233,9 @@ describe('plugin tool registration', () => {
         send_timeout_ms: 7_200_000,
         activity_lease_ms: 60_000,
         autoloop_hard_timeout_ms: 259_200_000,
+        planner_effort: 'high',
+        coder_effort: 'ultra',
+        reviewer_effort: 'low',
       });
       expect(start).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -240,6 +244,9 @@ describe('plugin tool registration', () => {
           sendTimeoutMs: 7_200_000,
           activityLeaseMs: 60_000,
           autoloopHardTimeoutMs: 259_200_000,
+          plannerEffort: 'high',
+          coderEffort: 'ultra',
+          reviewerEffort: 'low',
         }),
       );
     } finally {
@@ -294,6 +301,44 @@ describe('plugin tool registration', () => {
     for (const name of NEW_4_2_0_TOOLS) {
       expect(byName.has(name), `missing v4.2.0 tool: ${name}`).toBe(true);
     }
+  });
+
+  it('exposes the full reasoning-effort domain for fanout and workflow agents', () => {
+    const expected = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra', 'auto'];
+    const propertiesOf = (toolName: string) =>
+      (byName.get(toolName)!.parameters as { properties: Record<string, unknown> }).properties;
+    const itemProperties = (value: unknown) =>
+      (value as { items: { properties: Record<string, { enum?: string[] }> } }).items.properties;
+
+    const fanout = propertiesOf('fanout_start');
+    const workflow = propertiesOf('workflow_start');
+
+    expect(itemProperties(fanout.agents).effort.enum).toEqual(expected);
+    expect(itemProperties(workflow.agents).effort.enum).toEqual(expected);
+    expect(itemProperties(workflow.reviewers).effort.enum).toEqual(expected);
+  });
+
+  it('exposes persona as role instructions on fanout agents without changing prompt', () => {
+    const properties = (
+      byName.get('fanout_start')!.parameters as {
+        properties: {
+          agents: {
+            items: {
+              properties: Record<string, { type?: string; description?: string }>;
+            };
+          };
+        };
+      }
+    ).properties.agents.items.properties;
+
+    expect(properties.persona).toMatchObject({
+      type: 'string',
+      description: expect.stringMatching(/role.*shared task/i),
+    });
+    expect(properties.prompt).toMatchObject({
+      type: 'string',
+      description: expect.stringMatching(/replace.*shared task/i),
+    });
   });
 });
 
