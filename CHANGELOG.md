@@ -5,18 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [7.6.2] - 2026-10-01
+## [7.6.2] - 2026-10-05
 
 ### Fixed
 
 - **Autoloop agent reset no longer reports success while reusing a session that failed to stop.**
   A live or unprovable old session now makes reset fail without clearing the role's started state
-  or attempting a replacement; a session confirmed absent can still be recreated.
-
-## [Unreleased]
-
-### Fixed
-
+  or attempting a replacement; a session confirmed absent can still be recreated. When the reset
+  is part of a failed send's automatic recovery, the failure is recorded as a `phase_error`, so
+  the existing circuit breaker handles it; `autoloop_reset_agent` returns the error to its caller.
+  (#127, thanks @ajmtrz)
 - **Codex and OpenCode run on Windows.** npm installs both as `.cmd` shims, which
   `child_process.spawn` cannot launch without a shell, so every turn failed with `spawn <bin> ENOENT`.
   Engines now launch through `src/engine-spawn.ts` (cross-spawn), which resolves `PATH`/`PATHEXT`
@@ -25,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `cmd.exe` cuts an argument at its first newline; any other argument `cmd.exe` cannot carry
   unchanged is refused before spawning. A timed-out turn ends the engine's whole process tree on
   Windows, not only `cmd.exe`. (#121, thanks @tearz1986)
+
+### Changed
+
+- Tested with Claude Code 2.1.289, Codex 0.160.0, agy 1.2.17 and grok 1.0.46.
 
 ## [7.6.1] - 2026-10-01
 
