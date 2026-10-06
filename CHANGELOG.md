@@ -12,6 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Live Autoloop runner state transitions are checkpointed**, so a
   non-owning `autoloop_status` shows both a recoverable send-timeout pause
   and an operator pause instead of the stale initial planning snapshot.
+- **Resuming after a committed Coder iteration with no Reviewer verdict**
+  delivers that iteration to Reviewer once from the durable ledger and
+  `HEAD`, then persists `verdict.json`. An in-flight send is still not
+  retried. A resume with no open iteration still starts only the Planner.
 
 ## [7.7.0] - 2026-10-07
 
