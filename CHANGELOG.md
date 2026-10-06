@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   send, the conversation is compacted if context use has reached the given percentage (1–99, off by
   default). Every call in a turn re-reads the whole context, so cost grows with context size. The
   setting survives a server restart, and a failed compaction never costs the send.
+- **ACP sessions can be resumed and listed.** The ACP agent now advertises
+  `sessionCapabilities.resume` and `.list`: `session/list` returns the sessions it created, newest
+  first, and `session/resume` reattaches one after the editor or the agent process restarts, on its
+  engine and model, continuing the conversation. `session/load` remains unadvertised, since it
+  requires replaying the conversation to the client. Changing permission, or the model within the
+  same engine, and cancelling a turn now keep the conversation instead of starting a new one.
 - **Using `clawo-mcp` from the Codex CLI** is documented in `skills/references/mcp.md`
   (`codex mcp add clawo -- clawo-mcp`).
 

@@ -59,7 +59,15 @@ interface SessionManagerLike {
       onEvent?: (event: { type: string; tool?: { name?: string; input?: unknown }; result?: string }) => void;
     },
   ): Promise<{ output: string; sessionId?: string }>;
-  stopSession(name: string): Promise<void>;
+  stopSession(name: string, opts?: { keepPersisted?: boolean }): Promise<void>;
+  /** The sessions on disk that can be resumed by name; see `session/resume`. */
+  listPersistedSessions?(): Array<{
+    name: string;
+    cwd: string;
+    engine?: EngineType;
+    model?: string;
+    lastActivity: number;
+  }>;
   getStatus?(name: string): { stats: { contextPercent?: number } };
   getCost?(name: string): { totalUsd?: number };
 
@@ -334,11 +342,13 @@ export function createAcpAgent(manager: SessionManagerLike, options: AcpAgentOpt
     .onRequest('initialize', () => ({
       protocolVersion: acp.PROTOCOL_VERSION,
       agentCapabilities: {
-        // Resume is deliberately not advertised: mapping an ACP session id onto
-        // each engine's own resume handle (codex thread id, agy's log-harvested
-        // conversation id, cursor/opencode session ids) is its own piece of work,
-        // and claiming the capability without it would strand a client.
+        // `session/load` must replay the whole conversation to the client, and no
+        // engine here hands its history back in a form that can be replayed.
+        // `session/resume` reattaches without replay: the session layer keeps
+        // each engine's own resume handle (Claude session id, codex thread id,
+        // agy conversation id, opencode session id) under the ACP session id.
         loadSession: false,
+        sessionCapabilities: { resume: {}, list: {} },
         promptCapabilities: { image: false, audio: false, embeddedContext: false },
       },
     }))
@@ -359,7 +369,6 @@ export function createAcpAgent(manager: SessionManagerLike, options: AcpAgentOpt
         engine,
         model,
         permissionMode: defaultPermissionMode,
-        skipPersistence: true,
       });
 
       sessions.set(sessionId, {
@@ -391,6 +400,63 @@ export function createAcpAgent(manager: SessionManagerLike, options: AcpAgentOpt
       } as acp.NewSessionResponse;
     })
 
+    .onRequest('session/resume', async (ctx) => {
+      const { sessionId, cwd } = ctx.params;
+      const live = sessions.get(sessionId);
+      if (live) {
+        return {
+          modes: { currentModeId: live.modeId, availableModes: ACP_MODES },
+          configOptions: [buildModelConfigOption(live.model), buildPermissionConfigOption(live.permissionMode)],
+        } as acp.ResumeSessionResponse;
+      }
+      const saved = sessionId.startsWith(ACP_SESSION_PREFIX)
+        ? manager.listPersistedSessions?.().find((p) => p.name === sessionId)
+        : undefined;
+      if (!saved) throw acp.RequestError.invalidParams(`Unknown session: ${sessionId}`);
+      // The engines keep conversations per working directory; resuming from
+      // another one would start a new conversation under the old id.
+      if (saved.cwd !== cwd) {
+        throw acp.RequestError.invalidParams(`Session ${sessionId} belongs to ${saved.cwd}, not ${cwd}`);
+      }
+      const engine = saved.engine ?? 'claude';
+      const model = saved.model ?? resolveEngineAndModel(defaultModel).model;
+
+      // Started by name, the session layer resumes the engine's own conversation.
+      await manager.startSession({ name: sessionId, cwd, engine, model, permissionMode: defaultPermissionMode });
+      sessions.set(sessionId, {
+        name: sessionId,
+        cwd,
+        model,
+        engine,
+        permissionMode: defaultPermissionMode,
+        modeId: ACP_DEFAULT_MODE,
+      });
+      log?.info(`session/resume ${sessionId} engine=${engine} model=${model} cwd=${cwd}`);
+
+      setTimeout(() => {
+        void ctx.client
+          .notify('session/update', {
+            sessionId,
+            update: { sessionUpdate: 'available_commands_update', availableCommands: ACP_MODE_COMMANDS },
+          })
+          .catch(() => {});
+      }, 0);
+
+      return {
+        modes: { currentModeId: ACP_DEFAULT_MODE, availableModes: ACP_MODES },
+        configOptions: [buildModelConfigOption(model), buildPermissionConfigOption(defaultPermissionMode)],
+      } as acp.ResumeSessionResponse;
+    })
+
+    .onRequest('session/list', (ctx) => {
+      const cwd = ctx.params.cwd ?? undefined;
+      const listed = (manager.listPersistedSessions?.() ?? [])
+        .filter((p) => p.name.startsWith(ACP_SESSION_PREFIX) && (!cwd || p.cwd === cwd))
+        .sort((a, b) => b.lastActivity - a.lastActivity)
+        .map((p) => ({ sessionId: p.name, cwd: p.cwd, updatedAt: new Date(p.lastActivity).toISOString() }));
+      return { sessions: listed } as acp.ListSessionsResponse;
+    })
+
     .onRequest('session/set_mode', (ctx) => {
       const state = stateFor(ctx.params.sessionId);
       const mode = ACP_MODES.find((m) => m.id === ctx.params.modeId);
@@ -406,28 +472,28 @@ export function createAcpAgent(manager: SessionManagerLike, options: AcpAgentOpt
       if (ctx.params.configId === ACP_CONFIG_MODEL) {
         const { engine, model } = resolveEngineAndModel(value);
         // Engine is fixed at spawn time, so a model that changes engine has to
-        // be a new underlying session. The ACP session id is unaffected.
-        await manager.stopSession(state.name).catch(() => {});
+        // be a new underlying session; the old engine's conversation cannot carry
+        // over. On the same engine the restart resumes it. The ACP session id is
+        // unaffected either way.
+        await manager.stopSession(state.name, { keepPersisted: engine === state.engine }).catch(() => {});
         await manager.startSession({
           name: state.name,
           cwd: state.cwd,
           engine,
           model,
           permissionMode: state.permissionMode,
-          skipPersistence: true,
         });
         state.engine = engine;
         state.model = model;
       } else if (ctx.params.configId === ACP_CONFIG_PERMISSION) {
         state.permissionMode = value as PermissionMode;
-        await manager.stopSession(state.name).catch(() => {});
+        await manager.stopSession(state.name, { keepPersisted: true }).catch(() => {});
         await manager.startSession({
           name: state.name,
           cwd: state.cwd,
           engine: state.engine,
           model: state.model,
           permissionMode: state.permissionMode,
-          skipPersistence: true,
         });
       } else {
         throw acp.RequestError.invalidParams(`Unknown config option: ${ctx.params.configId}`);
@@ -579,10 +645,11 @@ export function cancelAcpTurn(manager: SessionManagerLike, state: AcpSessionStat
   if (!cancelInFlight) return false;
   cancelInFlight();
   // Best-effort teardown. `stopSession` is the only lever the session layer
-  // offers, and it destroys the session rather than pausing the turn, so the
-  // session is recreated lazily on the next prompt.
+  // offers, and it destroys the process rather than pausing the turn. The
+  // persisted resume handle is kept, so the restart rejoins the engine's
+  // conversation once the engine has reported one.
   void manager
-    .stopSession(state.name)
+    .stopSession(state.name, { keepPersisted: true })
     .then(() =>
       manager.startSession({
         name: state.name,
@@ -590,7 +657,6 @@ export function cancelAcpTurn(manager: SessionManagerLike, state: AcpSessionStat
         engine: state.engine,
         model: state.model,
         permissionMode: state.permissionMode,
-        skipPersistence: true,
       }),
     )
     .catch((err) => log?.warn(`cancel teardown failed for ${state.name}: ${String(err)}`));

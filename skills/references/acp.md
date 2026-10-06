@@ -27,8 +27,9 @@ Built against **stable ACP v1** (`@agentclientprotocol/sdk`, pinned `1.3.0`).
 ACP v2 exists but is a published draft whose README warns the wire protocol "may
 change incompatibly in any SDK release", so it is deliberately not used.
 
-Implemented: `initialize`, `authenticate`, `session/new`, `session/prompt`,
-`session/set_mode`, `session/set_config_option`, `session/cancel`.
+Implemented: `initialize`, `authenticate`, `session/new`, `session/resume`,
+`session/list`, `session/prompt`, `session/set_mode`, `session/set_config_option`,
+`session/cancel`.
 
 ## Configuration
 
@@ -99,8 +100,9 @@ cancelling one abandons the poll rather than stopping the work.
 `session/new` also returns a `category: "model"` config option whose values are
 **grouped by engine**, built from the shared registry in `src/models.ts`. One
 dropdown holds four engine groups at once: Claude Code, Codex, Antigravity and
-Grok Build. Changing it restarts the underlying session on the new engine; the
-ACP session id is unaffected.
+Grok Build. Changing it restarts the underlying session; the ACP session id is
+unaffected. A model on the same engine continues the conversation; a model on
+another engine starts a new one, since one engine cannot read another's.
 
 Other engines are absent for different reasons:
 
@@ -111,6 +113,24 @@ Other engines are absent for different reasons:
 - **`opencode`** — its models are open-ended `provider/model` strings passed
   straight through, so there is nothing in the registry to enumerate. An opencode
   session is reachable by naming the model, just not by picking it from this list.
+
+## Resuming sessions
+
+Sessions outlive the agent process. `initialize` advertises
+`sessionCapabilities.resume` and `sessionCapabilities.list`:
+
+- **`session/list`** returns the sessions this agent created, newest first, with
+  `sessionId`, `cwd` and `updatedAt`; pass `cwd` to see one project's.
+- **`session/resume`** reattaches a session by id after the editor or the agent
+  restarts, on the engine and model it was using, and the next prompt continues
+  its conversation. The `cwd` must be the one the session was created in — the
+  engines keep conversations per directory.
+
+`session/load` is not offered (`loadSession: false`): it requires replaying the
+earlier conversation to the client, and no engine returns its history in a form
+that can be replayed. A resumed session therefore opens with an empty view in the
+client while the engine still remembers it. Sessions are kept for 7 days after
+their last use.
 
 ## Permission
 
@@ -125,13 +145,11 @@ saying so, so the choice is a session config option instead — which also suits
 ## Cancellation
 
 `session/cancel` settles the in-flight prompt as `cancelled` immediately, then tears
-the underlying session down and recreates it.
-
-A cancel with **nothing in flight does nothing**. The teardown drops the engine's
-native conversation id — codex, codex-app, agy, cursor and opencode all capture
-theirs mid-turn — so running it on an idle session would fork the history
-silently: the client keeps the same ACP session id while the next prompt opens a
-fresh engine thread.
+the underlying session down and recreates it. The recreated session resumes the
+engine's conversation from the saved resume handle. Codex, codex-app, agy, cursor and
+opencode report theirs during a turn, so a cancel in the very first turn of a session
+can still start a fresh conversation. A cancel with **nothing in flight does
+nothing**.
 
 The session layer has **no mid-turn cancel** — `stopSession()` is the only lever and
 it destroys the session rather than pausing the turn. So the ACP turn returns
