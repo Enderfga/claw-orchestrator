@@ -2143,6 +2143,73 @@ describe('SessionManager', () => {
       });
 
       describe('Autoloop timeout resilience integration', () => {
+        it('publishes a genuine planner send timeout so a non-owning autoloopStatus can see the pause', async () => {
+          const runId = 'timeout-status-non-owning';
+          const workspace = workspaceFor(runId);
+          await mgr.autoloopStart({ runId, workspace, sendTimeoutMs: 600_000 });
+          const handle = mgr.getAutoloop(runId)!;
+          const planner = mockSessions[0];
+          planner.sendImplementation = async () => {
+            planner.sendImplementation = undefined;
+            throw new Error('Timeout waiting for response');
+          };
+
+          await mgr.autoloopChat(runId, 'one planner send that reaches its deadline');
+
+          expect(planner.sendCalls).toHaveLength(1);
+          expect(handle.runner.state.status).toBe('paused');
+          const pending = handle.runner.state.pending_dispatch!;
+          expect(pending.dispatch_id).toMatch(/^dispatch_[a-f0-9]{64}$/);
+          expect(handle.runner.state.status_reason).toBe(`awaiting_resume:send_timeout:planner:${pending.dispatch_id}`);
+
+          const auditRows = fs
+            .readFileSync(auditPathFor(workspace, runId), 'utf8')
+            .trim()
+            .split('\n')
+            .map((line) => JSON.parse(line) as { kind: string; payload: unknown })
+            .filter((row) => row.kind === 'send_timeout');
+          expect(auditRows).toHaveLength(1);
+          expect(auditRows[0].payload).toEqual(pending);
+
+          const observer = createManager();
+          try {
+            const observed = observer.autoloopStatus(runId);
+            expect(observed?.status).toBe('paused');
+            expect(observed?.status_reason).toBe(`awaiting_resume:send_timeout:planner:${pending.dispatch_id}`);
+            expect(observed?.pending_dispatch).toEqual(pending);
+            expect(observed?.pending_dispatch).toEqual(auditRows[0].payload);
+          } finally {
+            await observer.shutdown();
+          }
+
+          expect(mockSessions).toHaveLength(1);
+          expect(createdConfigs.map((config) => config.name)).toEqual([`autoloop-${runId}-planner`]);
+          expect(planner.sendCalls).toHaveLength(1);
+        });
+
+        it('publishes an operator pause so a non-owning autoloopStatus can see the pause', async () => {
+          const runId = 'operator-pause-status-non-owning';
+          const workspace = workspaceFor(runId);
+          await mgr.autoloopStart({ runId, workspace, sendTimeoutMs: 600_000 });
+          const handle = mgr.getAutoloop(runId)!;
+
+          await handle.runner.send(AutoloopMsg.pause(0, { reason: 'operator-hold' }));
+
+          expect(handle.runner.state.status).toBe('paused');
+          expect(handle.runner.state.status_reason).toBe('operator-hold');
+          expect(handle.runner.state.pending_dispatch).toBeNull();
+
+          const observer = createManager();
+          try {
+            const observed = observer.autoloopStatus(runId);
+            expect(observed?.status).toBe('paused');
+            expect(observed?.status_reason).toBe('operator-hold');
+            expect(observed?.pending_dispatch).toBeNull();
+          } finally {
+            await observer.shutdown();
+          }
+        });
+
         it('carries a genuine timed-out send through an atomic increase and a distinct later send', async () => {
           const runId = 'timeout-integration-lifecycle';
           const workspace = workspaceFor(runId);

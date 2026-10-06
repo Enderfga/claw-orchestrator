@@ -19,7 +19,12 @@ import type { AutoloopState } from '../../autoloop/types.js';
 
 /** Whatever SessionManager hands back from booting the loop. */
 export interface AutoloopHandle {
-  runner: { state: AutoloopState; stop(): void };
+  runner: {
+    state: AutoloopState;
+    stop(): void;
+    on(event: 'state', listener: () => void): unknown;
+    off(event: 'state', listener: () => void): unknown;
+  };
   dispatcher: {
     sessionNames: { planner: string };
     shutdown(reason: string, opts?: { purge?: boolean }): Promise<void>;
@@ -79,6 +84,10 @@ export function makeAutoloopExecutor(deps: AutoloopNodeDeps) {
       });
     deps.registerPublisher(ctx.runId, publish);
     publish();
+    // The runner emits state after it writes pause fields (send timeout and
+    // operator pause). Re-publish that snapshot so a non-owning autoloop_status
+    // can read it while this process still owns the live handle.
+    handle.runner.on('state', publish);
     deps.ready(ctx.tag ?? ctx.runId, {
       plannerSession: handle.dispatcher.sessionNames.planner,
       state: handle.runner.state,
@@ -87,6 +96,7 @@ export function makeAutoloopExecutor(deps: AutoloopNodeDeps) {
     try {
       await deps.waitForExit(handle, ctx.signal);
     } finally {
+      handle.runner.off('state', publish);
       deps.unregisterPublisher(ctx.runId);
     }
     publish();
