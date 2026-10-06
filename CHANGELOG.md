@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`autoCompactPercent` on `session_start`.** A long-lived session can compact itself: before each
+  send, the conversation is compacted if context use has reached the given percentage (1–99, off by
+  default). Every call in a turn re-reads the whole context, so cost grows with context size. The
+  setting survives a server restart, and a failed compaction never costs the send.
+- **Using `clawo-mcp` from the Codex CLI** is documented in `skills/references/mcp.md`
+  (`codex mcp add clawo -- clawo-mcp`).
+
+### Fixed
+
+- **Processes sharing the persisted-session file no longer erase each other's sessions.** The
+  server, the OpenClaw plugin and every `clawo-mcp` or `clawo acp` process share one file, and each
+  wrote its whole in-memory list back, so the last one to save dropped sessions the others had
+  added since it started — including the resume record of a long-lived session. Saves now merge
+  only the sessions a process changed, under a file lock. `CLAWO_SESSIONS_DIR` relocates the file.
+- **The run ledger records the model a Claude alias ran.** A session started with an alias such as
+  `opus[1m]` was recorded under the alias; it now records the model id the CLI reports at start
+  (`claude-opus-5-5[1m]`). A model named explicitly is still recorded as given.
+
 ## [7.6.2] - 2026-10-05
 
 ### Fixed

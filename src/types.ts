@@ -282,6 +282,12 @@ export interface SessionConfig {
   // Limits
   maxTurns?: number;
   maxBudgetUsd?: number;
+  /**
+   * Compact the conversation before a send once context use reaches this
+   * percentage (1–99). Off when unset. For long-lived sessions, where every
+   * call re-reads the whole context from cache and cost grows with its size.
+   */
+  autoCompactPercent?: number;
   // System prompts
   systemPrompt?: string;
   appendSystemPrompt?: string;

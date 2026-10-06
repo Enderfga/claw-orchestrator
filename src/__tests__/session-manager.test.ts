@@ -38,6 +38,8 @@ class MockSession extends EventEmitter implements ISession {
   stopCalled = 0;
   sendCalls: Array<{ message: string | unknown[]; options?: SessionSendOptions }> = [];
   compactCalls: string[] = [];
+  contextPercentOverride?: number;
+  compactThrows = false;
   /** Overrides the result event this session resolves with. */
   nextEvent?: Record<string, unknown>;
   /** Test seam for exercising real SessionManager/dispatcher send outcomes. */
@@ -117,7 +119,7 @@ class MockSession extends EventEmitter implements ISession {
       isReady: this._isReady,
       startTime: new Date().toISOString(),
       lastActivity: new Date().toISOString(),
-      contextPercent: 5,
+      contextPercent: this.contextPercentOverride ?? 5,
       retries: 0,
       sessionId: this.sessionId,
       uptime: 60,
@@ -147,6 +149,7 @@ class MockSession extends EventEmitter implements ISession {
 
   async compact(summary?: string): Promise<TurnResult | { requestId: number; sent: boolean }> {
     this.compactCalls.push(summary || '');
+    if (this.compactThrows) throw new Error('compact unsupported');
     return { text: 'compacted', event: { type: 'result' } };
   }
 
@@ -192,6 +195,8 @@ function patchCreateSession(manager: InstanceType<typeof SessionManager>): void 
 // and collide inside — the developer's real ~/.claw-orchestrator/wf.
 const TEST_WF_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'clawo-sm-wf-'));
 process.env.CLAWO_WF_DIR = TEST_WF_DIR;
+// The session file's lock is a real file; keep it out of the developer's ~/.openclaw.
+process.env.CLAWO_SESSIONS_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'clawo-sm-sessions-'));
 
 vi.mock('node:fs', async () => {
   const actual = await vi.importActual<typeof import('node:fs')>('node:fs');
@@ -799,6 +804,46 @@ describe('SessionManager', () => {
       await mgr.startSession({ name: 'compact-test2', cwd: '/tmp' });
       await mgr.compactSession('compact-test2');
       expect(lastMock().compactCalls).toEqual(['']);
+    });
+  });
+
+  // ─── autoCompactPercent ─────────────────────────────────────────────
+
+  describe('autoCompactPercent', () => {
+    it('compacts before a send once context reaches the threshold', async () => {
+      await mgr.startSession({ name: 'ac-hit', cwd: '/tmp', autoCompactPercent: 85 });
+      const mock = lastMock();
+      mock.contextPercentOverride = 85;
+      await mgr.sendMessage('ac-hit', 'hello');
+      expect(mock.compactCalls).toEqual(['']);
+      expect(mock.sendCalls.map((c) => c.message)).toEqual(['hello']);
+    });
+
+    it('leaves the session alone below the threshold or when unset', async () => {
+      await mgr.startSession({ name: 'ac-below', cwd: '/tmp', autoCompactPercent: 85 });
+      lastMock().contextPercentOverride = 84;
+      await mgr.sendMessage('ac-below', 'hello');
+      expect(lastMock().compactCalls).toEqual([]);
+
+      await mgr.startSession({ name: 'ac-off', cwd: '/tmp' });
+      lastMock().contextPercentOverride = 99;
+      await mgr.sendMessage('ac-off', 'hello');
+      expect(lastMock().compactCalls).toEqual([]);
+    });
+
+    it('still sends when the compact fails', async () => {
+      await mgr.startSession({ name: 'ac-fail', cwd: '/tmp', autoCompactPercent: 50 });
+      const mock = lastMock();
+      mock.contextPercentOverride = 90;
+      mock.compactThrows = true;
+      await mgr.sendMessage('ac-fail', 'hello');
+      expect(mock.sendCalls.map((c) => c.message)).toEqual(['hello']);
+    });
+
+    it.each([0, 100, Number.NaN])('rejects an out-of-range threshold (%s)', async (value) => {
+      await expect(mgr.startSession({ name: 'ac-bad', cwd: '/tmp', autoCompactPercent: value })).rejects.toThrow(
+        'autoCompactPercent must be a number from 1 to 99',
+      );
     });
   });
 
@@ -2352,6 +2397,16 @@ describe('SessionManager', () => {
         engine: 'cursor',
         sandboxMode: 'read-only',
       });
+    });
+
+    // A long-lived session resumed by name after a restart keeps its compaction
+    // threshold; without it the setting silently lapsed on the first restart.
+    it('persists and restores autoCompactPercent', async () => {
+      await mgr.startSession({ name: 'ac-persist', cwd: '/tmp', engine: 'cursor', autoCompactPercent: 85 });
+      await mgr.stopSession('ac-persist', { keepPersisted: true });
+      await mgr.startSession({ name: 'ac-persist', cwd: '/tmp' });
+
+      expect(createdConfigs.at(-1)).toMatchObject({ engine: 'cursor', autoCompactPercent: 85 });
     });
 
     it('persists and restores the real Codex thread ID', async () => {

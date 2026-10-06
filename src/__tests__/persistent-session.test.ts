@@ -644,6 +644,18 @@ describe('PersistentClaudeSession', () => {
       expect(named.getCost().model).toBe('claude-sonnet-4-6');
     });
 
+    // An alias is the CLI's to resolve: `opus[1m]` meant Opus 5 until CLI 2.1.280
+    // and Opus 5.5 after, so the ledger records the id init reports.
+    it('names the model init reports when the caller set an alias', async () => {
+      const aliased = new PersistentClaudeSession(makeConfig({ model: 'opus[1m]' }));
+      const started = aliased.start();
+      const init = { type: 'system', subtype: 'init', session_id: 'sess_789', model: 'claude-opus-5-5[1m]' };
+      mockProc.stdout.emit('data', Buffer.from(JSON.stringify(init) + '\n'));
+      await started;
+      expect(aliased.getCost().model).toBe('claude-opus-5-5[1m]');
+      expect(aliased.getCost().pricing.inputPer1M).toBe(4);
+    });
+
     it('emits text from content_block_delta', () => {
       const texts: unknown[] = [];
       session.on(SESSION_EVENT.TEXT, (t: unknown) => texts.push(t));

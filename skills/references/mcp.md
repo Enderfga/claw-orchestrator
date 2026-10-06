@@ -8,6 +8,7 @@ This document covers:
 - [Host configuration](#host-configuration)
   - [Hermes Agent](#hermes-agent)
   - [Claude Desktop / Claude Code](#claude-desktop--claude-code)
+  - [Codex CLI](#codex-cli)
   - [Cursor](#cursor)
   - [Cline (VS Code)](#cline-vs-code)
   - [Continue](#continue)
@@ -115,6 +116,24 @@ Hermes prefixes tool names with `mcp_<server>_`. The model sees the prefixed nam
 ```
 
 For Claude Code (`~/.claude.json` or per-project `.mcp.json`), use the same shape under `mcpServers`.
+
+### Codex CLI
+
+```bash
+codex mcp add clawo -- clawo-mcp
+```
+
+or in `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.clawo]
+command = "clawo-mcp"
+```
+
+Codex then offers the tools in every local session — `codex exec`, the TUI and `codex app-server`. For a
+one-off run without touching the config, pass `-c 'mcp_servers.clawo.command="clawo-mcp"'`. Each Codex
+session starts its own `clawo-mcp` process, so the sessions one Codex session starts through it are not
+visible from another.
 
 ### Cursor
 

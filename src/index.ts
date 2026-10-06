@@ -283,6 +283,13 @@ const plugin = {
           disallowedTools: { type: 'array', maxItems: 200, items: { type: 'string' }, description: 'Tools to deny' },
           maxTurns: { type: 'number', description: 'Max agent loop turns' },
           maxBudgetUsd: { type: 'number', description: 'Max API spend (USD)' },
+          autoCompactPercent: {
+            type: 'number',
+            minimum: 1,
+            maximum: 99,
+            description:
+              'Compact the conversation before a send once context use reaches this percentage. Off by default; for long-lived sessions, where cost grows with context size',
+          },
           systemPrompt: { type: 'string', description: 'Replace system prompt' },
           appendSystemPrompt: {
             type: 'string',

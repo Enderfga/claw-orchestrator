@@ -190,6 +190,17 @@ tokens the session has been billed for in total, which only ever grows.
 (`codex`, `agy`, `grok`, `opencode`); those sessions log a warning the first
 time it is called.
 
+A long-lived session can compact itself: start it with `autoCompactPercent`
+(1–99, off by default) and, before each send, the session is compacted first
+if `contextPercent` has reached that value. Every call in a turn re-reads the
+whole context from cache, so cost grows with context size; compacting earlier
+trades detail of older turns for cheaper ones. The setting survives a restart
+of the server, and a failed compaction never costs the send.
+
+```typescript
+await manager.startSession({ name: 'assistant', cwd: '/srv/bot', autoCompactPercent: 85 });
+```
+
 `stats.turns` and `stats.turnsSucceeded` are the same kind of distinction.
 `turns` counts turns that reached the engine, whatever their outcome, including
 the ones that then failed. `turnsSucceeded` counts only the ones the engine

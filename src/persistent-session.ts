@@ -965,7 +965,13 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
   }
 
   getCost(): CostBreakdown {
-    const model = this.options.model || this._engineModel;
+    // A model the caller named explicitly wins over what init reports. An alias
+    // (`opus`, `opus[1m]`) is different: what it means is the CLI's decision —
+    // the alias has moved under us five times — so the id init reports wins.
+    const configured = this.options.model;
+    const bare = configured?.replace(/\[1m\]$/i, '');
+    const isAlias = !!bare && resolveAlias(bare) !== bare;
+    const model = (isAlias ? this._engineModel : undefined) || configured || this._engineModel;
     const pricing = getModelPricing(model);
     const nonCachedIn = Math.max(0, this.stats.tokensIn - this.stats.cachedTokens);
     return {
