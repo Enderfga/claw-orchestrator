@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Live Autoloop runner state transitions are checkpointed**, so a
+  non-owning `autoloop_status` shows both a recoverable send-timeout pause
+  and an operator pause instead of the stale initial planning snapshot.
+
 ## [7.7.0] - 2026-10-07
 
 ### Added

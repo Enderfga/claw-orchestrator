@@ -124,6 +124,8 @@ A genuine per-agent send timeout is recoverable but is never retried
 automatically: the underlying agent may still complete and cause side effects.
 The runner pauses with an `awaiting_resume` reason and records the immutable
 logical dispatch as `pending_dispatch`, including its stable `dispatch_id`.
+Live runner state transitions are checkpointed, so a non-owning
+`autoloop_status` shows both a recoverable send-timeout pause and an operator pause.
 Resume may supply only a finite, in-range `send_timeout_ms` that is strictly
 larger than the latest effective value, together with the matching
 `pending_dispatch_id` when a dispatch is pending. Legacy runs start comparison
