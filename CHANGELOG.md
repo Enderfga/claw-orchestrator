@@ -5,6 +5,45 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.7.0] - 2026-10-07
+
+### Added
+
+- **`autoCompactPercent` on `session_start`.** A long-lived session can compact itself: before each
+  send, the conversation is compacted if context use has reached the given percentage (1–99, off by
+  default). Every call in a turn re-reads the whole context, so cost grows with context size. The
+  setting survives a server restart, and a failed compaction never costs the send.
+- **ACP sessions can be resumed and listed.** The ACP agent now advertises
+  `sessionCapabilities.resume` and `.list`: `session/list` returns the sessions it created, newest
+  first, and `session/resume` reattaches one after the editor or the agent process restarts, on its
+  engine and model, continuing the conversation. `session/load` remains unadvertised, since it
+  requires replaying the conversation to the client. Changing permission, or the model within the
+  same engine, and cancelling a turn now keep the conversation instead of starting a new one.
+- **`chrome` on `session_start` (Claude engine).** Passes `--chrome`, so the session can use the
+  user's Chrome through the Claude in Chrome extension, with that browser's sign-ins. Off by
+  default; it needs Chrome running with the extension and a claude.ai login. The setting survives a
+  server restart.
+- **The run ledger marks a refusal fallback.** When Opus 5.5 or Sonnet 5.5 refuses and Claude Code
+  re-runs the turn on another model (`system/model_refusal_fallback`), that turn's row records
+  `refusalFallback: { from, to, category }`.
+- **Using `clawo-mcp` from the Codex CLI** is documented in `skills/references/mcp.md`
+  (`codex mcp add clawo -- clawo-mcp`).
+
+### Fixed
+
+- **Processes sharing the persisted-session file no longer erase each other's sessions.** The
+  server, the OpenClaw plugin and every `clawo-mcp` or `clawo acp` process share one file, and each
+  wrote its whole in-memory list back, so the last one to save dropped sessions the others had
+  added since it started — including the resume record of a long-lived session. Saves now merge
+  only the sessions a process changed, under a file lock. `CLAWO_SESSIONS_DIR` relocates the file.
+- **The run ledger records the model a Claude alias ran.** A session started with an alias such as
+  `opus[1m]` was recorded under the alias; it now records the model id the CLI reports at start
+  (`claude-opus-5-5[1m]`). A model named explicitly is still recorded as given.
+
+### Changed
+
+- Tested with Claude Code 2.1.291, Codex 0.160.1 and agy 1.3.0.
+
 ## [7.6.2] - 2026-10-05
 
 ### Fixed

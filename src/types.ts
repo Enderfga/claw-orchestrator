@@ -282,6 +282,12 @@ export interface SessionConfig {
   // Limits
   maxTurns?: number;
   maxBudgetUsd?: number;
+  /**
+   * Compact the conversation before a send once context use reaches this
+   * percentage (1–99). Off when unset. For long-lived sessions, where every
+   * call re-reads the whole context from cache and cost grows with its size.
+   */
+  autoCompactPercent?: number;
   // System prompts
   systemPrompt?: string;
   appendSystemPrompt?: string;
@@ -365,6 +371,13 @@ export interface SessionConfig {
    * fan out (ultracode, agent teams) surface no intermediate output.
    */
   forwardSubagentText?: boolean;
+  /**
+   * Give the session the user's Chrome through the Claude in Chrome extension
+   * (`--chrome`, Claude engine). It acts with the browser's own sign-ins, so it
+   * is off unless asked for. Needs Chrome running with the extension installed
+   * and a claude.ai login; the CLI turns it off for API-key logins.
+   */
+  chrome?: boolean;
   /** Delegate permission prompts to an MCP tool for non-interactive use */
   permissionPromptTool?: string;
   /** Move cwd/env/git status from system prompt to user message for better prompt cache hits */
@@ -505,6 +518,13 @@ export interface SessionStats {
   retries: number;
   /** Last API retry error category (e.g. "overloaded", "rate_limit") */
   lastRetryError?: string;
+  /**
+   * Turns the model refused and the CLI re-ran on another model (Claude's
+   * `system/model_refusal_fallback`), and the most recent one. The run ledger
+   * compares the count across a turn to mark the rows where it happened.
+   */
+  refusalFallbacks?: number;
+  lastRefusalFallback?: { from: string; to: string; category?: string };
   /** Plugins that failed to load due to unmet dependencies (from system/init event, CLI 2.1.121+) */
   pluginErrors?: Array<{ plugin: string; reason: string }>;
   /** Codex thread ID captured from the most recent `thread.started` event (Codex 0.119+). Used by `codex_resume`. */

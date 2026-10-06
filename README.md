@@ -112,9 +112,9 @@ block, and the cancellation and permission limitations are in
 
 | Engine      | CLI        | Tested Version |
 | ----------- | ---------- | -------------- |
-| Claude Code | `claude`   | 2.1.289        |
-| Codex       | `codex`    | 0.160.0        |
-| Antigravity | `agy`      | 1.2.17         |
+| Claude Code | `claude`   | 2.1.291        |
+| Codex       | `codex`    | 0.160.1        |
+| Antigravity | `agy`      | 1.3.0          |
 | Grok Build  | `grok`     | 1.0.46         |
 | OpenCode    | `opencode` | 1.18.34        |
 | Custom CLI  | any        | —              |

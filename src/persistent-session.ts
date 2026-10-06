@@ -100,6 +100,8 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
   private _engineCostUsd = 0;
   /** Set when the process was spawned with `--resume`: its first total is inherited, not ours. */
   private _costBaselinePending = false;
+  private _refusalFallbacks = 0;
+  private _lastRefusalFallback: { from: string; to: string; category?: string } | undefined;
   /** Context window the engine reported for the model it actually used. */
   private _engineContextWindow: number | null = null;
   /** Model id the CLI reported in its init event — what answers when no `model` was set. */
@@ -321,6 +323,7 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
     if (this.options.includeHookEvents) args.push('--include-hook-events');
     // CLI 2.1.211+: surface subagent output in the parent stream.
     if (this.options.forwardSubagentText) args.push('--forward-subagent-text');
+    if (this.options.chrome) args.push('--chrome');
     if (this.options.permissionPromptTool) {
       args.push('--permission-prompt-tool', this.options.permissionPromptTool);
     } else {
@@ -541,6 +544,17 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
             this.stats.pluginErrors = pluginErrors as Array<{ plugin: string; reason: string }>;
           }
           this.emit(SESSION_EVENT.INIT, event);
+        } else if (event.subtype === 'model_refusal_fallback') {
+          // The model refused and the CLI re-ran the turn on another model.
+          // The stream-json frame is snake_case; the in-process form camelCase.
+          const e = event as Record<string, unknown>;
+          const from = e.original_model ?? e.originalModel;
+          const to = e.fallback_model ?? e.fallbackModel;
+          const category = e.api_refusal_category ?? e.apiRefusalCategory;
+          if (e.direction === 'retry' && typeof from === 'string' && typeof to === 'string') {
+            this._refusalFallbacks++;
+            this._lastRefusalFallback = { from, to, ...(typeof category === 'string' ? { category } : {}) };
+          }
         } else if (event.subtype === 'api_retry') {
           this.stats.retries++;
           this.stats.lastRetryError =
@@ -943,6 +957,9 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
       contextPercent: this._contextPercent(),
       retries: this.stats.retries,
       lastRetryError: this.stats.lastRetryError,
+      ...(this._refusalFallbacks > 0
+        ? { refusalFallbacks: this._refusalFallbacks, lastRefusalFallback: this._lastRefusalFallback }
+        : {}),
       sessionId: this.sessionId,
       uptime: this.stats.startTime ? Math.round((Date.now() - new Date(this.stats.startTime).getTime()) / 1000) : 0,
     };
@@ -965,7 +982,13 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
   }
 
   getCost(): CostBreakdown {
-    const model = this.options.model || this._engineModel;
+    // A model the caller named explicitly wins over what init reports. An alias
+    // (`opus`, `opus[1m]`) is different: what it means is the CLI's decision —
+    // the alias has moved under us five times — so the id init reports wins.
+    const configured = this.options.model;
+    const bare = configured?.replace(/\[1m\]$/i, '');
+    const isAlias = !!bare && resolveAlias(bare) !== bare;
+    const model = (isAlias ? this._engineModel : undefined) || configured || this._engineModel;
     const pricing = getModelPricing(model);
     const nonCachedIn = Math.max(0, this.stats.tokensIn - this.stats.cachedTokens);
     return {

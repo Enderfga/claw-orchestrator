@@ -39,7 +39,8 @@ function getPluginVersion(): string {
 
 // ─── Persistence ─────────────────────────────────────────────────────────────
 
-const PERSIST_DIR = path.join(os.homedir(), '.openclaw');
+// CLAWO_SESSIONS_DIR relocates the file, so tests never touch the real one.
+const PERSIST_DIR = process.env.CLAWO_SESSIONS_DIR || path.join(os.homedir(), '.openclaw');
 const PERSIST_FILE = path.join(PERSIST_DIR, 'claude-sessions.json');
 // PERSIST_DISK_TTL_MS imported from ./constants.js
 
@@ -50,6 +51,8 @@ interface PersistedSession {
   model?: string;
   engine?: EngineType;
   sandboxMode?: SessionConfig['sandboxMode'];
+  autoCompactPercent?: number;
+  chrome?: boolean;
   originalCreated: string;
   lastResumed: string;
   lastActivity: number;
@@ -69,46 +72,52 @@ function loadPersistedSessions(): Map<string, PersistedSession> {
   }
 }
 
-// Atomic write: write to .tmp then rename to avoid corrupt reads on crash
-function savePersistedSessions(sessions: Map<string, PersistedSession>, logger?: Logger): void {
+/**
+ * Write this process's changes into the shared session file.
+ *
+ * Several processes share the file — the server, the OpenClaw plugin, every
+ * `clawo-mcp` and `clawo acp` a host starts. Each used to write its whole
+ * in-memory map back, so the last writer erased whatever the others had added
+ * since it loaded: a long-lived session's resume record could vanish because an
+ * unrelated process exited. Now only the names this process changed (`dirty`,
+ * set or deleted) are merged into what is on disk, under a lock, and the merged
+ * map is returned so the caller sees the other processes' sessions too.
+ *
+ * Returns undefined when the lock stays busy; `dirty` is left as it was, so
+ * the changes go out with the next save instead of being lost.
+ */
+function savePersistedSessions(
+  mine: Map<string, PersistedSession>,
+  dirty: Set<string>,
+  logger?: Logger,
+): Map<string, PersistedSession> | undefined {
+  const log = logger || createConsoleLogger('SessionManager');
   try {
     fs.mkdirSync(PERSIST_DIR, { recursive: true });
-    const arr = Array.from(sessions.values());
-    const tmp = PERSIST_FILE + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify(arr, null, 2));
-    fs.renameSync(tmp, PERSIST_FILE);
+    const result = withFileLock(`${PERSIST_FILE}.lock`, () => {
+      const merged = loadPersistedSessions();
+      for (const name of dirty) {
+        const entry = mine.get(name);
+        if (entry) merged.set(name, entry);
+        else merged.delete(name);
+      }
+      const tmp = `${PERSIST_FILE}.${process.pid}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify(Array.from(merged.values()), null, 2));
+      fs.renameSync(tmp, PERSIST_FILE);
+      return merged;
+    });
+    if (!result.ok) {
+      log.warn('Session file busy; changes kept for the next save');
+      return undefined;
+    }
+    dirty.clear();
+    return result.value;
   } catch (err) {
-    (logger || createConsoleLogger('SessionManager')).warn('Failed to persist sessions:', (err as Error).message);
+    log.warn('Failed to persist sessions:', (err as Error).message);
+    return undefined;
   }
 }
 
-// Async version for hot-path (sendMessage, TTL cleanup)
-function savePersistedSessionsAsync(sessions: Map<string, PersistedSession>, logger?: Logger): void {
-  const log = logger || createConsoleLogger('SessionManager');
-  const arr = Array.from(sessions.values());
-  const tmp = PERSIST_FILE + '.tmp';
-  fs.mkdir(PERSIST_DIR, { recursive: true }, (mkdirErr) => {
-    if (mkdirErr) {
-      log.error('Failed to create persist dir:', mkdirErr.message);
-      return;
-    }
-    fs.writeFile(tmp, JSON.stringify(arr, null, 2), (writeErr) => {
-      if (writeErr) {
-        log.error('Failed to write session file:', writeErr.message);
-        return;
-      }
-      fs.rename(tmp, PERSIST_FILE, (renameErr) => {
-        if (renameErr) {
-          log.error('Failed to rename session file:', renameErr.message);
-          // Clean up orphan tmp file
-          fs.unlink(tmp, () => {});
-        }
-      });
-    });
-  });
-}
-
-// Debounce helper — coalesces rapid writes into one
 function makeDebounced(fn: () => void, ms: number): () => void {
   let timer: ReturnType<typeof setTimeout> | null = null;
   return () => {
@@ -156,6 +165,7 @@ import {
   type RunLedgerSummary,
 } from './run-ledger.js';
 import { checkBudget, isBudgetExceeded } from './budget.js';
+import { withFileLock } from './kernel/file-lock.js';
 import { InboxManager, type SessionLookup } from './inbox-manager.js';
 import { sanitizeCwd, validateName } from './validation.js';
 import { PersistentClaudeSession } from './persistent-session.js';
@@ -609,10 +619,7 @@ export class SessionManager {
     // Clean up orphaned child processes from a previous unclean exit
     this._cleanupOrphanedPids();
     // Debounced async writer — at most one write per 5 seconds on hot paths
-    this._debouncedSave = makeDebounced(
-      () => savePersistedSessionsAsync(this.persistedSessions, this.logger),
-      DEBOUNCED_SAVE_MS,
-    );
+    this._debouncedSave = makeDebounced(() => this._savePersisted(), DEBOUNCED_SAVE_MS);
 
     // Start TTL cleanup timer
     this.cleanupTimer = setInterval(() => this._cleanupIdleSessions(), CLEANUP_INTERVAL_MS);
@@ -671,6 +678,10 @@ export class SessionManager {
 
   async startSession(config: Partial<SessionConfig> & { name?: string }): Promise<SessionInfo> {
     const name = config.name || `session-${Date.now()}`;
+    const compactAt = config.autoCompactPercent;
+    if (compactAt !== undefined && !(Number.isFinite(compactAt) && compactAt >= 1 && compactAt <= 99)) {
+      throw new Error('autoCompactPercent must be a number from 1 to 99');
+    }
 
     // Check pending first — a concurrent caller may have already started creation
     const pending = this._pendingSessions.get(name);
@@ -755,6 +766,8 @@ export class SessionManager {
       effort: config.effort || this.pluginConfig.defaultEffort,
       model: config.model || persisted?.model || this.pluginConfig.defaultModel,
       sandboxMode: config.sandboxMode ?? persisted?.sandboxMode,
+      autoCompactPercent: config.autoCompactPercent ?? persisted?.autoCompactPercent,
+      chrome: config.chrome ?? persisted?.chrome,
       ...config,
       ...(resumeId ? { resumeSessionId: resumeId } : {}),
     };
@@ -868,6 +881,20 @@ export class SessionManager {
         session: name,
         engine: managed.config.engine || 'claude',
       });
+
+      // Compact before the send rather than after the previous reply, so the
+      // caller is never kept waiting for it, and inside the send chain, so no
+      // other send can interleave. Best effort: a failed or unsupported compact
+      // must not cost the caller their turn.
+      const compactAt = managed.config.autoCompactPercent;
+      if (compactAt && managed.session.getStats().contextPercent >= compactAt) {
+        try {
+          await managed.session.compact();
+          this.logger.info(`[SessionManager] ${name}: context at or above ${compactAt}% — compacted before send`);
+        } catch (err) {
+          this.logger.warn(`[SessionManager] ${name}: auto-compact failed: ${(err as Error).message}`);
+        }
+      }
 
       const sendOpts: Record<string, unknown> = {
         waitForComplete: true,
@@ -1028,6 +1055,7 @@ export class SessionManager {
       sandboxMode: source.config.sandboxMode,
       effort: source.config.effort,
       maxBudgetUsd: source.config.maxBudgetUsd,
+      autoCompactPercent: source.config.autoCompactPercent,
       systemPrompt: source.config.systemPrompt,
       appendSystemPrompt: source.config.appendSystemPrompt,
       addDir: source.config.addDir,
@@ -1090,6 +1118,7 @@ export class SessionManager {
     toolCalls: number;
     toolErrors: number;
     costUsd: number;
+    refusalFallbacks: number;
   } {
     const empty = {
       turns: 0,
@@ -1100,6 +1129,7 @@ export class SessionManager {
       toolCalls: 0,
       toolErrors: 0,
       costUsd: 0,
+      refusalFallbacks: 0,
     };
     try {
       const st = managed.session.getStats();
@@ -1112,6 +1142,7 @@ export class SessionManager {
         toolCalls: st.toolCalls || 0,
         toolErrors: st.toolErrors || 0,
         costUsd: this._spentUsd(managed),
+        refusalFallbacks: st.refusalFallbacks || 0,
       };
     } catch {
       return empty;
@@ -1160,10 +1191,18 @@ export class SessionManager {
       ok: !error && (after.turns > before.turns ? after.turnsSucceeded > before.turnsSucceeded : true),
     };
     // Fall back to the engine's own reported model, so a session started
-    // without an explicit `model` still records what actually answered.
-    const model = managed.config.resolvedModel || managed.config.model || this._reportedModel(managed);
+    // without an explicit `model` still records what actually answered. An
+    // alias (`opus[1m]`) is the CLI's to resolve, so what it reports wins there.
+    const configured = managed.config.resolvedModel || managed.config.model;
+    const bare = configured?.replace(/\[1m\]$/i, '');
+    const isAlias = !!bare && resolveAlias(bare) !== bare;
+    const model = (isAlias ? this._reportedModel(managed) : undefined) || configured || this._reportedModel(managed);
     if (model) row.model = model;
     if (error) row.error = error.slice(0, 500);
+    if (after.refusalFallbacks > before.refusalFallbacks) {
+      const fallback = managed.session.getStats().lastRefusalFallback;
+      if (fallback) row.refusalFallback = fallback;
+    }
     if (parent) row.parent = parent;
     if (dims.nodeKind) row.nodeKind = dims.nodeKind;
     if (dims.taskKind) row.taskKind = dims.taskKind;
@@ -1412,8 +1451,8 @@ export class SessionManager {
       // Callers that want the session resumable (autoloop terminate that
       // should still allow /autoloop/<id>/resume to reattach the Planner's
       // Claude conversation) pass keepPersisted: true.
-      this.persistedSessions.delete(name);
-      savePersistedSessions(this.persistedSessions, this.logger);
+      this._forgetPersisted(name);
+      this._savePersisted();
     }
   }
 
@@ -1877,7 +1916,7 @@ export class SessionManager {
       this._proxyPort = null;
     }
     // Persist final state (TTL-expired sessions already removed by cleanup)
-    savePersistedSessions(this.persistedSessions, this.logger);
+    this._savePersisted();
   }
 
   // ─── Codex /goal helpers (codex-app engine only) ─────────────────────
@@ -2387,16 +2426,33 @@ export class SessionManager {
 
   // ─── Private ───────────────────────────────────────────────────────────
 
+  /** Names this process has set or deleted since its last save; see savePersistedSessions. */
+  private readonly _persistDirty = new Set<string>();
+
+  private _forgetPersisted(name: string): void {
+    this.persistedSessions.delete(name);
+    this._persistDirty.add(name);
+  }
+
+  /** Merge this process's changes into the shared file and adopt the merged view. */
+  private _savePersisted(): void {
+    if (this._persistDirty.size === 0) return;
+    const merged = savePersistedSessions(this.persistedSessions, this._persistDirty, this.logger);
+    if (merged) this.persistedSessions = merged;
+  }
+
   private _persistSession(name: string, managed: ManagedSession): void {
     const resumeSessionId = this._managedResumeId(managed);
     if (!resumeSessionId) {
-      if (managed.config.engine === 'agy' && this.persistedSessions.delete(name)) {
+      if (managed.config.engine === 'agy' && this.persistedSessions.has(name)) {
+        this._forgetPersisted(name);
         this._debouncedSave();
       }
       return;
     }
     managed.claudeSessionId = resumeSessionId;
     const existing = this.persistedSessions.get(name);
+    this._persistDirty.add(name);
     this.persistedSessions.set(name, {
       name,
       claudeSessionId: resumeSessionId,
@@ -2404,6 +2460,8 @@ export class SessionManager {
       model: managed.config.resolvedModel || managed.config.model,
       engine: managed.config.engine,
       sandboxMode: managed.config.sandboxMode,
+      autoCompactPercent: managed.config.autoCompactPercent,
+      chrome: managed.config.chrome,
       originalCreated: existing?.originalCreated || managed.created,
       lastResumed: new Date().toISOString(),
       lastActivity: managed.lastActivity,
@@ -3848,10 +3906,8 @@ export class SessionManager {
       } catch {
         /* session not in memory — fine */
       }
-      this.persistedSessions.delete(`autoloop-${runId}-planner`);
-      this.persistedSessions.delete(`autoloop-${runId}-coder`);
-      this.persistedSessions.delete(`autoloop-${runId}-reviewer`);
-      savePersistedSessions(this.persistedSessions, this.logger);
+      for (const role of ['planner', 'coder', 'reviewer']) this._forgetPersisted(`autoloop-${runId}-${role}`);
+      this._savePersisted();
     }
     // No registry to scrub: the run record IS the registry, and removing it is
     // the delete. The ledger directory under tasks/<runId>/ is deliberately left
@@ -3904,10 +3960,10 @@ export class SessionManager {
     let pruned = false;
     for (const [name, entry] of this.persistedSessions) {
       if (now - entry.lastActivity > PERSIST_DISK_TTL_MS) {
-        this.persistedSessions.delete(name);
+        this._forgetPersisted(name);
         pruned = true;
       }
     }
-    if (pruned) savePersistedSessionsAsync(this.persistedSessions);
+    if (pruned) this._debouncedSave();
   }
 }

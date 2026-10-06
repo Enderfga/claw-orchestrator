@@ -45,6 +45,8 @@ class CostingSession extends EventEmitter implements ISession {
   /** Engine-side turns per send — claude counts one per tool-result batch. */
   turnsPerSend = 1;
   model = 'mock-model';
+  refusalFallbacks = 0;
+  lastRefusalFallback: { from: string; to: string; category?: string } | undefined;
 
   get isReady() {
     return true;
@@ -96,6 +98,9 @@ class CostingSession extends EventEmitter implements ISession {
       contextPercent: 1,
       retries: 0,
       tokensEstimated: this.tokensEstimated,
+      ...(this.refusalFallbacks
+        ? { refusalFallbacks: this.refusalFallbacks, lastRefusalFallback: this.lastRefusalFallback }
+        : {}),
       sessionId: this.sessionId,
       uptime: 1,
     };
@@ -236,6 +241,45 @@ describe('run ledger integration', () => {
     engines[0].model = 'claude-haiku-4-5-20251001';
     await mgr.sendMessage('ledger-nomodel', 'again');
     expect(readRunLedger({ session: 'ledger-nomodel' })[1].model).toBe('claude-haiku-4-5-20251001');
+    await mgr.shutdown();
+  });
+
+  // An alias names a model only through the CLI: `opus[1m]` meant Opus 5 until
+  // CLI 2.1.280 and Opus 5.5 after. The row records what the engine reports.
+  it('records the model the engine reports when the session was started with an alias', async () => {
+    const mgr = makeManager();
+    await mgr.startSession({ name: 'ledger-alias', engine: 'claude', model: 'opus[1m]', cwd: tmpDir });
+    engines[0].model = 'claude-opus-5-5[1m]';
+    await mgr.sendMessage('ledger-alias', 'hi');
+    expect(readRunLedger({ session: 'ledger-alias' })[0].model).toBe('claude-opus-5-5[1m]');
+    await mgr.startSession({ name: 'ledger-explicit', engine: 'claude', model: 'claude-sonnet-4-6', cwd: tmpDir });
+    engines[1].model = 'claude-opus-5-5';
+    await mgr.sendMessage('ledger-explicit', 'hi');
+    expect(readRunLedger({ session: 'ledger-explicit' })[0].model).toBe('claude-sonnet-4-6');
+    await mgr.shutdown();
+  });
+
+  it('marks the turn the model refused and the engine re-ran on another model', async () => {
+    const mgr = makeManager();
+    await mgr.startSession({ name: 'ledger-refusal', engine: 'claude', cwd: tmpDir });
+    await mgr.sendMessage('ledger-refusal', 'ordinary');
+    // The fallback frame arrives during the turn, as it does from the CLI.
+    const engine = engines[0];
+    const send = engine.send.bind(engine);
+    engine.send = async (...args: Parameters<typeof engine.send>) => {
+      engine.refusalFallbacks = 1;
+      engine.lastRefusalFallback = { from: 'claude-opus-5-5', to: 'claude-opus-4-8', category: 'cyber' };
+      engine.send = send;
+      return send(...args);
+    };
+    await mgr.sendMessage('ledger-refusal', 'refused, then re-run');
+    await mgr.sendMessage('ledger-refusal', 'ordinary again');
+    const rows = readRunLedger({ session: 'ledger-refusal' });
+    expect(rows.map((r) => r.refusalFallback)).toEqual([
+      undefined,
+      { from: 'claude-opus-5-5', to: 'claude-opus-4-8', category: 'cyber' },
+      undefined,
+    ]);
     await mgr.shutdown();
   });
 
