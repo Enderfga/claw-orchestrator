@@ -358,6 +358,11 @@ const plugin = {
             type: 'boolean',
             description: 'Forward subagent text and thinking into the output stream (Claude engine)',
           },
+          chrome: {
+            type: 'boolean',
+            description:
+              "Let the session use the user's Chrome through the Claude in Chrome extension, with its sign-ins (Claude engine; off by default)",
+          },
           permissionPromptTool: {
             type: 'string',
             description: 'Delegate permission prompts to this MCP tool (non-interactive)',

@@ -2409,6 +2409,14 @@ describe('SessionManager', () => {
       expect(createdConfigs.at(-1)).toMatchObject({ engine: 'cursor', autoCompactPercent: 85 });
     });
 
+    it('persists and restores chrome', async () => {
+      await mgr.startSession({ name: 'chrome-persist', cwd: '/tmp', engine: 'cursor', chrome: true });
+      await mgr.stopSession('chrome-persist', { keepPersisted: true });
+      await mgr.startSession({ name: 'chrome-persist', cwd: '/tmp' });
+
+      expect(createdConfigs.at(-1)).toMatchObject({ engine: 'cursor', chrome: true });
+    });
+
     it('persists and restores the real Codex thread ID', async () => {
       await mgr.startSession({ name: 'codex-persist', cwd: '/tmp', engine: 'codex', sandboxMode: 'read-only' });
       lastMock().threadId = '019c6dcb-93ad-7dc1-b531-418d213b8761';

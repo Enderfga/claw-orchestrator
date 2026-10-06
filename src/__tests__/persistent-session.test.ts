@@ -257,6 +257,21 @@ describe('PersistentClaudeSession', () => {
       expect(args).toContain('--forward-subagent-text');
     });
 
+    it('passes --chrome only when asked', async () => {
+      const { spawnEngine: spawn } = await import('../engine-spawn.js');
+      session = new PersistentClaudeSession(makeConfig({ chrome: true }));
+      let started = session.start();
+      emitInitEvent(mockProc);
+      await started;
+      expect(vi.mocked(spawn).mock.calls.at(-1)![1] as string[]).toContain('--chrome');
+
+      session = new PersistentClaudeSession(makeConfig({}));
+      started = session.start();
+      emitInitEvent(mockProc);
+      await started;
+      expect(vi.mocked(spawn).mock.calls.at(-1)![1] as string[]).not.toContain('--chrome');
+    });
+
     it('omits --forward-subagent-text by default', async () => {
       session = new PersistentClaudeSession(makeConfig({}));
       const { spawnEngine: spawn } = await import('../engine-spawn.js');
@@ -642,6 +657,26 @@ describe('PersistentClaudeSession', () => {
       mockProc.stdout.emit('data', Buffer.from(JSON.stringify(init) + '\n'));
       await namedStarted;
       expect(named.getCost().model).toBe('claude-sonnet-4-6');
+    });
+
+    // Opus 5.5 and Sonnet 5.5 re-run a refused turn on an older model and say so
+    // with system/model_refusal_fallback (snake_case on the stream-json wire).
+    it('counts a refusal fallback and keeps the latest one', () => {
+      const frame = (direction: string, to: string) => ({
+        type: 'system',
+        subtype: 'model_refusal_fallback',
+        trigger: 'refusal',
+        direction,
+        scope: 'session',
+        original_model: 'claude-opus-5-5',
+        fallback_model: to,
+        api_refusal_category: 'cyber',
+      });
+      mockProc.stdout.emit('data', Buffer.from(JSON.stringify(frame('retry', 'claude-opus-4-8')) + '\n'));
+      mockProc.stdout.emit('data', Buffer.from(JSON.stringify(frame('revert', 'claude-opus-5-5')) + '\n'));
+      const stats = session.getStats();
+      expect(stats.refusalFallbacks).toBe(1);
+      expect(stats.lastRefusalFallback).toEqual({ from: 'claude-opus-5-5', to: 'claude-opus-4-8', category: 'cyber' });
     });
 
     // An alias is the CLI's to resolve: `opus[1m]` meant Opus 5 until CLI 2.1.280

@@ -57,6 +57,8 @@ export interface RunLedgerRow {
    */
   ok: boolean;
   error?: string;
+  /** The model refused and the engine re-ran this turn on another one (Claude's refusal fallback). */
+  refusalFallback?: { from: string; to: string; category?: string };
   /** council id / fanout id / autoloop run id / workflow run id, when this turn belongs to one. */
   parent?: string;
 

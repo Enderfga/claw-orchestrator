@@ -52,6 +52,7 @@ interface PersistedSession {
   engine?: EngineType;
   sandboxMode?: SessionConfig['sandboxMode'];
   autoCompactPercent?: number;
+  chrome?: boolean;
   originalCreated: string;
   lastResumed: string;
   lastActivity: number;
@@ -766,6 +767,7 @@ export class SessionManager {
       model: config.model || persisted?.model || this.pluginConfig.defaultModel,
       sandboxMode: config.sandboxMode ?? persisted?.sandboxMode,
       autoCompactPercent: config.autoCompactPercent ?? persisted?.autoCompactPercent,
+      chrome: config.chrome ?? persisted?.chrome,
       ...config,
       ...(resumeId ? { resumeSessionId: resumeId } : {}),
     };
@@ -1116,6 +1118,7 @@ export class SessionManager {
     toolCalls: number;
     toolErrors: number;
     costUsd: number;
+    refusalFallbacks: number;
   } {
     const empty = {
       turns: 0,
@@ -1126,6 +1129,7 @@ export class SessionManager {
       toolCalls: 0,
       toolErrors: 0,
       costUsd: 0,
+      refusalFallbacks: 0,
     };
     try {
       const st = managed.session.getStats();
@@ -1138,6 +1142,7 @@ export class SessionManager {
         toolCalls: st.toolCalls || 0,
         toolErrors: st.toolErrors || 0,
         costUsd: this._spentUsd(managed),
+        refusalFallbacks: st.refusalFallbacks || 0,
       };
     } catch {
       return empty;
@@ -1186,10 +1191,18 @@ export class SessionManager {
       ok: !error && (after.turns > before.turns ? after.turnsSucceeded > before.turnsSucceeded : true),
     };
     // Fall back to the engine's own reported model, so a session started
-    // without an explicit `model` still records what actually answered.
-    const model = managed.config.resolvedModel || managed.config.model || this._reportedModel(managed);
+    // without an explicit `model` still records what actually answered. An
+    // alias (`opus[1m]`) is the CLI's to resolve, so what it reports wins there.
+    const configured = managed.config.resolvedModel || managed.config.model;
+    const bare = configured?.replace(/\[1m\]$/i, '');
+    const isAlias = !!bare && resolveAlias(bare) !== bare;
+    const model = (isAlias ? this._reportedModel(managed) : undefined) || configured || this._reportedModel(managed);
     if (model) row.model = model;
     if (error) row.error = error.slice(0, 500);
+    if (after.refusalFallbacks > before.refusalFallbacks) {
+      const fallback = managed.session.getStats().lastRefusalFallback;
+      if (fallback) row.refusalFallback = fallback;
+    }
     if (parent) row.parent = parent;
     if (dims.nodeKind) row.nodeKind = dims.nodeKind;
     if (dims.taskKind) row.taskKind = dims.taskKind;
@@ -2448,6 +2461,7 @@ export class SessionManager {
       engine: managed.config.engine,
       sandboxMode: managed.config.sandboxMode,
       autoCompactPercent: managed.config.autoCompactPercent,
+      chrome: managed.config.chrome,
       originalCreated: existing?.originalCreated || managed.created,
       lastResumed: new Date().toISOString(),
       lastActivity: managed.lastActivity,
