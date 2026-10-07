@@ -21,6 +21,13 @@ One bug, one acceptance contract, five engines, three runs each, first attempt o
 <a href="./examples/promo-video/">how the film was made, and how to re-run it</a>.
 </sub></p>
 
+<details>
+<summary><b>▶ The 40-second film, with sound</b></summary>
+
+https://github.com/user-attachments/assets/5bf9bea8-e5ac-4632-a292-a80a45831dff
+
+</details>
+
 Coding agents grade their own work: "All tests pass ✓". Claw Orchestrator runs them as persistent sessions behind one API and keeps the verdict out of their hands. You declare the checks, the runtime executes them and reads the exit codes, and the evidence stays on disk.
 
 ```bash
