@@ -8,9 +8,11 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { EventEmitter } from 'node:events';
+import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type {
   ISession,
   SessionConfig,
@@ -262,6 +264,8 @@ vi.mock('node:fs', async () => {
 // Import AFTER mocking fs
 const { SessionManager } = await import('../session-manager.js');
 const { Msg: AutoloopMsg } = await import('../autoloop/messages.js');
+const { leaseIsStale, readLease } = await import('../kernel/store.js');
+const { AUTOLOOP_PROOF_BYTES, AUTOLOOP_PROOF_RELPATH } = await import('./helpers/autoloop-owner-child.js');
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -2402,6 +2406,185 @@ describe('SessionManager', () => {
           },
         );
       });
+    });
+
+    describe('abrupt owner loss then public autoloopResume', () => {
+      const OWNER_CHILD = fileURLToPath(new URL('./helpers/autoloop-owner-child.ts', import.meta.url));
+
+      const initGitWorkspace = (workspace: string): void => {
+        fs.mkdirSync(workspace, { recursive: true });
+        execFileSync('git', ['init', '-b', 'main'], { cwd: workspace });
+        execFileSync('git', ['config', 'user.email', 'autoloop-test@example.com'], { cwd: workspace });
+        execFileSync('git', ['config', 'user.name', 'autoloop-test'], { cwd: workspace });
+        fs.writeFileSync(path.join(workspace, 'README.md'), 'workspace\n');
+        execFileSync('git', ['add', 'README.md'], { cwd: workspace });
+        execFileSync('git', ['commit', '-m', 'init'], { cwd: workspace });
+      };
+
+      const spawnOwner = (runId: string, workspace: string, mode: 'committed-iter' | 'planner-only'): ChildProcess =>
+        spawn(process.execPath, ['--import', 'tsx', OWNER_CHILD], {
+          env: {
+            ...process.env,
+            AUTOLOOP_MODE: mode,
+            AUTOLOOP_RUN_ID: runId,
+            AUTOLOOP_WORKSPACE: workspace,
+            CLAWO_WF_DIR: TEST_WF_DIR,
+          },
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+
+      const waitReadyThenSigkill = async (proc: ChildProcess): Promise<void> => {
+        let stderr = '';
+        proc.stderr?.on('data', (chunk: Buffer) => {
+          stderr += chunk.toString();
+        });
+        await new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error(`owner child never READY: ${stderr.slice(0, 800)}`)), 45_000);
+          proc.stdout?.on('data', (chunk: Buffer) => {
+            if (chunk.toString().includes('READY')) {
+              clearTimeout(timer);
+              resolve();
+            }
+          });
+          proc.on('exit', (code, signal) => {
+            clearTimeout(timer);
+            reject(
+              new Error(`owner child exited before READY code=${String(code)} signal=${String(signal)} ${stderr}`),
+            );
+          });
+          proc.on('error', reject);
+        });
+        proc.kill('SIGKILL');
+        await new Promise<void>((resolve) => {
+          proc.on('exit', () => resolve());
+        });
+        await vi.waitFor(
+          () => {
+            expect(proc.pid === undefined || proc.killed || proc.exitCode !== null).toBe(true);
+          },
+          { timeout: 5_000, interval: 50 },
+        );
+      };
+
+      beforeEach(() => {
+        vi.useRealTimers();
+      });
+
+      it('resumes a committed coder iteration into Reviewer after the owner process dies', async () => {
+        const runId = 'kill-owner-open-iter';
+        const workspace = path.join(TEST_WF_DIR, 'workspaces', runId);
+        initGitWorkspace(workspace);
+        const ledgerIter = path.join(workspace, 'tasks', runId, 'iter', '0');
+        const required = ['directive.json', 'eval_output.json', 'coder_summary.txt', 'diff.patch'] as const;
+
+        const proc = spawnOwner(runId, workspace, 'committed-iter');
+        await waitReadyThenSigkill(proc);
+
+        const observer = createManager();
+        try {
+          await vi.waitFor(
+            () => {
+              expect(leaseIsStale(readLease(runId))).toBe(true);
+              expect(observer.workflowStatus(runId).state).toBe('running');
+            },
+            { timeout: 5_000, interval: 50 },
+          );
+          for (const name of required) {
+            expect(fs.existsSync(path.join(ledgerIter, name))).toBe(true);
+          }
+          expect(fs.existsSync(path.join(ledgerIter, 'verdict.json'))).toBe(false);
+          const subject = execFileSync('git', ['log', '-1', '--format=%s'], { cwd: workspace, encoding: 'utf8' });
+          expect(subject.startsWith('autoloop/iter-0:')).toBe(true);
+          const headBefore = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: workspace, encoding: 'utf8' }).trim();
+          const proofBefore = fs.readFileSync(path.join(workspace, AUTOLOOP_PROOF_RELPATH));
+          expect(proofBefore.toString()).toBe(AUTOLOOP_PROOF_BYTES);
+          const artifactBefore = Object.fromEntries(
+            required.map((name) => [name, fs.readFileSync(path.join(ledgerIter, name))]),
+          );
+
+          const resumeMgr = createManager();
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const origCreate = (resumeMgr as any)._createSession.bind(resumeMgr);
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          (resumeMgr as any)._createSession = (engine: string, config: SessionConfig): ISession => {
+            const mock = origCreate(engine, config) as MockSession;
+            if (config.name.endsWith('-reviewer')) {
+              mock.sendImplementation = async (message) => {
+                const text = typeof message === 'string' ? message : JSON.stringify(message);
+                expect(text).toContain('[review_request iter=0]');
+                return {
+                  text: '```autoloop\n{"tool":"review_complete","args":{"decision":"hold","metric":null,"audit_notes":"recovered from ledger"}}\n```',
+                  event: { type: 'result', result: 'ok' },
+                };
+              };
+            }
+            return mock;
+          };
+
+          try {
+            await resumeMgr.autoloopResume(runId);
+            const verdictPath = path.join(ledgerIter, 'verdict.json');
+            await vi.waitFor(
+              () => {
+                expect(fs.existsSync(verdictPath)).toBe(true);
+              },
+              { timeout: 8_000, interval: 50 },
+            );
+            const reviewer = mockSessions.find((_, i) => createdConfigs[i]?.name.endsWith('-reviewer'));
+            const coder = mockSessions.find((_, i) => createdConfigs[i]?.name.endsWith('-coder'));
+            expect(reviewer?.sendCalls.some((c) => String(c.message).includes('[review_request iter=0]'))).toBe(true);
+            expect(coder?.sendCalls ?? []).toHaveLength(0);
+            expect(execFileSync('git', ['rev-parse', 'HEAD'], { cwd: workspace, encoding: 'utf8' }).trim()).toBe(
+              headBefore,
+            );
+            expect(fs.readFileSync(path.join(workspace, AUTOLOOP_PROOF_RELPATH)).equals(proofBefore)).toBe(true);
+            for (const name of required) {
+              expect(fs.readFileSync(path.join(ledgerIter, name)).equals(artifactBefore[name])).toBe(true);
+            }
+          } finally {
+            await resumeMgr.shutdown();
+          }
+        } finally {
+          await observer.shutdown();
+        }
+      }, 60_000);
+
+      it('plain autoloopResume starts only the Planner after abrupt loss with no open iteration', async () => {
+        const runId = 'kill-owner-planner-only';
+        const workspace = path.join(TEST_WF_DIR, 'workspaces', runId);
+        initGitWorkspace(workspace);
+
+        const proc = spawnOwner(runId, workspace, 'planner-only');
+        await waitReadyThenSigkill(proc);
+
+        const observer = createManager();
+        try {
+          await vi.waitFor(
+            () => {
+              expect(leaseIsStale(readLease(runId))).toBe(true);
+              expect(observer.workflowStatus(runId).state).toBe('running');
+            },
+            { timeout: 5_000, interval: 50 },
+          );
+
+          createdConfigs = [];
+          mockSessions = [];
+          const resumeMgr = createManager();
+          try {
+            await resumeMgr.autoloopResume(runId);
+            await new Promise((resolve) => setTimeout(resolve, 400));
+            expect(createdConfigs.map((c) => c.name)).toEqual([`autoloop-${runId}-planner`]);
+            expect(mockSessions).toHaveLength(1);
+            const auditPath = path.join(workspace, 'tasks', runId, 'decisions.jsonl');
+            const audit = fs.existsSync(auditPath) ? fs.readFileSync(auditPath, 'utf8') : '';
+            expect(audit).not.toMatch(/timeout_migration/);
+          } finally {
+            await resumeMgr.shutdown();
+          }
+        } finally {
+          await observer.shutdown();
+        }
+      }, 60_000);
     });
 
     it('records the engines and models spawn_subagents actually chose', async () => {

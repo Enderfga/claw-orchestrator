@@ -3416,6 +3416,7 @@ export class SessionManager {
       // this inside the startup try makes an append failure follow the same
       // cleanup path as any other failed resume.
       opts._commitTimeoutMigration?.();
+      await this._recoverCommittedCoderIteration(opts.workspace, ledgerDir, runId, runner, dispatcher);
     } catch (err) {
       try {
         await dispatcher.shutdown('start-failed', {
@@ -3428,6 +3429,62 @@ export class SessionManager {
       throw err;
     }
     return { runner, dispatcher, ledgerDir, pushPolicy };
+  }
+
+  /**
+   * If the durable ledger has a committed Coder iteration with no Reviewer
+   * verdict, and HEAD still names that iter, deliver it to Reviewer once.
+   * Git failure or a subject mismatch leaves this resume as a Planner-only boot.
+   */
+  private async _recoverCommittedCoderIteration(
+    workspace: string,
+    ledgerDir: string,
+    runId: string,
+    runner: AutoloopRunner,
+    dispatcher: ClaudeAgentDispatcher,
+  ): Promise<void> {
+    const iterRoot = path.join(ledgerDir, 'iter');
+    if (!fs.existsSync(iterRoot)) return;
+    const iters = fs
+      .readdirSync(iterRoot)
+      .filter((name) => /^\d+$/.test(name))
+      .map((name) => Number(name));
+    if (iters.length === 0) return;
+    const n = Math.max(...iters);
+    const artifacts = ['directive.json', 'eval_output.json', 'coder_summary.txt', 'diff.patch'];
+    const iterDir = path.join(iterRoot, String(n));
+    if (artifacts.some((name) => !fs.existsSync(path.join(iterDir, name)))) return;
+    if (fs.existsSync(path.join(iterDir, 'verdict.json'))) return;
+    for (let i = 0; i < n; i++) {
+      if (!fs.existsSync(path.join(iterRoot, String(i), 'verdict.json'))) return;
+    }
+    let subject: string;
+    try {
+      subject = execFileSync('git', ['-C', workspace, 'log', '-1', '--format=%s'], {
+        encoding: 'utf8',
+      }).trim();
+    } catch {
+      return;
+    }
+    if (!subject.startsWith(`autoloop/iter-${n}:`)) return;
+
+    this.logger.info?.(`[autoloop/${runId}] recovering committed iter ${n} into Reviewer`);
+    await dispatcher.spawnSubagents();
+    runner.markSubagentsSpawned();
+    runner.state.iter = n;
+    void runner
+      .send(
+        AutoloopMsg.reviewRequest(n, {
+          iter: n,
+          ledger_path: ledgerDir,
+          prior_metrics: runner.state.metric_history.slice(-10),
+        }),
+      )
+      .catch((err: unknown) => {
+        this.logger.warn?.(
+          `[autoloop/${runId}] recovered review_request failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
   }
 
   /**
