@@ -665,4 +665,278 @@ program
     console.log(formatEvidence(r.evidence as never));
   });
 
+// ─── solve / fanout — start a built-in workflow from the terminal ───────────
+
+type AgentBindingArg = { name: string; engine?: string; model?: string };
+
+/** `claude`, `codex:gpt-6.1-sol` → an agent binding. Names are made unique. */
+function parseAgentList(list: string, seen = new Map<string, number>()): AgentBindingArg[] {
+  return list
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((item) => {
+      const i = item.indexOf(':');
+      const engine = i === -1 ? item : item.slice(0, i);
+      const model = i === -1 ? undefined : item.slice(i + 1) || undefined;
+      const n = (seen.get(engine) ?? 0) + 1;
+      seen.set(engine, n);
+      return { name: n === 1 ? engine : `${engine}-${n}`, engine, ...(model ? { model } : {}) };
+    });
+}
+
+/** Refuse an unknown engine here rather than as a failed node a minute later. */
+async function enginesKnown(agents: AgentBindingArg[]): Promise<boolean> {
+  const { ENGINE_TYPES } = await import('../src/types.js');
+  const known = ENGINE_TYPES as readonly string[];
+  const bad = agents.filter((a) => !a.engine || !known.includes(a.engine)).map((a) => a.engine || '(empty)');
+  if (!bad.length) return true;
+  console.error(`Error: unknown engine ${bad.join(', ')}. Known: ${known.join(', ')}`);
+  process.exitCode = 1;
+  return false;
+}
+
+function collect(value: string, previous: string[]): string[] {
+  return [...previous, value];
+}
+
+/**
+ * `--check "node --test"` → a command check. Split on whitespace and run as
+ * argv, never through a shell; anything that needs quoting goes in `--contract`.
+ */
+function buildContract(checks: string[], contractFile: string | undefined): Record<string, unknown> | undefined {
+  if (contractFile) {
+    const raw = JSON.parse(fs.readFileSync(contractFile, 'utf-8')) as Record<string, unknown>;
+    if (!checks.length) return raw;
+    return { ...raw, checks: [...((raw.checks as unknown[]) ?? []), ...checksFromFlags(checks)] };
+  }
+  return checks.length ? { checks: checksFromFlags(checks) } : undefined;
+}
+
+function checksFromFlags(checks: string[]): Array<Record<string, unknown>> {
+  return checks.map((c, i) => {
+    const [cmd, ...args] = c.trim().split(/\s+/);
+    return { id: `check-${i + 1}`, type: 'command', cmd, args };
+  });
+}
+
+type RunSnapshot = {
+  state: string;
+  outcome: string;
+  error?: string;
+  outcomeReason?: string;
+  costUsd?: number;
+  nodes: Record<string, { id: string; kind: string; state: string; startedAt?: string; endedAt?: string }>;
+};
+
+const RUN_DONE = new Set(['completed', 'failed', 'cancelled']);
+
+async function runState(runId: string): Promise<RunSnapshot | undefined> {
+  const r = await api(`/workflow/${encodeURIComponent(runId)}/state`);
+  if (!r.ok) {
+    fail(r);
+    return undefined;
+  }
+  return r.run as RunSnapshot;
+}
+
+/** Print the verdict line and return the exit code: 0 only for a completed run. */
+function printVerdict(runId: string, run: RunSnapshot): number {
+  const verdict = run.outcome === 'refuted' ? 'REFUTED' : run.outcome;
+  const cost = typeof run.costUsd === 'number' ? `  $${run.costUsd.toFixed(4)}` : '';
+  console.log(`\n${runId}  ${run.state} / ${verdict}${cost}`);
+  if (run.outcomeReason) console.log(run.outcomeReason);
+  if (run.error) console.log(`error: ${run.error}`);
+  if (run.outcome !== 'unverified') console.log(`evidence: clawo verify ${runId}`);
+  return run.state === 'completed' ? 0 : 1;
+}
+
+/**
+ * Follow a run until it ends, printing each node transition in the order it
+ * happened. Reads the run's event stream: polling the state missed transitions
+ * that came and went between two polls — a failed check and the repair it
+ * triggered printed as one line, in node order rather than time order.
+ */
+async function followRun(runId: string): Promise<number> {
+  const first = await runState(runId);
+  if (!first) return 1;
+  const kinds = new Map(Object.values(first.nodes).map((n) => [n.id, n.kind]));
+  const last = new Map<string, string>();
+  const line = (node: string, state: string): void => {
+    if (last.get(node) === state) return;
+    last.set(node, state);
+    console.log(`  ${node.padEnd(18)} ${(kinds.get(node) ?? '').padEnd(11)} ${state}`);
+  };
+  // What already happened before the stream was open, oldest first.
+  const stamp = (n: RunSnapshot['nodes'][string]): string => n.endedAt ?? n.startedAt ?? '';
+  for (const n of Object.values(first.nodes)
+    .filter((x) => x.state !== 'pending')
+    .sort((x, y) => stamp(x).localeCompare(stamp(y)))) {
+    line(n.id, n.state);
+  }
+  if (RUN_DONE.has(first.state)) return printVerdict(runId, first);
+
+  const headers: Record<string, string> = {};
+  const token = getAuthToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const ctrl = new AbortController();
+  let ended = false;
+  let wake: () => void = () => {};
+  // The stream carries the transitions; a slow poll is what decides the run is
+  // over, so a dropped connection or a missed final event cannot hang the CLI.
+  const watch = (async () => {
+    while (!ended) {
+      await new Promise<void>((res) => {
+        const t = setTimeout(res, 5000);
+        wake = () => {
+          clearTimeout(t);
+          res();
+        };
+      });
+      if (ended) break;
+      const s = await runState(runId);
+      if (!s || RUN_DONE.has(s.state)) break;
+    }
+    ctrl.abort();
+  })();
+  try {
+    const res = await fetch(`${getBaseUrl()}/workflow/${encodeURIComponent(runId)}/events`, {
+      headers,
+      signal: ctrl.signal,
+    });
+    const reader = res.body?.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    while (reader) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let cut: number;
+      while ((cut = buf.indexOf('\n\n')) !== -1) {
+        const block = buf.slice(0, cut);
+        buf = buf.slice(cut + 2);
+        if (!block.startsWith('event: workflow-event')) continue;
+        const data = block.slice(block.indexOf('data: ') + 6);
+        const e = JSON.parse(data) as { type: string; node?: string; state?: string };
+        if (e.type === 'node_state' && e.node && e.state) line(e.node, e.state);
+        if (e.type === 'run_state' && e.state && RUN_DONE.has(e.state)) ctrl.abort();
+      }
+    }
+  } catch {
+    // Aborted on purpose when the run ended, or the stream dropped: the final
+    // state below is read fresh either way.
+  }
+  ended = true;
+  wake();
+  await watch.catch(() => {});
+  const final = await runState(runId);
+  return final ? printVerdict(runId, final) : 1;
+}
+
+async function startWorkflow(
+  spec: unknown,
+  cwd: string,
+  contract: Record<string, unknown> | undefined,
+  opts: { wait?: boolean; json?: boolean },
+): Promise<string | undefined> {
+  const r = await api('/workflow/new', 'POST', { spec, cwd, contract });
+  if (!r.ok) {
+    fail(r);
+    process.exitCode = 1;
+    return undefined;
+  }
+  const runId = String(r.runId);
+  if (!opts.wait) {
+    if (opts.json) console.log(JSON.stringify({ runId, state: r.state }));
+    else console.log(`${runId} started. Follow it with: clawo workflow show ${runId}`);
+    return runId;
+  }
+  if (!opts.json) console.log(`${runId} started`);
+  process.exitCode = opts.json ? await waitQuietly(runId) : await followRun(runId);
+  if (opts.json) {
+    const s = await api(`/workflow/${encodeURIComponent(runId)}/state`);
+    console.log(JSON.stringify(s.run, null, 2));
+  }
+  return runId;
+}
+
+/** `--wait --json`: poll without printing, so stdout stays one JSON document. */
+async function waitQuietly(runId: string): Promise<number> {
+  for (;;) {
+    const r = await api(`/workflow/${encodeURIComponent(runId)}/state`);
+    const run = r.run as { state?: string } | undefined;
+    if (!r.ok || !run) return 1;
+    if (run.state === 'completed') return 0;
+    if (run.state === 'failed' || run.state === 'cancelled') return 1;
+    await new Promise((res) => setTimeout(res, 2000));
+  }
+}
+
+program
+  .command('solve')
+  .description('Fix something and have the runtime check it: triage → implement → verify → repair until green')
+  .argument('<task>', 'What to do')
+  .option('-e, --engine <engine[:model]>', 'Implementer engine, optionally with a model', 'claude')
+  .option('--scouts <list>', 'Comma-separated triage agents, engine[:model] each (default: the implementer)')
+  .option('--reviewers <list>', 'Comma-separated reviewers, engine[:model] each')
+  .option(
+    '-c, --check <command>',
+    'Acceptance check the runtime runs itself, e.g. "npm test" (repeatable)',
+    collect,
+    [],
+  )
+  .option('--contract <file>', 'Acceptance contract JSON file (merged with --check)')
+  .option('--max-repairs <n>', 'Repair attempts while the checks are red', '3')
+  .option('--human-gate', 'Wait for `clawo workflow approve` before writing anything')
+  .option('--cwd <dir>', 'Project directory', process.cwd())
+  .option('-w, --wait', 'Follow the run until it ends; exit 1 unless it completes')
+  .option('--json', 'Machine-readable output')
+  .action(async (task: string, opts) => {
+    const { solveWorkflow } = await import('../src/kernel/templates/index.js');
+    const [implementer] = parseAgentList(opts.engine);
+    const scouts = opts.scouts ? parseAgentList(opts.scouts) : [{ ...implementer }];
+    const reviewers = opts.reviewers ? parseAgentList(opts.reviewers) : undefined;
+    if (!(await enginesKnown([implementer, ...scouts, ...(reviewers ?? [])]))) return;
+    const cwd = path.resolve(opts.cwd);
+    const spec = solveWorkflow({
+      task,
+      cwd,
+      scouts: scouts as never,
+      implementer: { engine: implementer.engine as never, model: implementer.model },
+      reviewers: reviewers as never,
+      humanGate: opts.humanGate,
+      maxRepairs: Math.max(0, parseInt(opts.maxRepairs, 10) || 0),
+    });
+    await startWorkflow(spec, cwd, buildContract(opts.check, opts.contract), opts);
+  });
+
+program
+  .command('fanout')
+  .description('Ask several engines the same thing in parallel, optionally with a synthesis pass')
+  .argument('<task>', 'The prompt every agent gets')
+  .option('-e, --engines <list>', 'Comma-separated agents, engine[:model] each', 'claude,codex')
+  .option('-s, --synthesize', 'Merge the answers in a final pass (needs two or more agents)')
+  .option('-c, --check <command>', 'Acceptance check the runtime runs afterwards (repeatable)', collect, [])
+  .option('--contract <file>', 'Acceptance contract JSON file (merged with --check)')
+  .option('--cwd <dir>', 'Project directory', process.cwd())
+  .option('-w, --wait', 'Follow the run until it ends, then print every answer')
+  .option('--json', 'Machine-readable output')
+  .action(async (task: string, opts) => {
+    const { fanoutWorkflow } = await import('../src/kernel/templates/index.js');
+    const agents = parseAgentList(opts.engines);
+    if (!agents.length) {
+      console.error('Error: --engines needs at least one engine');
+      process.exitCode = 1;
+      return;
+    }
+    if (!(await enginesKnown(agents))) return;
+    const cwd = path.resolve(opts.cwd);
+    const spec = fanoutWorkflow({ task, cwd, agents: agents as never, synthesize: !!opts.synthesize });
+    const runId = await startWorkflow(spec, cwd, buildContract(opts.check, opts.contract), opts);
+    if (!runId || !opts.wait || opts.json) return;
+    const s = await api(`/workflow/${encodeURIComponent(runId)}/state`);
+    const node = (s.run as { nodes?: Record<string, { output?: string }> } | undefined)?.nodes?.fanout;
+    if (node?.output) console.log(`\n${node.output}`);
+  });
+
 program.parse();

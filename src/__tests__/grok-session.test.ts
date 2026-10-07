@@ -377,6 +377,17 @@ describe('PersistentGrokSession — failure handling', () => {
     await expect(p).rejects.toThrow('model unavailable');
   });
 
+  // grok 1.0.46 answers a refused turn (free-tier usage limit, auth) with an
+  // error object, not a result. Reading only `error` resolved the turn as an
+  // empty reply, and the caller saw "did not report the turn as succeeded".
+  it('surfaces the message of a type:error object', async () => {
+    const s = new PersistentGrokSession({ name: 't', cwd: '/tmp', permissionMode: 'bypassPermissions' });
+    await s.start();
+    const p = s.send('hi', { waitForComplete: true });
+    setTimeout(() => reply({ type: 'error', message: 'You have reached your usage limit for now.' }, 1), 5);
+    await expect(p).rejects.toThrow('You have reached your usage limit for now.');
+  });
+
   it('refuses read-only rather than running writable under a read-only label', async () => {
     const s = new PersistentGrokSession({
       name: 't',

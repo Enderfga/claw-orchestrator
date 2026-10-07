@@ -1300,6 +1300,15 @@ const plugin = {
               required: ['name'],
             },
           },
+          implementer: {
+            type: 'object',
+            description:
+              '`solve` only: engine/model that writes the change. Defaults to the configured default engine, whatever engines the scouts use.',
+            properties: {
+              engine: { type: 'string', enum: ENGINE_TYPES },
+              model: { type: 'string' },
+            },
+          },
           humanGate: { type: 'boolean', description: '`solve` only: park for approval before writing anything.' },
           maxRepairs: { type: 'number', description: '`solve` only: repair attempts allowed (default 3).' },
           cwd: { type: 'string', description: 'Working directory for the run.' },
@@ -1395,6 +1404,7 @@ const plugin = {
               task,
               cwd,
               scouts: agents,
+              implementer: args.implementer as SolveArgs['implementer'],
               reviewers: args.reviewers as SolveArgs['reviewers'],
               humanGate: args.humanGate as boolean | undefined,
               maxRepairs: args.maxRepairs as number | undefined,

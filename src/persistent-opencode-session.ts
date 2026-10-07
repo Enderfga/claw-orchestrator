@@ -114,6 +114,14 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
    */
   private opencodeSessionId?: string;
 
+  /**
+   * Spend opencode reported itself, summed over every `step_finish.cost`.
+   * Undefined until a step reports one. When present it is the bill: the model
+   * opencode picked is not in its JSON output, so pricing tokens against the
+   * registry charged a free default model at Sonnet rates.
+   */
+  private _reportedCostUsd?: number;
+
   protected override _continuesConversation(): boolean {
     return !!this.opencodeSessionId;
   }
@@ -427,6 +435,9 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
           // `tokens.input` is only the uncached remainder, so the context this
           // turn actually filled is the whole input side.
           this._reportTurnInputTokens((tokens.input || 0) + cacheRead + cacheWrite);
+          if (typeof part.cost === 'number' && Number.isFinite(part.cost)) {
+            this._reportedCostUsd = (this._reportedCostUsd ?? 0) + part.cost;
+          }
           this._updateCost();
           state.gotUsage = true;
         }
@@ -441,6 +452,11 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
         // Unknown event type — ignore for forward compatibility.
         break;
     }
+  }
+
+  protected override _updateCost(): void {
+    if (this._reportedCostUsd !== undefined) this._stats.costUsd = this._reportedCostUsd;
+    else super._updateCost();
   }
 
   /**

@@ -8,6 +8,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach, afterAll } from 'vitest';
 import * as http from 'node:http';
 import * as net from 'node:net';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { EmbeddedServer, __sseSenderForTest as sseSenderForTest } from '../embedded-server.js';
 import type { SessionManager } from '../session-manager.js';
 import { useIsolatedHome } from './helpers/isolate-home.js';
@@ -272,6 +275,30 @@ describe('EmbeddedServer', () => {
       // /health still works
       const health = await request(port, '/health');
       expect(health.status).toBe(200);
+    });
+
+    // A second server started with an explicit token (another port, a demo, a
+    // test harness) used to overwrite the shared file, so every client reading
+    // it lost access to the first server.
+    it('an env-token server leaves an existing token file alone', async () => {
+      const dir = path.join(os.homedir(), '.openclaw');
+      fs.mkdirSync(dir, { recursive: true });
+      const file = path.join(dir, 'server-token');
+      const existing = 'ab'.repeat(32);
+      fs.writeFileSync(file, existing, { mode: 0o600 });
+      process.env.OPENCLAW_SERVER_TOKEN = 'secret-token';
+      port = await getFreePort();
+      server = new EmbeddedServer(manager, port);
+      await server.start();
+
+      expect(fs.readFileSync(file, 'utf-8')).toBe(existing);
+      const res = await request(port, '/session/list', {
+        method: 'POST',
+        body: {},
+        headers: { Authorization: 'Bearer secret-token' },
+      });
+      expect(res.status).toBe(200);
+      fs.rmSync(file);
     });
 
     it('OPENCLAW_SERVER_TOKEN=disabled disables auth entirely', async () => {

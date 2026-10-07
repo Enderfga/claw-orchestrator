@@ -12,6 +12,7 @@ import { exec } from '../../kernel/exec.js';
 import { captureBaseline } from '../../verify/baseline.js';
 import {
   evidenceDir,
+  failureLines,
   formatEvidence,
   listEvidence,
   makeEvidenceId,
@@ -208,5 +209,41 @@ describe('formatEvidence', () => {
     expect(text).toContain('PASSED');
     expect(text).toContain('untracked');
     expect(text).toContain('new.ts');
+  });
+
+  it("prints the lines of a failing check's output that say why", () => {
+    const tail = [
+      'node:internal/modules/run_main:107',
+      '    triggerUncaughtException(',
+      'AssertionError [ERR_ASSERTION]: applyDiscount(5.35, 10): expected 4.82, got 4.81',
+      '    at file:///holdout.mjs:7:10 {',
+      "  code: 'ERR_ASSERTION',",
+      '  expected: 4.82,',
+      '}',
+      'Node.js v24.0.0',
+    ].join('\n');
+    const text = formatEvidence({
+      evidenceId: 'v-01',
+      runId: 'r1',
+      node: 'verify',
+      createdAt: '2026-08-23T00:00:00.000Z',
+      cwd: repo,
+      passed: false,
+      rounds: 0,
+      results: [
+        { ...failWith('holdout', 'x'), tail },
+        { ...pass('lint'), tail: 'error: never shown' },
+      ],
+      changedFiles: [],
+    });
+    expect(text).toContain('│ AssertionError [ERR_ASSERTION]: applyDiscount(5.35, 10): expected 4.82, got 4.81');
+    expect(text).not.toContain('at file:///holdout.mjs');
+    expect(text).not.toContain("code: 'ERR_ASSERTION'");
+    // A passing check's output stays out of the summary.
+    expect(text).not.toContain('never shown');
+  });
+
+  it('falls back to the last lines when nothing in the output stands out', () => {
+    expect(failureLines('one\ntwo\n\nthree\nfour\nfive')).toEqual(['two', 'three', 'four', 'five']);
   });
 });

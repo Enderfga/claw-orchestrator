@@ -553,6 +553,52 @@ describe('PersistentOpencodeSession', () => {
       expect(stats.tokensOut).toBe(80);
       expect(stats.cachedTokens).toBe(50);
     });
+
+    // The model opencode chose is not in its JSON, so the registry priced every
+    // turn as Sonnet — a free default model showed up in the ledger at $0.15 a turn.
+    it('bills what opencode reported, a free model at zero', async () => {
+      const session = new PersistentOpencodeSession({ name: 'test', cwd: '/tmp', permissionMode: 'bypassPermissions' });
+      await session.start();
+      const sendPromise = session.send('hi', { waitForComplete: true });
+      setTimeout(() => {
+        feedLines(mockProc, [
+          envelope('step_finish', { part: { type: 'step-finish', tokens: { input: 90000, output: 2000 }, cost: 0 } }),
+          envelope('step_finish', { part: { type: 'step-finish', tokens: { input: 1000, output: 100 }, cost: 0 } }),
+        ]);
+        closeProc(mockProc, 0);
+      }, 10);
+      await sendPromise;
+      expect(session.getStats().costUsd).toBe(0);
+    });
+
+    it('sums reported cost across steps', async () => {
+      const session = new PersistentOpencodeSession({ name: 'test', cwd: '/tmp', permissionMode: 'bypassPermissions' });
+      await session.start();
+      const sendPromise = session.send('hi', { waitForComplete: true });
+      setTimeout(() => {
+        feedLines(mockProc, [
+          envelope('step_finish', { part: { type: 'step-finish', tokens: { input: 10, output: 5 }, cost: 0.0125 } }),
+          envelope('step_finish', { part: { type: 'step-finish', tokens: { input: 10, output: 5 }, cost: 0.0075 } }),
+        ]);
+        closeProc(mockProc, 0);
+      }, 10);
+      await sendPromise;
+      expect(session.getStats().costUsd).toBeCloseTo(0.02, 6);
+    });
+
+    it('still estimates when opencode reports no cost', async () => {
+      const session = new PersistentOpencodeSession({ name: 'test', cwd: '/tmp', permissionMode: 'bypassPermissions' });
+      await session.start();
+      const sendPromise = session.send('hi', { waitForComplete: true });
+      setTimeout(() => {
+        feedLines(mockProc, [
+          envelope('step_finish', { part: { type: 'step-finish', tokens: { input: 1_000_000, output: 0 } } }),
+        ]);
+        closeProc(mockProc, 0);
+      }, 10);
+      await sendPromise;
+      expect(session.getStats().costUsd).toBeGreaterThan(0);
+    });
   });
 
   describe('fallback estimation', () => {

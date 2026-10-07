@@ -4,23 +4,90 @@
 
 # Claw Orchestrator
 
-> A runtime for coding agents. Wrap Claude Code, Codex, Antigravity, Grok Build, OpenCode, or any custom CLI as persistent programmable sessions; coordinate them in multi-agent councils; run autonomous Planner / Coder / Reviewer loops; or hand a short structured interview to an Opus council that ships a deployed web app at `localhost:19000/forge/<slug>/`.
+**Run Claude Code, Codex, Antigravity, Grok Build and OpenCode behind one runtime, and a run only counts as done when checks it didn't write pass.**
 
 [![npm version](https://img.shields.io/npm/v/@enderfga/claw-orchestrator.svg)](https://www.npmjs.com/package/@enderfga/claw-orchestrator)
+[![npm downloads](https://img.shields.io/npm/dm/@enderfga/claw-orchestrator.svg)](https://www.npmjs.com/package/@enderfga/claw-orchestrator)
 [![CI](https://github.com/Enderfga/claw-orchestrator/actions/workflows/ci.yml/badge.svg)](https://github.com/Enderfga/claw-orchestrator/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
-Coding CLIs are designed for humans at terminals. Claw Orchestrator turns them into headless engines and adds an orchestration layer on top: 78 tools, from single-session calls to multi-agent runs and generated web apps — reachable through the CLI, the OpenClaw gateway, the Model Context Protocol, or directly from TypeScript, and visible through an embedded three-tab dashboard.
-
-https://github.com/user-attachments/assets/fbd2b0ea-28d8-4387-9894-c29cf15ba030
-
 <p align="center">
-  <sub><b>Control · Council · Autoloop · Ultraapp</b> — 35-second demo</sub>
+  <img src="./assets/hero.gif" alt="An agent reports that all tests pass; the runtime's own check refutes it. Five engines, three runs each, tallied by verdict." width="800">
 </p>
+
+<p align="center"><sub>
+One bug, one acceptance contract, five engines, three runs each, first attempt only. The runtime ran the checks itself:
+9 verified, 4 refuted, 2 errored (Grok Build hit its free-tier usage limit). One task, not a benchmark. Real runs, recorded locally —
+<a href="./examples/promo-video/">how the film was made, and how to re-run it</a>.
+</sub></p>
+
+Coding agents grade their own work: "All tests pass ✓". Claw Orchestrator runs them as persistent sessions behind one API and keeps the verdict out of their hands. You declare the checks, the runtime executes them and reads the exit codes, and the evidence stays on disk.
+
+```bash
+npm install -g @enderfga/claw-orchestrator
+clawo serve &    # local runtime + dashboard on 127.0.0.1:18796
+
+clawo solve "The test fails. Fix price.js." --engine codex \
+  --check "npm test" --check "node ../holdout/price.spec.mjs" --wait
+clawo verify <runId>    # each check, why it failed, the files that changed
+clawo runs --since 1h   # every turn on every engine: model, tokens, cost, verdict
+```
+
+## What you get
+
+| You want to…                     | Claw Orchestrator gives you                                                                                                                                                                                                                                                                                                   |
+| -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Stop trusting "All tests pass ✓" | Acceptance contracts — commands, HTTP probes, screenshots, diff policy, file assertions — that the runtime runs itself. A run with a contract ends `verified`, `refuted` or `unverified`, never "the agent said so". Editing the tests a contract runs refutes the run. → [verification](./skills/references/verification.md) |
+| Use more than one vendor         | Persistent sessions for Claude Code, Codex, Antigravity, Grok Build, OpenCode and custom CLIs behind one interface. `clawo fanout` asks several of them the same question at once. → [multi-engine](./skills/references/multi-engine.md)                                                                                      |
+| Switch engines mid-task          | `session_handoff` replays a live conversation onto another engine in the same workspace. → [sessions](./skills/references/sessions.md)                                                                                                                                                                                        |
+| Know what it cost                | A durable per-turn ledger across engines (`clawo runs`) and a `maxBudgetUsd` cap the runtime enforces on every engine. → [observability](./skills/references/observability.md)                                                                                                                                                |
+| Runs that survive a crash        | Durable workflows: every transition is checkpointed; resume, retry, timeout, cancel and steer come from the kernel. → [workflow](./skills/references/workflow.md)                                                                                                                                                             |
+| Call it from your own tools      | An MCP server (`clawo-mcp`), an ACP agent (`clawo acp`) for Zed, JetBrains and other ACP editors, an OpenAI-compatible endpoint, a TypeScript SDK, and the CLI. → [integrations](#integrations)                                                                                                                               |
+
+**How it relates to other tools.** claude-squad, Conductor and Vibe Kanban are interfaces for running agents side by side in worktrees; Claude Code subagents and Codex's parallel attempts stay within one vendor. Claw Orchestrator is a headless runtime: several vendors behind one API, durable workflows, and a verification step the agents cannot edit. They can be used together.
 
 ---
 
-## Features
+## Quick Start
+
+Requires Node 22+ and at least one engine CLI installed and logged in (`claude`, `codex`, `agy`, `grok` or `opencode`).
+
+```bash
+npm install -g @enderfga/claw-orchestrator
+clawo serve   # dashboard at http://127.0.0.1:18796/dash
+```
+
+The server writes an access token to `~/.openclaw/server-token`; the CLI reads it from there. Open `http://127.0.0.1:18796/login?token=<token>&redirect=/dash` once to sign in the browser.
+
+**From a terminal:**
+
+```bash
+clawo solve "Fix the failing tests" --engine claude --check "npm test" --wait
+clawo fanout "How would you speed up this test suite?" --engines claude,codex,grok --synthesize --wait
+clawo workflow list
+```
+
+**From Claude Code, or any MCP host:**
+
+```bash
+claude mcp add clawo -- clawo-mcp
+```
+
+Then ask for `workflow_start` with template `solve`, a task, and a contract such as `{"checks":[{"type":"command","cmd":"npm","args":["test"]}]}`.
+
+**From TypeScript:**
+
+```ts
+import { SessionManager } from '@enderfga/claw-orchestrator';
+
+const manager = new SessionManager();
+await manager.startSession({ name: 'fix-tests', engine: 'claude', cwd: '/project' });
+const result = await manager.sendMessage('fix-tests', 'Fix the failing tests');
+```
+
+---
+
+## All features
 
 | Capability                  | What it does                                                                                                                                                                                                                                                                                                                                                                                                                              | Reference                                                  |
 | --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
@@ -39,25 +106,6 @@ https://github.com/user-attachments/assets/fbd2b0ea-28d8-4387-9894-c29cf15ba030
 | **Run Ledger & Spend Caps** | Every turn on every engine is appended to a durable JSONL ledger — engine, model, tokens, cost, duration, and the council/fanout/autoloop it belonged to — queryable with `clawo runs` after a restart. Rows carry both the engine's self-report (`ok`) and the runtime's own measurement (`verified`), kept apart. `maxBudgetUsd` is enforced by the runtime, so a cap holds on Codex, Grok, agy and OpenCode too, not just Claude Code. | [`observability.md`](./skills/references/observability.md) |
 
 The full 78-tool surface is enumerated in [`tools.md`](./skills/references/tools.md).
-
----
-
-## Quick Start
-
-```bash
-npm install -g @enderfga/claw-orchestrator
-clawo serve   # dashboard at http://127.0.0.1:18796/dash
-```
-
-The server generates an access token at `~/.openclaw/server-token`; open `http://127.0.0.1:18796/login?token=<token>&redirect=/dash` once to sign in the browser.
-
-```ts
-import { SessionManager } from '@enderfga/claw-orchestrator';
-
-const manager = new SessionManager();
-await manager.startSession({ name: 'fix-tests', engine: 'claude', cwd: '/project' });
-const result = await manager.sendMessage('fix-tests', 'Fix the failing tests');
-```
 
 ---
 

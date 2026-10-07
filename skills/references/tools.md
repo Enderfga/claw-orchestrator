@@ -822,18 +822,19 @@ Full semantics in [`workflow.md`](./workflow.md) and
 Start a durable run. Every state transition is checkpointed to disk, so a run
 survives a process restart and can be resumed.
 
-| Param        | Type                             | Notes                                                                |
-| ------------ | -------------------------------- | -------------------------------------------------------------------- |
-| `spec`       | object                           | `WorkflowSpec`: `{ name, nodes[], cwd?, contract?, maxNodeVisits? }` |
-| `template`   | `solve` \| `council` \| `fanout` | Build a built-in instead of supplying `spec`                         |
-| `task`       | string                           | Required with `template`                                             |
-| `agents`     | array                            | `{ name, engine?, model?, effort?, persona? }`                       |
-| `reviewers`  | array                            | `solve` only — same agent binding for final reviewers                |
-| `humanGate`  | boolean                          | `solve` only — park for approval before anything is written          |
-| `maxRepairs` | number                           | `solve` only, default 3                                              |
-| `cwd`        | string                           | Working directory                                                    |
-| `runId`      | string                           | Explicit id                                                          |
-| `contract`   | object                           | Acceptance contract — see below                                      |
+| Param         | Type                             | Notes                                                                     |
+| ------------- | -------------------------------- | ------------------------------------------------------------------------- |
+| `spec`        | object                           | `WorkflowSpec`: `{ name, nodes[], cwd?, contract?, maxNodeVisits? }`      |
+| `template`    | `solve` \| `council` \| `fanout` | Build a built-in instead of supplying `spec`                              |
+| `task`        | string                           | Required with `template`                                                  |
+| `agents`      | array                            | `{ name, engine?, model?, effort?, persona? }`                            |
+| `reviewers`   | array                            | `solve` only — same agent binding for final reviewers                     |
+| `implementer` | object                           | `solve` only — `{ engine?, model? }` for the agent that writes the change |
+| `humanGate`   | boolean                          | `solve` only — park for approval before anything is written               |
+| `maxRepairs`  | number                           | `solve` only, default 3                                                   |
+| `cwd`         | string                           | Working directory                                                         |
+| `runId`       | string                           | Explicit id                                                               |
+| `contract`    | object                           | Acceptance contract — see below                                           |
 
 Returns `{ runId, workflow, state, nodes }` and runs in the background.
 

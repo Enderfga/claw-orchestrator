@@ -196,6 +196,48 @@ Tools without a CLI command are reachable through the OpenClaw plugin, the MCP
 server (`clawo-mcp`, see [mcp.md](./mcp.md)), or the `SessionManager` API. See
 [Tools Reference](./tools.md) for full parameter documentation.
 
+## `clawo solve`
+
+Start the built-in `solve` workflow — triage → implement → verify → repair until
+green — and let the runtime decide whether it worked.
+
+```bash
+clawo solve "<task>" [--engine <engine[:model]>] [--check "<command>"]... [--contract <file>]
+            [--scouts <list>] [--reviewers <list>] [--max-repairs N] [--human-gate]
+            [--cwd <dir>] [--wait] [--json]
+```
+
+| Option          | Default           | Notes                                                                                                                                        |
+| --------------- | ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `-e, --engine`  | `claude`          | The implementer, `engine` or `engine:model` (`codex:gpt-6.1-sol`)                                                                            |
+| `-c, --check`   | —                 | A command check, repeatable. Split on whitespace and run as argv, never through a shell; anything that needs quoting belongs in `--contract` |
+| `--contract`    | —                 | A contract JSON file ([verification.md](./verification.md)); `--check` entries are appended to it                                            |
+| `--scouts`      | the implementer   | Comma-separated triage agents, `engine[:model]` each                                                                                         |
+| `--reviewers`   | —                 | Comma-separated reviewers of the finished change                                                                                             |
+| `--max-repairs` | `3`               | Attempts the router allows while the checks are red; `0` keeps only the first attempt                                                        |
+| `--human-gate`  | off               | Park before anything is written until `clawo workflow approve`                                                                               |
+| `--cwd`         | current directory | Project directory                                                                                                                            |
+| `-w, --wait`    | off               | Follow the run, printing each node transition, then the verdict                                                                              |
+| `--json`        | off               | Print `{ runId }`, or with `--wait` the final run record                                                                                     |
+
+With `--wait` the exit code is the verdict: `0` when the run completed (verified,
+or unverified because no check was given), `1` when it was refuted, failed or
+cancelled. Unknown engine names are refused before anything starts.
+
+## `clawo fanout`
+
+Ask several engines the same thing in parallel, optionally merging the answers.
+
+```bash
+clawo fanout "<task>" [--engines <list>] [--synthesize] [--check "<command>"]...
+             [--contract <file>] [--cwd <dir>] [--wait] [--json]
+```
+
+`--engines` (default `claude,codex`) takes `engine[:model]` items; the same
+engine may appear more than once. With `--wait` the run is followed to the end
+and every answer is printed, followed by the synthesis when `--synthesize` was
+given. Checks run after the fan-out, as for `solve`.
+
 ## `clawo workflow`
 
 ```bash
@@ -220,8 +262,9 @@ earlier sessions.
 clawo verify <runId> [--evidence <id>] [--json]
 ```
 
-Prints the evidence bundle: per-check pass/fail with the failing command and its
-output tail, the base and head commits, and the files the run changed (created
+Prints the evidence bundle: per-check pass/fail with the failing command and the
+lines of its output that say why (an assertion message, an error line — the last
+few lines when nothing stands out), the base and head commits, and the files the run changed (created
 files included).
 
 ## `clawo engines`

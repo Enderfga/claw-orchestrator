@@ -299,8 +299,17 @@ export class EmbeddedServer {
         // Bound successfully — NOW persist the token. A second instance that
         // loses EADDRINUSE never reaches this callback and leaves the file alone.
         if (this.authToken) {
-          this._writeTokenFile(this.authToken);
-          const tokenFile = path.join(os.homedir(), '.openclaw', 'server-token');
+          // A server given its token through OPENCLAW_SERVER_TOKEN does not
+          // own the shared file when another server already wrote one: a
+          // second instance on another port would otherwise swap the token
+          // every file-reading client uses for the first one.
+          const persisted = this._readPersistedToken();
+          const envToken = process.env.OPENCLAW_SERVER_TOKEN;
+          const ownsFile = !envToken || !persisted || persisted === this.authToken;
+          if (ownsFile) this._writeTokenFile(this.authToken);
+          const tokenFile = ownsFile
+            ? path.join(os.homedir(), '.openclaw', 'server-token')
+            : 'none (token from OPENCLAW_SERVER_TOKEN)';
           console.log(`[embedded-server] Listening on http://${this.host}:${this.port} (auth enabled)`);
           console.log(`[embedded-server] Token file: ${tokenFile}`);
           // Only print the token-bearing convenience URL to an interactive TTY.

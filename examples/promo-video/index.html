@@ -1,0 +1,466 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=1920, height=1080" />
+    <script src="gsap.min.js"></script>
+    <script src="data/runs.js"></script>
+    <style>
+      /* Claw Orchestrator — "Done means the checks passed". 40 s, 120 BPM, cut to beats.json. */
+      @font-face { font-family: 'Clash Display'; src: url('fonts/ClashDisplay-700.woff2') format('woff2'); font-weight: 700; font-display: block; }
+      @font-face { font-family: 'Clash Display'; src: url('fonts/ClashDisplay-600.woff2') format('woff2'); font-weight: 600; font-display: block; }
+      @font-face { font-family: 'Clash Display'; src: url('fonts/ClashDisplay-500.woff2') format('woff2'); font-weight: 500; font-display: block; }
+      @font-face { font-family: 'JetBrains Mono'; src: url('fonts/JetBrainsMono.woff2') format('woff2'); font-weight: 100 900; font-display: block; }
+      @font-face { font-family: 'Archivo'; src: url('fonts/Archivo.woff2') format('woff2'); font-weight: 100 900; font-display: block; }
+
+      :root {
+        --bg: #08080a; --ink: #f4f0e7; --dim: #8f887c; --faint: #4a453f; --line: #24211f; --panel: #100f0d;
+        --ember: #ff6a1a; --ember-hi: #ffd08a;
+        --ok: #7fe0a3; --ok-deep: #123d27; --bad: #ff4b3e; --bad-deep: #4a120d; --err: #9a9285;
+      }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 1920px; height: 1080px; overflow: hidden; background: var(--bg); color: var(--ink);
+        font-family: 'Archivo', sans-serif; }
+      .mono { font-family: 'JetBrains Mono', monospace; }
+      .display { font-family: 'Clash Display', sans-serif; }
+
+      #root { position: absolute; inset: 0; overflow: hidden;
+        background: radial-gradient(85% 100% at 50% 45%, #121110 0%, var(--bg) 58%, #030304 100%); }
+      #grid { position: absolute; inset: 0; opacity: .5;
+        background-image: linear-gradient(var(--line) 1px, transparent 1px), linear-gradient(90deg, var(--line) 1px, transparent 1px);
+        background-size: 64px 64px;
+        -webkit-mask-image: radial-gradient(70% 70% at 50% 50%, #000 30%, transparent 85%); }
+      #glow { position: absolute; inset: -10%; pointer-events: none;
+        background: radial-gradient(40% 32% at 50% 46%, rgba(255,106,26,.10), transparent 70%); }
+      #vign { position: absolute; inset: 0; pointer-events: none; box-shadow: inset 0 0 360px 80px rgba(0,0,0,.8); z-index: 40; }
+      #flash { position: absolute; inset: 0; background: var(--bad); opacity: 0; z-index: 39; mix-blend-mode: screen; pointer-events: none; }
+
+      .scene { position: absolute; inset: 0; opacity: 0; }
+
+      /* caption: burned in, top-left, because X autoplays muted */
+      .cap { position: absolute; left: 120px; top: 92px; right: 120px; z-index: 30;
+        font-family: 'Clash Display', sans-serif; font-weight: 600; font-size: 54px; line-height: 1.08; letter-spacing: -.02em; }
+      .cap .sub { display: block; margin-top: 14px; font-family: 'Archivo', sans-serif; font-weight: 400; font-size: 26px;
+        letter-spacing: 0; color: var(--dim); }
+      .kicker { position: absolute; left: 120px; top: 44px; font-family: 'JetBrains Mono', monospace; font-size: 24px;
+        letter-spacing: .26em; color: var(--ember); text-transform: uppercase; z-index: 30; }
+      .tag { position: absolute; right: 120px; top: 44px; font-family: 'JetBrains Mono', monospace; font-size: 28px;
+        color: var(--dim); letter-spacing: .08em; z-index: 30; }
+
+      .panel { position: absolute; background: linear-gradient(180deg, #15130f, var(--panel)); border: 1px solid #2c2823;
+        border-radius: 14px; box-shadow: 0 30px 90px rgba(0,0,0,.55), inset 0 1px 0 rgba(255,255,255,.04); overflow: hidden; }
+      .panel .bar { height: 46px; display: flex; align-items: center; gap: 10px; padding: 0 20px; border-bottom: 1px solid #25221e;
+        font-family: 'JetBrains Mono', monospace; font-size: 17px; color: var(--dim); }
+      .panel .bar i { width: 12px; height: 12px; border-radius: 50%; background: #3a3530; display: inline-block; }
+      .code { isolation: isolate; font-family: 'JetBrains Mono', monospace; font-size: 27px; line-height: 1.62; padding: 26px 34px; white-space: pre; color: #d8d2c6; }
+      .code .c { color: #8a8175; }
+      .code .k { color: #ff9d5c; }
+      .code .s { color: var(--ember-hi); }
+      .hl { position: relative; }
+      .hl::before { content: ''; position: absolute; left: -6px; right: -6px; top: 6%; bottom: 6%; background: rgba(255,106,26,.28);
+        border-radius: 4px; transform-origin: 0 50%; transform: scaleX(var(--hl, 0)); z-index: -1; }
+
+      /* S0 teaser */
+      #bubble { position: absolute; left: 50%; top: 52%; transform: translate(-50%, -50%); padding: 34px 48px; border-radius: 28px 28px 28px 8px;
+        background: #1b1916; border: 1px solid #36312b; font-family: 'JetBrains Mono', monospace; font-size: 50px; line-height: 1.35; color: var(--ink); white-space: pre; }
+      #bubble .who { position: absolute; left: 0; top: -50px; font-size: 28px; color: var(--dim); letter-spacing: .02em; }
+      #bubble .tick { color: var(--ok); }
+      .stamp { position: absolute; font-family: 'Clash Display', sans-serif; font-weight: 700; letter-spacing: .04em; color: var(--bad);
+        border: 8px solid var(--bad); border-radius: 14px; padding: 6px 28px 0; line-height: 1.05; text-shadow: 0 0 40px rgba(255,75,62,.45);
+        box-shadow: 0 0 60px rgba(255,75,62,.25), inset 0 0 30px rgba(255,75,62,.18); }
+      #stamp0 { left: 61%; top: 66%; font-size: 112px; transform: translate(-50%, -50%) rotate(-8deg); opacity: 0; }
+
+      /* S1 bug */
+      #bugfile { left: 100px; top: 280px; width: 1720px; }
+      #bugfile .code { font-size: 25px; }
+      #testfile { left: 100px; top: 812px; width: 1100px; }
+      #testfile .code { font-size: 24px; padding: 18px 30px; }
+
+      /* S2 contract */
+      #cmd { left: 120px; top: 290px; width: 1680px; }
+      #cmd .code { font-size: 25px; white-space: pre-wrap; }
+      #cmd .prompt { color: var(--ember); }
+      #contract { left: 120px; top: 520px; width: 1680px; }
+      .chk { display: grid; grid-template-columns: 300px 1fr 360px; align-items: center; padding: 22px 34px; border-top: 1px solid #23201c;
+        font-family: 'JetBrains Mono', monospace; font-size: 24px; }
+      .chk:first-of-type { border-top: 0; }
+      .chk .id { color: var(--ember-hi); }
+      .chk .note { color: var(--dim); font-family: 'Archivo', sans-serif; font-size: 22px; text-align: right; }
+
+      /* S3/S4 columns */
+      #cols { position: absolute; left: 120px; right: 120px; top: 280px; height: 580px; display: grid; grid-template-columns: repeat(5, 1fr); gap: 26px; }
+      .col { position: relative; border-top: 2px solid #2f2a25; padding-top: 22px; }
+      .col h3 { font-family: 'Clash Display', sans-serif; font-weight: 600; font-size: 38px; letter-spacing: -.01em; }
+      .col .model { margin-top: 6px; font-family: 'JetBrains Mono', monospace; font-size: 28px; color: var(--dim); }
+      .chip { position: relative; margin-top: 22px; height: 118px; border-radius: 14px; border: 1px solid #2c2823; background: #121110;
+        font-family: 'JetBrains Mono', monospace; overflow: hidden; }
+      .chip .take { position: absolute; left: 18px; top: 12px; font-size: 22px; color: var(--dim); letter-spacing: .04em; white-space: nowrap; }
+      .chip .st { position: absolute; left: 18px; bottom: 18px; font-size: 30px; font-weight: 600; letter-spacing: .04em; color: var(--dim); }
+      .chip .prog { position: absolute; left: 0; bottom: 0; height: 3px; width: 100%; background: var(--ember); transform-origin: 0 50%; transform: scaleX(0); }
+      .chip.v { border-color: #2e6b47; background: linear-gradient(180deg, #10251a, #0c1711); }
+      .chip.v .st { color: var(--ok); }
+      .chip.r { border-color: #7a2a22; background: linear-gradient(180deg, #2a0f0b, #170a08); }
+      .chip.r .st { color: var(--bad); }
+      .chip.e { border-color: #3a3631; background: #121110; }
+      .chip.e .st { color: var(--err); }
+      #tally { position: absolute; left: 0; right: 0; top: 832px; text-align: center; font-family: 'Clash Display', sans-serif; font-weight: 600;
+        font-size: 64px; letter-spacing: -.01em; opacity: 0; }
+      #tally .ok { color: var(--ok); } #tally .bad { color: var(--bad); } #tally .err { color: var(--err); } #tally .sep { color: var(--faint); }
+      #tallynote2 { position: absolute; left: 0; right: 0; top: 972px; text-align: center; font-family: 'JetBrains Mono', monospace; font-size: 24px; color: var(--dim); opacity: 0; }
+      #tallynote { position: absolute; left: 0; right: 0; top: 924px; text-align: center; font-family: 'JetBrains Mono', monospace; font-size: 30px;
+        color: var(--dim); opacity: 0; }
+
+      /* S5 evidence */
+      #claimp { left: 100px; top: 290px; width: 600px; }
+      #claimp .code { font-size: 22px; line-height: 1.5; white-space: pre-wrap; }
+      #verifyp { left: 730px; top: 290px; width: 1090px; }
+      #verifyp .code { font-size: 20px; line-height: 1.75; white-space: pre-wrap; }
+      .pass { color: var(--ok); } .fail { color: var(--bad); font-weight: 700; } .why { color: #ffb4a8; }
+      #whybox { position: absolute; left: 120px; right: 120px; top: 790px; padding: 26px 34px; border-radius: 14px; border: 2px solid var(--bad);
+        background: rgba(255,75,62,.09); font-family: 'JetBrains Mono', monospace; font-size: 36px; color: #ffd2cb; opacity: 0; }
+      #whybox small { display: block; margin-bottom: 8px; font-size: 18px; color: #c98a80; letter-spacing: .12em; }
+
+      /* S6 repair */
+      #trail { position: absolute; left: 100px; right: 100px; top: 360px; display: flex; align-items: center; justify-content: center; gap: 18px; }
+      .node { padding: 30px 30px; border-radius: 16px; border: 1px solid #2c2823; background: #121110; font-family: 'JetBrains Mono', monospace;
+        font-size: 32px; text-align: center; min-width: 230px; opacity: 0; }
+      .node small { display: block; margin-top: 10px; font-size: 22px; color: var(--dim); }
+      .node.ok { border-color: #2e6b47; color: var(--ok); } .node.bad { border-color: #7a2a22; color: var(--bad); }
+      .arrow { color: var(--faint); font-size: 34px; opacity: 0; }
+      #sentback { position: absolute; left: 50%; top: 600px; transform: translateX(-50%); padding: 24px 34px; border-radius: 14px; border: 2px solid var(--bad);
+        background: rgba(255,75,62,.08); font-family: 'JetBrains Mono', monospace; font-size: 30px; color: #ffd2cb; white-space: nowrap; opacity: 0; }
+      #sentback small { display: block; margin-bottom: 8px; font-size: 18px; color: #c98a80; letter-spacing: .12em; }
+      #repairnote { position: absolute; left: 0; right: 0; top: 860px; text-align: center; font-family: 'JetBrains Mono', monospace; font-size: 28px; color: var(--dim); opacity: 0; }
+
+      /* S7 ledger */
+      #ledger { left: 120px; top: 300px; width: 1680px; }
+      .lrow { display: grid; grid-template-columns: 320px 400px 150px 210px 1fr; padding: 24px 34px; border-top: 1px solid #23201c;
+        font-family: 'JetBrains Mono', monospace; font-size: 29px; align-items: center; }
+      .lrow.h { color: var(--dim); font-size: 24px; letter-spacing: .08em; border-top: 0; }
+      .lrow .cost { color: var(--ember-hi); }
+      .lrow.total { color: var(--ink); font-weight: 700; border-top: 1px solid #3a342d; }
+
+      /* S8 end */
+      #end { text-align: center; }
+      #end .name { position: absolute; left: 0; right: 0; top: 300px; font-family: 'Clash Display', sans-serif; font-weight: 700; font-size: 132px; letter-spacing: -.035em; }
+      #end .name b { color: var(--ember); font-weight: 700; }
+      #end .line { position: absolute; left: 200px; right: 200px; top: 480px; font-size: 38px; line-height: 1.3; color: #ddd6c9; }
+      #end .install { position: absolute; left: 50%; top: 640px; transform: translateX(-50%); padding: 20px 36px; border-radius: 12px; border: 1px solid #3a342d;
+        background: #13110f; font-family: 'JetBrains Mono', monospace; font-size: 32px; white-space: nowrap; }
+      #end .install span { color: var(--ember); }
+      #end .repo { position: absolute; left: 0; right: 0; top: 760px; font-family: 'JetBrains Mono', monospace; font-size: 26px; color: var(--dim); }
+      #end .made { position: absolute; left: 0; right: 0; top: 930px; font-family: 'JetBrains Mono', monospace; font-size: 28px; color: var(--dim); letter-spacing: .04em; }
+      #wordmark { position: absolute; left: 120px; bottom: 22px; z-index: 31; font-family: 'JetBrains Mono', monospace; font-size: 26px; color: var(--dim); }
+      #wordmark b { color: var(--ember); font-weight: 700; }
+      #scrim { position: absolute; inset: 0; background: #000; opacity: 0; z-index: 50; }
+    </style>
+  </head>
+  <body>
+    <div id="root" data-composition-id="main" data-start="0" data-duration="40" data-width="1920" data-height="1080">
+      <audio id="bgm" src="music/loudnorm.wav" data-start="0" data-duration="40" data-volume="1"></audio>
+      <div id="grid"></div>
+      <div id="glow"></div>
+
+      <!-- S0 · 0–2 teaser -->
+      <section class="scene" id="s0">
+        <div class="cap" id="cap0">Your coding agent says the tests pass.</div>
+        <div id="bubble"><span class="who" id="who0"></span><span id="claim0"></span></div>
+        <div class="stamp" id="stamp0">REFUTED</div>
+      </section>
+
+      <!-- S1 · 2–6 the bug -->
+      <section class="scene" id="s1">
+        <div class="kicker">one bug</div>
+        <div class="cap">The spec is in the docstring.<span class="sub">The repo's only test checks one easy case.</span></div>
+        <div class="panel" id="bugfile">
+          <div class="bar"><i></i><i></i><i></i>&nbsp;price.js</div>
+<div class="code"><span class="c">&#47;**
+ * Apply a percentage discount to a price.
+ * @param {number} price  price in dollars
+ * @param {number} pct    discount in percent (0-100; <span class="hl" id="hl3">values above 100 mean free</span>)
+ * @returns {number} the discounted price, <span class="hl" id="hl1">rounded to cents (half up)</span>, <span class="hl" id="hl2">never below 0</span>
+ *&#47;</span>
+<span class="k">export function</span> applyDiscount(price, pct) {
+  <span class="k">return</span> price - pct;
+}</div>
+        </div>
+        <div class="panel" id="testfile">
+          <div class="bar"><i></i><i></i><i></i>&nbsp;test/price.test.js</div>
+<div class="code">test(<span class="s">'20% off 50'</span>, () => assert.strictEqual(applyDiscount(50, 20), 40));</div>
+        </div>
+      </section>
+
+      <!-- S2 · 6–10 contract -->
+      <section class="scene" id="s2">
+        <div class="kicker">the contract</div>
+        <div class="cap">You write the checks. The runtime runs them.<span class="sub">The agent doesn't get a vote.</span></div>
+        <div class="panel" id="cmd"><div class="code"><span class="prompt">$ </span><span id="cmdtext"></span></div></div>
+        <div class="panel" id="contract">
+          <div class="chk"><span class="id">check-1</span><span>node --test</span><span class="note">the repo's own test</span></div>
+          <div class="chk"><span class="id">check-2</span><span>node ~/demo/holdout/price.holdout.mjs</span><span class="note">outside the repo · tests the docstring</span></div>
+          <div class="chk"><span class="id">protected-tests</span><span>diff policy</span><span class="note">editing the tests refutes the run</span></div>
+        </div>
+      </section>
+
+      <!-- S3/S4 · 10–22 five engines, three runs each -->
+      <section class="scene" id="s3">
+        <div class="kicker" id="kick3">same bug · same contract</div>
+        <div class="cap" id="cap3">Five agents. Three runs each.</div>
+        <div id="cols"></div>
+        <div id="tally"></div>
+        <div id="tallynote"></div>
+        <div id="tallynote2"></div>
+        <div class="tag" id="tag3"></div>
+      </section>
+
+      <!-- S5 · 22–28 evidence -->
+      <section class="scene" id="s5">
+        <div class="kicker">one refuted run</div>
+        <div class="cap">The repo's test passed. The runtime's check didn't.</div>
+        <div class="panel" id="claimp"><div class="bar"><i></i><i></i><i></i>&nbsp;<span id="claimwho"></span></div><div class="code" id="claimtext"></div></div>
+        <div class="panel" id="verifyp"><div class="bar"><i></i><i></i><i></i>&nbsp;terminal</div><div class="code" id="verifytext"></div></div>
+        <div id="whybox"></div>
+      </section>
+
+      <!-- S6 · 28–32 repair loop -->
+      <section class="scene" id="s6">
+        <div class="kicker">repairs on</div>
+        <div class="cap">Red goes back to the agent, with the evidence.<span class="sub">The run only ends when the checks pass, or the budget runs out.</span></div>
+        <div id="trail"></div>
+        <div id="sentback"></div>
+        <div id="repairnote"></div>
+      </section>
+
+      <!-- S7 · 32–36 ledger -->
+      <section class="scene" id="s7">
+        <div class="kicker">clawo runs</div>
+        <div class="cap">Every turn on every engine, priced.</div>
+        <div class="panel" id="ledger"></div>
+      </section>
+
+      <!-- S8 · 36–40 end -->
+      <section class="scene" id="end">
+        <div class="name">Claw <b>Orchestrator</b></div>
+        <div class="line">Run Claude Code, Codex, Antigravity, Grok Build and OpenCode behind one runtime — and a run only counts as done when checks it didn't write pass.</div>
+        <div class="install"><span>$</span> npm i -g @enderfga/claw-orchestrator</div>
+        <div class="repo">github.com/Enderfga/claw-orchestrator</div>
+        <div class="made" id="made"></div>
+      </section>
+
+      <div id="wordmark"><b>Claw Orchestrator</b> · github.com/Enderfga/claw-orchestrator</div>
+      <div id="flash"></div>
+      <div id="vign"></div>
+      <div id="scrim"></div>
+    </div>
+
+    <script>
+      const D = window.DATA;
+      const $ = (s) => document.querySelector(s);
+      const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+      // ---- static content from the recorded runs ----
+      $('#who0').textContent = `${D.quoted.engine} · its last message`;
+      $('#claimwho').textContent = `${D.quoted.engine} · last message`;
+      // Verbatim from the run record: the agent's closing lines.
+      $('#claimtext').textContent = '…\n' + D.quoted.lastMessage;
+
+      const verifyLines = [
+        { t: `$ clawo verify ${D.quoted.runId}`, c: '' },
+        { t: '', c: '' },
+        ...D.quoted.checks.map((c) => ({ t: `${c.passed ? '[PASS]' : '[FAIL]'} ${c.id}  ${c.detail}`, c: c.passed ? 'pass' : 'fail' })),
+        { t: `       │ ${D.quoted.why}`, c: 'why' },
+        { t: '', c: '' },
+        { t: `changed files: ${D.quoted.changed.join(', ')}`, c: '' },
+      ];
+      $('#verifytext').innerHTML = verifyLines.map((l, i) => `<div class="vl ${l.c}" id="vl${i}" style="opacity:0">${esc(l.t) || '&nbsp;'}</div>`).join('');
+      $('#whybox').innerHTML = `<small>THE CHECK THE AGENT DIDN'T WRITE · OUTSIDE THE REPO</small>${esc(D.quoted.why)}`;
+
+      // columns: one per engine, three chips each, in recorded order
+      const engines = D.perEngine;
+      $('#cols').innerHTML = engines.map((e) => `
+        <div class="col" id="col-${e.engine}">
+          <h3>${esc(e.label)}</h3>
+          <div class="model">${esc(e.model || '')}</div>
+          ${[1, 2, 3].map((k) => `<div class="chip" id="chip-${e.engine}-${k}"><span class="take">RUN ${k}</span><span class="st">queued</span><div class="prog"></div></div>`).join('')}
+        </div>`).join('');
+
+      const t = D.tally;
+      $('#tally').innerHTML = `${t.runs} runs <span class="sep">·</span> <span class="ok">${t.verified} verified</span> <span class="sep">·</span> <span class="bad">${t.refuted} refuted</span>` +
+        (t.errored ? ` <span class="sep">·</span> <span class="err">${t.errored} errored</span>` : '');
+      const erroredEngines = [...new Set(D.runs.filter((r) => r.verdict === 'errored').map((r) => `${r.label}: ${r.errorNote}`))];
+      $('#tallynote').textContent = `one task · each CLI's default model · first attempt only · not a benchmark`;
+      $('#tallynote2').textContent = erroredEngines.length ? `errored = never reached the checks (${erroredEngines.join(', ')}, free tier)` : '';
+
+      // real time span of the batch, compressed into the 10–15.7 s window
+      // takes ran one after another per engine, so the span is the longest engine's total
+      const span = Math.max(...D.perEngine.map((e) => D.runs.filter((r) => r.engine === e.engine).reduce((s, r) => s + (r.tEnd || 0), 0)));
+      const W0 = 10.4, W1 = 15.6;
+      const factor = Math.round(span / (W1 - W0));
+      $('#tag3').textContent = `real runs, recorded locally · ${factor}× speed`;
+
+      // ledger table
+      const L = D.perEngine;
+      const total = L.reduce((s, e) => s + e.costUsd, 0);
+      $('#ledger').innerHTML =
+        `<div class="lrow h"><span>ENGINE</span><span>MODEL</span><span>TURNS</span><span>COST</span><span>VERDICTS</span></div>` +
+        L.map((e) => `<div class="lrow" style="opacity:0"><span>${esc(e.label)}</span><span>${esc(e.model)}</span><span>${e.turns}</span><span class="cost">$${e.costUsd.toFixed(2)}</span>` +
+          `<span><span class="pass">${e.verified} verified</span>${e.refuted ? ` · <span class="fail" style="font-weight:400">${e.refuted} refuted</span>` : ''}${e.errored ? ` · <span style="color:var(--err)">${e.errored} errored</span>` : ''}</span></div>`).join('') +
+        `<div class="lrow total" style="opacity:0"><span>15 runs</span><span></span><span>${L.reduce((s, e) => s + e.turns, 0)}</span><span class="cost">$${total.toFixed(2)}</span><span></span></div>`;
+
+      // repair trail (from the recorded repair run, when present)
+      const R = D.repair;
+      if (R && R.trail) {
+        $('#trail').innerHTML = R.trail.map((n, i) => `${i ? '<span class="arrow">→</span>' : ''}<div class="node ${n.cls || ''}">${esc(n.label)}<small>${esc(n.note || '')}</small></div>`).join('');
+        $('#repairnote').textContent = R.note || '';
+        if (R.sentBack) $('#sentback').innerHTML = `<small>SENT BACK WITH ATTEMPT 2 · FROM THE RUNTIME'S CHECK</small>${esc(R.sentBack)}`;
+      }
+      $('#made').textContent = 'Real runs, recorded 2026-10-07. Score and visuals written as code by Claude Opus; source in examples/promo-video.';
+
+      // ---- timeline ----
+      window.__timelines = window.__timelines || {};
+      const tl = gsap.timeline({ paused: true });
+      const show = (sel, at, d = 0.25) => tl.fromTo(sel, { opacity: 0 }, { opacity: 1, duration: d, ease: 'power2.out' }, at);
+      const hide = (sel, at, d = 0.2) => tl.to(sel, { opacity: 0, duration: d, ease: 'power2.in' }, at);
+      // Text and state changes are painted as a pure function of time (hf-seek),
+      // never by timeline callbacks: render workers seek to arbitrary frames.
+      const typed = [];
+      const type = (sel, text, at, dur) => typed.push({ sel, text, at, dur });
+      const painters = [];
+      // immediateRender off on every hit: otherwise the first one paints its
+      // from-state (red, shifted) from frame 0 instead of at the impact.
+      const hit = (at) => {
+        tl.fromTo('#flash', { opacity: 0.32 }, { opacity: 0, duration: 0.5, ease: 'power3.out', immediateRender: false }, at);
+        tl.fromTo('#root', { x: -10 }, { x: 0, duration: 0.45, ease: 'elastic.out(1.2,0.3)', immediateRender: false }, at);
+      };
+
+      // S0 · teaser 0–2
+      show('#s0', 0, 0.01);
+      tl.fromTo('#cap0', { opacity: 0, y: 14 }, { opacity: 1, y: 0, duration: 0.35, ease: 'power2.out' }, 0.05);
+      tl.fromTo('#bubble', { opacity: 0, y: 24, scale: 0.96 }, { opacity: 1, y: 0, scale: 1, duration: 0.3, ease: 'back.out(1.6)' }, 0.15);
+      type('#claim0', `${D.quoted.claim}\n✔ 20% off 50`, 0.3, 0.95);
+      tl.fromTo('#stamp0', { opacity: 0, scale: 2.4 }, { opacity: 1, scale: 1, duration: 0.14, ease: 'power4.in' }, 1.36);
+      hit(1.5);
+      hide('#s0', 1.88, 0.12);
+
+      // S1 · bug 2–6
+      show('#s1', 2.0, 0.2);
+      tl.fromTo('#bugfile', { y: 30, opacity: 0 }, { y: 0, opacity: 1, duration: 0.45, ease: 'power3.out' }, 2.0);
+      tl.fromTo('#testfile', { y: 30, opacity: 0 }, { y: 0, opacity: 1, duration: 0.45, ease: 'power3.out' }, 3.8);
+      tl.fromTo('#hl1', { '--hl': 0 }, { '--hl': 1, duration: 0.45, ease: 'power2.inOut' }, 2.55);
+      tl.fromTo('#hl2', { '--hl': 0 }, { '--hl': 1, duration: 0.35, ease: 'power2.inOut' }, 3.0);
+      tl.fromTo('#hl3', { '--hl': 0 }, { '--hl': 1, duration: 0.35, ease: 'power2.inOut' }, 3.35);
+      hide('#s1', 5.8);
+
+      // S2 · contract 6–10
+      show('#s2', 6.0, 0.2);
+      const cmd = `clawo solve "The test fails. Fix price.js." --engine <each> --check "node --test" --check "node ~/demo/holdout/price.holdout.mjs" --max-repairs 0 --wait`;
+      type('#cmdtext', cmd, 6.1, 0.8);
+      tl.fromTo('#contract', { opacity: 0, y: 26 }, { opacity: 1, y: 0, duration: 0.35, ease: 'power3.out' }, 6.6);
+      tl.fromTo('#contract .chk', { opacity: 0, x: -20 }, { opacity: 1, x: 0, duration: 0.3, stagger: 0.35, ease: 'power2.out' }, 6.75);
+      hide('#s2', 9.8);
+
+      // S3 · five columns 10–16
+      show('#s3', 10.0, 0.2);
+      tl.fromTo('.col', { opacity: 0, y: 30 }, { opacity: 1, y: 0, duration: 0.35, stagger: 0.08, ease: 'power3.out' }, 10.0);
+      const toT = (sec) => W0 + (sec / span) * (W1 - W0);
+      // takes ran in sequence per engine; each chip's clock starts where the previous take ended
+      const chipPlan = [];
+      for (const e of engines) {
+        let offset = 0;
+        for (let k = 1; k <= 3; k++) {
+          const r = D.runs.find((x) => x.engine === e.engine && x.take === k);
+          const id = `#chip-${e.engine}-${k}`;
+          const start = toT(offset);
+          const verifyAt = r.tVerify != null ? toT(offset + r.tVerify) : null;
+          const endAt = Math.min(toT(offset + (r.tEnd || 0)), 15.7);
+          chipPlan.push({ r, id, start, verifyAt, endAt });
+          tl.fromTo(`${id} .prog`, { scaleX: 0 }, { scaleX: 1, duration: Math.max(0.05, (verifyAt ?? endAt) - start), ease: 'none' }, start);
+          offset += r.tEnd || 0;
+        }
+      }
+      painters.push((now) => {
+        chipPlan.forEach((c, i) => {
+          const el = $(c.id);
+          const st = el.querySelector('.st');
+          const verdictAt = 16.0 + i * 0.035;
+          el.classList.remove('v', 'r', 'e');
+          el.style.borderColor = '';
+          el.querySelector('.prog').style.opacity = now >= verdictAt ? 0 : 1;
+          if (now >= verdictAt) {
+            const v = c.r.verdict;
+            el.classList.add(v === 'verified' ? 'v' : v === 'refuted' ? 'r' : 'e');
+            st.textContent = v === 'verified' ? 'VERIFIED' : v === 'refuted' ? 'REFUTED' : 'ERRORED';
+            el.querySelector('.take').textContent = v === 'errored' ? `RUN ${c.r.take} · ${c.r.errorNote}` : c.r.agentStepFailed ? `RUN ${c.r.take} · step failed` : `RUN ${c.r.take}`;
+          } else if (now >= c.endAt) {
+            st.textContent = c.r.verdict === 'errored' ? 'errored' : 'checked';
+          } else if (c.verifyAt != null && now >= c.verifyAt) {
+            st.textContent = 'verifying';
+            el.style.borderColor = '#5b3a25';
+          } else if (now >= c.start) {
+            st.textContent = 'working';
+            el.style.borderColor = '#5b3a25';
+          } else {
+            st.textContent = 'queued';
+          }
+        });
+        $('#cap3').textContent = now >= 16.0 ? 'The runtime decided. Not the agents.' : 'Five agents. Three runs each.';
+      });
+      tl.to('#cap3', { opacity: 0, duration: 0.15 }, 15.75);
+
+      // S4 · verdict 16–22
+      hit(16.0);
+      chipPlan.forEach((c, i) => tl.fromTo(c.id, { scale: 1.08 }, { scale: 1, duration: 0.35, ease: 'power3.out' }, 16.0 + i * 0.035));
+      tl.to('#cap3', { opacity: 1, duration: 0.25 }, 16.2);
+      tl.fromTo('#tally', { opacity: 0, y: 20 }, { opacity: 1, y: 0, duration: 0.4, ease: 'power3.out' }, 16.6);
+      show('#tallynote', 17.0, 0.4);
+      show('#tallynote2', 17.6, 0.4);
+      hide('#s3', 21.8);
+
+      // S5 · evidence 22–28
+      show('#s5', 22.0, 0.2);
+      tl.fromTo('#claimp', { opacity: 0, x: -30 }, { opacity: 1, x: 0, duration: 0.4, ease: 'power3.out' }, 22.0);
+      tl.fromTo('#verifyp', { opacity: 0, x: 30 }, { opacity: 1, x: 0, duration: 0.4, ease: 'power3.out' }, 22.6);
+      verifyLines.forEach((_, i) => show(`#vl${i}`, 23.0 + i * 0.25, 0.08));
+      tl.fromTo('#whybox', { opacity: 0, scale: 0.97 }, { opacity: 1, scale: 1, duration: 0.3, ease: 'back.out(2)' }, 25.6);
+      hide('#s5', 27.8);
+
+      // S6 · repair 28–32
+      show('#s6', 28.0, 0.2);
+      tl.fromTo('#trail .node, #trail .arrow', { opacity: 0, y: 16 }, { opacity: 1, y: 0, duration: 0.22, stagger: 0.2, ease: 'power2.out' }, 28.3);
+      tl.fromTo('#sentback', { opacity: 0, y: 14 }, { opacity: 1, y: 0, duration: 0.3, ease: 'power2.out' }, 29.0);
+      show('#repairnote', 29.3, 0.4);
+      hide('#s6', 31.8);
+
+      // S7 · ledger 32–36
+      show('#s7', 32.0, 0.2);
+      tl.fromTo('#ledger', { opacity: 0, y: 24 }, { opacity: 1, y: 0, duration: 0.4, ease: 'power3.out' }, 32.0);
+      tl.fromTo('#ledger .lrow:not(.h)', { opacity: 0, x: -14 }, { opacity: 1, x: 0, duration: 0.22, stagger: 0.18, ease: 'power2.out' }, 32.4);
+      hide('#s7', 35.8);
+
+      // S8 · end 36–40
+      hide('#wordmark', 35.8);
+      show('#end', 36.0, 0.3);
+      tl.fromTo('#end .name', { opacity: 0, y: 30, scale: 1.04 }, { opacity: 1, y: 0, scale: 1, duration: 0.8, ease: 'expo.out' }, 36.0);
+      tl.fromTo('#end .line', { opacity: 0 }, { opacity: 1, duration: 0.6 }, 36.5);
+      tl.fromTo('#end .install', { opacity: 0, y: 14 }, { opacity: 1, y: 0, duration: 0.5, ease: 'power2.out' }, 37.0);
+      tl.fromTo('#end .repo', { opacity: 0 }, { opacity: 1, duration: 0.5 }, 37.4);
+      tl.fromTo('#end .made', { opacity: 0 }, { opacity: 1, duration: 0.5 }, 38.0);
+      tl.to('#scrim', { opacity: 1, duration: 0.5, ease: 'power2.in' }, 39.5);
+      tl.set({}, {}, 40);
+
+      const paint = (now) => {
+        for (const x of typed) {
+          const n = Math.max(0, Math.min(x.text.length, Math.round(((now - x.at) / x.dur) * x.text.length)));
+          $(x.sel).textContent = now < x.at ? '' : x.text.slice(0, n);
+        }
+        for (const p of painters) p(now);
+      };
+      window.addEventListener('hf-seek', (e) => paint(e.detail.time));
+      tl.eventCallback('onUpdate', () => paint(tl.time()));
+      paint(0);
+
+      window.__timelines['main'] = tl;
+      window.__scenes = { teaser: 0, bug: 2, contract: 6, columns: 10, verdict: 16, evidence: 22, repair: 28, ledger: 32, end: 36 };
+    </script>
+  </body>
+</html>

@@ -240,6 +240,11 @@ with `visits_lt`.
 }
 ```
 
+When the router sends control back to `implement`, the agent is told what the
+last verification found: each failing required check and the lines of its output
+that say why, framed as data, ahead of the node's own prompt. This applies to any
+`agent` node re-entered after a failed verifier, not only to `solve`.
+
 The run leaves `completed` only if the last `verify` was green. There is no
 second verifier at the end on purpose: re-running a contract that shells out to a
 test suite would double the most expensive part of the run to learn nothing new.
