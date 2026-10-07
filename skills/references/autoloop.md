@@ -460,9 +460,11 @@ Custom-engine configs are the one thing the spec does not carry (they can hold
 secrets), so a resume must be given them again. Cancelling a run stops all three
 agents, the same as `autoloop_stop`. If the highest committed Coder iteration
 has ledger artifacts and no `verdict.json`, and `HEAD` still names that iter,
-resume delivers one `review_request` for it and the dispatcher persists the
-Reviewer verdict; it does not send a new Coder directive. An in-flight send is
-still not retried, and there is no message outbox.
+resume starts and sends only the Reviewer: one `review_request` for that
+checkpoint, and the dispatcher persists `verdict.json`. It does not create or
+resume a Coder session, and a historical persisted Coder registry row is left
+unchanged. An in-flight send is still not retried, and there is no message
+outbox.
 
 ## Known limitations
 
