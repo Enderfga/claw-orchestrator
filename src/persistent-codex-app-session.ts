@@ -33,6 +33,7 @@ import type {
   SessionConfig,
   SessionStats,
   EffortLevel,
+  GeneratedImage,
   StreamEvent,
   ISession,
   SessionSendOptions,
@@ -89,7 +90,7 @@ interface ThreadTokenUsageUpdatedNotification {
 interface ItemCompletedNotification {
   threadId: string;
   turnId: string;
-  item: { type: string; id?: string; text?: string };
+  item: { type: string; id?: string; text?: string; savedPath?: string | null; revisedPrompt?: string | null };
 }
 
 interface AgentMessageDeltaNotification {
@@ -138,6 +139,8 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
 
   // Per-turn buffers (reset at each send)
   private turnAssistantText = '';
+  /** Images saved by `imageGeneration` items in the current turn. */
+  private turnImages: GeneratedImage[] = [];
   private turnResolve: ((r: TurnResult) => void) | null = null;
   private turnReject: ((e: Error) => void) | null = null;
 
@@ -344,6 +347,7 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
   private async _runTurn(text: string, options: SessionSendOptions): Promise<TurnResult> {
     const timeout = options.timeout || 600_000;
     this.turnAssistantText = '';
+    this.turnImages = [];
 
     const turnPromise = new Promise<TurnResult>((resolve, reject) => {
       this.turnResolve = resolve;
@@ -462,6 +466,13 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
       }
       case 'item/completed': {
         const p = params as ItemCompletedNotification;
+        // Codex's built-in image generation reports where it saved the file.
+        if (p.item?.type === 'imageGeneration' && typeof p.item.savedPath === 'string' && p.item.savedPath) {
+          this.turnImages.push({
+            path: p.item.savedPath,
+            ...(typeof p.item.revisedPrompt === 'string' ? { revisedPrompt: p.item.revisedPrompt } : {}),
+          });
+        }
         if (p.item?.type === 'agentMessage' && typeof p.item.text === 'string') {
           // Agent messages may arrive as one final text payload (when no
           // delta stream was used). Only append if we haven't already
@@ -525,6 +536,7 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
           result: turnText,
           stop_reason: failed ? 'error' : 'end_turn',
           session_id: this.threadId,
+          ...(this.turnImages.length ? { generated_images: [...this.turnImages] } : {}),
         };
         this.emit(SESSION_EVENT.RESULT, event);
         this.emit(SESSION_EVENT.TURN_COMPLETE, event);

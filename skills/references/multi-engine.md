@@ -28,7 +28,7 @@ SessionManager
 
 ### Claude Code (`engine: 'claude'`)
 
-Default engine. Long-running subprocess with streaming JSON I/O. Tested with Claude Code CLI **2.1.291**.
+Default engine. Long-running subprocess with streaming JSON I/O. Tested with Claude Code CLI **2.1.292**.
 
 - Persistent multi-turn conversations
 - Real-time streaming (text, tool_use, tool_result, system events)
@@ -83,6 +83,11 @@ Wraps the `codex exec` subcommand. Each `send()` spawns a new process. Tested wi
 - Requires `codex` CLI >= 0.119 (for `exec resume`): `npm install -g @openai/codex`
 - The prompt is sent on stdin (`codex exec … -`), never on the command line.
 - **Windows:** the npm `.cmd` shim launches through `src/engine-spawn.ts` (cross-spawn), which escapes the remaining arguments for `cmd.exe`. Because the prompt is on stdin it arrives unchanged, newlines and quotes included. A timed-out turn ends the whole process tree (`taskkill /T /F`), not only `cmd.exe`.
+- **Image generation**: ask for an image and Codex generates it with its built-in tool and saves it under
+  `$CODEX_HOME/generated_images/<thread_id>/`. `codex exec --json` reports no event for it, so the
+  adapter lists the files the turn added there and returns them as `images` on the send result
+  (`codex-app` reads them from the `imageGeneration` item, with the revised prompt). It uses the
+  account's image-generation allowance.
 - **Does not support `/goal`** — for that, use `engine: 'codex-app'` below
 
 ```typescript
@@ -128,7 +133,7 @@ await manager.startSession({
 
 Wraps Google's **Antigravity CLI** (`agy`) — the successor to Gemini CLI (consumer
 Gemini CLI tiers stopped serving 2026-06-18). Each `send()` spawns a new process
-in print mode. Tested with `agy` **1.3.0**.
+in print mode. Tested with `agy` **1.3.1**.
 
 - One-shot execution per message (no persistent subprocess)
 - **Structured output and real usage** — `--output-format stream-json` emits an

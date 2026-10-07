@@ -5,17 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [7.8.0] - 2026-10-07
+
+### Added
+
+- **Images Codex generates are returned with the turn.** Asked for an image, Codex generates it with
+  its built-in tool and saves the file under `$CODEX_HOME/generated_images/<thread_id>/`, mentioning
+  it only in its reply text. The send result now carries `images: [{ path, revisedPrompt? }]` for the
+  files the turn produced — `codex` lists what the turn added to that directory, since
+  `codex exec --json` reports no event for it; `codex-app` reads the `imageGeneration` item. The ACP
+  agent names each image and sends it as an `image` content block.
 
 ### Fixed
 
 - **Live Autoloop runner state transitions are checkpointed**, so a
   non-owning `autoloop_status` shows both a recoverable send-timeout pause
   and an operator pause instead of the stale initial planning snapshot.
+  (#132, thanks @ajmtrz)
 - **Resuming after a committed Coder iteration with no Reviewer verdict**
   delivers that iteration to Reviewer once from the durable ledger and
   `HEAD`, then persists `verdict.json`. An in-flight send is still not
   retried. A resume with no open iteration still starts only the Planner.
+  (#134, thanks @ajmtrz)
+
+### Changed
+
+- Tested with Claude Code 2.1.292, agy 1.3.1 and OpenCode 1.18.35.
 
 ## [7.7.0] - 2026-10-07
 

@@ -583,6 +583,28 @@ describe('PersistentCodexSession', () => {
     session.stop();
   });
 
+  // `codex exec --json` emits no event for a generated image; the file under
+  // $CODEX_HOME/generated_images/<thread>/ is the only record of it.
+  it('reports the images a turn saved, not ones already there', async () => {
+    const dir = join(codexHome, 'generated_images', 'thread-img');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'exec-old.png'), 'x');
+    const session = new PersistentCodexSession({ name: 'test', cwd: '/tmp', resumeSessionId: 'thread-img' });
+    await session.start();
+
+    const p = session.send('draw', { waitForComplete: true });
+    setTimeout(() => {
+      writeFileSync(join(dir, 'exec-new.png'), 'y');
+      writeFileSync(join(dir, 'notes.txt'), 'z');
+      mockProc.stdout.push(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1 } }) + '\n');
+      mockProc.stdout.push(null);
+      mockProc.emit('close', 0);
+    }, 10);
+    const result = (await p) as { event: Record<string, unknown> };
+    expect(result.event.generated_images).toEqual([{ path: join(dir, 'exec-new.png') }]);
+    session.stop();
+  });
+
   it('keeps the configured model over the one in the rollout', async () => {
     writeRollout('thread-pinned', [JSON.stringify({ type: 'turn_context', payload: { model: 'gpt-6-astra' } })]);
     const session = new PersistentCodexSession({ name: 'test', cwd: '/tmp', model: 'gpt-6-luna' });

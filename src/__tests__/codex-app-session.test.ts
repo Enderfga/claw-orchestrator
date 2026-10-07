@@ -185,6 +185,35 @@ describe('PersistentCodexAppServerSession v2 RPCs', () => {
     expect(proc.written.some((m) => m.method === 'turn/interrupt')).toBe(false);
   });
 
+  // Codex's image generation reports each saved file as an imageGeneration item.
+  it('attaches the images a turn generated to its result, and only that turn', async () => {
+    const proc = createMockProc(defaultResponder());
+    const session = await startSession(proc);
+    const push = (method: string, params: Record<string, unknown>) =>
+      proc.stdout.push(JSON.stringify({ jsonrpc: '2.0', method, params }) + '\n');
+
+    const first = session.send('draw a circle', { waitForComplete: true });
+    setTimeout(() => {
+      push('item/completed', {
+        threadId: 't1',
+        turnId: 'a',
+        item: { type: 'imageGeneration', id: 'ig1', savedPath: '/img/one.png', revisedPrompt: 'a blue circle' },
+      });
+      push('item/completed', { threadId: 't1', turnId: 'a', item: { type: 'agentMessage', text: 'done' } });
+      push('turn/completed', { threadId: 't1', turn: { id: 'a', status: 'completed' } });
+    }, 5);
+    const r1 = (await first) as { event: Record<string, unknown> };
+    expect(r1.event.generated_images).toEqual([{ path: '/img/one.png', revisedPrompt: 'a blue circle' }]);
+
+    const second = session.send('thanks', { waitForComplete: true });
+    setTimeout(() => {
+      push('item/completed', { threadId: 't1', turnId: 'b', item: { type: 'agentMessage', text: 'ok' } });
+      push('turn/completed', { threadId: 't1', turn: { id: 'b', status: 'completed' } });
+    }, 5);
+    const r2 = (await second) as { event: Record<string, unknown> };
+    expect(r2.event.generated_images).toBeUndefined();
+  });
+
   it('rejects a send() and increments toolErrors when a turn completes with status failed', async () => {
     const proc = createMockProc(defaultResponder());
     const session = await startSession(proc);

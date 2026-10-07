@@ -192,6 +192,7 @@ import {
   type SessionInfo,
   type SendOptions,
   type PermissionDenial,
+  type GeneratedImage,
   type SendResult,
   type PluginConfig,
   type EffortLevel,
@@ -553,6 +554,15 @@ function validateAutoloopEffort(role: AutoloopRoleName, effort: EffortLevel | un
  * engine emits a result event of its own shape, so anything that is not an
  * array of objects naming a tool is ignored rather than trusted.
  */
+/** Images an engine attached to its result event as `generated_images`. */
+function readGeneratedImages(evt: Record<string, unknown> | undefined): GeneratedImage[] {
+  const raw = evt?.generated_images;
+  if (!Array.isArray(raw)) return [];
+  return raw.filter(
+    (i): i is GeneratedImage => !!i && typeof i === 'object' && typeof (i as GeneratedImage).path === 'string',
+  );
+}
+
 function readPermissionDenials(evt: Record<string, unknown> | undefined): PermissionDenial[] {
   const raw = evt?.permission_denials;
   if (!Array.isArray(raw)) return [];
@@ -969,6 +979,7 @@ export class SessionManager {
           // through. The result event was dropped at this line, and it is the
           // only record of a blocked call: the turn itself still reports success.
           const permissionDenials = readPermissionDenials(evt);
+          const images = readGeneratedImages(evt);
           // The record holds what the caller said, never the replayed history in
           // front of it — a second handoff would otherwise nest one inside the other.
           managed.transcript ??= newTranscript();
@@ -983,6 +994,7 @@ export class SessionManager {
             error: turnError,
             events: [],
             ...(permissionDenials.length ? { permissionDenials } : {}),
+            ...(images.length ? { images } : {}),
           };
         }
 
