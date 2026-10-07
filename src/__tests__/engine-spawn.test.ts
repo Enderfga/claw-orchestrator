@@ -83,6 +83,29 @@ describe('spawnEngine', () => {
     }
   });
 
+  // opencode resolves its project from PWD, not from the process cwd. A
+  // session started by a server whose PWD was elsewhere ran in that directory.
+  it('points PWD at the cwd it was given, for spawn and exec alike', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'clawo-pwd-'));
+    const script = 'process.stdout.write(process.env.PWD || "")';
+    try {
+      const child = spawnEngine(process.execPath, ['-e', script], {
+        cwd,
+        env: { ...process.env, PWD: '/somewhere/else' },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      const { stdout } = await capture(child);
+      expect(stdout).toBe(cwd);
+      const exec = await execEngine(process.execPath, ['-e', script], {
+        cwd,
+        env: { ...process.env, PWD: '/somewhere/else' },
+      });
+      expect(exec).toEqual({ stdout: cwd, stderr: '' });
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
   it.runIf(isWin)('keeps argv intact through a .cmd shim in a path with spaces', async () => {
     const { cmdPath, dir } = writeCmdFixture();
     try {

@@ -17,6 +17,7 @@
  */
 
 import { spawn } from 'node:child_process';
+import { resolve as resolvePath } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 
 export interface ExecResult {
@@ -90,7 +91,9 @@ export function exec(cmd: string, args: string[] = [], opts: ExecOptions = {}): 
     try {
       child = spawn(cmd, args, {
         cwd: opts.cwd,
-        env: opts.env ?? process.env,
+        // Keep PWD in step with cwd: a check script that reads $PWD would
+        // otherwise see the server's directory.
+        env: opts.cwd ? { ...(opts.env ?? process.env), PWD: resolvePath(opts.cwd) } : (opts.env ?? process.env),
         stdio: [opts.input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
         // Own process group, so the timeout can take the whole tree down.
         detached: process.platform !== 'win32',

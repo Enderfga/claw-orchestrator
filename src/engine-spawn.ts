@@ -30,7 +30,7 @@
  */
 import crossSpawn from 'cross-spawn';
 import { statSync } from 'node:fs';
-import { isAbsolute, join, resolve } from 'node:path';
+import { isAbsolute, join, resolve as resolvePath } from 'node:path';
 import { execFileSync, type ChildProcess, type SpawnOptions } from 'node:child_process';
 
 /** Extensions CreateProcess runs directly — everything else needs cmd.exe. */
@@ -79,7 +79,7 @@ export function isWindowsBatchTarget(bin: string, env: NodeJS.ProcessEnv = proce
     const base = dir ? join(dir, bin) : bin;
     const ordered = [base, ...pathext.map((e) => base + e)];
     for (const candidate of ordered) {
-      const resolved = dir && !isAbsolute(candidate) ? resolve(candidate) : candidate;
+      const resolved = dir && !isAbsolute(candidate) ? resolvePath(candidate) : candidate;
       if (!isFile(dir ? resolved : candidate)) continue;
       const ext = extOf(candidate);
       if (!ext) return true; // extensionless shim: not directly executable
@@ -139,9 +139,12 @@ export function killEngineTree(child: ChildProcess): void {
  * `node:child_process` spawn, so call sites change by one import line.
  */
 export function spawnEngine(bin: string, args: string[], options: SpawnOptions): ChildProcess {
-  const env = options.env ?? process.env;
   const cwd = typeof options.cwd === 'string' ? options.cwd : undefined;
-  return crossSpawn(bin, prepareArgs(bin, args, env, cwd), options);
+  // `cwd` moves the process but leaves the inherited PWD naming the parent's
+  // directory, and some engines trust PWD: opencode resolves its project from
+  // it, so a session started by a server ran in the server's directory.
+  const env = cwd ? { ...(options.env ?? process.env), PWD: resolvePath(cwd) } : (options.env ?? process.env);
+  return crossSpawn(bin, prepareArgs(bin, args, env, cwd), { ...options, env });
 }
 
 export interface ExecEngineOptions {
@@ -188,7 +191,7 @@ export function execEngine(bin: string, args: string[], opts: ExecEngineOptions 
 
     let child: ChildProcess;
     try {
-      const childEnv = env ?? process.env;
+      const childEnv = cwd ? { ...(env ?? process.env), PWD: resolvePath(cwd) } : (env ?? process.env);
       child = crossSpawn(bin, prepareArgs(bin, args, childEnv, cwd), {
         cwd,
         env: childEnv,

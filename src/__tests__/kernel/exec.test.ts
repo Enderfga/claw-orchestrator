@@ -5,6 +5,9 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { exec, execOk, lastLines, MAX_CAPTURE_BYTES } from '../../kernel/exec.js';
 
 describe('kernel exec', () => {
@@ -92,5 +95,15 @@ describe('exec robustness', () => {
     const r = await exec(process.execPath, ['-e', script], { maxCaptureBytes: 1024 * 1024 });
     expect(r.out).not.toContain('\uFFFD');
     expect(r.out.length).toBe(35000);
+  });
+
+  it('sets PWD to the cwd it runs in', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'clawo-exec-pwd-'));
+    try {
+      const r = await exec('sh', ['-c', 'printf %s "$PWD"'], { cwd, env: { ...process.env, PWD: '/elsewhere' } });
+      expect(r.out).toBe(cwd);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
   });
 });
