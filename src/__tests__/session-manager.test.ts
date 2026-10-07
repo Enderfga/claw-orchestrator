@@ -811,6 +811,26 @@ describe('SessionManager', () => {
     });
   });
 
+  // ─── generated images ───────────────────────────────────────────────
+
+  describe('generated images', () => {
+    it('surfaces the images an engine attached to its result', async () => {
+      await mgr.startSession({ name: 'img', cwd: '/tmp', engine: 'codex' });
+      lastMock().sendImplementation = async () => ({
+        text: 'drawn',
+        event: { type: 'result', generated_images: [{ path: '/g/a.png' }, { bogus: true }] },
+      });
+      const result = await mgr.sendMessage('img', 'draw');
+      expect(result.images).toEqual([{ path: '/g/a.png' }]);
+    });
+
+    it('leaves the field out when there are none', async () => {
+      await mgr.startSession({ name: 'noimg', cwd: '/tmp' });
+      const result = await mgr.sendMessage('noimg', 'hi');
+      expect(result).not.toHaveProperty('images');
+    });
+  });
+
   // ─── autoCompactPercent ─────────────────────────────────────────────
 
   describe('autoCompactPercent', () => {

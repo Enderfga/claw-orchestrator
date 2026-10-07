@@ -19,7 +19,7 @@ import { writeFileSync, unlinkSync, readFileSync, readdirSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
 
-import type { SessionConfig, SessionSendOptions, StreamEvent, TurnResult } from './types.js';
+import type { GeneratedImage, SessionConfig, SessionSendOptions, StreamEvent, TurnResult } from './types.js';
 import { SESSION_EVENT } from './constants.js';
 import { BaseOneShotSession } from './base-oneshot-session.js';
 
@@ -209,6 +209,28 @@ export class PersistentCodexSession extends BaseOneShotSession {
   }
 
   /**
+   * Files Codex's built-in image generation has saved for this thread.
+   *
+   * `codex exec --json` emits no event for a generated image; the only record
+   * is the file, under `$CODEX_HOME/generated_images/<thread_id>/`. Diffing the
+   * directory around a turn gives that turn's images. Empty until the thread
+   * id is known — a new thread's first turn reports it before it ends.
+   */
+  private _generatedImages(): Set<string> {
+    if (!this.codexThreadId) return new Set();
+    const dir = join(process.env.CODEX_HOME || join(homedir(), '.codex'), 'generated_images', this.codexThreadId);
+    try {
+      return new Set(
+        readdirSync(dir)
+          .filter((f) => /\.(png|jpe?g|webp|gif)$/i.test(f))
+          .map((f) => join(dir, f)),
+      );
+    } catch {
+      return new Set();
+    }
+  }
+
+  /**
    * Locate a thread's rollout under `sessions/<year>/<month>/<day>/`.
    *
    * Walks newest-first and stops at the first hit, so the usual case — a thread
@@ -349,6 +371,7 @@ export class PersistentCodexSession extends BaseOneShotSession {
     // cumulative total as of the *previous* turn, and this turn is about to
     // append its own to the same file.
     this._readRollout();
+    const imagesBefore = this._generatedImages();
     const args = this._buildArgs();
     const timeout = options.timeout || 300_000;
 
@@ -515,11 +538,13 @@ export class PersistentCodexSession extends BaseOneShotSession {
         this._readRollout();
         this._addHistory({ text: assistantText, code });
 
+        const images = [...this._generatedImages()].filter((p) => !imagesBefore.has(p));
         const event: StreamEvent = {
           type: 'result',
           result: assistantText,
           stop_reason: ok ? 'end_turn' : 'error',
           session_id: this.codexThreadId,
+          ...(images.length ? { generated_images: images.map((path): GeneratedImage => ({ path })) } : {}),
         };
 
         this.emit(SESSION_EVENT.RESULT, event);

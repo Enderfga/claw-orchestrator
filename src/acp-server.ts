@@ -19,6 +19,9 @@
  * release, so it is deliberately not used.
  */
 
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+
 import * as acp from '@agentclientprotocol/sdk';
 
 import { ACP_SESSION_PREFIX } from './constants.js';
@@ -58,7 +61,7 @@ interface SessionManagerLike {
       onChunk?: (chunk: string) => void;
       onEvent?: (event: { type: string; tool?: { name?: string; input?: unknown }; result?: string }) => void;
     },
-  ): Promise<{ output: string; sessionId?: string }>;
+  ): Promise<{ output: string; sessionId?: string; images?: Array<{ path: string }> }>;
   stopSession(name: string, opts?: { keepPersisted?: boolean }): Promise<void>;
   /** The sessions on disk that can be resumed by name; see `session/resume`. */
   listPersistedSessions?(): Array<{
@@ -613,6 +616,7 @@ export function createAcpAgent(manager: SessionManagerLike, options: AcpAgentOpt
             update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: output } },
           });
         }
+        await emitImages((raced as { images?: Array<{ path: string }> }).images, emit);
         await emitUsage(manager, state, emit);
         return { stopReason: 'end_turn' };
       } catch (err) {
@@ -630,15 +634,49 @@ export function createAcpAgent(manager: SessionManagerLike, options: AcpAgentOpt
     });
 }
 
+/** Larger images are named by path only, to keep a session/update frame bounded. */
+const ACP_MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+const IMAGE_MIME: Record<string, string> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.gif': 'image/gif',
+};
+
+/**
+ * Send the images an engine generated this turn (Codex image generation).
+ *
+ * Each one is named by its path in a text chunk — a client that does not
+ * render images still learns where the file is — and then sent as an image
+ * content block when it is small enough. A file that cannot be read is named
+ * and skipped.
+ */
+export async function emitImages(
+  images: Array<{ path: string }> | undefined,
+  emit: (update: Record<string, unknown>) => Promise<unknown>,
+): Promise<void> {
+  for (const image of images ?? []) {
+    await emit({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: `\n\nImage: ${image.path}\n` } });
+    const mimeType = IMAGE_MIME[path.extname(image.path).toLowerCase()];
+    if (!mimeType) continue;
+    try {
+      if (fs.statSync(image.path).size > ACP_MAX_IMAGE_BYTES) continue;
+      const data = fs.readFileSync(image.path).toString('base64');
+      await emit({ sessionUpdate: 'agent_message_chunk', content: { type: 'image', data, mimeType } });
+    } catch {
+      /* named above; an unreadable file is not worth failing the turn */
+    }
+  }
+}
+
 /**
  * Cancel the turn this ACP session has in flight, if it has one.
  *
  * Returns whether anything was torn down. The guard is the point: the teardown
- * destroys and recreates the underlying session, which drops the engine's
- * native conversation id — codex, codex-app, agy, cursor and opencode all
- * capture theirs mid-turn — so running it on an idle session silently forked
- * the history. The client kept the same ACP sessionId while the next prompt
- * opened a fresh engine thread, with nothing to say so.
+ * destroys and recreates the engine process, which is not free, and an idle
+ * session has nothing to cancel. The restart keeps the persisted resume handle,
+ * so the conversation continues once the engine has reported one.
  */
 export function cancelAcpTurn(manager: SessionManagerLike, state: AcpSessionState, log?: Logger): boolean {
   const cancelInFlight = state.cancelInFlight;

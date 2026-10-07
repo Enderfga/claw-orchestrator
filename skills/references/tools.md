@@ -73,11 +73,13 @@ Send a message and get the response.
 | `timeout` | number  |          | Timeout in ms (default 300000)     |
 | `stream`  | boolean |          | Collect streaming chunks in result |
 
-Returns `{ ok, output, sessionId, error?, permissionDenials? }`. `permissionDenials` lists the tool
+Returns `{ ok, output, sessionId, error?, permissionDenials?, images? }`. `permissionDenials` lists the tool
 calls the engine refused during the turn — `[{ toolName, toolUseId?, input? }]` — and is present only
 when there was at least one. Check it even when `error` is absent: a turn whose tool calls were all
 denied still ends as a success. See [sessions.md](./sessions.md) on what "succeeded" does and does
-not mean.
+not mean. `images` lists the images the engine generated in this turn as `{ path, revisedPrompt? }`,
+with `path` a file on the machine running the orchestrator; Codex (`codex` and `codex-app`) generates
+them when asked for an image.
 
 ### `session_handoff`
 

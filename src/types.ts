@@ -658,6 +658,20 @@ export interface SendResult {
    * successful turn as work done needs this field to know otherwise.
    */
   permissionDenials?: PermissionDenial[];
+  /**
+   * Images the engine generated during this turn, as files on this machine.
+   * Present only when there was at least one. Codex is the engine that
+   * generates them (its built-in image generation); the reply text may name
+   * the same files, but this list is the one to read.
+   */
+  images?: GeneratedImage[];
+}
+
+export interface GeneratedImage {
+  /** Absolute path of the saved image. */
+  path: string;
+  /** The prompt the engine actually used, when it reports one. */
+  revisedPrompt?: string;
 }
 
 export interface GrepMatch {

@@ -114,6 +114,13 @@ Other engines are absent for different reasons:
   straight through, so there is nothing in the registry to enumerate. An opencode
   session is reachable by naming the model, just not by picking it from this list.
 
+## Generated images
+
+When the engine generates an image in a turn (Codex does, when asked for one), the agent names the
+file's path in a text chunk and then sends the image itself as an `image` content block, so a client
+that renders images shows it and one that does not still gets the path. Files over 8 MB are named
+only.
+
 ## Resuming sessions
 
 Sessions outlive the agent process. `initialize` advertises

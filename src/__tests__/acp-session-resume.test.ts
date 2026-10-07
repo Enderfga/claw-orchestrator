@@ -9,7 +9,11 @@
 import { describe, expect, it } from 'vitest';
 import * as acp from '@agentclientprotocol/sdk';
 
-import { cancelAcpTurn, createAcpAgent } from '../acp-server.js';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
+import { cancelAcpTurn, createAcpAgent, emitImages } from '../acp-server.js';
 
 type Persisted = { name: string; cwd: string; engine?: 'claude' | 'codex'; model?: string; lastActivity: number };
 
@@ -142,5 +146,22 @@ describe('cancelAcpTurn keeps the conversation', () => {
     expect(cancelAcpTurn(manager as never, state)).toBe(true);
     await new Promise((r) => setTimeout(r, 0));
     expect(manager.stops).toEqual([{ name: 'acp-x', keepPersisted: true }]);
+  });
+});
+
+describe('emitImages', () => {
+  it('names each image by path and sends it as an image block', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'clawo-acp-img-'));
+    const png = path.join(dir, 'a.png');
+    fs.writeFileSync(png, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    const updates: Array<Record<string, unknown>> = [];
+    await emitImages([{ path: png }, { path: path.join(dir, 'missing.png') }], async (u) => void updates.push(u));
+    const contents = updates.map((u) => u.content as Record<string, unknown>);
+    expect(contents[0]).toMatchObject({ type: 'text', text: expect.stringContaining(png) });
+    expect(contents[1]).toEqual({ type: 'image', data: 'iVBORw==', mimeType: 'image/png' });
+    // An unreadable file is still named, and nothing else is sent for it.
+    expect(contents[2]).toMatchObject({ type: 'text', text: expect.stringContaining('missing.png') });
+    expect(contents).toHaveLength(3);
+    fs.rmSync(dir, { recursive: true, force: true });
   });
 });
