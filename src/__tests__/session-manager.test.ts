@@ -2522,7 +2522,30 @@ describe('SessionManager', () => {
             required.map((name) => [name, fs.readFileSync(path.join(ledgerIter, name))]),
           );
 
+          const actualFs = await vi.importActual<typeof import('node:fs')>('node:fs');
+          const sessionsPath = path.join(process.env.CLAWO_SESSIONS_DIR!, 'claude-sessions.json');
+          // Missing must not compare equal to an empty file: null vs Buffer.
+          // Snapshot the killed owner's on-disk bytes as they are — do not plant a row.
+          const registryBefore: Buffer | null = actualFs.existsSync(sessionsPath)
+            ? actualFs.readFileSync(sessionsPath)
+            : null;
+
+          createdConfigs = [];
+          mockSessions = [];
           const resumeMgr = createManager();
+          const coderName = `autoloop-${runId}-coder`;
+          const startSession = resumeMgr.startSession.bind(resumeMgr);
+          const sendMessage = resumeMgr.sendMessage.bind(resumeMgr);
+          const startCalls: Array<Partial<SessionConfig> & { name?: string }> = [];
+          const sendCalls: string[] = [];
+          resumeMgr.startSession = async (config) => {
+            startCalls.push(config);
+            return startSession(config);
+          };
+          resumeMgr.sendMessage = async (name, message, options) => {
+            sendCalls.push(name);
+            return sendMessage(name, message, options);
+          };
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const origCreate = (resumeMgr as any)._createSession.bind(resumeMgr);
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -2541,6 +2564,48 @@ describe('SessionManager', () => {
             return mock;
           };
 
+          // The module fs stub no-ops claude-sessions.json, which would hide a
+          // destructive write from the unmocked byte snapshot. For this resume
+          // window only, route that path through real disk I/O so a sync
+          // savePersistedSessions would change the snapshotted bytes.
+          const isClaudeSessionsPath = (p: unknown): boolean =>
+            typeof p === 'string' && p.includes('claude-sessions.json');
+          const prevExists = vi.mocked(fs.existsSync).getMockImplementation();
+          const prevRead = vi.mocked(fs.readFileSync).getMockImplementation();
+          const prevWrite = vi.mocked(fs.writeFileSync).getMockImplementation();
+          const prevRename = vi.mocked(fs.renameSync).getMockImplementation();
+          vi.mocked(fs.existsSync).mockImplementation((p: string) =>
+            isClaudeSessionsPath(p) ? actualFs.existsSync(p) : prevExists!(p),
+          );
+          vi.mocked(fs.readFileSync).mockImplementation((p: string, enc?: string) =>
+            isClaudeSessionsPath(p) ? actualFs.readFileSync(p, enc as BufferEncoding) : prevRead!(p, enc),
+          );
+          vi.mocked(fs.writeFileSync).mockImplementation((p: unknown, ...rest: unknown[]) => {
+            if (isClaudeSessionsPath(p)) {
+              (actualFs.writeFileSync as (...a: unknown[]) => void)(p, ...rest);
+              return;
+            }
+            return prevWrite!(p, ...rest);
+          });
+          vi.mocked(fs.renameSync).mockImplementation((from: unknown, to: unknown) => {
+            if (isClaudeSessionsPath(from) || isClaudeSessionsPath(to)) {
+              (actualFs.renameSync as (...a: unknown[]) => void)(from, to);
+              return;
+            }
+            return prevRename!(from, to);
+          });
+          vi.mocked(fs.writeFileSync).mockClear();
+          vi.mocked(fs.renameSync).mockClear();
+          vi.mocked(fs.writeFile).mockClear();
+          vi.mocked(fs.rename).mockClear();
+
+          const restoreSessionsFsMock = (): void => {
+            vi.mocked(fs.existsSync).mockImplementation(prevExists!);
+            vi.mocked(fs.readFileSync).mockImplementation(prevRead!);
+            vi.mocked(fs.writeFileSync).mockImplementation(prevWrite!);
+            vi.mocked(fs.renameSync).mockImplementation(prevRename!);
+          };
+
           try {
             await resumeMgr.autoloopResume(runId);
             const verdictPath = path.join(ledgerIter, 'verdict.json');
@@ -2554,6 +2619,38 @@ describe('SessionManager', () => {
             const coder = mockSessions.find((_, i) => createdConfigs[i]?.name.endsWith('-coder'));
             expect(reviewer?.sendCalls.some((c) => String(c.message).includes('[review_request iter=0]'))).toBe(true);
             expect(coder?.sendCalls ?? []).toHaveLength(0);
+            expect(startCalls.map((c) => c.name)).not.toContain('autoloop-kill-owner-open-iter-coder');
+            expect(createdConfigs.map((c) => c.name)).not.toContain('autoloop-kill-owner-open-iter-coder');
+            expect(resumeMgr.hasSession(coderName)).toBe(false);
+            expect(resumeMgr.listSessions().some((s) => s.name === coderName)).toBe(false);
+            expect(startCalls.some((c) => c.name === coderName && c.resumeSessionId)).toBe(false);
+            expect(createdConfigs.some((c) => c.name === coderName && c.resumeSessionId)).toBe(false);
+            expect(sendCalls.filter((name) => name === coderName)).toHaveLength(0);
+            // Any mocked write/rename of the registry during resume fails even
+            // when the module stub would otherwise no-op the bytes. Real-disk
+            // pass-through is also live, so a sync save would break the snapshot.
+            const registryWriteSync = vi.mocked(fs.writeFileSync).mock.calls.filter((c) => isClaudeSessionsPath(c[0]));
+            const registryRenameSync = vi
+              .mocked(fs.renameSync)
+              .mock.calls.filter((c) => isClaudeSessionsPath(c[0]) || isClaudeSessionsPath(c[1]));
+            const registryWriteAsync = vi.mocked(fs.writeFile).mock.calls.filter((c) => isClaudeSessionsPath(c[0]));
+            const registryRenameAsync = vi
+              .mocked(fs.rename)
+              .mock.calls.filter((c) => isClaudeSessionsPath(c[0]) || isClaudeSessionsPath(c[1]));
+            expect(registryWriteSync, 'mocked writeFileSync of claude-sessions.json during resume').toEqual([]);
+            expect(registryRenameSync, 'mocked renameSync of claude-sessions.json during resume').toEqual([]);
+            expect(registryWriteAsync, 'mocked writeFile of claude-sessions.json during resume').toEqual([]);
+            expect(registryRenameAsync, 'mocked rename of claude-sessions.json during resume').toEqual([]);
+            const registryAfter: Buffer | null = actualFs.existsSync(sessionsPath)
+              ? actualFs.readFileSync(sessionsPath)
+              : null;
+            // Missing must stay missing — never treat absence as Buffer.alloc(0).
+            if (registryBefore === null) {
+              expect(registryAfter, 'missing claude-sessions.json must stay absent').toBeNull();
+            } else {
+              expect(registryAfter, 'claude-sessions.json must still exist after resume').not.toBeNull();
+              expect(registryAfter!.equals(registryBefore), 'historical registry bytes must be unchanged').toBe(true);
+            }
             expect(execFileSync('git', ['rev-parse', 'HEAD'], { cwd: workspace, encoding: 'utf8' }).trim()).toBe(
               headBefore,
             );
@@ -2562,6 +2659,9 @@ describe('SessionManager', () => {
               expect(fs.readFileSync(path.join(ledgerIter, name)).equals(artifactBefore[name])).toBe(true);
             }
           } finally {
+            // Restore the no-op stub before shutdown so a debounced/shutdown
+            // persist cannot rewrite the snapshotted registry after the assert.
+            restoreSessionsFsMock();
             await resumeMgr.shutdown();
           }
         } finally {

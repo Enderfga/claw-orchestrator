@@ -586,6 +586,27 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
   }
 
   /**
+   * Start only Reviewer so a committed Coder iteration can be reviewed after
+   * owner loss. Does not start, send to, or resume Coder. Ordinary
+   * `spawnSubagents` still starts both roles.
+   */
+  async ensureReviewerForCommittedRecovery(): Promise<void> {
+    await this.ensureReviewer();
+    await this.config.onRoleSelectionChanged?.({
+      coder: {
+        engine: this.coderSelection.engine,
+        model: this.coderSelection.model,
+        effort: this.coderSelection.effort,
+      },
+      reviewer: {
+        engine: this.reviewerSelection.engine,
+        model: this.reviewerSelection.model,
+        effort: this.reviewerSelection.effort,
+      },
+    });
+  }
+
+  /**
    * Reset a single subagent — stop its session, clear the started flag, and
    * (optionally) eagerly start a fresh one. The session-level system prompt is
    * the same; persistent state lives in `<ledger>/{coder,reviewer}_memory.md`

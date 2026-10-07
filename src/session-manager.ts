@@ -3481,7 +3481,7 @@ export class SessionManager {
     if (!subject.startsWith(`autoloop/iter-${n}:`)) return;
 
     this.logger.info?.(`[autoloop/${runId}] recovering committed iter ${n} into Reviewer`);
-    await dispatcher.spawnSubagents();
+    await dispatcher.ensureReviewerForCommittedRecovery();
     runner.markSubagentsSpawned();
     runner.state.iter = n;
     void runner
