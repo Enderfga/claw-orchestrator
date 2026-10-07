@@ -11,7 +11,15 @@
 [![CI](https://github.com/Enderfga/claw-orchestrator/actions/workflows/ci.yml/badge.svg)](https://github.com/Enderfga/claw-orchestrator/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
-@@HERO@@
+<p align="center">
+  <img src="./assets/hero.gif" alt="An agent reports that all tests pass; the runtime's own check refutes it. Five engines, three runs each, tallied by verdict." width="800">
+</p>
+
+<p align="center"><sub>
+One bug, one acceptance contract, five engines, three runs each, first attempt only. The runtime ran the checks itself:
+9 verified, 4 refuted, 2 errored (Grok Build hit its free-tier usage limit). One task, not a benchmark. Real runs, recorded locally —
+<a href="./examples/promo-video/">how the film was made, and how to re-run it</a>.
+</sub></p>
 
 Coding agents grade their own work: "All tests pass ✓". Claw Orchestrator runs them as persistent sessions behind one API and keeps the verdict out of their hands. You declare the checks, the runtime executes them and reads the exit codes, and the evidence stays on disk.
 

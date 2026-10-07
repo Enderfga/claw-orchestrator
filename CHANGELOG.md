@@ -9,12 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **`clawo solve` and `clawo fanout`.** The built-in `solve` and `fanout` workflows can now be started
-  from a terminal, not only through MCP or the SDK. `clawo solve "<task>" --engine codex --check "npm test"`
-  runs triage → implement → verify → repair until the checks pass; `clawo fanout "<task>" --engines
-claude,codex,grok --synthesize` asks several engines at once. `--check` adds a command check the
-  runtime runs itself, `--contract` takes a contract file, and `--wait` follows the run node by node
-  and exits non-zero unless it completes.
+- **`clawo solve` and `clawo fanout`.** The built-in `solve` and `fanout` workflows can now be
+  started from a terminal, not only through MCP or the SDK. `clawo solve "<task>" --engine codex
+  --check "npm test"` runs triage → implement → verify → repair until the checks pass;
+  `clawo fanout "<task>" --engines claude,codex,grok --synthesize` asks several engines at once.
+  `--check` adds a command check the runtime runs itself, `--contract` takes a contract file, and
+  `--wait` follows the run node by node and exits non-zero unless it completes.
 - **`workflow_start` takes `implementer`** for the `solve` template, so the engine that writes the
   change can differ from the scouts. It was reachable from the SDK only.
 - **`clawo verify` prints why a check failed** — the assertion or error lines from its output, or
@@ -33,9 +33,19 @@ claude,codex,grok --synthesize` asks several engines at once. `--check` adds a c
   session's. Every engine process, and every contract check, now gets a `PWD` that matches its `cwd`.
 - **A second server started with `OPENCLAW_SERVER_TOKEN` no longer overwrites the token file** another
   server wrote, which locked every file-reading client out of the first one.
+- **OpenCode turns are billed at what opencode reported.** Its JSON output names no model, so each
+  turn was priced as Sonnet from the registry; a free default model showed up in the ledger at
+  Sonnet rates. The `cost` opencode reports per step is now the bill, with the registry estimate
+  kept for output that carries none.
 - **A Grok turn the vendor refuses now says why.** grok answers a free-tier usage limit or an auth
   failure with `{"type":"error","message":...}` instead of a result; the wrapper read only an `error`
   field, so the turn came back empty and callers saw "engine did not report the turn as succeeded".
+
+### Changed
+
+- The README leads with what the runtime checks, and `examples/promo-video/` holds the source of the
+  launch film: the one-bug repository, the contract, the 15 recorded runs it shows, and the
+  composition and score that render it.
 
 ## [7.8.0] - 2026-10-07
 
