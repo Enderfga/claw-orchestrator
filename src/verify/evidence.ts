@@ -169,7 +169,11 @@ export function failureLines(tail: string, max = 4): string[] {
     .split('\n')
     .map((l) => l.trimEnd())
     .filter((l) => l.trim() !== '');
-  const telling = all.filter((l) => /error|expected|fail|✖|not ok|assert/i.test(l) && !/^\s+at /.test(l));
+  // Skip stack frames and the property dump node prints under an error
+  // (`  code: 'ERR_ASSERTION',`), which match the pattern without adding to it.
+  const telling = all.filter(
+    (l) => /error|expected|fail|✖|not ok|assert/i.test(l) && !/^\s+at /.test(l) && !/^\s+\w+: /.test(l),
+  );
   const picked = telling.length > 0 ? [...new Set(telling)].slice(0, max) : all.slice(-max);
   return picked.map((l) => (l.length > 160 ? `${l.slice(0, 157)}...` : l));
 }

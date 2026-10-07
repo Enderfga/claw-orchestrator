@@ -47,6 +47,9 @@ interface GrokJsonResult {
   total_cost_usd?: number;
   modelUsage?: Record<string, unknown>;
   error?: string;
+  /** `error` when grok refused the turn outright (usage limit, auth), with `message`. */
+  type?: string;
+  message?: string;
 }
 
 export class PersistentGrokSession extends BaseOneShotSession {
@@ -231,8 +234,12 @@ export class PersistentGrokSession extends BaseOneShotSession {
 
         // A turn that produced no parseable result object failed, whatever the
         // exit code says: there is no reply to hand back.
+        // A refused turn (usage limit, auth) is `{"type":"error","message":...}`
+        // rather than a result object; the message is the only reason given.
+        const refusal = parsed?.type === 'error' ? parsed.message?.trim() || 'Grok reported an error' : undefined;
         const turnError =
           parsed?.error?.trim() ||
+          refusal ||
           (!parsed ? stderr.trim() || `Grok exited with code ${code} and no JSON result` : undefined);
 
         if (parsed?.sessionId) {

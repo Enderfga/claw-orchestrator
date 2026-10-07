@@ -720,45 +720,117 @@ function checksFromFlags(checks: string[]): Array<Record<string, unknown>> {
   });
 }
 
+type RunSnapshot = {
+  state: string;
+  outcome: string;
+  error?: string;
+  outcomeReason?: string;
+  costUsd?: number;
+  nodes: Record<string, { id: string; kind: string; state: string; startedAt?: string; endedAt?: string }>;
+};
+
+const RUN_DONE = new Set(['completed', 'failed', 'cancelled']);
+
+async function runState(runId: string): Promise<RunSnapshot | undefined> {
+  const r = await api(`/workflow/${encodeURIComponent(runId)}/state`);
+  if (!r.ok) {
+    fail(r);
+    return undefined;
+  }
+  return r.run as RunSnapshot;
+}
+
+/** Print the verdict line and return the exit code: 0 only for a completed run. */
+function printVerdict(runId: string, run: RunSnapshot): number {
+  const verdict = run.outcome === 'refuted' ? 'REFUTED' : run.outcome;
+  const cost = typeof run.costUsd === 'number' ? `  $${run.costUsd.toFixed(4)}` : '';
+  console.log(`\n${runId}  ${run.state} / ${verdict}${cost}`);
+  if (run.outcomeReason) console.log(run.outcomeReason);
+  if (run.error) console.log(`error: ${run.error}`);
+  if (run.outcome !== 'unverified') console.log(`evidence: clawo verify ${runId}`);
+  return run.state === 'completed' ? 0 : 1;
+}
+
 /**
- * Follow a run until it ends, printing each node transition. Returns the
- * process exit code: 0 when the run completed (verified, or unverified because
- * no contract was declared), 1 otherwise.
+ * Follow a run until it ends, printing each node transition in the order it
+ * happened. Reads the run's event stream: polling the state missed transitions
+ * that came and went between two polls — a failed check and the repair it
+ * triggered printed as one line, in node order rather than time order.
  */
 async function followRun(runId: string): Promise<number> {
-  const seen = new Map<string, string>();
-  const done = new Set(['completed', 'failed', 'cancelled']);
-  for (;;) {
-    const r = await api(`/workflow/${encodeURIComponent(runId)}/state`);
-    if (!r.ok) {
-      fail(r);
-      return 1;
-    }
-    const run = r.run as {
-      state: string;
-      outcome: string;
-      error?: string;
-      outcomeReason?: string;
-      costUsd?: number;
-      nodes: Record<string, { id: string; kind: string; state: string; visits?: number }>;
-    };
-    for (const node of Object.values(run.nodes)) {
-      const key = `${node.state}#${node.visits ?? 0}`;
-      if (seen.get(node.id) === key || node.state === 'pending') continue;
-      seen.set(node.id, key);
-      console.log(`  ${node.id.padEnd(18)} ${node.kind.padEnd(11)} ${node.state}`);
-    }
-    if (done.has(run.state)) {
-      const verdict = run.outcome === 'refuted' ? 'REFUTED' : run.outcome;
-      const cost = typeof run.costUsd === 'number' ? `  $${run.costUsd.toFixed(4)}` : '';
-      console.log(`\n${runId}  ${run.state} / ${verdict}${cost}`);
-      if (run.outcomeReason) console.log(run.outcomeReason);
-      if (run.error) console.log(`error: ${run.error}`);
-      if (run.outcome !== 'unverified') console.log(`evidence: clawo verify ${runId}`);
-      return run.state === 'completed' ? 0 : 1;
-    }
-    await new Promise((res) => setTimeout(res, 2000));
+  const first = await runState(runId);
+  if (!first) return 1;
+  const kinds = new Map(Object.values(first.nodes).map((n) => [n.id, n.kind]));
+  const last = new Map<string, string>();
+  const line = (node: string, state: string): void => {
+    if (last.get(node) === state) return;
+    last.set(node, state);
+    console.log(`  ${node.padEnd(18)} ${(kinds.get(node) ?? '').padEnd(11)} ${state}`);
+  };
+  // What already happened before the stream was open, oldest first.
+  const stamp = (n: RunSnapshot['nodes'][string]): string => n.endedAt ?? n.startedAt ?? '';
+  for (const n of Object.values(first.nodes)
+    .filter((x) => x.state !== 'pending')
+    .sort((x, y) => stamp(x).localeCompare(stamp(y)))) {
+    line(n.id, n.state);
   }
+  if (RUN_DONE.has(first.state)) return printVerdict(runId, first);
+
+  const headers: Record<string, string> = {};
+  const token = getAuthToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const ctrl = new AbortController();
+  let ended = false;
+  let wake: () => void = () => {};
+  // The stream carries the transitions; a slow poll is what decides the run is
+  // over, so a dropped connection or a missed final event cannot hang the CLI.
+  const watch = (async () => {
+    while (!ended) {
+      await new Promise<void>((res) => {
+        const t = setTimeout(res, 5000);
+        wake = () => {
+          clearTimeout(t);
+          res();
+        };
+      });
+      if (ended) break;
+      const s = await runState(runId);
+      if (!s || RUN_DONE.has(s.state)) break;
+    }
+    ctrl.abort();
+  })();
+  try {
+    const res = await fetch(`${getBaseUrl()}/workflow/${encodeURIComponent(runId)}/events`, {
+      headers,
+      signal: ctrl.signal,
+    });
+    const reader = res.body?.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    while (reader) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let cut: number;
+      while ((cut = buf.indexOf('\n\n')) !== -1) {
+        const block = buf.slice(0, cut);
+        buf = buf.slice(cut + 2);
+        if (!block.startsWith('event: workflow-event')) continue;
+        const data = block.slice(block.indexOf('data: ') + 6);
+        const e = JSON.parse(data) as { type: string; node?: string; state?: string };
+        if (e.type === 'node_state' && e.node && e.state) line(e.node, e.state);
+        if (e.type === 'run_state' && e.state && RUN_DONE.has(e.state)) ctrl.abort();
+      }
+    }
+  } catch {
+    // Aborted on purpose when the run ended, or the stream dropped: the final
+    // state below is read fresh either way.
+  }
+  ended = true;
+  wake();
+  await watch.catch(() => {});
+  const final = await runState(runId);
+  return final ? printVerdict(runId, final) : 1;
 }
 
 async function startWorkflow(

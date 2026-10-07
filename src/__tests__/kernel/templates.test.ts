@@ -11,6 +11,7 @@ import { councilWorkflow, fanoutWorkflow, solveWorkflow } from '../../kernel/tem
 import { prepareSpec, IMPLICIT_VERIFIER_ID, RunKernel } from '../../kernel/engine.js';
 import { executeRouterNode } from '../../kernel/nodes/router.js';
 import { executeVerifierNode } from '../../kernel/nodes/verifier.js';
+import { repairBrief } from '../../kernel/nodes/agent.js';
 import { evidenceRoot } from '../../verify/evidence.js';
 import { runDir } from '../../kernel/store.js';
 import type { RouterNode, VerifierNode } from '../../kernel/types.js';
@@ -228,5 +229,44 @@ describe('solve workflow — evidence across repair passes', () => {
     expect(bundles.length).toBeGreaterThan(1);
     expect(new Set(bundles).size).toBe(bundles.length);
     expect(bundles[0]).not.toBe(bundles[1]);
+  });
+});
+
+describe('solve workflow — what a repair pass is told', () => {
+  // The router sent the implementer back with the same prompt and nothing else.
+  // Its own test passed, so it repeated the first attempt: three OpenCode passes
+  // at a rounding bug ended red with an unchanged diff.
+  it('hands the failing checks and their output to the agent on a repair visit only', async () => {
+    const marker = path.join(tmp, 'pass');
+    const briefs: Array<string | undefined> = [];
+    const kernel = new RunKernel({ nodeTimeoutMs: 20_000 });
+    kernel.setExecutor('agent', async (node, ctx) => {
+      briefs.push(repairBrief(ctx, node.id));
+      if (briefs.length === 2) fs.writeFileSync(marker, 'x');
+      return { ok: true, output: 'done' };
+    });
+    kernel.setExecutor('fanout', async () => ({ ok: true, output: 'ok' }));
+    kernel.setExecutor('router', executeRouterNode);
+    kernel.setExecutor('verifier', executeVerifierNode);
+    const check = `test -f ${JSON.stringify(marker)} || { echo 'AssertionError: expected 4.82, got 4.81' >&2; exit 1; }`;
+    const spec = solveWorkflow({
+      task: 't',
+      scouts: [{ name: 'a' }],
+      cwd: tmp,
+      maxRepairs: 2,
+      contract: {
+        checks: [{ id: 'holdout', spec: { type: 'command', cmd: 'sh', args: ['-c', check] }, required: true }],
+      },
+    });
+
+    const started = await kernel.start(spec);
+    const done = await kernel.wait(started.runId);
+
+    expect(briefs).toHaveLength(2);
+    expect(briefs[0]).toBeUndefined();
+    expect(briefs[1]).toContain('holdout');
+    expect(briefs[1]).toContain('expected 4.82, got 4.81');
+    expect(briefs[1]).toContain('diagnostic DATA');
+    expect(done!.outcome).toBe('verified');
   });
 });

@@ -217,6 +217,8 @@ describe('formatEvidence', () => {
       '    triggerUncaughtException(',
       'AssertionError [ERR_ASSERTION]: applyDiscount(5.35, 10): expected 4.82, got 4.81',
       '    at file:///holdout.mjs:7:10 {',
+      "  code: 'ERR_ASSERTION',",
+      '  expected: 4.82,',
       '}',
       'Node.js v24.0.0',
     ].join('\n');
@@ -236,6 +238,7 @@ describe('formatEvidence', () => {
     });
     expect(text).toContain('│ AssertionError [ERR_ASSERTION]: applyDiscount(5.35, 10): expected 4.82, got 4.81');
     expect(text).not.toContain('at file:///holdout.mjs');
+    expect(text).not.toContain("code: 'ERR_ASSERTION'");
     // A passing check's output stays out of the summary.
     expect(text).not.toContain('never shown');
   });

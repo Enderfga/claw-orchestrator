@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.9.0] - 2026-10-07
+
+### Added
+
+- **`clawo solve` and `clawo fanout`.** The built-in `solve` and `fanout` workflows can now be started
+  from a terminal, not only through MCP or the SDK. `clawo solve "<task>" --engine codex --check "npm test"`
+  runs triage → implement → verify → repair until the checks pass; `clawo fanout "<task>" --engines
+claude,codex,grok --synthesize` asks several engines at once. `--check` adds a command check the
+  runtime runs itself, `--contract` takes a contract file, and `--wait` follows the run node by node
+  and exits non-zero unless it completes.
+- **`workflow_start` takes `implementer`** for the `solve` template, so the engine that writes the
+  change can differ from the scouts. It was reachable from the SDK only.
+- **`clawo verify` prints why a check failed** — the assertion or error lines from its output, or
+  its last lines — instead of the exit code alone.
+
+### Fixed
+
+- **A repair pass now tells the agent what failed.** When a router sends a workflow back to an agent
+  node after a red verifier — the `solve` repair loop — the agent gets the failing checks and the
+  lines of their output that say why, framed as data, ahead of its task. It used to get the same
+  prompt again; its own tests passed, so it tended to repeat the first attempt.
+- **`--wait` prints every transition, in order.** It follows the run's event stream instead of
+  polling, so a failed check and the repair it triggers no longer collapse into one line.
+- **OpenCode sessions ran in the server's directory instead of their own.** opencode resolves its
+  project from `PWD`, which a spawned engine inherited from the server even though its `cwd` was the
+  session's. Every engine process, and every contract check, now gets a `PWD` that matches its `cwd`.
+- **A second server started with `OPENCLAW_SERVER_TOKEN` no longer overwrites the token file** another
+  server wrote, which locked every file-reading client out of the first one.
+- **A Grok turn the vendor refuses now says why.** grok answers a free-tier usage limit or an auth
+  failure with `{"type":"error","message":...}` instead of a result; the wrapper read only an `error`
+  field, so the turn came back empty and callers saw "engine did not report the turn as succeeded".
+
 ## [7.8.0] - 2026-10-07
 
 ### Added
