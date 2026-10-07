@@ -29,7 +29,10 @@ for (const trace of TRACES) {
         const { specJson } = await replayTrace(file, tmp);
         expect(stripVolatile(specJson)).toEqual(stripVolatile(expected));
       } finally {
-        fs.rmSync(tmp, { recursive: true, force: true });
+        // Turns the replayer drives are fire-and-forget, so one can still be
+        // writing into the store when this runs; a single rmdir then fails with
+        // ENOTEMPTY and turns a passing replay red.
+        fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
       }
     });
   });
