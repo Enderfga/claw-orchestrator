@@ -547,6 +547,131 @@ function validateAutoloopEffort(role: AutoloopRoleName, effort: EffortLevel | un
   }
 }
 
+/** True when path is under tasks/<id>/ and tasks/<id>/goal.json is a regular file. */
+function isMarkedAutoloopLedgerPath(workspace: string, filePath: string): boolean {
+  const parts = filePath.split('/');
+  if (parts.length < 3 || parts[0] !== 'tasks') return false;
+  for (const seg of parts) {
+    if (seg === '' || seg === '.' || seg === '..') return false;
+  }
+  const id = parts[1]!;
+  try {
+    return fs.statSync(path.join(workspace, 'tasks', id, 'goal.json')).isFile();
+  } catch {
+    return false;
+  }
+}
+
+/** Porcelain XY allowed for a marked ledger: untracked or index-clean worktree mod. */
+function isAllowedAutoloopLedgerStatus(x: string, y: string): boolean {
+  return (x === '?' && y === '?') || (x === ' ' && y === 'M');
+}
+
+/** True for an index gitlink, false for an ordinary path, null when Git cannot answer. */
+function isTrackedGitlink(workspace: string, filePath: string): boolean | null {
+  try {
+    const record = execFileSync(
+      'git',
+      ['--literal-pathspecs', '-C', workspace, 'ls-files', '--stage', '-z', '--', filePath],
+      {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: { ...process.env, LC_ALL: 'C' },
+      },
+    );
+    return record.startsWith('160000 ');
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * `git status` paths are repo-root-relative. Strip a verified `--show-prefix` so
+ * ledger checks see workspace-relative paths. Null = outside the workspace.
+ */
+function workspaceRelativePorcelainPath(repoRelPath: string, prefix: string): string | null {
+  if (prefix.length === 0) return repoRelPath;
+  if (!repoRelPath.startsWith(prefix)) return null;
+  return repoRelPath.slice(prefix.length);
+}
+
+/**
+ * Read and verify `rev-parse --show-prefix` against toplevel↔workspace relative
+ * path. Returns null when verification fails (caller fail-closes as dirty).
+ */
+function readVerifiedGitShowPrefix(workspace: string): string | null {
+  try {
+    const toplevel = execFileSync('git', ['-C', workspace, 'rev-parse', '--show-toplevel'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }).replace(/\r?\n$/, '');
+    const prefix = execFileSync('git', ['-C', workspace, 'rev-parse', '--show-prefix'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }).replace(/\r?\n$/, '');
+    const resolvedTop = fs.realpathSync(toplevel);
+    const resolvedWs = fs.realpathSync(workspace);
+    const rel = path.relative(resolvedTop, resolvedWs);
+    if (rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) return null;
+    const expected = rel === '' ? '' : `${rel.split(path.sep).join('/')}/`;
+    return expected === prefix ? prefix : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Only this deterministic git failure means a non-repository workspace. */
+function isNotGitRepositoryError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const stderr = (err as { stderr?: string | Buffer }).stderr;
+  const text = typeof stderr === 'string' ? stderr : Buffer.isBuffer(stderr) ? stderr.toString('utf8') : '';
+  const lines = text.trim().split(/\r?\n/);
+  if (lines.length === 1) {
+    return lines[0] === 'fatal: not a git repository (or any of the parent directories): .git';
+  }
+  return (
+    lines.length === 2 &&
+    /^fatal: not a git repository \(or any parent up to mount point .+\)$/.test(lines[0]!) &&
+    lines[1] === 'Stopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).'
+  );
+}
+
+/**
+ * Parse `git status --porcelain=v1 -z` output. Returns true when any record must
+ * refuse autoloopStart. Ignore only status exactly `??` or index-clean ` M`
+ * under a marked ledger (after normalizing repo-root paths with a verified
+ * show-prefix).
+ */
+function porcelainHasDisallowedAutoloopDirt(workspace: string, porcelain: string, prefix: string): boolean {
+  if (porcelain.length === 0) return false;
+  let i = 0;
+  while (i < porcelain.length) {
+    if (i + 3 > porcelain.length) return true;
+    const x = porcelain[i]!;
+    const y = porcelain[i + 1]!;
+    if (porcelain[i + 2] !== ' ') return true;
+    i += 3;
+    const nul = porcelain.indexOf('\0', i);
+    if (nul < 0) return true;
+    const repoRelPath = porcelain.slice(i, nul);
+    i = nul + 1;
+    if (x === 'R' || x === 'C' || y === 'R' || y === 'C') {
+      const nul2 = porcelain.indexOf('\0', i);
+      if (nul2 < 0) return true;
+      i = nul2 + 1;
+      return true;
+    }
+    const filePath = workspaceRelativePorcelainPath(repoRelPath, prefix);
+    if (filePath === null || !isAllowedAutoloopLedgerStatus(x, y) || !isMarkedAutoloopLedgerPath(workspace, filePath)) {
+      return true;
+    }
+    // Porcelain v1 -z collapses every kind of submodule dirt to worktree `M`.
+    // Never let a gitlink inherit the ordinary ledger-file ` M` exception.
+    if (x === ' ' && y === 'M' && isTrackedGitlink(workspace, filePath) !== false) return true;
+  }
+  return false;
+}
+
 /**
  * The tool calls a turn's `result` event says the engine refused, normalized.
  *
@@ -3545,6 +3670,50 @@ export class SessionManager {
       const sessionName = `autoloop-${opts.runId}-${role}`;
       if (this.sessions.has(sessionName) || this._pendingSessions.has(sessionName)) {
         throw new Error(`Autoloop session name '${sessionName}' is already in use`);
+      }
+    }
+
+    // Refuse a dirty git worktree before the run directory or Planner exists.
+    // --porcelain=v1 -z keeps paths literal (spaces/quotes). --untracked-files=all
+    // overrides status.showUntrackedFiles=no, while --ignore-submodules=none
+    // prevents repository config from hiding submodule dirt; do not pass
+    // --ignored. Only the deterministic not-a-git-repository error allows the
+    // start; every other status failure rejects. Do not raise maxBuffer:
+    // ENOBUFS or already-nonempty stdout means dirt. Untracked (??) or
+    // index-clean worktree mods
+    // (` M`) under tasks/<id>/ are ignored only when tasks/<id>/goal.json is a
+    // regular file — every other status (staged/rename/copy/delete/conflict/
+    // malformed) rejects.
+    // Nested workspaces: status paths are repo-root-relative; strip a verified
+    // `rev-parse --show-prefix` before the ledger check; paths outside the
+    // workspace still refuse.
+    const dirtyStartError = new Error(
+      'Autoloop workspace has uncommitted changes; commit or stash them before starting',
+    );
+    let porcelain = '';
+    try {
+      porcelain = execFileSync(
+        'git',
+        ['-C', opts.workspace, 'status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignore-submodules=none'],
+        {
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'pipe'],
+          env: { ...process.env, LC_ALL: 'C' },
+        },
+      );
+    } catch (err) {
+      const e = err as { code?: string; stdout?: string | Buffer };
+      const partial =
+        typeof e.stdout === 'string' ? e.stdout : Buffer.isBuffer(e.stdout) ? e.stdout.toString('utf8') : '';
+      if (e.code === 'ENOBUFS' || partial.trim() !== '' || !isNotGitRepositoryError(err)) {
+        throw dirtyStartError;
+      }
+      porcelain = '';
+    }
+    if (porcelain.length > 0) {
+      const prefix = readVerifiedGitShowPrefix(opts.workspace);
+      if (prefix === null || porcelainHasDisallowedAutoloopDirt(opts.workspace, porcelain, prefix)) {
+        throw dirtyStartError;
       }
     }
 

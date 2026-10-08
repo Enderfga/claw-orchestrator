@@ -90,7 +90,7 @@ failing with "Session not found".
 ## UX flow
 
 ```
-1. autoloop_start { run_id, workspace }       → Planner session ready
+1. autoloop_start { run_id, workspace }       → Planner session ready (refuses if the workspace Git tree already has tracked, staged, untracked, or submodule changes — including when repository status configuration hides them, `status.showUntrackedFiles=no`, or the porcelain listing is too large to buffer; unexpected `git status` failures also refuse; untracked (`??`) or index-clean worktree modifications (` M`) under `tasks/<id>/` with a regular `tasks/<id>/goal.json` are ignored so a second start can proceed after a committed ledger is appended, including when workspace is a nested repo subdirectory after stripping a verified `show-prefix`; dirt outside the workspace still refuses; ignored paths and non-repo workspaces still start)
 2. autoloop_chat { run_id, "<your goal>" }    → Planner reads workspace,
                                                 drafts plan.md + goal.json,
                                                 asks "ready to spawn?"
