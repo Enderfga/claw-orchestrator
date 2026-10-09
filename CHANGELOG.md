@@ -13,6 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--model haiku` does in Claude Code 2.1.295. It is priced at the tier for prompts up to 100K tokens
   ($0.10 / $0.50 per Mtok); Claude sessions are billed at the cost Claude Code reports.
 
+- **Grok sessions support `sandboxMode: 'read-only'`.** They run inside grok's `--sandbox read-only`
+  profile, which the OS enforces for the whole process tree (Seatbelt on macOS, Landlock on Linux), so
+  a delegated subagent is held to it too. grok runs on unsandboxed when a profile cannot be applied;
+  a read-only session kills the process on that warning instead. A project under the temp directory,
+  which the profile leaves writable, and platforms without either sandbox are refused. `ultrareview`
+  accepts `grok` among its reviewer engines, since reviewers run read-only.
+
 ### Fixed
 
 - **Claude Sonnet 5.5's cached input price is $0.10 per Mtok**, not $0.20: a cache hit on Sonnet 5.5

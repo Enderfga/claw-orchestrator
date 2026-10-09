@@ -426,9 +426,22 @@ describe('ultrareview is read-only', () => {
     fs.rmSync(cwd, { recursive: true, force: true });
   });
 
-  it('refuses engines that cannot run a read-only reviewer', async () => {
-    await expect(mgr.ultrareviewStart('/tmp', { engines: ['claude', 'grok'] })).rejects.toThrow(/grok/);
+  it('refuses an engine that cannot run a read-only reviewer', async () => {
     await expect(mgr.ultrareviewStart('/tmp', { engines: ['custom'] })).rejects.toThrow(/custom/);
+  });
+
+  // grok was refused here until its read-only mode moved onto grok's OS
+  // sandbox; a grok reviewer is now started read-only like the others.
+  it('starts a grok reviewer read-only', async () => {
+    const cwd = gitRepo();
+    const review = await mgr.ultrareviewStart(cwd, { agentCount: 1, engines: ['grok'] });
+    await (mgr as unknown as { kernel: { wait(id: string): Promise<unknown> } }).kernel.wait(review.id);
+
+    const reviewers = observed.filter((o) => !o.config.name?.endsWith('-synthesis'));
+    expect(reviewers.map((r) => r.config.engine)).toEqual(['grok']);
+    expect(reviewers.every((r) => r.config.sandboxMode === 'read-only')).toBe(true);
+
+    fs.rmSync(cwd, { recursive: true, force: true });
   });
 });
 

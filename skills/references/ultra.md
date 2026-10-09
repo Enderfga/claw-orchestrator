@@ -122,6 +122,6 @@ if (status?.status === 'completed') {
 | `maxDurationMinutes` | 10                        | 5-25  | Per-agent timeout                                                                                     |
 | `model`              | session default           | —     | Model for all reviewers                                                                               |
 | `focus`              | bugs + security + quality | —     | Review focus description                                                                              |
-| `engines`            | `['claude']`              | —     | Engines assigned to reviewers round-robin. Not `grok`, which refuses a read-only session, or `custom` |
+| `engines`            | `['claude']`              | —     | Engines assigned to reviewers round-robin. Not `custom`, which has no config to start a reviewer from |
 
 Reviewers run once each (up to 20 turns); there is no cross-review round. Results are stored as a durable run and remain queryable after a restart.

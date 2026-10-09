@@ -3035,15 +3035,13 @@ export class SessionManager {
       engines?: EngineType[];
     },
   ): Promise<UltrareviewResult> {
-    // Every reviewer runs read-only (see below). grok refuses a read-only session
-    // rather than approximate one, and a custom reviewer has no config to start
-    // from, so both are turned away here instead of failing one reviewer at a time.
-    const unsupported = (opts?.engines ?? []).filter((e) => e === 'grok' || e === 'custom');
-    if (unsupported.length) {
+    // Every reviewer runs read-only (see below). A custom reviewer has no config
+    // to start from, so it is turned away here instead of failing one reviewer
+    // at a time. (grok was turned away too until its read-only mode moved onto
+    // grok's OS sandbox.)
+    if ((opts?.engines ?? []).includes('custom')) {
       throw new Error(
-        `ultrareview cannot use ${[...new Set(unsupported)].join(', ')}: reviewers run read-only, which ${
-          unsupported.includes('grok') ? 'grok refuses' : 'a custom engine cannot be configured for here'
-        }`,
+        'ultrareview cannot use custom: reviewers run read-only, which a custom engine cannot be configured for here',
       );
     }
     const id = `ultrareview-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
