@@ -1459,6 +1459,58 @@ describe('autoloopStart dirty worktree preflight', () => {
     expect(ignoreOut).toContain(`/tasks/${runId}/`);
   });
 
+  it('preserves a concurrent append without a trailing LF as an effective ignore rule', async () => {
+    const workspace = createTempRepo();
+    repos.push(workspace);
+    const runId = 'oappend-race-no-lf';
+    const x = excludePathOf(workspace);
+    const seed = Buffer.from('# seed\n');
+    const racedRule = Buffer.from('/private/');
+    fs.writeFileSync(x, seed);
+
+    const openOriginal = fs.openSync.bind(fs);
+    const writeOriginal = fs.writeSync.bind(fs);
+    let excludeFd: number | undefined;
+    let injected = false;
+    vi.spyOn(fs, 'openSync').mockImplementation(((p: unknown, flags: unknown, mode?: unknown) => {
+      const opened = (openOriginal as (...args: unknown[]) => number)(p, flags, mode);
+      if (String(p) === x && excludeFd === undefined) excludeFd = opened;
+      return opened;
+    }) as typeof fs.openSync);
+    vi.spyOn(fs, 'writeSync').mockImplementation(((...args: unknown[]) => {
+      if (args[0] === excludeFd && !injected) {
+        execFileSync(process.execPath, [
+          '-e',
+          "require('node:fs').appendFileSync(process.argv[1], process.argv[2])",
+          x,
+          racedRule.toString(),
+        ]);
+        injected = true;
+      }
+      return (writeOriginal as (...inner: unknown[]) => number)(...args);
+    }) as typeof fs.writeSync);
+    syncBuiltinESMExports();
+
+    await mgr.autoloopStart({ runId, workspace, plannerEngine: 'codex' });
+    expect(injected).toBe(true);
+    const body = fs.readFileSync(x);
+    expect(body.indexOf(racedRule)).toBe(seed.length);
+
+    const privateFile = path.join(workspace, 'private', 'secret.txt');
+    fs.mkdirSync(path.dirname(privateFile), { recursive: true });
+    fs.writeFileSync(privateFile, 'secret\n');
+    expect(() =>
+      execFileSync('git', ['-C', workspace, 'check-ignore', '-q', '--', path.join('private', 'secret.txt')], {
+        stdio: 'pipe',
+      }),
+    ).not.toThrow();
+    expect(() =>
+      execFileSync('git', ['-C', workspace, 'check-ignore', '-q', '--', path.join('tasks', runId, 'plan.md')], {
+        stdio: 'pipe',
+      }),
+    ).not.toThrow();
+  });
+
   it('short write failure leaves only an inert comment and never a broad active rule', async () => {
     const workspace = createTempRepo();
     repos.push(workspace);

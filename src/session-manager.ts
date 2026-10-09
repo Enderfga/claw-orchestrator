@@ -985,27 +985,18 @@ function installAutoloopExcludePattern(
       if (live.dev !== ownedDev || live.ino !== ownedIno || !live.isFile()) {
         throw new Error('Autoloop refuse unsafe repository-local exclude path for ledger isolation');
       }
-      let needsLeadingNewline = false;
-      if (live.size > 0) {
-        const last = Buffer.alloc(1);
-        try {
-          fs.readSync(fd, last, 0, 1, live.size - 1);
-        } catch {
-          throw new Error('Autoloop could not update repository-local exclude for ledger isolation');
-        }
-        needsLeadingNewline = last[0] !== 0x0a;
-      }
       // Append the prospective rule as a comment first. Every partial prefix is
       // therefore inert. Only after the complete comment is present do we flip
       // its first byte from '#' to '/', activating the exact rule with one
-      // positional byte write. A failed append/activation cannot leave `/tasks/`
-      // or another broader prefix active.
+      // positional byte write. The unconditional leading LF also terminates any
+      // concurrent append that raced after the size check without its own LF,
+      // preserving that caller's rule. A failed append/activation cannot leave
+      // `/tasks/` or another broader prefix active.
       const commentLine = Buffer.from(patternLine);
       commentLine[0] = 0x23; // '#tasks/<runId>/'
       const markerLine = Buffer.from(`# clawo-pending:${randomUUID()}\n`, 'utf8');
       const pendingBlock = Buffer.concat([markerLine, commentLine]);
-      const leading = needsLeadingNewline ? Buffer.from('\n', 'utf8') : Buffer.alloc(0);
-      const suffix = Buffer.concat([leading, pendingBlock]);
+      const suffix = Buffer.concat([Buffer.from('\n', 'utf8'), pendingBlock]);
       const searchStart = live.size;
 
       let appended = 0;
