@@ -42,15 +42,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   installed `info/exclude` pattern. There is no lock file and no rollback:
   concurrent appends are never overwritten, and a short write can leave only an
   inert comment, never a broad active prefix and never truncated, unlinked, or
-  rewritten caller bytes. Existing tracked files beneath the target ledger are
-  refused because ignore rules cannot hide index entries. A committed negation,
-  an LF/CR in the show-prefix / run id, or an unsafe exclude path fails closed.
-  Every repo-relative segment of the verified show-prefix, `tasks`, and the run
-  id is gitignore-escaped. Isolation runs only on the initial accepted start
-  (in-memory secrets; not in `spec.json`); resume and committed-iteration
-  recovery neither open nor mutate the exclude. A refused dirty start does not
-  mutate excludes; a non-repository workspace is unchanged. Linked worktrees
-  may share `info/exclude`.
+  rewritten caller bytes. External concurrent rewrite of the same `info/exclude`
+  inode during `autoloop_start` is unsupported (residual theoretical TOCTOU, not
+  an observed incident); append-only additions, inode replacement, partial
+  writes, and ordinary failures remain covered as above. Existing tracked files
+  beneath the target ledger are refused because ignore rules cannot hide index
+  entries. A committed negation, an LF/CR in the show-prefix / run id, or an
+  unsafe exclude path fails closed. Every repo-relative segment of the verified
+  show-prefix, `tasks`, and the run id is gitignore-escaped. Isolation runs only
+  on the initial accepted start (in-memory secrets; not in `spec.json`); resume
+  and committed-iteration recovery neither open nor mutate the exclude. A
+  refused dirty start does not mutate excludes; a non-repository workspace is
+  unchanged. Linked worktrees may share `info/exclude`.
 
 ## [7.10.0] - 2026-10-09
 

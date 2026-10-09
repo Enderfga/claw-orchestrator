@@ -483,6 +483,13 @@ outbox.
   process until it is resumed, and a send that was in flight is not retried.
 - **Multi-run / same workspace** races on `git index.lock`. Run separate
   workspaces (or git worktrees) for concurrent runs.
+- **External concurrent rewrite of the same `.git/info/exclude` inode during
+  `autoloop_start` is unsupported.** Ledger isolation appends under `O_APPEND`
+  and activates one verified byte on the opened inode; an external process that
+  rewrites that same inode while start is installing the rule is outside the
+  contract (a residual theoretical TOCTOU, not an observed incident). Append-only
+  additions, inode replacement, partial writes, and ordinary failures remain
+  protected where the implementation and tests establish them.
 
 ## Related
 
