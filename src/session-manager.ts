@@ -765,6 +765,35 @@ function gitIgnoreMatchIsExact(
 }
 
 /**
+ * True when the ledger directory itself is positively ignored by the effective
+ * last rule. An already-existing broader positive rule is safe; a negation is
+ * not. Querying the directory (rather than a finite child sentinel) proves the
+ * rule applies to every artifact created beneath it.
+ */
+function gitLedgerDirectoryIsIgnored(
+  workspace: string,
+  runId: string,
+  opts?: { coreExcludesFile?: string; nonMatching?: boolean },
+): boolean {
+  const match = gitIgnoreMatch(workspace, `${path.join('tasks', runId)}/`, opts);
+  return match !== null && !match.pattern.startsWith('!');
+}
+
+function autoloopLedgerHasTrackedFiles(workspace: string, runId: string): boolean {
+  try {
+    const out = execFileSync('git', ['-C', workspace, 'ls-files', '-z', '--', path.join('tasks', runId)], {
+      encoding: null,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, LC_ALL: 'C' },
+    });
+    return out.length > 0;
+  } catch {
+    // A repository whose index cannot be inspected cannot support the promise.
+    return true;
+  }
+}
+
+/**
  * Read-only proof that `pattern` would be the last match for `tasks/<runId>/plan.md`
  * under real Git precedence (ephemeral temp excludes file + --non-matching).
  * Never mutates info/exclude. Temp dir always removed in finally.
@@ -774,7 +803,7 @@ function preflightAutoloopLedgerPattern(workspace: string, runId: string, patter
   try {
     const excludesFile = path.join(tempDir, 'excludes');
     fs.writeFileSync(excludesFile, `${pattern}\n`, 'utf8');
-    return gitIgnoreMatchIsExact(workspace, runId, excludesFile, pattern, {
+    return gitLedgerDirectoryIsIgnored(workspace, runId, {
       coreExcludesFile: excludesFile,
       nonMatching: true,
     });
@@ -826,8 +855,11 @@ function ensureAutoloopRunLedgerExcluded(workspace: string, runId: string): void
   const pattern = autoloopLedgerExcludePattern(prefix, runId);
   const patternBytes = Buffer.from(pattern, 'utf8');
   const patternLine = Buffer.from(`${pattern}\n`, 'utf8');
-  // Idempotent: already effective — no open/write.
-  if (gitIgnoreMatchIsExact(workspace, runId, excludePath, pattern, { nonMatching: true })) {
+  if (autoloopLedgerHasTrackedFiles(workspace, runId)) {
+    throw new Error('Autoloop cannot isolate a run ledger that already contains tracked files');
+  }
+  // Idempotent: already positively ignored — no open/write.
+  if (gitLedgerDirectoryIsIgnored(workspace, runId, { nonMatching: true })) {
     return;
   }
   if (!preflightAutoloopLedgerPattern(workspace, runId, pattern)) {
@@ -963,21 +995,87 @@ function installAutoloopExcludePattern(
         }
         needsLeadingNewline = last[0] !== 0x0a;
       }
-      const suffix = needsLeadingNewline ? Buffer.concat([Buffer.from('\n', 'utf8'), patternLine]) : patternLine;
+      // Append the prospective rule as a comment first. Every partial prefix is
+      // therefore inert. Only after the complete comment is present do we flip
+      // its first byte from '#' to '/', activating the exact rule with one
+      // positional byte write. A failed append/activation cannot leave `/tasks/`
+      // or another broader prefix active.
+      const commentLine = Buffer.from(patternLine);
+      commentLine[0] = 0x23; // '#tasks/<runId>/'
+      const leading = needsLeadingNewline ? Buffer.from('\n', 'utf8') : Buffer.alloc(0);
+      const suffix = Buffer.concat([leading, commentLine]);
+      const searchStart = live.size;
 
+      let appended = 0;
       try {
-        let written = 0;
-        while (written < suffix.length) {
-          const n = fs.writeSync(fd, suffix, written, suffix.length - written, null);
-          if (n <= 0) {
-            throw Object.assign(new Error('short exclude write made no progress'), { code: 'EIO' });
-          }
-          written += n;
-        }
+        appended = fs.writeSync(fd, suffix, 0, suffix.length, null);
       } catch {
         throw new Error(
-          'Autoloop could not update repository-local exclude for ledger isolation; this attempt may have left a partial exclude suffix',
+          'Autoloop could not update repository-local exclude for ledger isolation; this attempt may have left an inert partial comment',
         );
+      }
+      if (appended !== suffix.length) {
+        throw new Error(
+          'Autoloop could not update repository-local exclude for ledger isolation; this attempt left an inert partial comment',
+        );
+      }
+
+      let afterAppend: fs.Stats;
+      try {
+        afterAppend = fs.fstatSync(fd);
+      } catch {
+        throw new Error('Autoloop could not verify repository-local exclude after append');
+      }
+      if (afterAppend.dev !== ownedDev || afterAppend.ino !== ownedIno || afterAppend.size < searchStart) {
+        throw new Error('Autoloop refuse unsafe repository-local exclude path for ledger isolation');
+      }
+      const appendedRegion = Buffer.alloc(afterAppend.size - searchStart);
+      let regionRead = 0;
+      while (regionRead < appendedRegion.length) {
+        const n = fs.readSync(
+          fd,
+          appendedRegion,
+          regionRead,
+          appendedRegion.length - regionRead,
+          searchStart + regionRead,
+        );
+        if (n <= 0) break;
+        regionRead += n;
+      }
+      const first = appendedRegion.indexOf(commentLine);
+      const second = first < 0 ? -1 : appendedRegion.indexOf(commentLine, first + 1);
+      if (first < 0 || second >= 0) {
+        throw new Error('Autoloop could not identify its inert exclude comment for activation');
+      }
+      const commentOffset = searchStart + first;
+      if (commentOffset > 0) {
+        const preceding = Buffer.alloc(1);
+        fs.readSync(fd, preceding, 0, 1, commentOffset - 1);
+        if (preceding[0] !== 0x0a) {
+          throw new Error('Autoloop could not safely activate its exclude comment');
+        }
+      }
+
+      closeExcludeFd(fd);
+      fd = undefined;
+      let activationFd: number | undefined;
+      try {
+        activationFd = fs.openSync(excludePath, fs.constants.O_RDWR | nofollow);
+        const activationStat = fs.fstatSync(activationFd);
+        if (!activationStat.isFile() || activationStat.dev !== ownedDev || activationStat.ino !== ownedIno) {
+          throw new Error('Autoloop refuse unsafe repository-local exclude path for ledger isolation');
+        }
+        const verifyComment = Buffer.alloc(commentLine.length);
+        fs.readSync(activationFd, verifyComment, 0, verifyComment.length, commentOffset);
+        if (!verifyComment.equals(commentLine)) {
+          throw new Error('Autoloop could not safely activate its exclude comment');
+        }
+        const activated = fs.writeSync(activationFd, Buffer.from('/'), 0, 1, commentOffset);
+        if (activated !== 1) {
+          throw new Error('Autoloop could not activate its exclude comment');
+        }
+      } finally {
+        closeExcludeFd(activationFd);
       }
     }
 

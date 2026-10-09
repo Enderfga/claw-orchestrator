@@ -1458,7 +1458,7 @@ describe('autoloopStart dirty worktree preflight', () => {
     expect(ignoreOut).toContain(`/tasks/${runId}/`);
   });
 
-  it('short write failure preserves pre-start prefix and may leave only this attempt partial suffix', async () => {
+  it('short write failure leaves only an inert comment and never a broad active rule', async () => {
     const workspace = createTempRepo();
     repos.push(workspace);
     const runId = 'short-write-partial';
@@ -1496,13 +1496,45 @@ describe('autoloopStart dirty worktree preflight', () => {
     syncBuiltinESMExports();
 
     await expect(mgr.autoloopStart({ runId, workspace, plannerEngine: 'codex' })).rejects.toThrow(
-      /partial exclude suffix/i,
+      /inert partial comment/i,
     );
-    expect(writes).toBeGreaterThanOrEqual(1);
+    expect(writes).toBe(1);
     const body = fs.readFileSync(x);
     expect(body.subarray(0, seed.length).equals(seed)).toBe(true);
-    expect(body.length).toBeGreaterThanOrEqual(seed.length);
+    expect(body.includes(Buffer.from('\n#tasks/'))).toBe(true);
+    expect(() =>
+      execFileSync('git', ['-C', workspace, 'check-ignore', '-q', 'tasks/unrelated/file'], {
+        stdio: 'pipe',
+      }),
+    ).toThrow();
     expect(fs.existsSync(path.join(workspace, 'tasks', runId))).toBe(false);
+  });
+
+  it('accepts an existing broader positive info/exclude rule without mutating it', async () => {
+    const workspace = createTempRepo();
+    repos.push(workspace);
+    const runId = 'already-covered';
+    const x = excludePathOf(workspace);
+    const seed = Buffer.from('/tasks/\n');
+    fs.writeFileSync(x, seed);
+
+    await mgr.autoloopStart({ runId, workspace, plannerEngine: 'codex' });
+    expect(fs.readFileSync(x)).toEqual(seed);
+    expect(fs.existsSync(path.join(workspace, 'tasks', runId))).toBe(true);
+  });
+
+  it('refuses an existing tracked ledger before claiming whole-ledger isolation', async () => {
+    const workspace = createTempRepo();
+    repos.push(workspace);
+    const runId = 'tracked-ledger';
+    const tracked = path.join(workspace, 'tasks', runId, 'goal.json');
+    fs.mkdirSync(path.dirname(tracked), { recursive: true });
+    fs.writeFileSync(tracked, '{}\n');
+    execFileSync('git', ['add', '--', path.join('tasks', runId, 'goal.json')], { cwd: workspace, stdio: 'pipe' });
+    execFileSync('git', ['commit', '-m', 'tracked ledger fixture'], { cwd: workspace, stdio: 'pipe' });
+
+    await expect(mgr.autoloopStart({ runId, workspace, plannerEngine: 'codex' })).rejects.toThrow(/tracked files/i);
+    expect(fs.readFileSync(tracked, 'utf8')).toBe('{}\n');
   });
 
   it('missing-file race: O_EXCL does not overwrite caller-created exclude prefix', async () => {
@@ -1692,7 +1724,7 @@ describe('autoloopStart dirty worktree preflight', () => {
     const runId = 'retry-residue';
     const x = excludePathOf(workspace);
     const seed = Buffer.from('# seed\n');
-    const residue = Buffer.from('/tasks/retry-resi'); // incomplete prior attempt
+    const residue = Buffer.from('#tasks/retry-resi'); // inert incomplete prior attempt
     fs.writeFileSync(x, Buffer.concat([seed, residue]));
 
     await mgr.autoloopStart({ runId, workspace, plannerEngine: 'codex' });
