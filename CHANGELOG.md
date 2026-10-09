@@ -29,11 +29,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   After a dirty-start check accepts a Git workspace, and before
   `tasks/<runId>/` is created, the start appends one exact root-anchored
   pattern for that run to the path from `git rev-parse --git-path info/exclude`
-  (resolved against the workspace when relative). The new ledger stays out of
-  `git status` and `git add -A`. Existing exclude bytes are preserved; a
-  refused dirty start does not mutate excludes; a non-repository workspace is
-  unchanged. Linked worktrees may share `info/exclude`. Resume and recovery
-  are unchanged.
+  (resolved against the workspace when relative). Every repo-relative segment
+  of the verified show-prefix, `tasks`, and the run id is gitignore-escaped so
+  metacharacters in the prefix match only that ledger. The append is byte-wise
+  and does not decode or rewrite pre-existing exclude contents. Isolation runs
+  only on the initial accepted start (in-memory secrets; not persisted in
+  `spec.json`); resume and committed-iteration recovery neither open nor mutate
+  the exclude. A refused dirty start does not mutate excludes; a non-repository
+  workspace is unchanged. Linked worktrees may share `info/exclude`.
 
 ## [7.10.0] - 2026-10-09
 
