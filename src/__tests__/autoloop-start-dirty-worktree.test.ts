@@ -1116,7 +1116,8 @@ describe('autoloopStart dirty worktree preflight', () => {
     const afterFirst = fs.readFileSync(excludePath);
     expect(afterFirst.subarray(0, seed.length).equals(seed)).toBe(true);
     expect(afterFirst[seed.length]).toBe(0x0a);
-    expect(afterFirst.subarray(seed.length + 1).equals(Buffer.from(`${pattern}\n`, 'utf8'))).toBe(true);
+    expect(afterFirst.subarray(seed.length + 1).includes(Buffer.from('# clawo-pending:', 'utf8'))).toBe(true);
+    expect(afterFirst.includes(Buffer.from(`${pattern}\n`, 'utf8'))).toBe(true);
 
     await mgr.shutdown();
     mgr = createManager();
@@ -1465,16 +1466,17 @@ describe('autoloopStart dirty worktree preflight', () => {
     const x = excludePathOf(workspace);
     const seed = Buffer.from('# original no LF');
     fs.writeFileSync(x, seed);
+    const openOriginal = fs.openSync.bind(fs);
+    let excludeFd: number | undefined;
+    vi.spyOn(fs, 'openSync').mockImplementation(((p: unknown, flags: unknown, mode?: unknown) => {
+      const opened = (openOriginal as (...args: unknown[]) => number)(p, flags, mode);
+      if (String(p) === x) excludeFd = opened;
+      return opened;
+    }) as typeof fs.openSync);
     const writeOriginal = fs.writeSync.bind(fs);
     let writes = 0;
     vi.spyOn(fs, 'writeSync').mockImplementation(((...args: unknown[]) => {
-      let target = '';
-      try {
-        target = fs.readlinkSync(`/proc/self/fd/${args[0] as number}`);
-      } catch {
-        /* ignore */
-      }
-      if (target === x) {
+      if (args[0] === excludeFd) {
         writes++;
         if (writes === 1) {
           const buf = args[1] as Buffer;
@@ -1501,7 +1503,7 @@ describe('autoloopStart dirty worktree preflight', () => {
     expect(writes).toBe(1);
     const body = fs.readFileSync(x);
     expect(body.subarray(0, seed.length).equals(seed)).toBe(true);
-    expect(body.includes(Buffer.from('\n#tasks/'))).toBe(true);
+    expect(body.subarray(seed.length, seed.length + 2).equals(Buffer.from('\n#'))).toBe(true);
     expect(() =>
       execFileSync('git', ['-C', workspace, 'check-ignore', '-q', 'tasks/unrelated/file'], {
         stdio: 'pipe',
@@ -1625,17 +1627,23 @@ describe('autoloopStart dirty worktree preflight', () => {
     const runId = 'fstat-close';
     const x = excludePathOf(workspace);
     fs.writeFileSync(x, Buffer.from('# seed\n'));
-    const before = fs.readdirSync('/proc/self/fd').length;
+    const openOriginal = fs.openSync.bind(fs);
+    let excludeFd: number | undefined;
+    vi.spyOn(fs, 'openSync').mockImplementation(((p: unknown, flags: unknown, mode?: unknown) => {
+      const opened = (openOriginal as (...args: unknown[]) => number)(p, flags, mode);
+      if (String(p) === x) excludeFd = opened;
+      return opened;
+    }) as typeof fs.openSync);
+    const closeOriginal = fs.closeSync.bind(fs);
+    const closed = new Set<number>();
+    vi.spyOn(fs, 'closeSync').mockImplementation(((fd: number) => {
+      closed.add(fd);
+      return closeOriginal(fd);
+    }) as typeof fs.closeSync);
     const fstatOriginal = fs.fstatSync.bind(fs);
     let hit = false;
     vi.spyOn(fs, 'fstatSync').mockImplementation(((fd: unknown, opts?: unknown) => {
-      let target = '';
-      try {
-        target = fs.readlinkSync(`/proc/self/fd/${fd as number}`);
-      } catch {
-        /* ignore */
-      }
-      if (target === x && !hit) {
+      if (fd === excludeFd && !hit) {
         hit = true;
         throw Object.assign(new Error('injected fstat failure'), { code: 'EIO' });
       }
@@ -1645,8 +1653,8 @@ describe('autoloopStart dirty worktree preflight', () => {
 
     await expect(mgr.autoloopStart({ runId, workspace, plannerEngine: 'codex' })).rejects.toThrow();
     expect(hit).toBe(true);
-    await new Promise((r) => setImmediate(r));
-    expect(fs.readdirSync('/proc/self/fd').length).toBeLessThanOrEqual(before + 2);
+    expect(excludeFd).toBeDefined();
+    expect(closed.has(excludeFd!)).toBe(true);
     expect(fs.existsSync(path.join(workspace, 'tasks', runId))).toBe(false);
   });
 
@@ -1656,17 +1664,23 @@ describe('autoloopStart dirty worktree preflight', () => {
     const runId = 'read-close';
     const x = excludePathOf(workspace);
     fs.writeFileSync(x, Buffer.from('# seed with content\n'));
-    const before = fs.readdirSync('/proc/self/fd').length;
+    const openOriginal = fs.openSync.bind(fs);
+    let excludeFd: number | undefined;
+    vi.spyOn(fs, 'openSync').mockImplementation(((p: unknown, flags: unknown, mode?: unknown) => {
+      const opened = (openOriginal as (...args: unknown[]) => number)(p, flags, mode);
+      if (String(p) === x) excludeFd = opened;
+      return opened;
+    }) as typeof fs.openSync);
+    const closeOriginal = fs.closeSync.bind(fs);
+    const closed = new Set<number>();
+    vi.spyOn(fs, 'closeSync').mockImplementation(((fd: number) => {
+      closed.add(fd);
+      return closeOriginal(fd);
+    }) as typeof fs.closeSync);
     const readOriginal = fs.readSync.bind(fs);
     let hit = false;
     vi.spyOn(fs, 'readSync').mockImplementation(((...args: unknown[]) => {
-      let target = '';
-      try {
-        target = fs.readlinkSync(`/proc/self/fd/${args[0] as number}`);
-      } catch {
-        /* ignore */
-      }
-      if (target === x && !hit) {
+      if (args[0] === excludeFd && !hit) {
         hit = true;
         throw Object.assign(new Error('injected read failure'), { code: 'EIO' });
       }
@@ -1676,8 +1690,8 @@ describe('autoloopStart dirty worktree preflight', () => {
 
     await expect(mgr.autoloopStart({ runId, workspace, plannerEngine: 'codex' })).rejects.toThrow();
     expect(hit).toBe(true);
-    await new Promise((r) => setImmediate(r));
-    expect(fs.readdirSync('/proc/self/fd').length).toBeLessThanOrEqual(before + 2);
+    expect(excludeFd).toBeDefined();
+    expect(closed.has(excludeFd!)).toBe(true);
     expect(fs.existsSync(path.join(workspace, 'tasks', runId))).toBe(false);
   });
 
@@ -1689,17 +1703,18 @@ describe('autoloopStart dirty worktree preflight', () => {
     commitGitignore(workspace, `!/tasks/${runId}/\n`);
     const seed = Buffer.from('# original\n');
     fs.writeFileSync(x, seed);
+    const openOriginal = fs.openSync.bind(fs);
+    const excludeFds = new Set<number>();
+    vi.spyOn(fs, 'openSync').mockImplementation(((p: unknown, flags: unknown, mode?: unknown) => {
+      const opened = (openOriginal as (...args: unknown[]) => number)(p, flags, mode);
+      if (String(p) === x) excludeFds.add(opened);
+      return opened;
+    }) as typeof fs.openSync);
     let truncated = false;
     let unlinked = false;
     const ftruncateOriginal = fs.ftruncateSync.bind(fs);
     vi.spyOn(fs, 'ftruncateSync').mockImplementation(((fd: unknown, len?: unknown) => {
-      let target = '';
-      try {
-        target = fs.readlinkSync(`/proc/self/fd/${fd as number}`);
-      } catch {
-        /* ignore */
-      }
-      if (target === x) truncated = true;
+      if (excludeFds.has(fd as number)) truncated = true;
       return ftruncateOriginal(fd as number, len as number | undefined);
     }) as typeof fs.ftruncateSync);
     const unlinkOriginal = fs.unlinkSync.bind(fs);

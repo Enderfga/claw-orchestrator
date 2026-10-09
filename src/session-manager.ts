@@ -1002,8 +1002,10 @@ function installAutoloopExcludePattern(
       // or another broader prefix active.
       const commentLine = Buffer.from(patternLine);
       commentLine[0] = 0x23; // '#tasks/<runId>/'
+      const markerLine = Buffer.from(`# clawo-pending:${randomUUID()}\n`, 'utf8');
+      const pendingBlock = Buffer.concat([markerLine, commentLine]);
       const leading = needsLeadingNewline ? Buffer.from('\n', 'utf8') : Buffer.alloc(0);
-      const suffix = Buffer.concat([leading, commentLine]);
+      const suffix = Buffer.concat([leading, pendingBlock]);
       const searchStart = live.size;
 
       let appended = 0;
@@ -1042,19 +1044,12 @@ function installAutoloopExcludePattern(
         if (n <= 0) break;
         regionRead += n;
       }
-      const first = appendedRegion.indexOf(commentLine);
-      const second = first < 0 ? -1 : appendedRegion.indexOf(commentLine, first + 1);
+      const first = appendedRegion.indexOf(pendingBlock);
+      const second = first < 0 ? -1 : appendedRegion.indexOf(pendingBlock, first + 1);
       if (first < 0 || second >= 0) {
         throw new Error('Autoloop could not identify its inert exclude comment for activation');
       }
-      const commentOffset = searchStart + first;
-      if (commentOffset > 0) {
-        const preceding = Buffer.alloc(1);
-        fs.readSync(fd, preceding, 0, 1, commentOffset - 1);
-        if (preceding[0] !== 0x0a) {
-          throw new Error('Autoloop could not safely activate its exclude comment');
-        }
-      }
+      const commentOffset = searchStart + first + markerLine.length;
 
       closeExcludeFd(fd);
       fd = undefined;
@@ -1065,9 +1060,9 @@ function installAutoloopExcludePattern(
         if (!activationStat.isFile() || activationStat.dev !== ownedDev || activationStat.ino !== ownedIno) {
           throw new Error('Autoloop refuse unsafe repository-local exclude path for ledger isolation');
         }
-        const verifyComment = Buffer.alloc(commentLine.length);
-        fs.readSync(activationFd, verifyComment, 0, verifyComment.length, commentOffset);
-        if (!verifyComment.equals(commentLine)) {
+        const verifyBlock = Buffer.alloc(pendingBlock.length);
+        fs.readSync(activationFd, verifyBlock, 0, verifyBlock.length, commentOffset - markerLine.length);
+        if (!verifyBlock.equals(pendingBlock)) {
           throw new Error('Autoloop could not safely activate its exclude comment');
         }
         const activated = fs.writeSync(activationFd, Buffer.from('/'), 0, 1, commentOffset);

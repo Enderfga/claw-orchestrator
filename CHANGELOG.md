@@ -35,8 +35,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is accepted without mutation; a negation is not. Otherwise the exact pattern
   is installed in the path from `git rev-parse --git-path info/exclude`
   (resolved against the workspace when relative) in two preservation-first
-  steps: `O_APPEND` writes a complete commented rule, then one positional byte
-  activates it. `O_NOFOLLOW` is used throughout (`O_CREAT|O_EXCL` when absent),
+  steps: `O_APPEND` writes a complete uniquely marked commented block, then one
+  positional byte activates only the verified rule inside that block.
+  `O_NOFOLLOW` is used throughout (`O_CREAT|O_EXCL` when absent),
   opened inodes must match the prior `lstat`, and a post-check requires the exact
   installed `info/exclude` pattern. There is no lock file and no rollback:
   concurrent appends are never overwritten, and a short write can leave only an
