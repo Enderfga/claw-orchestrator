@@ -38,7 +38,7 @@ describe('resolveEngineAndModel', () => {
   it('maps short aliases to claude engine', () => {
     expect(resolveEngineAndModel('opus')).toEqual({ engine: 'claude', model: 'claude-opus-5-5' });
     expect(resolveEngineAndModel('sonnet')).toEqual({ engine: 'claude', model: 'claude-sonnet-5-5' });
-    expect(resolveEngineAndModel('haiku')).toEqual({ engine: 'claude', model: 'claude-haiku-4-5' });
+    expect(resolveEngineAndModel('haiku')).toEqual({ engine: 'claude', model: 'claude-haiku-5-5' });
   });
 
   it('maps GPT-5.4 models to codex engine', () => {

@@ -127,13 +127,13 @@ const MODELS: ModelDef[] = [
   },
   // Sonnet 5.5 is the model `--model sonnet` resolves to since CLI 2.1.284
   // (verified against the binary), so the `sonnet` alias moved to it, as `opus`
-  // did for Opus 5.5. It is priced like Sonnet 5 — $2/$10 per Mtok, cached read
-  // 0.1× input, 1M-token context — so the move changes no cost figure today.
+  // did for Opus 5.5. $2/$10 per Mtok like Sonnet 5, 1M-token context, but a
+  // cache hit is 0.05× input ($0.10), not the usual 0.1×, as on Opus 5.5.
   {
     id: 'claude-sonnet-5-5',
     engine: 'claude',
     provider: 'anthropic',
-    pricing: { input: 2, output: 10, cached: 0.2 },
+    pricing: { input: 2, output: 10, cached: 0.1 },
     aliases: ['sonnet'],
     contextWindow: 1_000_000,
   },
@@ -185,12 +185,25 @@ const MODELS: ModelDef[] = [
     pricing: { input: 5, output: 25, cached: 0.5 },
     contextWindow: 200_000,
   },
+  // Haiku 5.5 (2026-10-07) is what `--model haiku` resolves to in CLI 2.1.295
+  // (verified against the binary), so the `haiku` alias moved to it. 1M-token
+  // context. Priced by prompt length: $0.10/$0.50 per Mtok (cache hit $0.01) for
+  // a prompt up to 100K tokens, $0.50/$2.50 ($0.05) above. The registry is
+  // single-tier, so this is the lower tier; Claude Code reports its own cost,
+  // which is what the ledger and `maxBudgetUsd` use for Claude sessions.
+  {
+    id: 'claude-haiku-5-5',
+    engine: 'claude',
+    provider: 'anthropic',
+    pricing: { input: 0.1, output: 0.5, cached: 0.01 },
+    aliases: ['haiku'],
+    contextWindow: 1_000_000,
+  },
   {
     id: 'claude-haiku-4-5',
     engine: 'claude',
     provider: 'anthropic',
     pricing: { input: 1, output: 5, cached: 0.1 },
-    aliases: ['haiku'],
     contextWindow: 200_000,
   },
 

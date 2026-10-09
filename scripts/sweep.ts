@@ -508,6 +508,11 @@ async function anthropicPrices(): Promise<{ prices: PublishedPrice[]; note?: str
       .slice(1, -1)
       .map((c) => c.trim());
     if (cells.length < 6) continue;
+    // A model priced by prompt length has one row per tier ("for prompts up to
+    // 100,000 tokens" / "over"), both naming the same model. The registry is
+    // single-tier and carries the base tier; reading every row let the upper
+    // tier overwrite it and report the correct entry as drifted.
+    if (/\bover\b[^)]*tokens/i.test(cells[0])) continue;
     const id = cells[0]
       .replace(/\s*\(.*$/, '')
       .trim()

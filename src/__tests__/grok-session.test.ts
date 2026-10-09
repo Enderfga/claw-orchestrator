@@ -8,13 +8,18 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import * as os from 'node:os';
 import { EventEmitter } from 'node:events';
 import { Readable } from 'node:stream';
 
 const mockSpawn = vi.fn();
+const mockKillTree = vi.fn();
 vi.mock('../engine-spawn.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../engine-spawn.js')>()),
   spawnEngine: (...args: unknown[]) => mockSpawn(...args),
+  // The real one signals the pid's process group — the mock's pid is a real
+  // number on this machine.
+  killEngineTree: (...args: unknown[]) => mockKillTree(...args),
 }));
 
 const { PersistentGrokSession } = await import('../persistent-grok-session.js');
@@ -54,6 +59,7 @@ const OK_RESULT = {
 beforeEach(() => {
   mockProc = createMockProcess();
   mockSpawn.mockReset();
+  mockKillTree.mockReset();
   mockSpawn.mockReturnValue(mockProc);
 });
 
@@ -227,15 +233,30 @@ describe('PersistentGrokSession — flags', () => {
   // plan mode refused a direct write and a shell write, then lost to the third
   // prompt — the session spawned a subagent and the file appeared. Until that
   // is closed and proven, read-only stays refused rather than approximated.
-  it('refuses read-only, and says what was measured', async () => {
+  // Read-only is grok's OS sandbox profile, not a tool allowlist: the allowlist
+  // was measured losing to a delegated subagent on 1.0.13.
+  it("runs read-only inside grok's read-only sandbox profile", async () => {
     const s = new PersistentGrokSession({
       name: 't',
-      cwd: '/tmp',
+      cwd: process.cwd(),
       permissionMode: 'bypassPermissions',
       sandboxMode: 'read-only',
     });
     await s.start();
-    await expect(s.send('hi', { waitForComplete: true })).rejects.toThrow(/subagent still wrote to disk/);
+    const p = s.send('hi', { waitForComplete: true });
+    setTimeout(() => reply(OK_RESULT), 5);
+    await p;
+    const args = spawnArgs();
+    expect(args[args.indexOf('--sandbox') + 1]).toBe('read-only');
+  });
+
+  it('passes no sandbox profile when the session is not read-only', async () => {
+    const s = new PersistentGrokSession({ name: 't', cwd: process.cwd(), permissionMode: 'bypassPermissions' });
+    await s.start();
+    const p = s.send('hi', { waitForComplete: true });
+    setTimeout(() => reply(OK_RESULT), 5);
+    await p;
+    expect(spawnArgs()).not.toContain('--sandbox');
   });
 
   it('omits --effort for auto', async () => {
@@ -388,15 +409,53 @@ describe('PersistentGrokSession — failure handling', () => {
     await expect(p).rejects.toThrow('You have reached your usage limit for now.');
   });
 
-  it('refuses read-only rather than running writable under a read-only label', async () => {
+  // grok's read-only profile leaves the temp directory writable, so a project
+  // there would be writable under a read-only label.
+  it('refuses read-only for a project under the temp directory', async () => {
     const s = new PersistentGrokSession({
       name: 't',
-      cwd: '/tmp',
+      cwd: os.tmpdir(),
       permissionMode: 'bypassPermissions',
       sandboxMode: 'read-only',
     });
     await s.start();
-    await expect(s.send('hi', { waitForComplete: true })).rejects.toThrow(/do not support sandboxMode: read-only/);
+    await expect(s.send('hi', { waitForComplete: true })).rejects.toThrow(/temp directory/);
     expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  // grok 1.0.50 warns and runs unsandboxed when a profile cannot be applied.
+  it('stops the turn when grok says the sandbox could not be applied', async () => {
+    const s = new PersistentGrokSession({
+      name: 't',
+      cwd: process.cwd(),
+      permissionMode: 'bypassPermissions',
+      sandboxMode: 'read-only',
+    });
+    await s.start();
+    const p = s.send('hi', { waitForComplete: true });
+    setTimeout(
+      () => mockProc.stderr.emit('data', Buffer.from('warning: sandbox could not be applied: Landlock unavailable\n')),
+      5,
+    );
+    await expect(p).rejects.toThrow(/could not apply its read-only sandbox/);
+    expect(mockKillTree).toHaveBeenCalledWith(mockProc);
+  });
+
+  it('refuses read-only on a platform without an OS sandbox', async () => {
+    const original = process.platform;
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    try {
+      const s = new PersistentGrokSession({
+        name: 't',
+        cwd: process.cwd(),
+        permissionMode: 'bypassPermissions',
+        sandboxMode: 'read-only',
+      });
+      await s.start();
+      await expect(s.send('hi', { waitForComplete: true })).rejects.toThrow(/Seatbelt or Landlock/);
+      expect(mockSpawn).not.toHaveBeenCalled();
+    } finally {
+      Object.defineProperty(process, 'platform', { value: original });
+    }
   });
 });

@@ -26,7 +26,10 @@
  * codex, where the same-looking field is a running total.
  */
 
-import { spawnEngine } from './engine-spawn.js';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { killEngineTree, spawnEngine } from './engine-spawn.js';
 
 import type { SessionConfig, SessionSendOptions, StreamEvent, TurnResult } from './types.js';
 import { sanitizeSecrets } from './sanitize.js';
@@ -50,6 +53,24 @@ interface GrokJsonResult {
   /** `error` when grok refused the turn outright (usage limit, auth), with `message`. */
   type?: string;
   message?: string;
+}
+
+/** grok's warning when a sandbox profile could not be applied (1.0.50). */
+const SANDBOX_NOT_APPLIED_RE = /sandbox could not be applied/i;
+
+/** True when `dir` is inside the OS temp directory, which grok's read-only profile leaves writable. */
+function underTempDir(dir: string): boolean {
+  const real = (p: string): string => {
+    try {
+      return fs.realpathSync(p);
+    } catch {
+      return path.resolve(p);
+    }
+  };
+  const target = real(dir);
+  const roots = new Set([real(os.tmpdir()), real('/tmp'), real('/var/tmp')]);
+  if (process.env.TMPDIR) roots.add(real(process.env.TMPDIR));
+  return [...roots].some((root) => target === root || target.startsWith(root + path.sep));
 }
 
 export class PersistentGrokSession extends BaseOneShotSession {
@@ -99,6 +120,10 @@ export class PersistentGrokSession extends BaseOneShotSession {
     const mode = this.options.permissionMode === 'manual' ? 'default' : this.options.permissionMode;
     if (mode) args.push('--permission-mode', mode);
 
+    // The boundary for read-only is grok's own OS sandbox (Seatbelt / Landlock),
+    // not a tool allowlist — see _run for what it was measured against.
+    if (this.options.sandboxMode === 'read-only') args.push('--sandbox', 'read-only');
+
     const effort = options.effort ?? this.options.effort;
     if (effort && effort !== 'auto') {
       // grok 1.0.5 takes low|medium|high|xhigh — it names the invalid ones in
@@ -147,32 +172,42 @@ export class PersistentGrokSession extends BaseOneShotSession {
   }
 
   protected _run(message: string, options: SessionSendOptions): Promise<TurnResult> {
-    // Read-only is refused rather than approximated, and as of 1.0.13 that is a
-    // measured decision rather than a cautious one.
+    // Read-only is grok's built-in `--sandbox read-only` profile, enforced by
+    // the OS (Seatbelt on macOS, Landlock on Linux): reads anywhere, writes only
+    // to ~/.grok/ and the temp directory.
     //
-    // The obvious construction is a `--tools` allowlist of read-only built-ins
-    // (`read_file,list_dir,grep`) plus `--permission-mode plan`. Run against
-    // 1.0.13 it holds for a direct write and for a shell write — and loses to
-    // the third prompt in the matrix: asked to delegate, the session spawned a
-    // subagent and the file appeared. The subagent does not inherit the parent's
-    // tool restriction, which is the same load-bearing hole found in OpenCode,
-    // where denying the write tools without denying `task` left the delegation
-    // path wide open.
+    // It replaced a refusal. A `--tools` allowlist plus plan mode, measured on
+    // 1.0.13, held for a direct and a shell write and lost to delegation: the
+    // subagent did not inherit the restriction and wrote the file. The sandbox
+    // is inherited by the whole process tree. Measured on 1.0.50 against a repo
+    // outside temp, with `--permission-mode bypassPermissions`: a direct write, a
+    // shell redirect, a delegated subagent, a write on a resumed turn and a write
+    // outside the project all failed with `Operation not permitted`, each one
+    // actually attempted (the agent reported the error, not a refusal or a quota
+    // stop).
     //
-    // grok 1.0.13 also ships `--no-subagents`, which is the obvious next probe.
-    // It is deliberately NOT wired up yet: the run that would have confirmed it
-    // hit this account's free-tier usage limit, and a probe that fails for lack
-    // of quota writes no file either — reading that as a pass is how an unproven
-    // boundary gets shipped. Prove it on an account with quota, with the full
-    // write x shell x subagent x resumed-turn matrix, before changing this.
+    // Two things the profile cannot cover are refused rather than claimed:
+    //   - a project under the temp directory, which the profile leaves writable;
+    //   - a platform without Seatbelt or Landlock.
+    // And a sandbox that fails to apply does not fail closed in grok: it warns
+    // and runs unsandboxed. The warning comes at startup, before any model call
+    // (13 ms, measured), so the turn is killed on sight of it — see the stderr
+    // handler below.
     if (this.options.sandboxMode === 'read-only') {
-      return Promise.reject(
-        new Error(
-          'Grok sessions do not support sandboxMode: read-only yet — a tool allowlist plus plan mode ' +
-            'was measured against 1.0.13 and a delegated subagent still wrote to disk. This engine ' +
-            'will not claim a boundary it has not proven. Use a different engine for read-only work.',
-        ),
-      );
+      if (process.platform !== 'darwin' && process.platform !== 'linux') {
+        return Promise.reject(
+          new Error(
+            `Grok read-only needs grok's OS sandbox (Seatbelt or Landlock), which ${process.platform} does not have. Use a different engine for read-only work.`,
+          ),
+        );
+      }
+      if (this.options.cwd && underTempDir(this.options.cwd)) {
+        return Promise.reject(
+          new Error(
+            "Grok read-only cannot protect a project under the temp directory: grok's read-only sandbox leaves temp writable. Move the project or use a different engine for read-only work.",
+          ),
+        );
+      }
     }
 
     const args = this._buildArgs(message, options);
@@ -207,6 +242,18 @@ export class PersistentGrokSession extends BaseOneShotSession {
         const sanitized = sanitizeSecrets(d.toString());
         stderr += sanitized;
         this.emit(SESSION_EVENT.LOG, `[grok-stderr] ${sanitized}`);
+        // grok carries on unsandboxed when a profile cannot be applied. For a
+        // read-only session that is the one outcome that must not run.
+        if (this.options.sandboxMode === 'read-only' && !settled && SANDBOX_NOT_APPLIED_RE.test(stderr)) {
+          settled = true;
+          clearTimeout(timer);
+          killEngineTree(proc);
+          reject(
+            new Error(
+              `Grok could not apply its read-only sandbox, so the turn was stopped before it ran: ${stderr.trim().split('\n')[0]}`,
+            ),
+          );
+        }
       });
 
       proc.on('error', (err) => {

@@ -1954,11 +1954,10 @@ const plugin = {
           engines: {
             type: 'array',
             // Excluded: 'custom', because ultrareview spawns reviewers without a
-            // customEngine config; and 'grok', because reviewers run read-only
-            // and grok refuses a read-only session rather than approximate one.
-            items: { type: 'string', enum: ENGINE_TYPES.filter((e) => e !== 'custom' && e !== 'grok') },
+            // customEngine config.
+            items: { type: 'string', enum: ENGINE_TYPES.filter((e) => e !== 'custom') },
             description:
-              'Engines to round-robin reviewers across (default ["claude"]). Every reviewer runs read-only (sandboxMode read-only), so grok and custom are not accepted. Reviewers fan out in parallel; per-agent failures are isolated.',
+              'Engines to round-robin reviewers across (default ["claude"]). Every reviewer runs read-only (sandboxMode read-only), so custom is not accepted. Reviewers fan out in parallel; per-agent failures are isolated.',
           },
         },
         required: ['cwd'],

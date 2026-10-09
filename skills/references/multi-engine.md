@@ -28,7 +28,7 @@ SessionManager
 
 ### Claude Code (`engine: 'claude'`)
 
-Default engine. Long-running subprocess with streaming JSON I/O. Tested with Claude Code CLI **2.1.292**.
+Default engine. Long-running subprocess with streaming JSON I/O. Tested with Claude Code CLI **2.1.295**.
 
 - Persistent multi-turn conversations
 - Real-time streaming (text, tool_use, tool_result, system events)
@@ -62,7 +62,7 @@ await manager.startSession({
 
 ### OpenAI Codex (`engine: 'codex'`)
 
-Wraps the `codex exec` subcommand. Each `send()` spawns a new process. Tested with `codex` CLI **0.160.1**.
+Wraps the `codex exec` subcommand. Each `send()` spawns a new process. Tested with `codex` CLI **0.162.0**.
 
 - Non-interactive execution via `codex exec --sandbox workspace-write --skip-git-repo-check --json`
 - Real `usage` from the `turn.completed` JSON event (input, output, cached, reasoning tokens). **These are cumulative over the thread, not per turn**, so they replace the session totals rather than being added to them; subtracting consecutive values gives one turn's prompt
@@ -133,7 +133,7 @@ await manager.startSession({
 
 Wraps Google's **Antigravity CLI** (`agy`) — the successor to Gemini CLI (consumer
 Gemini CLI tiers stopped serving 2026-06-18). Each `send()` spawns a new process
-in print mode. Tested with `agy` **1.3.1**.
+in print mode. Tested with `agy` **1.3.2**.
 
 - One-shot execution per message (no persistent subprocess)
 - **Structured output and real usage** — `--output-format stream-json` emits an
@@ -218,7 +218,7 @@ await manager.startSession({
 ### Grok Build (`engine: 'grok'`)
 
 Wraps xAI's **Grok Build** CLI. Each `send()` spawns `grok -p <msg> --output-format json`, which
-prints a single JSON object and exits. Tested with `grok` **1.0.46**.
+prints a single JSON object and exits. Tested with `grok` **1.0.50**.
 
 - **Cost comes from the engine, not from the price table.** The result object carries
   `total_cost_usd`, and the wrapper writes it straight into the session's spend, so the run ledger
@@ -240,13 +240,21 @@ prints a single JSON object and exits. Tested with `grok` **1.0.46**.
   `dangerouslySkipPermissions` → `--always-approve`, `customSessionId` → `--session-id`, `forkSession`
   → `--fork-session`. **grok validates neither tool list**: a name that does not exist is ignored
   rather than rejected, so a typo in a denylist leaves the tool enabled. Prefer an allowlist.
-- **`sandboxMode: 'read-only'` is refused.** A read-only `--tools` allowlist plus
-  `--permission-mode plan` does not stop a delegated subagent from writing, because the subagent
-  does not inherit the parent's tool restriction. A read-only grok session therefore throws at start instead of running
-  writable.
-- **On an exhausted free tier, `grok -p` may hang with no output instead of exiting with an error.**
-  The session's turn timeout is then the only thing that ends the turn. If a grok turn times out with
-  no output, run `grok -p` by hand to check your quota.
+- **`sandboxMode: 'read-only'` runs inside grok's `--sandbox read-only` profile**, which the OS
+  enforces (Seatbelt on macOS, Landlock on Linux) for the whole process tree: the session reads
+  anywhere and can write only to `~/.grok/` and the temp directory. Measured on 1.0.50 with
+  `bypassPermissions`: a direct write, a shell write, a delegated subagent, a write on a resumed turn
+  and a write outside the project all fail with `Operation not permitted`. A tool allowlist was not
+  enough — a delegated subagent does not inherit it. Three cases are refused rather than claimed:
+  - a project under the temp directory, which the profile leaves writable;
+  - a platform other than macOS or Linux;
+  - a sandbox grok reports it could not apply. grok itself would carry on unsandboxed; the session
+    kills the process on that warning, which grok prints at startup before any model call.
+
+  Child-process network access is not blocked on macOS (grok enforces that part on Linux only).
+
+- **On an exhausted free tier grok answers with an error object** (`{"type":"error","message":...}`),
+  and the session reports that message as the turn's error.
 - Binary: `grok` (set `GROK_BIN` to override). Not `agent`: xAI's installer claims that name too,
   and so did Cursor's.
 - Requires Grok Build: see `x.ai/cli`.

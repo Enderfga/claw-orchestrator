@@ -694,7 +694,7 @@ describe('SessionManager', () => {
     it('resolves haiku alias', async () => {
       await mgr.startSession({ name: 'haiku-test', model: 'haiku', cwd: '/tmp' });
       const list = mgr.listSessions();
-      expect(list[0].model).toBe('claude-haiku-4-5');
+      expect(list[0].model).toBe('claude-haiku-5-5');
     });
 
     it('passes through unknown model strings as-is', async () => {
