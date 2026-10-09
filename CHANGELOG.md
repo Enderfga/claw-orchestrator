@@ -28,30 +28,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`autoloop_start` isolates each run ledger from the caller's Git index only
   when a returned start can prove whole-ledger exclusion.** After a dirty-start
   check accepts a Git workspace, and before `tasks/<runId>/` is created, the
-  start appends one exact root-anchored pattern for that run to the path from
-  `git rev-parse --git-path info/exclude` (resolved against the workspace when
-  relative), under a lock beside that exclude file. Writes use verified owned
-  file identities: symlinks and non-regular paths are refused, missing files are
-  created with `O_EXCL`, opened inodes must match the prior `lstat`, appends
-  re-`fstat` immediately before the positional write so a concurrent append is
-  not overwritten, and rollback operates on the open fd (overwrite-then-truncate
-  for concurrent tails; create cleanup never unlinks when another writer has
-  appended). Effectiveness is a directory-level Git proof: `git check-ignore -v`
-  on a non-sentinel probe (`plan.md`) must report our exact directory pattern as
-  the last matching rule — not a finite file-sentinel list. If a committed
-  negation or other higher-precedence rule keeps that proof from holding, or if
-  the show-prefix / run id contains LF or CR, the start throws before creating
-  the ledger and rolls back only this attempt's owned bytes (partial writes
-  included); rollback that cannot prove ownership is skipped and a distinct
-  cleanup failure is reported rather than erasing another writer's suffix. A
-  thrown start never claims status/`git add -A` isolation. Every repo-relative
-  segment of the verified show-prefix, `tasks`, and the run id is
-  gitignore-escaped. The append is byte-wise and does not decode or rewrite
-  pre-existing exclude contents. Isolation runs only on the initial accepted
-  start (in-memory secrets; not in `spec.json`); resume and committed-iteration
-  recovery neither open nor mutate the exclude. A refused dirty start does not
-  mutate excludes; a non-repository workspace is unchanged. Linked worktrees may
-  share `info/exclude`.
+  start proves with a read-only `git check-ignore -v --non-matching --no-index`
+  on `tasks/<runId>/plan.md` that this run's exact root-anchored directory
+  pattern will be the last match (an ephemeral temp excludes file is used only
+  for that preflight and removed afterward). Only then does it append that
+  pattern to the path from `git rev-parse --git-path info/exclude` (resolved
+  against the workspace when relative) using `O_APPEND` and `O_NOFOLLOW`
+  (`O_CREAT|O_EXCL` when absent). There is no lock file and no rollback:
+  symlinks and non-regular paths are refused, opened inodes must match the
+  prior `lstat`, concurrent appends are never overwritten, and a failed
+  write or post-check may leave only this attempt's inert/complete suffix —
+  never truncating, unlinking, or rewriting caller bytes. Post-check again
+  requires `check-ignore -v` to report that exact `info/exclude` pattern for
+  `plan.md`. A committed negation (including mixed with an ignored `goal.json`),
+  an LF/CR in the show-prefix / run id, or an unsafe exclude path fails closed
+  before create/append. Every repo-relative segment of the verified show-prefix,
+  `tasks`, and the run id is gitignore-escaped. Isolation runs only on the
+  initial accepted start (in-memory secrets; not in `spec.json`); resume and
+  committed-iteration recovery neither open nor mutate the exclude. A refused
+  dirty start does not mutate excludes; a non-repository workspace is unchanged.
+  Linked worktrees may share `info/exclude`.
 
 ## [7.10.0] - 2026-10-09
 

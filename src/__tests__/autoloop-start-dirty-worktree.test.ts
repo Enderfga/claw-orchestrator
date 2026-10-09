@@ -1312,48 +1312,9 @@ describe('autoloopStart dirty worktree preflight', () => {
     expect(walk(workspace)).toEqual([]);
   });
 
-  // --- HOLD correction adversarial probes (e5f3ba6) ---
+  // --- Preservation-first exclude isolation probes ---
 
-  /** Run `fn` once after our exclude path first gains the run pattern (append or create). */
-  function afterPatternInstalled(excludePath: string, runId: string, fn: () => void): () => boolean {
-    let injected = false;
-    const fire = (): void => {
-      if (injected) return;
-      if (!fs.existsSync(excludePath)) return;
-      try {
-        if (!fs.readFileSync(excludePath).includes(Buffer.from(`/tasks/${runId}/`))) return;
-      } catch {
-        return;
-      }
-      injected = true;
-      fn();
-    };
-    const appendOriginal = fs.appendFileSync.bind(fs);
-    vi.spyOn(fs, 'appendFileSync').mockImplementation(((p: unknown, data: unknown, opts?: unknown) => {
-      const result = appendOriginal(p as fs.PathLike, data as string | Buffer, opts as never);
-      if (String(p) === excludePath) fire();
-      return result;
-    }) as typeof fs.appendFileSync);
-    const writeFileOriginal = fs.writeFileSync.bind(fs);
-    vi.spyOn(fs, 'writeFileSync').mockImplementation(((p: unknown, data: unknown, opts?: unknown) => {
-      const result = writeFileOriginal(p as fs.PathLike, data as string | Buffer, opts as never);
-      if (String(p) === excludePath) fire();
-      return result;
-    }) as typeof fs.writeFileSync);
-    const writeOriginal = fs.writeSync.bind(fs);
-    vi.spyOn(fs, 'writeSync').mockImplementation(((...args: unknown[]) => {
-      const n = (writeOriginal as (...a: unknown[]) => number)(...args);
-      try {
-        if (fs.readlinkSync(`/proc/self/fd/${args[0] as number}`) === excludePath) fire();
-      } catch {
-        /* ignore */
-      }
-      return n;
-    }) as typeof fs.writeSync);
-    return () => injected;
-  }
-
-  it('mixed directory negation plus ignored goal.json refuses before chat.jsonl can stage', async () => {
+  it('mixed directory negation plus ignored goal.json refuses before any exclude mutate', async () => {
     const workspace = createTempRepo();
     repos.push(workspace);
     const runId = 'mixed-negation';
@@ -1366,164 +1327,141 @@ describe('autoloopStart dirty worktree preflight', () => {
     );
     expect(fs.existsSync(path.join(workspace, 'tasks', runId))).toBe(false);
     expect(fs.readFileSync(x).equals(seed)).toBe(true);
+    expect(fs.existsSync(`${x}.clawo-autoloop.lock`)).toBe(false);
     expect(fs.readFileSync(path.join(workspace, '.gitignore'), 'utf8')).toContain(`!/tasks/${runId}/`);
   });
 
-  it('failed isolation rollback preserves a concurrent append to shared exclude', async () => {
+  it('negation preflight does not open-for-write or create a lock beside exclude', async () => {
     const workspace = createTempRepo();
     repos.push(workspace);
-    const runId = 'concurrent-rollback';
+    const runId = 'negation-no-lock';
     const x = excludePathOf(workspace);
     commitGitignore(workspace, `!/tasks/${runId}/\n`);
-    const seed = Buffer.from('# initial\n');
+    const seed = Buffer.from('# keep\n');
     fs.writeFileSync(x, seed);
-    const other = Buffer.from('# concurrently added caller rule\n');
-    const wasInjected = afterPatternInstalled(x, runId, () => {
-      execFileSync(process.execPath, [
-        '-e',
-        "require('node:fs').appendFileSync(process.argv[1], process.argv[2])",
-        x,
-        other.toString(),
-      ]);
-    });
+    let openedForWrite = false;
+    const openOriginal = fs.openSync.bind(fs);
+    vi.spyOn(fs, 'openSync').mockImplementation(((p: unknown, flags: unknown, mode?: unknown) => {
+      if (String(p) === x) {
+        const f = typeof flags === 'number' ? flags : 0;
+        if (f & fs.constants.O_RDWR || f & fs.constants.O_WRONLY || f & fs.constants.O_APPEND) {
+          openedForWrite = true;
+        }
+      }
+      return (openOriginal as (path: fs.PathLike, flags: unknown, mode?: unknown) => number)(
+        p as fs.PathLike,
+        flags,
+        mode,
+      );
+    }) as typeof fs.openSync);
     syncBuiltinESMExports();
 
-    await expect(mgr.autoloopStart({ runId, workspace, plannerEngine: 'codex' })).rejects.toThrow(/could not isolate/i);
-    expect(wasInjected()).toBe(true);
-    expect(fs.readFileSync(x)).toEqual(Buffer.concat([seed, other]));
+    await expect(mgr.autoloopStart({ runId, workspace, plannerEngine: 'codex' })).rejects.toThrow(
+      /could not isolate the run ledger/i,
+    );
+    expect(openedForWrite).toBe(false);
+    expect(fs.readFileSync(x)).toEqual(seed);
+    expect(fs.existsSync(`${x}.clawo-autoloop.lock`)).toBe(false);
+    expect(fs.existsSync(path.join(workspace, 'tasks', runId))).toBe(false);
   });
 
-  it('rollback never truncates a caller replacement inode', async () => {
+  it('directory negation plus all three sentinels ignored still refuses (plan.md proof)', async () => {
     const workspace = createTempRepo();
     repos.push(workspace);
-    const runId = 'replacement-truncate';
+    const runId = 'triple-sentinel';
     const x = excludePathOf(workspace);
-    commitGitignore(workspace, `!/tasks/${runId}/\n`);
-    fs.writeFileSync(x, Buffer.from('# seed\n'));
-    const replacement = Buffer.from('# caller replacement file and valuable custom rules\n');
-    afterPatternInstalled(x, runId, () => {
-      execFileSync(process.execPath, [
-        '-e',
-        "const fs=require('node:fs');fs.renameSync(process.argv[1],process.argv[1]+'.old');fs.writeFileSync(process.argv[1],process.argv[2])",
-        x,
-        replacement.toString(),
-      ]);
+    commitGitignore(
+      workspace,
+      [
+        `!/tasks/${runId}/`,
+        `/tasks/${runId}/goal.json`,
+        `/tasks/${runId}/chat.jsonl`,
+        `/tasks/${runId}/decisions.jsonl`,
+        '',
+      ].join('\n'),
+    );
+    const seed = fs.readFileSync(x);
+    const ignoreBytes = fs.readFileSync(path.join(workspace, '.gitignore'));
+
+    await expect(mgr.autoloopStart({ runId, workspace, plannerEngine: 'codex' })).rejects.toThrow(
+      /could not isolate the run ledger/i,
+    );
+    expect(fs.existsSync(path.join(workspace, 'tasks', runId))).toBe(false);
+    expect(fs.readFileSync(x).equals(seed)).toBe(true);
+    expect(fs.readFileSync(path.join(workspace, '.gitignore')).equals(ignoreBytes)).toBe(true);
+
+    // Demonstrate the staging hole a finite sentinel check would miss.
+    fs.mkdirSync(path.join(workspace, 'tasks', runId, 'iter', '0'), { recursive: true });
+    fs.writeFileSync(path.join(workspace, 'tasks', runId, 'goal.json'), '{}\n');
+    fs.writeFileSync(path.join(workspace, 'tasks', runId, 'chat.jsonl'), '{}\n');
+    fs.writeFileSync(path.join(workspace, 'tasks', runId, 'decisions.jsonl'), '{}\n');
+    fs.writeFileSync(path.join(workspace, 'tasks', runId, 'plan.md'), '# plan\n');
+    fs.writeFileSync(path.join(workspace, 'tasks', runId, 'iter', '0', 'verdict.json'), '{}\n');
+    fs.appendFileSync(x, `/tasks/${runId}/\n`);
+    expect(() =>
+      execFileSync('git', ['-C', workspace, 'check-ignore', '-q', path.join('tasks', runId, 'goal.json')], {
+        stdio: 'pipe',
+      }),
+    ).not.toThrow();
+    execFileSync('git', ['-C', workspace, 'add', '-A'], { stdio: 'pipe' });
+    const staged = execFileSync('git', ['-C', workspace, 'diff', '--cached', '--name-only'], {
+      encoding: 'utf8',
     });
-    syncBuiltinESMExports();
-
-    await expect(mgr.autoloopStart({ runId, workspace, plannerEngine: 'codex' })).rejects.toThrow(/could not isolate/i);
-    expect(fs.readFileSync(x)).toEqual(replacement);
+    expect(staged).toMatch(/plan\.md/);
+    expect(staged).toMatch(/iter\//);
   });
 
-  it('rollback never unlinks a caller replacement of a newly created exclude', async () => {
+  it('O_APPEND preserves concurrent raced bytes and non-UTF-8 prefix; no lock file', async () => {
     const workspace = createTempRepo();
     repos.push(workspace);
-    const runId = 'replacement-unlink';
+    const runId = 'oappend-race';
     const x = excludePathOf(workspace);
-    commitGitignore(workspace, `!/tasks/${runId}/\n`);
-    fs.rmSync(x, { force: true });
-    const replacement = Buffer.from('# caller replacement\n');
-    afterPatternInstalled(x, runId, () => {
-      execFileSync(process.execPath, [
-        '-e',
-        "const fs=require('node:fs');fs.renameSync(process.argv[1],process.argv[1]+'.old');fs.writeFileSync(process.argv[1],process.argv[2])",
-        x,
-        replacement.toString(),
-      ]);
-    });
-    syncBuiltinESMExports();
-
-    await expect(mgr.autoloopStart({ runId, workspace, plannerEngine: 'codex' })).rejects.toThrow(/could not isolate/i);
-    expect(fs.existsSync(x)).toBe(true);
-    expect(fs.readFileSync(x)).toEqual(replacement);
-  });
-
-  it('rollback cannot follow a replacement symlink and truncate caller work', async () => {
-    const workspace = createTempRepo();
-    repos.push(workspace);
-    const runId = 'symlink-rollback';
-    const x = excludePathOf(workspace);
-    commitGitignore(workspace, `!/tasks/${runId}/\n`);
-    fs.writeFileSync(x, Buffer.from('# seed\n'));
-    const victim = path.join(path.dirname(x), 'caller-ignore');
-    const bytes = Buffer.from('# valuable caller contents beyond seven bytes\n');
-    fs.writeFileSync(victim, bytes);
-    const wasInjected = afterPatternInstalled(x, runId, () => {
-      execFileSync(process.execPath, [
-        '-e',
-        "const fs=require('node:fs');fs.renameSync(process.argv[1],process.argv[1]+'.old');fs.symlinkSync(process.argv[2],process.argv[1])",
-        x,
-        victim,
-      ]);
-    });
-    syncBuiltinESMExports();
-
-    await expect(mgr.autoloopStart({ runId, workspace, plannerEngine: 'codex' })).rejects.toThrow(/could not isolate/i);
-    expect(wasInjected()).toBe(true);
-    expect(fs.readFileSync(victim)).toEqual(bytes);
-  });
-
-  it('missing-file read cannot race into overwriting a caller-created exclude', async () => {
-    const workspace = createTempRepo();
-    repos.push(workspace);
-    const runId = 'creation-race';
-    const x = excludePathOf(workspace);
-    fs.rmSync(x, { force: true });
-    const bytes = Buffer.from('# new caller ignore rules\n');
+    const seed = Buffer.from([0xff, 0xfe, 0x01, 0x0a]); // non-UTF-8 prefix + LF
+    fs.writeFileSync(x, seed);
+    const raced = Buffer.from('# raced append before our write\n');
     let injected = false;
-    const inject = (): void => {
-      if (injected) return;
-      injected = true;
-      execFileSync(process.execPath, [
-        '-e',
-        "require('node:fs').writeFileSync(process.argv[1], process.argv[2])",
-        x,
-        bytes.toString(),
-      ]);
-    };
-    const readOriginal = fs.readFileSync.bind(fs);
-    vi.spyOn(fs, 'readFileSync').mockImplementation(((p: unknown, opts?: unknown) => {
-      try {
-        return (readOriginal as (path: fs.PathLike, opts?: unknown) => Buffer)(p as fs.PathLike, opts);
-      } catch (err) {
-        if (String(p) === x) inject();
-        throw err;
+    const openOriginal = fs.openSync.bind(fs);
+    vi.spyOn(fs, 'openSync').mockImplementation(((p: unknown, flags: unknown, mode?: unknown) => {
+      const fd = (openOriginal as (path: fs.PathLike, flags: unknown, mode?: unknown) => number)(
+        p as fs.PathLike,
+        flags,
+        mode,
+      );
+      if (String(p) === x && !injected) {
+        injected = true;
+        execFileSync(process.execPath, [
+          '-e',
+          "require('node:fs').appendFileSync(process.argv[1], process.argv[2])",
+          x,
+          raced.toString(),
+        ]);
       }
-    }) as typeof fs.readFileSync);
-    const lstatOriginal = fs.lstatSync.bind(fs);
-    vi.spyOn(fs, 'lstatSync').mockImplementation(((p: unknown, opts?: unknown) => {
-      try {
-        return (lstatOriginal as (path: fs.PathLike, opts?: unknown) => fs.Stats)(p as fs.PathLike, opts);
-      } catch (err) {
-        if (String(p) === x) inject();
-        throw err;
-      }
-    }) as typeof fs.lstatSync);
+      return fd;
+    }) as typeof fs.openSync);
     syncBuiltinESMExports();
 
-    await expect(mgr.autoloopStart({ runId, workspace, plannerEngine: 'codex' })).rejects.toThrow();
+    await mgr.autoloopStart({ runId, workspace, plannerEngine: 'codex' });
     expect(injected).toBe(true);
-    expect(fs.readFileSync(x).subarray(0, bytes.length)).toEqual(bytes);
+    const body = fs.readFileSync(x);
+    expect(body.subarray(0, seed.length).equals(seed)).toBe(true);
+    expect(body.includes(raced)).toBe(true);
+    const racedAt = body.indexOf(raced);
+    const patternAt = body.indexOf(Buffer.from(`/tasks/${runId}/`));
+    expect(racedAt).toBeGreaterThanOrEqual(seed.length);
+    expect(patternAt).toBeGreaterThan(racedAt);
+    expect(fs.existsSync(`${x}.clawo-autoloop.lock`)).toBe(false);
+    const ignoreOut = execFileSync(
+      'git',
+      ['-C', workspace, 'check-ignore', '-v', '--', path.join('tasks', runId, 'plan.md')],
+      { encoding: 'utf8' },
+    );
+    expect(ignoreOut).toContain(`/tasks/${runId}/`);
   });
 
-  it('dangling exclude symlink cannot create a file outside repository metadata', async () => {
+  it('short write failure preserves pre-start prefix and may leave only this attempt partial suffix', async () => {
     const workspace = createTempRepo();
     repos.push(workspace);
-    const runId = 'dangling-link';
-    const x = excludePathOf(workspace);
-    const target = path.join(workspace, 'user-owned-output');
-    fs.rmSync(x, { force: true });
-    fs.symlinkSync(target, x);
-
-    await expect(mgr.autoloopStart({ runId, workspace, plannerEngine: 'codex' })).rejects.toThrow();
-    expect(fs.existsSync(target)).toBe(false);
-    expect(fs.lstatSync(x).isSymbolicLink()).toBe(true);
-  });
-
-  it('short write then ENOSPC preserves pre-start exclude bytes', async () => {
-    const workspace = createTempRepo();
-    repos.push(workspace);
-    const runId = 'short-write-real';
+    const runId = 'short-write-partial';
     const x = excludePathOf(workspace);
     const seed = Buffer.from('# original no LF');
     fs.writeFileSync(x, seed);
@@ -1558,203 +1496,62 @@ describe('autoloopStart dirty worktree preflight', () => {
     syncBuiltinESMExports();
 
     await expect(mgr.autoloopStart({ runId, workspace, plannerEngine: 'codex' })).rejects.toThrow(
-      /could not update|ENOSPC|exclude/i,
+      /partial exclude suffix/i,
     );
     expect(writes).toBeGreaterThanOrEqual(1);
-    expect(fs.readFileSync(x)).toEqual(seed);
+    const body = fs.readFileSync(x);
+    expect(body.subarray(0, seed.length).equals(seed)).toBe(true);
+    expect(body.length).toBeGreaterThanOrEqual(seed.length);
     expect(fs.existsSync(path.join(workspace, 'tasks', runId))).toBe(false);
   });
 
-  it('rollback failure is surfaced distinctly and leaves no ledger', async () => {
+  it('missing-file race: O_EXCL does not overwrite caller-created exclude prefix', async () => {
     const workspace = createTempRepo();
     repos.push(workspace);
-    const runId = 'rollback-error';
+    const runId = 'creation-race';
     const x = excludePathOf(workspace);
-    commitGitignore(workspace, `!/tasks/${runId}/\n`);
-    fs.writeFileSync(x, Buffer.from('# original\n'));
-    const ftruncateOriginal = fs.ftruncateSync.bind(fs);
-    vi.spyOn(fs, 'ftruncateSync').mockImplementation(((fd: unknown, len?: unknown) => {
-      let target = '';
-      try {
-        target = fs.readlinkSync(`/proc/self/fd/${fd as number}`);
-      } catch {
-        /* ignore */
-      }
-      if (target === x) {
-        throw Object.assign(new Error('rollback I/O failure'), { code: 'EIO' });
-      }
-      return ftruncateOriginal(fd as number, len as number | undefined);
-    }) as typeof fs.ftruncateSync);
-    syncBuiltinESMExports();
-
-    await expect(mgr.autoloopStart({ runId, workspace, plannerEngine: 'codex' })).rejects.toThrow(
-      /failed to roll back exclude/i,
-    );
-    expect(fs.existsSync(path.join(workspace, 'tasks', runId))).toBe(false);
-  });
-
-  // --- Second HOLD (cfd143d) regression probes ---
-
-  it('directory negation plus all three sentinels ignored still refuses (plan.md/iter would stage)', async () => {
-    const workspace = createTempRepo();
-    repos.push(workspace);
-    const runId = 'triple-sentinel';
-    const x = excludePathOf(workspace);
-    commitGitignore(
-      workspace,
-      [
-        `!/tasks/${runId}/`,
-        `/tasks/${runId}/goal.json`,
-        `/tasks/${runId}/chat.jsonl`,
-        `/tasks/${runId}/decisions.jsonl`,
-        '',
-      ].join('\n'),
-    );
-    const seed = fs.readFileSync(x);
-    const ignoreBytes = fs.readFileSync(path.join(workspace, '.gitignore'));
-
-    await expect(mgr.autoloopStart({ runId, workspace, plannerEngine: 'codex' })).rejects.toThrow(
-      /could not isolate the run ledger/i,
-    );
-    expect(fs.existsSync(path.join(workspace, 'tasks', runId))).toBe(false);
-    expect(fs.readFileSync(x).equals(seed)).toBe(true);
-    expect(fs.readFileSync(path.join(workspace, '.gitignore')).equals(ignoreBytes)).toBe(true);
-
-    // Demonstrate the staging hole a finite sentinel check would miss.
-    fs.mkdirSync(path.join(workspace, 'tasks', runId, 'iter', '0'), { recursive: true });
-    fs.writeFileSync(path.join(workspace, 'tasks', runId, 'goal.json'), '{}\n');
-    fs.writeFileSync(path.join(workspace, 'tasks', runId, 'chat.jsonl'), '{}\n');
-    fs.writeFileSync(path.join(workspace, 'tasks', runId, 'decisions.jsonl'), '{}\n');
-    fs.writeFileSync(path.join(workspace, 'tasks', runId, 'plan.md'), '# plan\n');
-    fs.writeFileSync(path.join(workspace, 'tasks', runId, 'iter', '0', 'verdict.json'), '{}\n');
-    // Install the would-be exclude line alone (without directory-level proof).
-    fs.appendFileSync(x, `/tasks/${runId}/\n`);
-    expect(() =>
-      execFileSync('git', ['-C', workspace, 'check-ignore', '-q', path.join('tasks', runId, 'goal.json')], {
-        stdio: 'pipe',
-      }),
-    ).not.toThrow();
-    execFileSync('git', ['-C', workspace, 'add', '-A'], { stdio: 'pipe' });
-    const staged = execFileSync('git', ['-C', workspace, 'diff', '--cached', '--name-only'], {
-      encoding: 'utf8',
-    });
-    expect(staged).toMatch(/plan\.md/);
-    expect(staged).toMatch(/iter\//);
-  });
-
-  it('new-file isolation failure preserves a concurrent append instead of unlinking it', async () => {
-    const workspace = createTempRepo();
-    repos.push(workspace);
-    const runId = 'create-append-preserve';
-    const x = excludePathOf(workspace);
-    commitGitignore(workspace, `!/tasks/${runId}/\n`);
     fs.rmSync(x, { force: true });
-    const caller = Buffer.from('# caller append after create\n');
-    const wasInjected = afterPatternInstalled(x, runId, () => {
+    const bytes = Buffer.from('# new caller ignore rules\n');
+    let injected = false;
+    const inject = (): void => {
+      if (injected) return;
+      injected = true;
       execFileSync(process.execPath, [
         '-e',
-        "require('node:fs').appendFileSync(process.argv[1], process.argv[2])",
+        "require('node:fs').writeFileSync(process.argv[1], process.argv[2])",
         x,
-        caller.toString(),
+        bytes.toString(),
       ]);
-    });
-    syncBuiltinESMExports();
-
-    await expect(mgr.autoloopStart({ runId, workspace, plannerEngine: 'codex' })).rejects.toThrow(/could not isolate/i);
-    expect(wasInjected()).toBe(true);
-    expect(fs.existsSync(x)).toBe(true);
-    const body = fs.readFileSync(x);
-    expect(body.includes(caller)).toBe(true);
-    expect(body.equals(caller) || body.subarray(body.length - caller.length).equals(caller)).toBe(true);
-    expect(fs.existsSync(path.join(workspace, 'tasks', runId))).toBe(false);
-  });
-
-  it('existing-file append does not overwrite bytes a concurrent writer appended after the size read', async () => {
-    const workspace = createTempRepo();
-    repos.push(workspace);
-    const runId = 'positional-race';
-    const x = excludePathOf(workspace);
-    const seed = Buffer.from('# seed\n');
-    fs.writeFileSync(x, seed);
-    const raced = Buffer.from('# raced append before our write\n');
-    let injected = false;
-    const openOriginal = fs.openSync.bind(fs);
-    vi.spyOn(fs, 'openSync').mockImplementation(((p: unknown, flags: unknown, mode?: unknown) => {
-      const fd = (openOriginal as (path: fs.PathLike, flags: unknown, mode?: unknown) => number)(
-        p as fs.PathLike,
-        flags,
-        mode,
-      );
-      if (String(p) === x && !injected) {
-        injected = true;
-        execFileSync(process.execPath, [
-          '-e',
-          "require('node:fs').appendFileSync(process.argv[1], process.argv[2])",
-          x,
-          raced.toString(),
-        ]);
+    };
+    const lstatOriginal = fs.lstatSync.bind(fs);
+    vi.spyOn(fs, 'lstatSync').mockImplementation(((p: unknown, opts?: unknown) => {
+      try {
+        return (lstatOriginal as (path: fs.PathLike, opts?: unknown) => fs.Stats)(p as fs.PathLike, opts);
+      } catch (err) {
+        if (String(p) === x) inject();
+        throw err;
       }
-      return fd;
-    }) as typeof fs.openSync);
+    }) as typeof fs.lstatSync);
     syncBuiltinESMExports();
 
     await mgr.autoloopStart({ runId, workspace, plannerEngine: 'codex' });
     expect(injected).toBe(true);
-    const body = fs.readFileSync(x);
-    expect(body.subarray(0, seed.length).equals(seed)).toBe(true);
-    expect(body.includes(raced)).toBe(true);
-    // Our pattern must appear after the raced bytes, not clobber them.
-    const racedAt = body.indexOf(raced);
-    const patternAt = body.indexOf(Buffer.from(`/tasks/${runId}/`));
-    expect(racedAt).toBeGreaterThanOrEqual(seed.length);
-    expect(patternAt).toBeGreaterThan(racedAt);
+    expect(fs.readFileSync(x).subarray(0, bytes.length)).toEqual(bytes);
+    expect(fs.readFileSync(x).includes(Buffer.from(`/tasks/${runId}/`))).toBe(true);
   });
 
-  it('rollback with a concurrent tail preserves caller bytes even if restore write fails mid-way', async () => {
+  it('dangling exclude symlink is refused without creating or truncating the target', async () => {
     const workspace = createTempRepo();
     repos.push(workspace);
-    const runId = 'rollback-tail-race';
+    const runId = 'dangling-link';
     const x = excludePathOf(workspace);
-    commitGitignore(workspace, `!/tasks/${runId}/\n`);
-    const seed = Buffer.from('# seed\n');
-    fs.writeFileSync(x, seed);
-    const tail = Buffer.from('# valuable concurrent tail\n');
-    afterPatternInstalled(x, runId, () => {
-      execFileSync(process.execPath, [
-        '-e',
-        "require('node:fs').appendFileSync(process.argv[1], process.argv[2])",
-        x,
-        tail.toString(),
-      ]);
-    });
-    let restoreWrites = 0;
-    const writeOriginal = fs.writeSync.bind(fs);
-    vi.spyOn(fs, 'writeSync').mockImplementation(((...args: unknown[]) => {
-      let target = '';
-      try {
-        target = fs.readlinkSync(`/proc/self/fd/${args[0] as number}`);
-      } catch {
-        /* ignore */
-      }
-      if (target === x) {
-        // Allow the initial pattern install writes; fail during rollback restore.
-        const body = fs.readFileSync(x);
-        if (body.includes(tail)) {
-          restoreWrites++;
-          if (restoreWrites >= 1) {
-            throw Object.assign(new Error('restore ENOSPC'), { code: 'ENOSPC' });
-          }
-        }
-      }
-      return (writeOriginal as (...a: unknown[]) => number)(...args);
-    }) as typeof fs.writeSync);
-    syncBuiltinESMExports();
+    const target = path.join(workspace, 'user-owned-output');
+    fs.rmSync(x, { force: true });
+    fs.symlinkSync(target, x);
 
-    await expect(mgr.autoloopStart({ runId, workspace, plannerEngine: 'codex' })).rejects.toThrow(
-      /roll back|isolate|ENOSPC|exclude/i,
-    );
-    expect(fs.readFileSync(x).includes(tail)).toBe(true);
-    expect(fs.existsSync(path.join(workspace, 'tasks', runId))).toBe(false);
+    await expect(mgr.autoloopStart({ runId, workspace, plannerEngine: 'codex' })).rejects.toThrow();
+    expect(fs.existsSync(target)).toBe(false);
+    expect(fs.lstatSync(x).isSymbolicLink()).toBe(true);
   });
 
   it('opened exclude inode mismatch against prior lstat refuses without mutating caller bytes', async () => {
@@ -1852,16 +1649,17 @@ describe('autoloopStart dirty worktree preflight', () => {
     expect(fs.existsSync(path.join(workspace, 'tasks', runId))).toBe(false);
   });
 
-  it('injected truncate failure during rollback closes the exclude fd', async () => {
+  it('never calls ftruncateSync or unlinkSync on the exclude path during failed isolation', async () => {
     const workspace = createTempRepo();
     repos.push(workspace);
-    const runId = 'truncate-close';
+    const runId = 'no-destructive-cleanup';
     const x = excludePathOf(workspace);
     commitGitignore(workspace, `!/tasks/${runId}/\n`);
-    fs.writeFileSync(x, Buffer.from('# seed\n'));
-    const before = fs.readdirSync('/proc/self/fd').length;
+    const seed = Buffer.from('# original\n');
+    fs.writeFileSync(x, seed);
+    let truncated = false;
+    let unlinked = false;
     const ftruncateOriginal = fs.ftruncateSync.bind(fs);
-    let hit = false;
     vi.spyOn(fs, 'ftruncateSync').mockImplementation(((fd: unknown, len?: unknown) => {
       let target = '';
       try {
@@ -1869,20 +1667,44 @@ describe('autoloopStart dirty worktree preflight', () => {
       } catch {
         /* ignore */
       }
-      if (target === x) {
-        hit = true;
-        throw Object.assign(new Error('injected truncate failure'), { code: 'EIO' });
-      }
+      if (target === x) truncated = true;
       return ftruncateOriginal(fd as number, len as number | undefined);
     }) as typeof fs.ftruncateSync);
+    const unlinkOriginal = fs.unlinkSync.bind(fs);
+    vi.spyOn(fs, 'unlinkSync').mockImplementation(((p: unknown) => {
+      if (String(p) === x) unlinked = true;
+      return unlinkOriginal(p as fs.PathLike);
+    }) as typeof fs.unlinkSync);
     syncBuiltinESMExports();
 
     await expect(mgr.autoloopStart({ runId, workspace, plannerEngine: 'codex' })).rejects.toThrow(
-      /roll back|isolate|exclude/i,
+      /could not isolate the run ledger/i,
     );
-    expect(hit).toBe(true);
-    await new Promise((r) => setImmediate(r));
-    expect(fs.readdirSync('/proc/self/fd').length).toBeLessThanOrEqual(before + 2);
+    expect(truncated).toBe(false);
+    expect(unlinked).toBe(false);
+    expect(fs.readFileSync(x)).toEqual(seed);
     expect(fs.existsSync(path.join(workspace, 'tasks', runId))).toBe(false);
+  });
+
+  it('retry after partial residue appends a fresh newline+full rule', async () => {
+    const workspace = createTempRepo();
+    repos.push(workspace);
+    const runId = 'retry-residue';
+    const x = excludePathOf(workspace);
+    const seed = Buffer.from('# seed\n');
+    const residue = Buffer.from('/tasks/retry-resi'); // incomplete prior attempt
+    fs.writeFileSync(x, Buffer.concat([seed, residue]));
+
+    await mgr.autoloopStart({ runId, workspace, plannerEngine: 'codex' });
+    const body = fs.readFileSync(x);
+    expect(body.subarray(0, seed.length).equals(seed)).toBe(true);
+    expect(body.includes(residue)).toBe(true);
+    expect(body.includes(Buffer.from(`\n/tasks/${runId}/\n`))).toBe(true);
+    const ignoreOut = execFileSync(
+      'git',
+      ['-C', workspace, 'check-ignore', '-v', '--', path.join('tasks', runId, 'plan.md')],
+      { encoding: 'utf8' },
+    );
+    expect(ignoreOut).toContain(`/tasks/${runId}/`);
   });
 });
