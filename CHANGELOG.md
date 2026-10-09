@@ -19,6 +19,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which the profile leaves writable, and platforms without either sandbox are refused. `ultrareview`
   accepts `grok` among its reviewer engines, since reviewers run read-only.
 
+### Added
+
+- **`autoloop_start` refuses a dirty Git worktree.** Tracked (staged or
+  unstaged) or untracked changes make the start throw before the run directory
+  or Planner session exist. Untracked files are enumerated even when the repo
+  sets `status.showUntrackedFiles=no`. An oversized porcelain listing that
+  exceeds the process buffer is still treated as dirty, not as a clean or
+  non-repository tree. Submodule dirt is enumerated even when repository
+  configuration would hide it, and unexpected `git status` failures refuse
+  the start. Ignored paths still do not refuse. A second start is
+  allowed when the only dirt is untracked (`??`) or index-clean worktree
+  modifications (` M`) under `tasks/<id>/` while `tasks/<id>/goal.json` is a
+  regular file — covering a committed ledger that later appends
+  `decisions.jsonl` / `chat.jsonl`; any other status still refuses.
+  Nested workspaces normalize repo-root porcelain paths with a verified
+  `rev-parse --show-prefix`; valid path components beginning with `..` remain
+  accepted, while dirt outside the workspace still refuses.
+  A non-repository workspace still starts; resume and recovery are unchanged.
+
 ### Fixed
 
 - **Claude Sonnet 5.5's cached input price is $0.10 per Mtok**, not $0.20: a cache hit on Sonnet 5.5
