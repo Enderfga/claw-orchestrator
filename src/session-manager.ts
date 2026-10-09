@@ -620,6 +620,99 @@ function readVerifiedGitShowPrefix(workspace: string): string | null {
   }
 }
 
+/** Escape gitignore metacharacters in a single path segment (the run id). */
+export function escapeGitExcludeSegment(segment: string): string {
+  return segment.replace(/[\\#!*?[\]\s]/g, (ch) => `\\${ch}`);
+}
+
+/**
+ * Root-anchored exclude pattern for one run ledger: `/` + show-prefix +
+ * `tasks/` + escaped runId + `/`. Exact and run-scoped — not a broad `tasks/` rule.
+ */
+export function autoloopLedgerExcludePattern(prefix: string, runId: string): string {
+  return `/${prefix}tasks/${escapeGitExcludeSegment(runId)}/`;
+}
+
+/**
+ * Resolve `git rev-parse --git-path info/exclude` without treating `.git` as a
+ * directory. Relative results are resolved against the workspace cwd. Linked
+ * worktrees may share the same exclude file as the main worktree.
+ */
+function resolveGitInfoExcludePath(workspace: string): string | null {
+  try {
+    const gitPath = execFileSync('git', ['-C', workspace, 'rev-parse', '--git-path', 'info/exclude'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, LC_ALL: 'C' },
+    }).replace(/\r?\n$/, '');
+    if (!gitPath) return null;
+    return path.isAbsolute(gitPath) ? gitPath : path.resolve(workspace, gitPath);
+  } catch (err) {
+    if (isNotGitRepositoryError(err)) return null;
+    throw err;
+  }
+}
+
+/**
+ * After a dirty-start check accepts a Git workspace, append one exact
+ * root-anchored pattern for `tasks/<runId>/` to the repository-local exclude
+ * so the new ledger stays out of `git status` and `git add -A`. Non-repository
+ * workspaces are a no-op. Prefix or git-path failure inside a repository fails
+ * closed without mutating the exclude. Existing exclude bytes are preserved;
+ * an identical line is not duplicated; lines are never removed.
+ */
+function ensureAutoloopRunLedgerExcluded(workspace: string, runId: string): void {
+  let excludePath: string | null;
+  try {
+    excludePath = resolveGitInfoExcludePath(workspace);
+  } catch {
+    throw new Error('Autoloop could not resolve repository-local exclude for ledger isolation');
+  }
+  if (excludePath === null) {
+    // Distinguish not-a-repo (no-op) from empty/failed path inside a repo.
+    try {
+      execFileSync('git', ['-C', workspace, 'rev-parse', '--is-inside-work-tree'], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: { ...process.env, LC_ALL: 'C' },
+      });
+    } catch (err) {
+      if (isNotGitRepositoryError(err)) return;
+      throw new Error('Autoloop could not resolve repository-local exclude for ledger isolation');
+    }
+    throw new Error('Autoloop could not resolve repository-local exclude for ledger isolation');
+  }
+
+  const prefix = readVerifiedGitShowPrefix(workspace);
+  if (prefix === null) {
+    throw new Error('Autoloop could not verify git show-prefix for ledger isolation');
+  }
+
+  const pattern = autoloopLedgerExcludePattern(prefix, runId);
+  let existing = '';
+  try {
+    existing = fs.readFileSync(excludePath, 'utf8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw new Error('Autoloop could not read repository-local exclude for ledger isolation');
+    }
+  }
+  if (existing.split(/\r?\n/).includes(pattern)) return;
+
+  const next =
+    existing.length === 0
+      ? `${pattern}\n`
+      : existing.endsWith('\n')
+        ? `${existing}${pattern}\n`
+        : `${existing}\n${pattern}\n`;
+  try {
+    fs.mkdirSync(path.dirname(excludePath), { recursive: true });
+    fs.writeFileSync(excludePath, next);
+  } catch {
+    throw new Error('Autoloop could not update repository-local exclude for ledger isolation');
+  }
+}
+
 /** Only this deterministic git failure means a non-repository workspace. */
 function isNotGitRepositoryError(err: unknown): boolean {
   if (!err || typeof err !== 'object') return false;
@@ -3468,6 +3561,9 @@ export class SessionManager {
       }
     }
     const ledgerDir = path.join(opts.workspace, 'tasks', opts.runId);
+    // Isolate this run's ledger from `git status` / `git add -A` before creating
+    // it. Dirty-start refusal happens in autoloopStart before we reach here.
+    ensureAutoloopRunLedgerExcluded(opts.workspace, opts.runId);
     if (!fs.existsSync(ledgerDir)) {
       fs.mkdirSync(ledgerDir, { recursive: true });
     }

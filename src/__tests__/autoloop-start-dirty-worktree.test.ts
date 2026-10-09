@@ -97,7 +97,7 @@ const TEST_WF_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'clawo-dirty-start-wf-
 process.env.CLAWO_WF_DIR = TEST_WF_DIR;
 process.env.CLAWO_SESSIONS_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'clawo-dirty-start-sessions-'));
 
-const { SessionManager } = await import('../session-manager.js');
+const { SessionManager, autoloopLedgerExcludePattern } = await import('../session-manager.js');
 const { runDir } = await import('../kernel/store.js');
 
 function createTempRepo(): string {
@@ -801,5 +801,262 @@ describe('autoloopStart dirty worktree preflight', () => {
       thrown = err;
     }
     assertRejectedBeforeSideEffects(mgr, runId, thrown);
+  });
+
+  it('hides the new run ledger from porcelain and git add -A via info/exclude', async () => {
+    const workspace = createTempRepo();
+    repos.push(workspace);
+    const runId = 'ledger-isolate-clean';
+    const ledgerRel = `tasks/${runId}/`;
+    const result = await mgr.autoloopStart({ runId, workspace, plannerEngine: 'codex' });
+    expect(result.runId).toBe(runId);
+    expect(fs.existsSync(path.join(workspace, 'tasks', runId))).toBe(true);
+
+    const excludePath = path.resolve(
+      workspace,
+      execFileSync('git', ['-C', workspace, 'rev-parse', '--git-path', 'info/exclude'], {
+        encoding: 'utf8',
+      }).trim(),
+    );
+    const excludeBody = fs.existsSync(excludePath) ? fs.readFileSync(excludePath, 'utf8') : '';
+    expect(excludeBody).toContain(`/${ledgerRel}`);
+
+    // Ledger dir may be empty at start; a real artifact must stay out of status/add.
+    const artifact = path.join(workspace, 'tasks', runId, 'goal.json');
+    fs.writeFileSync(artifact, '{"scalar":null}\n');
+    const afterPorcelain = porcelain(workspace);
+    expect(afterPorcelain).not.toContain(ledgerRel);
+    expect(afterPorcelain).not.toContain(`tasks/${runId}`);
+
+    execFileSync('git', ['add', '-A'], { cwd: workspace, stdio: 'pipe' });
+    const staged = execFileSync('git', ['-C', workspace, 'diff', '--cached', '--name-only'], {
+      encoding: 'utf8',
+    });
+    expect(staged).not.toContain(`tasks/${runId}`);
+
+    const checkIgnore = execFileSync(
+      'git',
+      ['-C', workspace, 'check-ignore', '-v', path.join('tasks', runId, 'goal.json')],
+      { encoding: 'utf8' },
+    );
+    expect(checkIgnore).toContain('info/exclude');
+    expect(checkIgnore).toContain(`/${ledgerRel}`);
+  });
+
+  it('writes only the shared git-path exclude for a linked worktree (.git file)', async () => {
+    const main = createTempRepo();
+    repos.push(main);
+    const wt = fs.mkdtempSync(path.join(os.tmpdir(), 'clawo-dirty-start-wt-'));
+    repos.push(wt);
+    execFileSync('git', ['-C', main, 'worktree', 'add', wt, 'HEAD'], { stdio: 'pipe' });
+    expect(fs.statSync(path.join(wt, '.git')).isFile()).toBe(true);
+
+    const runId = 'ledger-isolate-wt';
+    await mgr.autoloopStart({ runId, workspace: wt, plannerEngine: 'codex' });
+
+    const wtExclude = path.resolve(
+      wt,
+      execFileSync('git', ['-C', wt, 'rev-parse', '--git-path', 'info/exclude'], {
+        encoding: 'utf8',
+      }).trim(),
+    );
+    const mainExclude = path.resolve(
+      main,
+      execFileSync('git', ['-C', main, 'rev-parse', '--git-path', 'info/exclude'], {
+        encoding: 'utf8',
+      }).trim(),
+    );
+    expect(fs.realpathSync(wtExclude)).toBe(fs.realpathSync(mainExclude));
+    expect(fs.readFileSync(wtExclude, 'utf8')).toContain(`/tasks/${runId}/`);
+
+    const sibling = path.join(wt, 'tasks', 'sibling-visible', 'notes.txt');
+    fs.mkdirSync(path.dirname(sibling), { recursive: true });
+    fs.writeFileSync(sibling, 'visible\n');
+    const detailed = execFileSync('git', ['-C', wt, 'status', '--porcelain', '--untracked-files=all'], {
+      encoding: 'utf8',
+    });
+    expect(detailed).toContain('tasks/sibling-visible');
+    expect(detailed).not.toContain(`tasks/${runId}`);
+  });
+
+  it('anchors the exclude under a nested workspace show-prefix', async () => {
+    const { repoRoot, workspace } = createNestedWorkspaceRepo();
+    repos.push(repoRoot);
+    const runId = 'ledger-isolate-nested';
+    await mgr.autoloopStart({ runId, workspace, plannerEngine: 'codex' });
+
+    const expected = `/nested/pkg/tasks/${runId}/`;
+    const excludePath = path.resolve(
+      workspace,
+      execFileSync('git', ['-C', workspace, 'rev-parse', '--git-path', 'info/exclude'], {
+        encoding: 'utf8',
+      }).trim(),
+    );
+    expect(fs.readFileSync(excludePath, 'utf8')).toContain(expected);
+
+    const checkIgnore = execFileSync(
+      'git',
+      ['-C', workspace, 'check-ignore', '-v', path.join('tasks', runId, 'goal.json')],
+      { encoding: 'utf8' },
+    );
+    expect(checkIgnore).toContain(expected);
+
+    const porcelainRoot = porcelain(repoRoot);
+    expect(porcelainRoot).not.toContain(`nested/pkg/tasks/${runId}`);
+
+    const sibling = path.join(repoRoot, 'other', 'tasks', runId, 'notes.txt');
+    fs.mkdirSync(path.dirname(sibling), { recursive: true });
+    fs.writeFileSync(sibling, 'outside workspace\n');
+    const detailed = execFileSync('git', ['-C', repoRoot, 'status', '--porcelain', '--untracked-files=all'], {
+      encoding: 'utf8',
+    });
+    expect(detailed).toContain(`other/tasks/${runId}`);
+  });
+
+  it('escapes special run ids so check-ignore matches only that ledger', () => {
+    // Kernel run ids are [A-Za-z0-9._-]; the exclude helper still escapes the
+    // broader segment alphabet the dirty-start ledger exception already allows.
+    const workspace = createTempRepo();
+    repos.push(workspace);
+    const runId = 'run "1"*#![x';
+    const pattern = autoloopLedgerExcludePattern('', runId);
+    expect(pattern).toBe('/tasks/run\\ "1"\\*\\#\\!\\[x/');
+
+    const excludePath = path.resolve(
+      workspace,
+      execFileSync('git', ['-C', workspace, 'rev-parse', '--git-path', 'info/exclude'], {
+        encoding: 'utf8',
+      }).trim(),
+    );
+    fs.appendFileSync(excludePath, `${pattern}\n`);
+    fs.mkdirSync(path.join(workspace, 'tasks', runId), { recursive: true });
+    fs.writeFileSync(path.join(workspace, 'tasks', runId, 'goal.json'), '{"scalar":null}\n');
+    fs.mkdirSync(path.join(workspace, 'tasks', 'run "1"OTHER'), { recursive: true });
+    fs.writeFileSync(path.join(workspace, 'tasks', 'run "1"OTHER', 'notes.txt'), 'sibling\n');
+
+    const checkIgnore = execFileSync(
+      'git',
+      ['-C', workspace, 'check-ignore', '-v', path.join('tasks', runId, 'goal.json')],
+      { encoding: 'utf8' },
+    );
+    expect(checkIgnore).toContain('info/exclude');
+    expect(checkIgnore).toContain(pattern);
+
+    let siblingIgnored = true;
+    try {
+      execFileSync('git', ['-C', workspace, 'check-ignore', '-q', path.join('tasks', 'run "1"OTHER', 'notes.txt')], {
+        stdio: 'pipe',
+      });
+    } catch {
+      siblingIgnored = false;
+    }
+    expect(siblingIgnored).toBe(false);
+    const detailed = execFileSync('git', ['-C', workspace, 'status', '--porcelain', '--untracked-files=all'], {
+      encoding: 'utf8',
+    });
+    // Porcelain quotes paths that contain spaces/quotes.
+    expect(detailed).toMatch(/tasks\/run .*OTHER/);
+    expect(detailed).not.toContain(`*#![x`);
+  });
+
+  it('preserves seeded exclude bytes, appends one line, and does not duplicate on second setup', async () => {
+    const workspace = createTempRepo();
+    repos.push(workspace);
+    const excludePath = path.resolve(
+      workspace,
+      execFileSync('git', ['-C', workspace, 'rev-parse', '--git-path', 'info/exclude'], {
+        encoding: 'utf8',
+      }).trim(),
+    );
+    fs.mkdirSync(path.dirname(excludePath), { recursive: true });
+    const seed = '# keep-comment\n!important-negation\npartial-line';
+    fs.writeFileSync(excludePath, seed);
+    expect(seed.endsWith('\n')).toBe(false);
+
+    const runId = 'ledger-isolate-seed';
+    const pattern = `/tasks/${runId}/`;
+    await mgr.autoloopStart({ runId, workspace, plannerEngine: 'codex' });
+    const afterFirst = fs.readFileSync(excludePath, 'utf8');
+    expect(afterFirst.startsWith(seed)).toBe(true);
+    expect(afterFirst).toContain(pattern);
+    expect(afterFirst.split('\n').filter((l) => l === pattern)).toHaveLength(1);
+
+    // Pattern already present: a second setup must not duplicate or drop it.
+    await mgr.shutdown();
+    mgr = createManager();
+    const runId2 = 'ledger-isolate-seed-2';
+    const pattern2 = `/tasks/${runId2}/`;
+    const withPattern2 = afterFirst.endsWith('\n') ? `${afterFirst}${pattern2}\n` : `${afterFirst}\n${pattern2}\n`;
+    fs.writeFileSync(excludePath, withPattern2);
+    expect(
+      fs
+        .readFileSync(excludePath, 'utf8')
+        .split('\n')
+        .filter((l) => l === pattern2),
+    ).toHaveLength(1);
+
+    await mgr.autoloopStart({ runId: runId2, workspace, plannerEngine: 'codex' });
+    const afterSecond = fs.readFileSync(excludePath, 'utf8');
+    expect(afterSecond.startsWith(seed)).toBe(true);
+    expect(afterSecond.split('\n').filter((l) => l === pattern)).toHaveLength(1);
+    expect(afterSecond.split('\n').filter((l) => l === pattern2)).toHaveLength(1);
+  });
+
+  it('does not mutate info/exclude when dirty start is refused', async () => {
+    const workspace = createTempRepo();
+    repos.push(workspace);
+    const excludePath = path.resolve(
+      workspace,
+      execFileSync('git', ['-C', workspace, 'rev-parse', '--git-path', 'info/exclude'], {
+        encoding: 'utf8',
+      }).trim(),
+    );
+    // Absent exclude: refuse must not create the file.
+    fs.rmSync(excludePath, { force: true });
+    expect(fs.existsSync(excludePath)).toBe(false);
+
+    fs.writeFileSync(path.join(workspace, 'README.md'), '# dirty\n');
+    let thrown: unknown;
+    try {
+      await mgr.autoloopStart({ runId: 'refuse-no-exclude', workspace, plannerEngine: 'codex' });
+    } catch (err) {
+      thrown = err;
+    }
+    assertRejectedBeforeSideEffects(mgr, 'refuse-no-exclude', thrown);
+    expect(fs.existsSync(excludePath)).toBe(false);
+
+    const seeded = '# seeded-before-refuse\n';
+    fs.mkdirSync(path.dirname(excludePath), { recursive: true });
+    fs.writeFileSync(excludePath, seeded);
+    fs.writeFileSync(path.join(workspace, 'untracked.txt'), 'still dirty\n');
+    thrown = undefined;
+    try {
+      await mgr.autoloopStart({ runId: 'refuse-keep-exclude', workspace, plannerEngine: 'codex' });
+    } catch (err) {
+      thrown = err;
+    }
+    assertRejectedBeforeSideEffects(mgr, 'refuse-keep-exclude', thrown);
+    expect(fs.readFileSync(excludePath, 'utf8')).toBe(seeded);
+  });
+
+  it('non-repository start creates neither .git nor an exclude file', async () => {
+    const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'clawo-dirty-start-norepo-exclude-'));
+    repos.push(workspace);
+    fs.writeFileSync(path.join(workspace, 'notes.txt'), 'not a git repo\n');
+
+    await mgr.autoloopStart({ runId: 'norepo-no-exclude', workspace, plannerEngine: 'codex' });
+    expect(fs.existsSync(path.join(workspace, '.git'))).toBe(false);
+    expect(fs.existsSync(path.join(workspace, '.git', 'info', 'exclude'))).toBe(false);
+    // Walk for any info/exclude under the workspace.
+    const walk = (dir: string): string[] => {
+      const found: string[] = [];
+      for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+        const p = path.join(dir, ent.name);
+        if (ent.isDirectory()) found.push(...walk(p));
+        else if (ent.name === 'exclude' && p.endsWith(`${path.sep}info${path.sep}exclude`)) found.push(p);
+      }
+      return found;
+    };
+    expect(walk(workspace)).toEqual([]);
   });
 });

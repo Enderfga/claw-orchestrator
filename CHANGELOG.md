@@ -25,6 +25,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `rev-parse --show-prefix`; valid path components beginning with `..` remain
   accepted, while dirt outside the workspace still refuses.
   A non-repository workspace still starts; resume and recovery are unchanged.
+- **`autoloop_start` isolates each run ledger from the caller's Git index.**
+  After a dirty-start check accepts a Git workspace, and before
+  `tasks/<runId>/` is created, the start appends one exact root-anchored
+  pattern for that run to the path from `git rev-parse --git-path info/exclude`
+  (resolved against the workspace when relative). The new ledger stays out of
+  `git status` and `git add -A`. Existing exclude bytes are preserved; a
+  refused dirty start does not mutate excludes; a non-repository workspace is
+  unchanged. Linked worktrees may share `info/exclude`. Resume and recovery
+  are unchanged.
 
 ## [7.10.0] - 2026-10-09
 
