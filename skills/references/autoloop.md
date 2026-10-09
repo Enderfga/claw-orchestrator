@@ -90,7 +90,7 @@ failing with "Session not found".
 ## UX flow
 
 ```
-1. autoloop_start { run_id, workspace }       → Planner session ready (refuses if the workspace Git tree already has tracked, staged, untracked, or submodule changes — including when repository status configuration hides them, `status.showUntrackedFiles=no`, or the porcelain listing is too large to buffer; unexpected `git status` failures also refuse; untracked (`??`) or index-clean worktree modifications (` M`) under `tasks/<id>/` with a regular `tasks/<id>/goal.json` are ignored so a second start can proceed after a committed ledger is appended, including when workspace is a nested repo subdirectory after stripping a verified `show-prefix`; dirt outside the workspace still refuses; ignored paths and non-repo workspaces still start)
+1. autoloop_start { run_id, workspace }       → Planner session ready (refuses if the workspace Git tree already has tracked, staged, untracked, or submodule changes — including when repository status configuration hides them, `status.showUntrackedFiles=no`, or the porcelain listing is too large to buffer; unexpected `git status` failures also refuse; untracked (`??`) or index-clean worktree modifications (` M`) under `tasks/<id>/` with a regular `tasks/<id>/goal.json` are ignored so a second start can proceed after a committed ledger is appended, including when workspace is a nested repo subdirectory after stripping a verified `show-prefix`; dirt outside the workspace still refuses; ignored paths and non-repo workspaces still start; after a Git workspace is accepted and before `tasks/<run_id>/` is created, a read-only `git check-ignore -z -v --non-matching --no-index --stdin` query must prove the directory itself is positively ignored; an already-effective broader positive rule is accepted unchanged, otherwise the exact escaped run pattern is installed through `git rev-parse --git-path info/exclude` by `O_APPEND`ing a uniquely marked commented block and activating only its verified rule with one positional byte write; `O_NOFOLLOW` / `O_EXCL`, inode checks, and an exact post-check protect the path, while no lock, truncation, unlink, or rollback can erase caller bytes; a short write leaves only an inert comment, a tracked target ledger is refused, and a committed negation, LF/CR path, or unsafe exclude path fails closed; only a returned start claims the new ledger is absent from `git status` and `git add -A`; resume and recovery do not repeat that exclude update)
 2. autoloop_chat { run_id, "<your goal>" }    → Planner reads workspace,
                                                 drafts plan.md + goal.json,
                                                 asks "ready to spawn?"
@@ -483,6 +483,13 @@ outbox.
   process until it is resumed, and a send that was in flight is not retried.
 - **Multi-run / same workspace** races on `git index.lock`. Run separate
   workspaces (or git worktrees) for concurrent runs.
+- **External concurrent rewrite of the same `.git/info/exclude` inode during
+  `autoloop_start` is unsupported.** Ledger isolation appends under `O_APPEND`
+  and activates one verified byte on the opened inode; an external process that
+  rewrites that same inode while start is installing the rule is outside the
+  contract (a residual theoretical TOCTOU, not an observed incident). Append-only
+  additions, inode replacement, partial writes, and ordinary failures remain
+  protected where the implementation and tests establish them.
 
 ## Related
 

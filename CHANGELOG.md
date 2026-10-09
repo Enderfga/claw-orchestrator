@@ -25,6 +25,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `rev-parse --show-prefix`; valid path components beginning with `..` remain
   accepted, while dirt outside the workspace still refuses.
   A non-repository workspace still starts; resume and recovery are unchanged.
+- **`autoloop_start` isolates each run ledger from the caller's Git index only
+  when a returned start can prove whole-ledger exclusion.** After a dirty-start
+  check accepts a Git workspace, and before `tasks/<runId>/` is created, the
+  start proves with a read-only `git check-ignore -z -v --non-matching
+  --no-index --stdin` query on the directory itself that `tasks/<runId>/` will
+  be positively ignored (an ephemeral temp excludes file is used only for that
+  preflight and removed afterward). An already-effective broader positive rule
+  is accepted without mutation; a negation is not. Otherwise the exact pattern
+  is installed in the path from `git rev-parse --git-path info/exclude`
+  (resolved against the workspace when relative) in two preservation-first
+  steps: `O_APPEND` writes a complete uniquely marked commented block, then one
+  positional byte activates only the verified rule inside that block.
+  `O_NOFOLLOW` is used throughout (`O_CREAT|O_EXCL` when absent),
+  opened inodes must match the prior `lstat`, and a post-check requires the exact
+  installed `info/exclude` pattern. There is no lock file and no rollback:
+  concurrent appends are never overwritten, and a short write can leave only an
+  inert comment, never a broad active prefix and never truncated, unlinked, or
+  rewritten caller bytes. External concurrent rewrite of the same `info/exclude`
+  inode during `autoloop_start` is unsupported (residual theoretical TOCTOU, not
+  an observed incident); append-only additions, inode replacement, partial
+  writes, and ordinary failures remain covered as above. Existing tracked files
+  beneath the target ledger are refused because ignore rules cannot hide index
+  entries. A committed negation, an LF/CR in the show-prefix / run id, or an
+  unsafe exclude path fails closed. Every repo-relative segment of the verified
+  show-prefix, `tasks`, and the run id is gitignore-escaped. Isolation runs only
+  on the initial accepted start (in-memory secrets; not in `spec.json`); resume
+  and committed-iteration recovery neither open nor mutate the exclude. A
+  refused dirty start does not mutate excludes; a non-repository workspace is
+  unchanged. Linked worktrees may share `info/exclude`.
 
 ## [7.10.0] - 2026-10-09
 

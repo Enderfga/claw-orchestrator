@@ -620,6 +620,473 @@ function readVerifiedGitShowPrefix(workspace: string): string | null {
   }
 }
 
+/** Escape gitignore metacharacters in a single path segment. */
+export function escapeGitExcludeSegment(segment: string): string {
+  return segment.replace(/[\\#!*?[\]\s]/g, (ch) => `\\${ch}`);
+}
+
+/**
+ * Root-anchored exclude pattern for one run ledger. Escapes every repo-relative
+ * segment of the verified show-prefix, then `tasks`, then the run id. Exact and
+ * run-scoped — not a broad `tasks/` rule.
+ */
+export function autoloopLedgerExcludePattern(prefix: string, runId: string): string {
+  const segments: string[] = [];
+  if (prefix.length > 0) {
+    const trimmed = prefix.endsWith('/') ? prefix.slice(0, -1) : prefix;
+    for (const seg of trimmed.split('/')) {
+      segments.push(escapeGitExcludeSegment(seg));
+    }
+  }
+  segments.push(escapeGitExcludeSegment('tasks'));
+  segments.push(escapeGitExcludeSegment(runId));
+  return `/${segments.join('/')}/`;
+}
+
+/** True when `line` appears as a full `\n`-delimited line in `buf` (bytes only). */
+function bufferHasExactExcludeLine(buf: Buffer, line: Buffer): boolean {
+  let start = 0;
+  for (let i = 0; i <= buf.length; i++) {
+    if (i === buf.length || buf[i] === 0x0a) {
+      let end = i;
+      if (end > start && buf[end - 1] === 0x0d) end--;
+      const slice = buf.subarray(start, end);
+      if (slice.length === line.length && slice.equals(line)) return true;
+      start = i + 1;
+    }
+  }
+  return false;
+}
+
+/**
+ * Resolve `git rev-parse --git-path info/exclude` without treating `.git` as a
+ * directory. Relative results are resolved against the workspace cwd. Linked
+ * worktrees may share the same exclude file as the main worktree.
+ */
+function resolveGitInfoExcludePath(workspace: string): string | null {
+  try {
+    const gitPath = execFileSync('git', ['-C', workspace, 'rev-parse', '--git-path', 'info/exclude'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, LC_ALL: 'C' },
+    }).replace(/\r?\n$/, '');
+    if (!gitPath) return null;
+    return path.isAbsolute(gitPath) ? gitPath : path.resolve(workspace, gitPath);
+  } catch (err) {
+    if (isNotGitRepositoryError(err)) return null;
+    throw err;
+  }
+}
+
+/**
+ * Parse one `git check-ignore -z -v --no-index` match for `probe`.
+ * Optional ephemeral `-c core.excludesFile=` is for read-only preflight only.
+ */
+interface GitIgnoreMatch {
+  source: string;
+  pattern: string;
+}
+
+function gitIgnoreMatch(
+  workspace: string,
+  probe: string,
+  opts?: { coreExcludesFile?: string; nonMatching?: boolean },
+): GitIgnoreMatch | null {
+  const args = ['-C', workspace];
+  if (opts?.coreExcludesFile !== undefined) {
+    args.push('-c', `core.excludesFile=${opts.coreExcludesFile}`);
+  }
+  args.push('check-ignore', '-z', '-v');
+  if (opts?.nonMatching) args.push('--non-matching');
+  args.push('--no-index', '--stdin');
+  let out: Buffer = Buffer.alloc(0);
+  try {
+    out = execFileSync('git', args, {
+      encoding: null,
+      input: Buffer.from(`${probe}\0`, 'utf8'),
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: { ...process.env, LC_ALL: 'C' },
+    }) as Buffer;
+  } catch (err) {
+    const stdout = (err as { stdout?: string | Buffer }).stdout;
+    if (Buffer.isBuffer(stdout)) out = Buffer.from(stdout);
+    else if (typeof stdout === 'string') out = Buffer.from(stdout, 'utf8');
+    else out = Buffer.alloc(0);
+  }
+  const fields = out.toString('utf8').split('\0');
+  // -z -v: source, lineno, pattern, path[, trailing empty]
+  if (fields.length < 4 || !fields[0] || !fields[2]) return null;
+  return { source: fields[0], pattern: fields[2] };
+}
+
+function gitIgnoreSourceMatches(workspace: string, actualSource: string, expectedSource: string): boolean {
+  let toplevel: string;
+  try {
+    toplevel = execFileSync('git', ['-C', workspace, 'rev-parse', '--show-toplevel'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, LC_ALL: 'C' },
+    }).replace(/\r?\n$/, '');
+  } catch {
+    return false;
+  }
+  const resolveOne = (p: string): string => {
+    // check-ignore sources are relative to the repo toplevel, not the workspace cwd.
+    const abs = path.isAbsolute(p) ? p : path.resolve(toplevel, p);
+    try {
+      return fs.realpathSync(abs);
+    } catch {
+      return path.resolve(abs);
+    }
+  };
+  try {
+    return resolveOne(actualSource) === resolveOne(expectedSource);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * True when check-ignore reports exactly `expectedSource` + `expectedPattern`
+ * for `tasks/<runId>/plan.md` (directory-level proof; not a file-sentinel list).
+ */
+function gitIgnoreMatchIsExact(
+  workspace: string,
+  runId: string,
+  expectedSource: string,
+  expectedPattern: string,
+  opts?: { coreExcludesFile?: string; nonMatching?: boolean },
+): boolean {
+  const probe = path.join('tasks', runId, 'plan.md');
+  const match = gitIgnoreMatch(workspace, probe, opts);
+  if (match === null || match.pattern.startsWith('!')) return false;
+  if (match.pattern !== expectedPattern) return false;
+  return gitIgnoreSourceMatches(workspace, match.source, expectedSource);
+}
+
+/**
+ * True when the ledger directory itself is positively ignored by the effective
+ * last rule. An already-existing broader positive rule is safe; a negation is
+ * not. Querying the directory (rather than a finite child sentinel) proves the
+ * rule applies to every artifact created beneath it.
+ */
+function gitLedgerDirectoryIsIgnored(
+  workspace: string,
+  runId: string,
+  opts?: { coreExcludesFile?: string; nonMatching?: boolean },
+): boolean {
+  const match = gitIgnoreMatch(workspace, `${path.join('tasks', runId)}/`, opts);
+  return match !== null && !match.pattern.startsWith('!');
+}
+
+function autoloopLedgerHasTrackedFiles(workspace: string, runId: string): boolean {
+  try {
+    const out = execFileSync('git', ['-C', workspace, 'ls-files', '-z', '--', path.join('tasks', runId)], {
+      encoding: null,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, LC_ALL: 'C' },
+    });
+    return out.length > 0;
+  } catch {
+    // A repository whose index cannot be inspected cannot support the promise.
+    return true;
+  }
+}
+
+/**
+ * Read-only proof that `pattern` would be the last match for `tasks/<runId>/plan.md`
+ * under real Git precedence (ephemeral temp excludes file + --non-matching).
+ * Never mutates info/exclude. Temp dir always removed in finally.
+ */
+function preflightAutoloopLedgerPattern(workspace: string, runId: string, pattern: string): boolean {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'clawo-autoloop-exclude-'));
+  try {
+    const excludesFile = path.join(tempDir, 'excludes');
+    fs.writeFileSync(excludesFile, `${pattern}\n`, 'utf8');
+    return gitLedgerDirectoryIsIgnored(workspace, runId, {
+      coreExcludesFile: excludesFile,
+      nonMatching: true,
+    });
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * After a dirty-start check accepts a Git workspace, append one exact
+ * root-anchored pattern for `tasks/<runId>/` to the repository-local exclude
+ * so the new ledger stays out of `git status` and `git add -A` when effective.
+ * Non-repository workspaces are a no-op. Preservation-first: a read-only
+ * preflight must show our exact directory pattern will be the last match for
+ * `tasks/<runId>/plan.md` before any create/append; writes use O_APPEND /
+ * O_NOFOLLOW (O_CREAT|O_EXCL when absent) and never truncate, unlink, or
+ * positionally rewrite caller bytes. Post-check requires the same exact
+ * info/exclude source+pattern; failure throws without rollback.
+ */
+function ensureAutoloopRunLedgerExcluded(workspace: string, runId: string): void {
+  let excludePath: string | null;
+  try {
+    excludePath = resolveGitInfoExcludePath(workspace);
+  } catch {
+    throw new Error('Autoloop could not resolve repository-local exclude for ledger isolation');
+  }
+  if (excludePath === null) {
+    try {
+      execFileSync('git', ['-C', workspace, 'rev-parse', '--is-inside-work-tree'], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: { ...process.env, LC_ALL: 'C' },
+      });
+    } catch (err) {
+      if (isNotGitRepositoryError(err)) return;
+      throw new Error('Autoloop could not resolve repository-local exclude for ledger isolation');
+    }
+    throw new Error('Autoloop could not resolve repository-local exclude for ledger isolation');
+  }
+
+  const prefix = readVerifiedGitShowPrefix(workspace);
+  if (prefix === null) {
+    throw new Error('Autoloop could not verify git show-prefix for ledger isolation');
+  }
+  if (/[\r\n]/.test(prefix) || /[\r\n]/.test(runId)) {
+    throw new Error('Autoloop cannot isolate a ledger path that spans multiple exclude lines');
+  }
+
+  const pattern = autoloopLedgerExcludePattern(prefix, runId);
+  const patternBytes = Buffer.from(pattern, 'utf8');
+  const patternLine = Buffer.from(`${pattern}\n`, 'utf8');
+  if (autoloopLedgerHasTrackedFiles(workspace, runId)) {
+    throw new Error('Autoloop cannot isolate a run ledger that already contains tracked files');
+  }
+  // Idempotent: already positively ignored — no open/write.
+  if (gitLedgerDirectoryIsIgnored(workspace, runId, { nonMatching: true })) {
+    return;
+  }
+  if (!preflightAutoloopLedgerPattern(workspace, runId, pattern)) {
+    throw new Error('Autoloop could not isolate the run ledger from git status');
+  }
+  installAutoloopExcludePattern(excludePath, workspace, runId, pattern, patternBytes, patternLine);
+}
+
+function closeExcludeFd(fd: number | undefined): void {
+  if (fd === undefined) return;
+  try {
+    fs.closeSync(fd);
+  } catch {
+    /* already closed */
+  }
+}
+
+function installAutoloopExcludePattern(
+  excludePath: string,
+  workspace: string,
+  runId: string,
+  expectedPattern: string,
+  patternBytes: Buffer,
+  patternLine: Buffer,
+): void {
+  const nofollow = typeof fs.constants.O_NOFOLLOW === 'number' ? fs.constants.O_NOFOLLOW : 0;
+  const baseFlags = fs.constants.O_RDWR | fs.constants.O_APPEND | nofollow;
+
+  let lst: fs.Stats | undefined;
+  try {
+    lst = fs.lstatSync(excludePath);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw new Error('Autoloop could not read repository-local exclude for ledger isolation');
+    }
+  }
+
+  if (lst !== undefined) {
+    if (lst.isSymbolicLink() || !lst.isFile()) {
+      throw new Error('Autoloop refuse unsafe repository-local exclude path for ledger isolation');
+    }
+  } else {
+    try {
+      fs.mkdirSync(path.dirname(excludePath), { recursive: true });
+    } catch {
+      throw new Error('Autoloop could not update repository-local exclude for ledger isolation');
+    }
+  }
+
+  let createdExcl = lst === undefined;
+  let openFlags = createdExcl ? baseFlags | fs.constants.O_CREAT | fs.constants.O_EXCL : baseFlags;
+
+  let fd: number | undefined;
+  try {
+    try {
+      fd = fs.openSync(excludePath, openFlags, 0o644);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (createdExcl && code === 'EEXIST') {
+        // Caller created the file in the missing-file race — re-read, never overwrite.
+        try {
+          lst = fs.lstatSync(excludePath);
+        } catch {
+          throw new Error('Autoloop could not read repository-local exclude for ledger isolation');
+        }
+        if (lst.isSymbolicLink() || !lst.isFile()) {
+          throw new Error('Autoloop refuse unsafe repository-local exclude path for ledger isolation');
+        }
+        createdExcl = false;
+        openFlags = baseFlags;
+        try {
+          fd = fs.openSync(excludePath, openFlags);
+        } catch (openErr) {
+          if ((openErr as NodeJS.ErrnoException).code === 'ELOOP') {
+            throw new Error('Autoloop refuse unsafe repository-local exclude path for ledger isolation');
+          }
+          throw new Error('Autoloop could not read repository-local exclude for ledger isolation');
+        }
+      } else if (code === 'ELOOP') {
+        throw new Error('Autoloop refuse unsafe repository-local exclude path for ledger isolation');
+      } else if (createdExcl) {
+        throw new Error('Autoloop could not exclusively create repository-local exclude for ledger isolation');
+      } else {
+        throw new Error('Autoloop could not read repository-local exclude for ledger isolation');
+      }
+    }
+
+    let st: fs.Stats;
+    try {
+      st = fs.fstatSync(fd);
+    } catch {
+      throw new Error('Autoloop could not read repository-local exclude for ledger isolation');
+    }
+    if (!st.isFile()) {
+      throw new Error('Autoloop refuse unsafe repository-local exclude path for ledger isolation');
+    }
+    if (lst !== undefined && (st.dev !== lst.dev || st.ino !== lst.ino)) {
+      throw new Error('Autoloop refuse unsafe repository-local exclude path for ledger isolation');
+    }
+    const ownedDev = st.dev;
+    const ownedIno = st.ino;
+
+    let existing: Buffer;
+    try {
+      existing = Buffer.alloc(st.size);
+      let readOff = 0;
+      while (readOff < st.size) {
+        const n = fs.readSync(fd, existing, readOff, st.size - readOff, readOff);
+        if (n <= 0) break;
+        readOff += n;
+      }
+    } catch {
+      throw new Error('Autoloop could not read repository-local exclude for ledger isolation');
+    }
+
+    if (!bufferHasExactExcludeLine(existing, patternBytes)) {
+      let live: fs.Stats;
+      try {
+        live = fs.fstatSync(fd);
+      } catch {
+        throw new Error('Autoloop could not update repository-local exclude for ledger isolation');
+      }
+      if (live.dev !== ownedDev || live.ino !== ownedIno || !live.isFile()) {
+        throw new Error('Autoloop refuse unsafe repository-local exclude path for ledger isolation');
+      }
+      // Append the prospective rule as a comment first. Every partial prefix is
+      // therefore inert. Only after the complete comment is present do we flip
+      // its first byte from '#' to '/', activating the exact rule with one
+      // positional byte write. The unconditional leading LF also terminates any
+      // concurrent append that raced after the size check without its own LF,
+      // preserving that caller's rule. A failed append/activation cannot leave
+      // `/tasks/` or another broader prefix active.
+      const commentLine = Buffer.from(patternLine);
+      commentLine[0] = 0x23; // '#tasks/<runId>/'
+      const markerLine = Buffer.from(`# clawo-pending:${randomUUID()}\n`, 'utf8');
+      const pendingBlock = Buffer.concat([markerLine, commentLine]);
+      const suffix = Buffer.concat([Buffer.from('\n', 'utf8'), pendingBlock]);
+      const searchStart = live.size;
+
+      let appended = 0;
+      try {
+        appended = fs.writeSync(fd, suffix, 0, suffix.length, null);
+      } catch {
+        throw new Error(
+          'Autoloop could not update repository-local exclude for ledger isolation; this attempt may have left an inert partial comment',
+        );
+      }
+      if (appended !== suffix.length) {
+        throw new Error(
+          'Autoloop could not update repository-local exclude for ledger isolation; this attempt left an inert partial comment',
+        );
+      }
+
+      let afterAppend: fs.Stats;
+      try {
+        afterAppend = fs.fstatSync(fd);
+      } catch {
+        throw new Error('Autoloop could not verify repository-local exclude after append');
+      }
+      if (afterAppend.dev !== ownedDev || afterAppend.ino !== ownedIno || afterAppend.size < searchStart) {
+        throw new Error('Autoloop refuse unsafe repository-local exclude path for ledger isolation');
+      }
+      const appendedRegion = Buffer.alloc(afterAppend.size - searchStart);
+      let regionRead = 0;
+      while (regionRead < appendedRegion.length) {
+        const n = fs.readSync(
+          fd,
+          appendedRegion,
+          regionRead,
+          appendedRegion.length - regionRead,
+          searchStart + regionRead,
+        );
+        if (n <= 0) break;
+        regionRead += n;
+      }
+      const first = appendedRegion.indexOf(pendingBlock);
+      const second = first < 0 ? -1 : appendedRegion.indexOf(pendingBlock, first + 1);
+      if (first < 0 || second >= 0) {
+        throw new Error('Autoloop could not identify its inert exclude comment for activation');
+      }
+      const commentOffset = searchStart + first + markerLine.length;
+
+      closeExcludeFd(fd);
+      fd = undefined;
+      let activationFd: number | undefined;
+      try {
+        activationFd = fs.openSync(excludePath, fs.constants.O_RDWR | nofollow);
+        const activationStat = fs.fstatSync(activationFd);
+        if (!activationStat.isFile() || activationStat.dev !== ownedDev || activationStat.ino !== ownedIno) {
+          throw new Error('Autoloop refuse unsafe repository-local exclude path for ledger isolation');
+        }
+        const verifyBlock = Buffer.alloc(pendingBlock.length);
+        fs.readSync(activationFd, verifyBlock, 0, verifyBlock.length, commentOffset - markerLine.length);
+        if (!verifyBlock.equals(pendingBlock)) {
+          throw new Error('Autoloop could not safely activate its exclude comment');
+        }
+        const activated = fs.writeSync(activationFd, Buffer.from('/'), 0, 1, commentOffset);
+        if (activated !== 1) {
+          throw new Error('Autoloop could not activate its exclude comment');
+        }
+      } finally {
+        closeExcludeFd(activationFd);
+      }
+    }
+
+    const assertPathIdentity = (): void => {
+      let cur: fs.Stats;
+      try {
+        cur = fs.lstatSync(excludePath);
+      } catch {
+        throw new Error('Autoloop refuse unsafe repository-local exclude path for ledger isolation');
+      }
+      if (cur.isSymbolicLink() || !cur.isFile() || cur.dev !== ownedDev || cur.ino !== ownedIno) {
+        throw new Error('Autoloop refuse unsafe repository-local exclude path for ledger isolation');
+      }
+    };
+
+    assertPathIdentity();
+    if (!gitIgnoreMatchIsExact(workspace, runId, excludePath, expectedPattern, { nonMatching: true })) {
+      throw new Error('Autoloop could not isolate the run ledger from git status');
+    }
+    assertPathIdentity();
+  } finally {
+    closeExcludeFd(fd);
+  }
+}
+
 /** Only this deterministic git failure means a non-repository workspace. */
 function isNotGitRepositoryError(err: unknown): boolean {
   if (!err || typeof err !== 'object') return false;
@@ -3449,6 +3916,12 @@ export class SessionManager {
     _resumeTimeoutMigration?: boolean;
     /** In-memory commit barrier for a prepared append-only migration record. */
     _commitTimeoutMigration?: () => void;
+    /**
+     * When true, append this run's ledger exclude before creating the ledger.
+     * Passed only via the in-memory secrets bag on the initial `autoloopStart`;
+     * never persisted in spec.json. Resume/recovery omit it.
+     */
+    isolateLedger?: boolean;
   }): Promise<{
     runner: AutoloopRunner;
     dispatcher: ClaudeAgentDispatcher;
@@ -3468,6 +3941,11 @@ export class SessionManager {
       }
     }
     const ledgerDir = path.join(opts.workspace, 'tasks', opts.runId);
+    // Isolate only on the initial accepted start (secrets.isolateLedger). Resume
+    // and committed-iteration recovery omit the flag and must not open exclude.
+    if (opts.isolateLedger === true) {
+      ensureAutoloopRunLedgerExcluded(opts.workspace, opts.runId);
+    }
     if (!fs.existsSync(ledgerDir)) {
       fs.mkdirSync(ledgerDir, { recursive: true });
     }
@@ -3743,7 +4221,13 @@ export class SessionManager {
         runId: opts.runId,
         cwd: opts.workspace,
         tag,
-        secrets: { plannerCustomEngine, coderCustomEngine, reviewerCustomEngine },
+        secrets: {
+          plannerCustomEngine,
+          coderCustomEngine,
+          reviewerCustomEngine,
+          // Start-only: not part of persistable config / spec.json.
+          isolateLedger: true,
+        },
       },
     );
     try {
