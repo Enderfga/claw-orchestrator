@@ -5,19 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [7.10.0] - 2026-10-09
-
-### Added
-
-- **Claude Haiku 5.5** is in the model registry, and the `haiku` alias now resolves to it, as
-  `--model haiku` does in Claude Code 2.1.295. It is priced at the tier for prompts up to 100K tokens
-  ($0.10 / $0.50 per Mtok); Claude sessions are billed at the cost Claude Code reports.
-- **Grok sessions support `sandboxMode: 'read-only'`.** They run inside grok's `--sandbox read-only`
-  profile, which the OS enforces for the whole process tree (Seatbelt on macOS, Landlock on Linux), so
-  a delegated subagent is held to it too. grok runs on unsandboxed when a profile cannot be applied;
-  a read-only session kills the process on that warning instead. A project under the temp directory,
-  which the profile leaves writable, and platforms without either sandbox are refused. `ultrareview`
-  accepts `grok` among its reviewer engines, since reviewers run read-only.
+## [Unreleased]
 
 ### Added
 
@@ -37,6 +25,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `rev-parse --show-prefix`; valid path components beginning with `..` remain
   accepted, while dirt outside the workspace still refuses.
   A non-repository workspace still starts; resume and recovery are unchanged.
+
+## [7.10.0] - 2026-10-09
+
+### Added
+
+- **Claude Haiku 5.5** is in the model registry, and the `haiku` alias now resolves to it, as
+  `--model haiku` does in Claude Code 2.1.295. It is priced at the tier for prompts up to 100K tokens
+  ($0.10 / $0.50 per Mtok); Claude sessions are billed at the cost Claude Code reports.
+- **Grok sessions support `sandboxMode: 'read-only'`.** They run inside grok's `--sandbox read-only`
+  profile, which the OS enforces for the whole process tree (Seatbelt on macOS, Landlock on Linux), so
+  a delegated subagent is held to it too. grok runs on unsandboxed when a profile cannot be applied;
+  a read-only session kills the process on that warning instead. A project under the temp directory,
+  which the profile leaves writable, and platforms without either sandbox are refused. `ultrareview`
+  accepts `grok` among its reviewer engines, since reviewers run read-only.
 
 ### Fixed
 
