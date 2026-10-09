@@ -1190,7 +1190,7 @@ describe('autoloopStart dirty worktree preflight', () => {
         encoding: 'utf8',
       }).trim(),
     );
-    // Seed so a failed effectiveness check must truncate this attempt's append only.
+    // Preservation-first: mixed-negation preflight must refuse before any exclude mutate.
     const seed = Buffer.from('# keep\n', 'utf8');
     fs.writeFileSync(excludePath, seed);
     fs.writeFileSync(path.join(workspace, '.gitignore'), `!/tasks/${runId}/\n`);
@@ -1206,10 +1206,10 @@ describe('autoloopStart dirty worktree preflight', () => {
     expect(fs.readFileSync(excludePath).equals(seed)).toBe(true);
   });
 
-  it('unlinks an exclude this attempt created when negation defeats isolation', async () => {
+  it('negation preflight refuses before creating a missing exclude file', async () => {
     const workspace = createTempRepo();
     repos.push(workspace);
-    const runId = 'negated-unlink';
+    const runId = 'negated-no-create';
     const excludePath = path.resolve(
       workspace,
       execFileSync('git', ['-C', workspace, 'rev-parse', '--git-path', 'info/exclude'], {
@@ -1220,12 +1220,13 @@ describe('autoloopStart dirty worktree preflight', () => {
     expect(fs.existsSync(excludePath)).toBe(false);
     fs.writeFileSync(path.join(workspace, '.gitignore'), `!/tasks/${runId}/\n`);
     execFileSync('git', ['add', '.gitignore'], { cwd: workspace, stdio: 'pipe' });
-    execFileSync('git', ['commit', '-m', 'gitignore negation unlink'], { cwd: workspace, stdio: 'pipe' });
+    execFileSync('git', ['commit', '-m', 'gitignore negation no create'], { cwd: workspace, stdio: 'pipe' });
 
     await expect(mgr.autoloopStart({ runId, workspace, plannerEngine: 'codex' })).rejects.toThrow(
       /could not isolate the run ledger/i,
     );
     expect(fs.existsSync(path.join(workspace, 'tasks', runId))).toBe(false);
+    // Preservation-first: never create-then-unlink; the exclude stays absent.
     expect(fs.existsSync(excludePath)).toBe(false);
   });
 

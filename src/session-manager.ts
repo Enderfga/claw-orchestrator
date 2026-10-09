@@ -713,6 +713,76 @@ function autoloopLedgerExclusionEffective(workspace: string, runId: string, expe
   return matchedPattern === expectedPattern;
 }
 
+/**
+ * True when `git check-ignore -z -v --no-index` reports exactly `expectedSource`
+ * (same resolved/canonical path) and `expectedPattern` for `probe`.
+ */
+function gitIgnoreMatchIsExact(
+  workspace: string,
+  probe: string,
+  expectedSource: string,
+  expectedPattern: string,
+  coreExcludesFile?: string,
+): boolean {
+  const args = ['-C', workspace];
+  if (coreExcludesFile !== undefined) {
+    args.push('-c', `core.excludesFile=${coreExcludesFile}`);
+  }
+  args.push('check-ignore', '-z', '-v', '--no-index', '--', probe);
+  let out: Buffer;
+  try {
+    out = execFileSync('git', args, {
+      encoding: null,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, LC_ALL: 'C' },
+    });
+  } catch {
+    return false;
+  }
+  const fields: string[] = [];
+  let start = 0;
+  for (let i = 0; i < out.length; i++) {
+    if (out[i] === 0) {
+      fields.push(out.subarray(start, i).toString('utf8'));
+      start = i + 1;
+      if (fields.length === 4) break;
+    }
+  }
+  if (fields.length < 4) return false;
+  const source = fields[0]!;
+  const pattern = fields[2]!;
+  if (pattern !== expectedPattern) return false;
+  const resolveOne = (p: string): string => {
+    const abs = path.isAbsolute(p) ? p : path.resolve(workspace, p);
+    try {
+      return fs.realpathSync(abs);
+    } catch {
+      return path.resolve(abs);
+    }
+  };
+  try {
+    return resolveOne(source) === resolveOne(expectedSource);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Prove `pattern` is an exact directory ignore under real Git precedence via a
+ * temporary `core.excludesFile` (cleaned in finally). Does not mutate info/exclude.
+ */
+function preflightAutoloopLedgerPattern(workspace: string, runId: string, pattern: string): boolean {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'clawo-autoloop-exclude-'));
+  try {
+    const excludesFile = path.join(tempDir, 'excludes');
+    fs.writeFileSync(excludesFile, `${pattern}\n`, 'utf8');
+    const probe = path.join('tasks', runId, '.clawo-ledger-probe');
+    return gitIgnoreMatchIsExact(workspace, probe, excludesFile, pattern, excludesFile);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+}
+
 function writeAllSync(fd: number, buf: Buffer, position: number): number {
   let written = 0;
   try {
@@ -729,90 +799,6 @@ function writeAllSync(fd: number, buf: Buffer, position: number): number {
     (err as { bytesWritten?: number }).bytesWritten = written;
     throw err;
   }
-}
-
-function fdStillOwned(fd: number, dev: number, ino: number): boolean {
-  try {
-    const st = fs.fstatSync(fd);
-    return st.dev === dev && st.ino === ino;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Remove only the suffix this attempt wrote at `preLength`, preserving any
- * later concurrent append. Operates on the open fd (owned inode), never by
- * path — so a replaced pathname or symlink is not truncated/unlinked.
- */
-function rollbackOwnedExcludeAppend(fd: number, dev: number, ino: number, preLength: number, suffix: Buffer): void {
-  if (!fdStillOwned(fd, dev, ino)) return;
-  const st = fs.fstatSync(fd);
-  if (st.size < preLength) return;
-  const ourEnd = preLength + suffix.length;
-  if (st.size < ourEnd) {
-    // Partial write of our suffix only — truncate back to the pre-append size.
-    fs.ftruncateSync(fd, preLength);
-    return;
-  }
-  const ours = Buffer.alloc(suffix.length);
-  fs.readSync(fd, ours, 0, suffix.length, preLength);
-  if (!ours.equals(suffix)) return;
-  if (st.size === ourEnd) {
-    fs.ftruncateSync(fd, preLength);
-    return;
-  }
-  // Concurrent writer appended after us: overwrite our region with the tail
-  // first, then truncate — so a failed restore cannot drop a tail that was
-  // only held in memory after an early truncate.
-  const tailLen = st.size - ourEnd;
-  const tail = Buffer.alloc(tailLen);
-  fs.readSync(fd, tail, 0, tailLen, ourEnd);
-  writeAllSync(fd, tail, preLength);
-  fs.ftruncateSync(fd, preLength + tailLen);
-}
-
-/**
- * Roll back a newly created exclude that starts with `prefix` (our pattern),
- * preserving any concurrent append after it. Never unlinks when another writer
- * has appended — surgically drop only our prefix via the open fd.
- */
-function rollbackOwnedExcludeCreate(fd: number, _excludePath: string, dev: number, ino: number, prefix: Buffer): void {
-  if (!fdStillOwned(fd, dev, ino)) return;
-  const st = fs.fstatSync(fd);
-  if (st.size < prefix.length) {
-    fs.ftruncateSync(fd, 0);
-    return;
-  }
-  const head = Buffer.alloc(prefix.length);
-  fs.readSync(fd, head, 0, prefix.length, 0);
-  if (!head.equals(prefix)) return;
-  if (st.size === prefix.length) {
-    fs.ftruncateSync(fd, 0);
-    return;
-  }
-  const tailLen = st.size - prefix.length;
-  const tail = Buffer.alloc(tailLen);
-  fs.readSync(fd, tail, 0, tailLen, prefix.length);
-  writeAllSync(fd, tail, 0);
-  fs.ftruncateSync(fd, tailLen);
-}
-
-/**
- * Unlink `excludePath` only when it is still our empty regular file inode.
- * Skip when size > 0 (concurrent append into the same inode) or identity changed.
- */
-function unlinkOwnedExcludeCreate(excludePath: string, dev: number, ino: number): void {
-  let lst: fs.Stats;
-  try {
-    lst = fs.lstatSync(excludePath);
-  } catch {
-    return;
-  }
-  if (lst.isSymbolicLink() || !lst.isFile()) return;
-  if (lst.dev !== dev || lst.ino !== ino) return;
-  if (lst.size !== 0) return;
-  fs.unlinkSync(excludePath);
 }
 
 /**
@@ -858,18 +844,10 @@ function ensureAutoloopRunLedgerExcluded(workspace: string, runId: string): void
   const pattern = autoloopLedgerExcludePattern(prefix, runId);
   const patternBytes = Buffer.from(pattern, 'utf8');
   const patternLine = Buffer.from(`${pattern}\n`, 'utf8');
-  const lockPath = `${excludePath}.clawo-autoloop.lock`;
-
-  const locked = withFileLock(
-    lockPath,
-    () => {
-      installAutoloopExcludePattern(excludePath!, workspace, runId, pattern, patternBytes, patternLine);
-    },
-    { createParent: true, waitMs: 2_000 },
-  );
-  if (!locked.ok) {
-    throw new Error('Autoloop could not lock repository-local exclude for ledger isolation');
+  if (!preflightAutoloopLedgerPattern(workspace, runId, pattern)) {
+    throw new Error('Autoloop could not isolate the run ledger from git status');
   }
+  installAutoloopExcludePattern(excludePath, workspace, runId, pattern, patternBytes, patternLine);
 }
 
 function closeExcludeFd(fd: number | undefined): void {
