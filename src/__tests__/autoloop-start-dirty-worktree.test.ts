@@ -1162,6 +1162,79 @@ describe('autoloopStart dirty worktree preflight', () => {
     expect(fs.readFileSync(excludePath).equals(snapshot)).toBe(true);
   });
 
+  it('fails closed when a committed .gitignore negation defeats ledger exclude', async () => {
+    const workspace = createTempRepo();
+    repos.push(workspace);
+    const runId = 'negated-ledger';
+    const excludePath = path.resolve(
+      workspace,
+      execFileSync('git', ['-C', workspace, 'rev-parse', '--git-path', 'info/exclude'], {
+        encoding: 'utf8',
+      }).trim(),
+    );
+    // Seed so a failed effectiveness check must truncate this attempt's append only.
+    const seed = Buffer.from('# keep\n', 'utf8');
+    fs.writeFileSync(excludePath, seed);
+    fs.writeFileSync(path.join(workspace, '.gitignore'), `!/tasks/${runId}/\n`);
+    execFileSync('git', ['add', '.gitignore'], { cwd: workspace, stdio: 'pipe' });
+    execFileSync('git', ['commit', '-m', 'gitignore negation'], { cwd: workspace, stdio: 'pipe' });
+    const preStart = fs.readFileSync(excludePath);
+
+    await expect(mgr.autoloopStart({ runId, workspace, plannerEngine: 'codex' })).rejects.toThrow(
+      /could not isolate the run ledger/i,
+    );
+    expect(fs.existsSync(path.join(workspace, 'tasks', runId))).toBe(false);
+    expect(fs.readFileSync(excludePath).equals(preStart)).toBe(true);
+    expect(fs.readFileSync(excludePath).equals(seed)).toBe(true);
+  });
+
+  it('unlinks an exclude this attempt created when negation defeats isolation', async () => {
+    const workspace = createTempRepo();
+    repos.push(workspace);
+    const runId = 'negated-unlink';
+    const excludePath = path.resolve(
+      workspace,
+      execFileSync('git', ['-C', workspace, 'rev-parse', '--git-path', 'info/exclude'], {
+        encoding: 'utf8',
+      }).trim(),
+    );
+    fs.rmSync(excludePath, { force: true });
+    expect(fs.existsSync(excludePath)).toBe(false);
+    fs.writeFileSync(path.join(workspace, '.gitignore'), `!/tasks/${runId}/\n`);
+    execFileSync('git', ['add', '.gitignore'], { cwd: workspace, stdio: 'pipe' });
+    execFileSync('git', ['commit', '-m', 'gitignore negation unlink'], { cwd: workspace, stdio: 'pipe' });
+
+    await expect(mgr.autoloopStart({ runId, workspace, plannerEngine: 'codex' })).rejects.toThrow(
+      /could not isolate the run ledger/i,
+    );
+    expect(fs.existsSync(path.join(workspace, 'tasks', runId))).toBe(false);
+    expect(fs.existsSync(excludePath)).toBe(false);
+  });
+
+  it('fails closed when show-prefix contains a real newline', async () => {
+    const { repoRoot, workspace } = createNestedWorkspaceRepo(['pkg\npart']);
+    repos.push(repoRoot);
+    const runId = 'ledger-isolate-lf';
+    const excludePath = path.resolve(
+      workspace,
+      execFileSync('git', ['-C', workspace, 'rev-parse', '--git-path', 'info/exclude'], {
+        encoding: 'utf8',
+      }).trim(),
+    );
+    const preStart = fs.readFileSync(excludePath);
+    const prefix = execFileSync('git', ['-C', workspace, 'rev-parse', '--show-prefix'], {
+      encoding: 'utf8',
+    }).replace(/\r?\n$/, '');
+    expect(prefix).toContain('\n');
+
+    await expect(mgr.autoloopStart({ runId, workspace, plannerEngine: 'codex' })).rejects.toThrow(
+      /multiple exclude lines/i,
+    );
+    expect(fs.existsSync(path.join(workspace, 'tasks', runId))).toBe(false);
+    expect(fs.readFileSync(excludePath).equals(preStart)).toBe(true);
+    expect(fs.readFileSync(excludePath).includes(Buffer.from('\\\n'))).toBe(false);
+  });
+
   it('does not mutate info/exclude when dirty start is refused', async () => {
     const workspace = createTempRepo();
     repos.push(workspace);

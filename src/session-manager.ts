@@ -685,7 +685,9 @@ function resolveGitInfoExcludePath(workspace: string): string | null {
  * workspaces are a no-op. Prefix or git-path failure inside a repository fails
  * closed without mutating the exclude. Pre-existing exclude bytes are never
  * decoded or rewritten — only appended to. An identical line is not duplicated;
- * lines are never removed.
+ * lines are never removed. After append (or when the line is already present),
+ * `git check-ignore` must ignore the prospective ledger path; otherwise this
+ * attempt's append is truncated/unlinked and the start fails closed.
  */
 function ensureAutoloopRunLedgerExcluded(workspace: string, runId: string): void {
   let excludePath: string | null;
@@ -713,6 +715,11 @@ function ensureAutoloopRunLedgerExcluded(workspace: string, runId: string): void
   if (prefix === null) {
     throw new Error('Autoloop could not verify git show-prefix for ledger isolation');
   }
+  // A real LF/CR in the prefix or run id cannot be one exclude line; escaping
+  // `\s` would inject a multiline pattern into info/exclude.
+  if (/[\r\n]/.test(prefix) || /[\r\n]/.test(runId)) {
+    throw new Error('Autoloop cannot isolate a ledger path that spans multiple exclude lines');
+  }
 
   const pattern = autoloopLedgerExcludePattern(prefix, runId);
   const patternBytes = Buffer.from(pattern, 'utf8');
@@ -727,26 +734,58 @@ function ensureAutoloopRunLedgerExcluded(workspace: string, runId: string): void
     }
   }
 
+  let created = false;
+  let appended = false;
+  let preAppendLength = 0;
+
   if (existing !== undefined) {
-    if (bufferHasExactExcludeLine(existing, patternBytes)) return;
-    const suffix =
-      existing.length > 0 && existing[existing.length - 1] !== 0x0a
-        ? Buffer.concat([Buffer.from('\n', 'utf8'), patternLine])
-        : patternLine;
+    if (!bufferHasExactExcludeLine(existing, patternBytes)) {
+      const suffix =
+        existing.length > 0 && existing[existing.length - 1] !== 0x0a
+          ? Buffer.concat([Buffer.from('\n', 'utf8'), patternLine])
+          : patternLine;
+      try {
+        fs.appendFileSync(excludePath, suffix);
+        appended = true;
+        preAppendLength = existing.length;
+      } catch {
+        throw new Error('Autoloop could not update repository-local exclude for ledger isolation');
+      }
+    }
+  } else {
     try {
-      fs.appendFileSync(excludePath, suffix);
+      fs.mkdirSync(path.dirname(excludePath), { recursive: true });
+      fs.writeFileSync(excludePath, patternLine);
+      created = true;
     } catch {
       throw new Error('Autoloop could not update repository-local exclude for ledger isolation');
     }
-    return;
   }
 
+  // Fail closed when a higher-precedence rule (e.g. committed `!/tasks/<id>/`)
+  // keeps the ledger visible to status / add -A.
+  let effective = false;
   try {
-    fs.mkdirSync(path.dirname(excludePath), { recursive: true });
-    fs.writeFileSync(excludePath, patternLine);
+    execFileSync('git', ['-C', workspace, 'check-ignore', '-q', path.join('tasks', runId, 'goal.json')], {
+      stdio: ['ignore', 'ignore', 'pipe'],
+      env: { ...process.env, LC_ALL: 'C' },
+    });
+    effective = true;
   } catch {
-    throw new Error('Autoloop could not update repository-local exclude for ledger isolation');
+    effective = false;
   }
+  if (effective) return;
+
+  try {
+    if (created) {
+      fs.unlinkSync(excludePath);
+    } else if (appended) {
+      fs.truncateSync(excludePath, preAppendLength);
+    }
+  } catch {
+    // Still fail closed; best-effort undo must not mask the isolation error.
+  }
+  throw new Error('Autoloop could not isolate the run ledger from git status');
 }
 
 /** Only this deterministic git failure means a non-repository workspace. */
