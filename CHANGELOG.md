@@ -26,20 +26,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   accepted, while dirt outside the workspace still refuses.
   A non-repository workspace still starts; resume and recovery are unchanged.
 - **`autoloop_start` isolates each run ledger from the caller's Git index only
-  when a returned start can prove it.** After a dirty-start check accepts a Git
-  workspace, and before `tasks/<runId>/` is created, the start appends one exact
-  root-anchored pattern for that run to the path from
+  when a returned start can prove whole-ledger exclusion.** After a dirty-start
+  check accepts a Git workspace, and before `tasks/<runId>/` is created, the
+  start appends one exact root-anchored pattern for that run to the path from
   `git rev-parse --git-path info/exclude` (resolved against the workspace when
-  relative), then requires `git check-ignore` to ignore the prospective ledger
-  path. If a committed negation or other higher-precedence rule keeps the ledger
-  visible, or if the show-prefix / run id contains LF or CR (which cannot form
-  one exclude line), the start throws before creating the ledger and undoes only
-  this attempt's append (truncate or unlink). A thrown start therefore never
-  claims status/`git add -A` isolation. Every repo-relative segment of the
-  verified show-prefix, `tasks`, and the run id is gitignore-escaped so
-  metacharacters in the prefix match only that ledger. The append is byte-wise
-  and does not decode or rewrite pre-existing exclude contents. Isolation runs
-  only on the initial accepted start (in-memory secrets; not persisted in
+  relative), under a lock beside that exclude file. Writes use verified owned
+  file identities: symlinks and non-regular paths are refused, missing files are
+  created with `O_EXCL`, and append/rollback operate on the open fd so a replaced
+  pathname or symlink target is never truncated or unlinked. Effectiveness
+  requires `git check-ignore` on prospective `goal.json`, `chat.jsonl`, and
+  `decisions.jsonl` — not a single sentinel. If a committed negation or other
+  higher-precedence rule keeps any probe visible, or if the show-prefix / run id
+  contains LF or CR, the start throws before creating the ledger and rolls back
+  only this attempt's owned bytes (partial writes included); rollback that cannot
+  prove ownership is skipped and a distinct cleanup failure is reported rather
+  than erasing another writer's suffix. A thrown start never claims
+  status/`git add -A` isolation. Every repo-relative segment of the verified
+  show-prefix, `tasks`, and the run id is gitignore-escaped. The append is
+  byte-wise and does not decode or rewrite pre-existing exclude contents.
+  Isolation runs only on the initial accepted start (in-memory secrets; not in
   `spec.json`); resume and committed-iteration recovery neither open nor mutate
   the exclude. A refused dirty start does not mutate excludes; a non-repository
   workspace is unchanged. Linked worktrees may share `info/exclude`.
