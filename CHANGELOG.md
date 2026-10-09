@@ -32,22 +32,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `git rev-parse --git-path info/exclude` (resolved against the workspace when
   relative), under a lock beside that exclude file. Writes use verified owned
   file identities: symlinks and non-regular paths are refused, missing files are
-  created with `O_EXCL`, and append/rollback operate on the open fd so a replaced
-  pathname or symlink target is never truncated or unlinked. Effectiveness
-  requires `git check-ignore` on prospective `goal.json`, `chat.jsonl`, and
-  `decisions.jsonl` — not a single sentinel. If a committed negation or other
-  higher-precedence rule keeps any probe visible, or if the show-prefix / run id
-  contains LF or CR, the start throws before creating the ledger and rolls back
-  only this attempt's owned bytes (partial writes included); rollback that cannot
-  prove ownership is skipped and a distinct cleanup failure is reported rather
-  than erasing another writer's suffix. A thrown start never claims
-  status/`git add -A` isolation. Every repo-relative segment of the verified
-  show-prefix, `tasks`, and the run id is gitignore-escaped. The append is
-  byte-wise and does not decode or rewrite pre-existing exclude contents.
-  Isolation runs only on the initial accepted start (in-memory secrets; not in
-  `spec.json`); resume and committed-iteration recovery neither open nor mutate
-  the exclude. A refused dirty start does not mutate excludes; a non-repository
-  workspace is unchanged. Linked worktrees may share `info/exclude`.
+  created with `O_EXCL`, opened inodes must match the prior `lstat`, appends
+  re-`fstat` immediately before the positional write so a concurrent append is
+  not overwritten, and rollback operates on the open fd (overwrite-then-truncate
+  for concurrent tails; create cleanup never unlinks when another writer has
+  appended). Effectiveness is a directory-level Git proof: `git check-ignore -v`
+  on a non-sentinel probe (`plan.md`) must report our exact directory pattern as
+  the last matching rule — not a finite file-sentinel list. If a committed
+  negation or other higher-precedence rule keeps that proof from holding, or if
+  the show-prefix / run id contains LF or CR, the start throws before creating
+  the ledger and rolls back only this attempt's owned bytes (partial writes
+  included); rollback that cannot prove ownership is skipped and a distinct
+  cleanup failure is reported rather than erasing another writer's suffix. A
+  thrown start never claims status/`git add -A` isolation. Every repo-relative
+  segment of the verified show-prefix, `tasks`, and the run id is
+  gitignore-escaped. The append is byte-wise and does not decode or rewrite
+  pre-existing exclude contents. Isolation runs only on the initial accepted
+  start (in-memory secrets; not in `spec.json`); resume and committed-iteration
+  recovery neither open nor mutate the exclude. A refused dirty start does not
+  mutate excludes; a non-repository workspace is unchanged. Linked worktrees may
+  share `info/exclude`.
 
 ## [7.10.0] - 2026-10-09
 

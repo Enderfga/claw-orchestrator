@@ -679,30 +679,38 @@ function resolveGitInfoExcludePath(workspace: string): string | null {
 }
 
 /**
- * Prospective ledger paths that must all be ignored before mkdir. Checking only
- * `goal.json` is insufficient when a committed rule ignores that file alone.
+ * True when real Git ignore semantics ignore a path under the run ledger
+ * because of our exact directory pattern — not a finite file-sentinel list.
+ * `check-ignore -v` must report `expectedPattern` as the last matching rule
+ * for a non-sentinel probe (`plan.md`); a per-file ignore of the old sentinels
+ * alone cannot satisfy this.
  */
-function autoloopLedgerExclusionProbes(runId: string): string[] {
-  return [
-    path.join('tasks', runId, 'goal.json'),
-    path.join('tasks', runId, 'chat.jsonl'),
-    path.join('tasks', runId, 'decisions.jsonl'),
-  ];
-}
-
-/** True when git check-ignore accepts every prospective ledger probe path. */
-function autoloopLedgerExclusionEffective(workspace: string, runId: string): boolean {
-  for (const probe of autoloopLedgerExclusionProbes(runId)) {
-    try {
-      execFileSync('git', ['-C', workspace, 'check-ignore', '-q', probe], {
-        stdio: ['ignore', 'ignore', 'pipe'],
-        env: { ...process.env, LC_ALL: 'C' },
-      });
-    } catch {
-      return false;
-    }
+function autoloopLedgerExclusionEffective(workspace: string, runId: string, expectedPattern: string): boolean {
+  const probe = path.join('tasks', runId, 'plan.md');
+  let out: string;
+  try {
+    out = execFileSync('git', ['-C', workspace, 'check-ignore', '-v', '--', probe], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, LC_ALL: 'C' },
+    });
+  } catch {
+    return false;
   }
-  return true;
+  const line = out
+    .replace(/\r?\n$/, '')
+    .split(/\r?\n/)
+    .pop();
+  if (!line) return false;
+  const tab = line.indexOf('\t');
+  if (tab < 0) return false;
+  // check-ignore -v: <source>:<lineno>:<pattern>\t<path>
+  const meta = line.slice(0, tab);
+  const first = meta.indexOf(':');
+  const second = first >= 0 ? meta.indexOf(':', first + 1) : -1;
+  if (second < 0) return false;
+  const matchedPattern = meta.slice(second + 1);
+  return matchedPattern === expectedPattern;
 }
 
 function writeAllSync(fd: number, buf: Buffer, position: number): number {
@@ -754,17 +762,45 @@ function rollbackOwnedExcludeAppend(fd: number, dev: number, ino: number, preLen
     fs.ftruncateSync(fd, preLength);
     return;
   }
-  // Concurrent writer appended after us: keep their bytes, drop only ours.
+  // Concurrent writer appended after us: overwrite our region with the tail
+  // first, then truncate — so a failed restore cannot drop a tail that was
+  // only held in memory after an early truncate.
   const tailLen = st.size - ourEnd;
   const tail = Buffer.alloc(tailLen);
   fs.readSync(fd, tail, 0, tailLen, ourEnd);
-  fs.ftruncateSync(fd, preLength);
   writeAllSync(fd, tail, preLength);
+  fs.ftruncateSync(fd, preLength + tailLen);
 }
 
 /**
- * Unlink `excludePath` only when it is still the regular file inode we created.
- * Never follows a replacement symlink or removes a caller replacement file.
+ * Roll back a newly created exclude that starts with `prefix` (our pattern),
+ * preserving any concurrent append after it. Never unlinks when another writer
+ * has appended — surgically drop only our prefix via the open fd.
+ */
+function rollbackOwnedExcludeCreate(fd: number, _excludePath: string, dev: number, ino: number, prefix: Buffer): void {
+  if (!fdStillOwned(fd, dev, ino)) return;
+  const st = fs.fstatSync(fd);
+  if (st.size < prefix.length) {
+    fs.ftruncateSync(fd, 0);
+    return;
+  }
+  const head = Buffer.alloc(prefix.length);
+  fs.readSync(fd, head, 0, prefix.length, 0);
+  if (!head.equals(prefix)) return;
+  if (st.size === prefix.length) {
+    fs.ftruncateSync(fd, 0);
+    return;
+  }
+  const tailLen = st.size - prefix.length;
+  const tail = Buffer.alloc(tailLen);
+  fs.readSync(fd, tail, 0, tailLen, prefix.length);
+  writeAllSync(fd, tail, 0);
+  fs.ftruncateSync(fd, tailLen);
+}
+
+/**
+ * Unlink `excludePath` only when it is still our empty regular file inode.
+ * Skip when size > 0 (concurrent append into the same inode) or identity changed.
  */
 function unlinkOwnedExcludeCreate(excludePath: string, dev: number, ino: number): void {
   let lst: fs.Stats;
@@ -775,6 +811,7 @@ function unlinkOwnedExcludeCreate(excludePath: string, dev: number, ino: number)
   }
   if (lst.isSymbolicLink() || !lst.isFile()) return;
   if (lst.dev !== dev || lst.ino !== ino) return;
+  if (lst.size !== 0) return;
   fs.unlinkSync(excludePath);
 }
 
@@ -826,7 +863,7 @@ function ensureAutoloopRunLedgerExcluded(workspace: string, runId: string): void
   const locked = withFileLock(
     lockPath,
     () => {
-      installAutoloopExcludePattern(excludePath!, workspace, runId, patternBytes, patternLine);
+      installAutoloopExcludePattern(excludePath!, workspace, runId, pattern, patternBytes, patternLine);
     },
     { createParent: true, waitMs: 2_000 },
   );
@@ -835,10 +872,20 @@ function ensureAutoloopRunLedgerExcluded(workspace: string, runId: string): void
   }
 }
 
+function closeExcludeFd(fd: number | undefined): void {
+  if (fd === undefined) return;
+  try {
+    fs.closeSync(fd);
+  } catch {
+    /* already closed */
+  }
+}
+
 function installAutoloopExcludePattern(
   excludePath: string,
   workspace: string,
   runId: string,
+  expectedPattern: string,
   patternBytes: Buffer,
   patternLine: Buffer,
 ): void {
@@ -871,7 +918,7 @@ function installAutoloopExcludePattern(
     } catch {
       throw new Error('Autoloop could not update repository-local exclude for ledger isolation');
     }
-    let fd: number;
+    let fd: number | undefined;
     try {
       fd = fs.openSync(excludePath, createFlags, 0o644);
     } catch (err) {
@@ -881,21 +928,155 @@ function installAutoloopExcludePattern(
       }
       throw new Error('Autoloop could not update repository-local exclude for ledger isolation');
     }
-    const st = fs.fstatSync(fd);
-    const ownedDev = st.dev;
-    const ownedIno = st.ino;
+    let ownedDev = 0;
+    let ownedIno = 0;
     let written = 0;
     try {
-      written = writeAllSync(fd, patternLine, 0);
+      let st: fs.Stats;
+      try {
+        st = fs.fstatSync(fd);
+      } catch {
+        closeExcludeFd(fd);
+        fd = undefined;
+        throw new Error('Autoloop could not update repository-local exclude for ledger isolation');
+      }
+      ownedDev = st.dev;
+      ownedIno = st.ino;
+      try {
+        written = writeAllSync(fd, patternLine, 0);
+      } catch (writeErr) {
+        written = (writeErr as { bytesWritten?: number }).bytesWritten ?? written;
+        let cleanupErr: unknown;
+        try {
+          if (written > 0) {
+            rollbackOwnedExcludeCreate(fd, excludePath, ownedDev, ownedIno, patternLine.subarray(0, written));
+          }
+          closeExcludeFd(fd);
+          fd = undefined;
+          unlinkOwnedExcludeCreate(excludePath, ownedDev, ownedIno);
+        } catch (err) {
+          cleanupErr = err;
+          closeExcludeFd(fd);
+          fd = undefined;
+        }
+        if (cleanupErr) {
+          throw new Error(
+            `Autoloop could not update repository-local exclude for ledger isolation; also failed to roll back exclude: ${(cleanupErr as Error).message}`,
+          );
+        }
+        throw new Error('Autoloop could not update repository-local exclude for ledger isolation');
+      }
+
+      if (autoloopLedgerExclusionEffective(workspace, runId, expectedPattern)) {
+        closeExcludeFd(fd);
+        fd = undefined;
+        return;
+      }
+
+      try {
+        rollbackOwnedExcludeCreate(fd, excludePath, ownedDev, ownedIno, patternLine);
+        closeExcludeFd(fd);
+        fd = undefined;
+        unlinkOwnedExcludeCreate(excludePath, ownedDev, ownedIno);
+      } catch (cleanupErr) {
+        closeExcludeFd(fd);
+        fd = undefined;
+        throw new Error(
+          `Autoloop could not isolate the run ledger from git status; also failed to roll back exclude: ${(cleanupErr as Error).message}`,
+        );
+      }
+      throw new Error('Autoloop could not isolate the run ledger from git status');
+    } finally {
+      closeExcludeFd(fd);
+    }
+  }
+
+  // --- existing regular file: fd append ---
+  let fd: number | undefined;
+  try {
+    fd = fs.openSync(excludePath, openFlags);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ELOOP') {
+      throw new Error('Autoloop refuse unsafe repository-local exclude path for ledger isolation');
+    }
+    throw new Error('Autoloop could not read repository-local exclude for ledger isolation');
+  }
+
+  try {
+    let st: fs.Stats;
+    try {
+      st = fs.fstatSync(fd);
+    } catch {
+      throw new Error('Autoloop could not read repository-local exclude for ledger isolation');
+    }
+    // Opened identity must match the prior lstat (catch replace-between-lstat-and-open).
+    if (!st.isFile() || st.dev !== lst!.dev || st.ino !== lst!.ino) {
+      throw new Error('Autoloop refuse unsafe repository-local exclude path for ledger isolation');
+    }
+    const ownedDev = st.dev;
+    const ownedIno = st.ino;
+
+    let existing: Buffer;
+    try {
+      existing = Buffer.alloc(st.size);
+      let readOff = 0;
+      while (readOff < st.size) {
+        const n = fs.readSync(fd, existing, readOff, st.size - readOff, readOff);
+        if (n <= 0) break;
+        readOff += n;
+      }
+    } catch {
+      throw new Error('Autoloop could not read repository-local exclude for ledger isolation');
+    }
+
+    if (bufferHasExactExcludeLine(existing, patternBytes)) {
+      if (autoloopLedgerExclusionEffective(workspace, runId, expectedPattern)) return;
+      throw new Error('Autoloop could not isolate the run ledger from git status');
+    }
+
+    // Re-fstat immediately before write so a concurrent append after our read
+    // is not overwritten by a stale positional write.
+    let live: fs.Stats;
+    try {
+      live = fs.fstatSync(fd);
+    } catch {
+      throw new Error('Autoloop could not update repository-local exclude for ledger isolation');
+    }
+    if (live.dev !== ownedDev || live.ino !== ownedIno || !live.isFile()) {
+      throw new Error('Autoloop refuse unsafe repository-local exclude path for ledger isolation');
+    }
+    let preAppendLength = live.size;
+    let needsLeadingNewline = false;
+    if (preAppendLength > 0) {
+      const last = Buffer.alloc(1);
+      try {
+        fs.readSync(fd, last, 0, 1, preAppendLength - 1);
+      } catch {
+        throw new Error('Autoloop could not update repository-local exclude for ledger isolation');
+      }
+      needsLeadingNewline = last[0] !== 0x0a;
+    } else if (existing.length > 0) {
+      needsLeadingNewline = existing[existing.length - 1] !== 0x0a;
+    }
+    // If size grew since the buffer read, prefer live end; if equal, use the
+    // already-known trailing-newline state from `existing` when sizes match.
+    if (live.size === existing.length) {
+      needsLeadingNewline = existing.length > 0 && existing[existing.length - 1] !== 0x0a;
+      preAppendLength = existing.length;
+    }
+    const suffix = needsLeadingNewline ? Buffer.concat([Buffer.from('\n', 'utf8'), patternLine]) : patternLine;
+
+    let written = 0;
+    try {
+      written = writeAllSync(fd, suffix, preAppendLength);
     } catch (writeErr) {
       written = (writeErr as { bytesWritten?: number }).bytesWritten ?? written;
       let cleanupErr: unknown;
       try {
-        if (written > 0 && fdStillOwned(fd, ownedDev, ownedIno)) {
-          fs.ftruncateSync(fd, 0);
+        if (written > 0) {
+          rollbackOwnedExcludeAppend(fd, ownedDev, ownedIno, preAppendLength, suffix.subarray(0, written));
         }
-        fs.closeSync(fd);
-        unlinkOwnedExcludeCreate(excludePath, ownedDev, ownedIno);
       } catch (err) {
         cleanupErr = err;
       }
@@ -907,101 +1088,19 @@ function installAutoloopExcludePattern(
       throw new Error('Autoloop could not update repository-local exclude for ledger isolation');
     }
 
-    if (autoloopLedgerExclusionEffective(workspace, runId)) {
-      fs.closeSync(fd);
-      return;
-    }
+    if (autoloopLedgerExclusionEffective(workspace, runId, expectedPattern)) return;
 
     try {
-      fs.closeSync(fd);
-      unlinkOwnedExcludeCreate(excludePath, ownedDev, ownedIno);
+      rollbackOwnedExcludeAppend(fd, ownedDev, ownedIno, preAppendLength, suffix);
     } catch (cleanupErr) {
       throw new Error(
         `Autoloop could not isolate the run ledger from git status; also failed to roll back exclude: ${(cleanupErr as Error).message}`,
       );
     }
     throw new Error('Autoloop could not isolate the run ledger from git status');
+  } finally {
+    closeExcludeFd(fd);
   }
-
-  // --- existing regular file: fd append ---
-  let fd: number;
-  try {
-    fd = fs.openSync(excludePath, openFlags);
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code;
-    if (code === 'ELOOP') {
-      throw new Error('Autoloop refuse unsafe repository-local exclude path for ledger isolation');
-    }
-    throw new Error('Autoloop could not read repository-local exclude for ledger isolation');
-  }
-  const st = fs.fstatSync(fd);
-  const ownedDev = st.dev;
-  const ownedIno = st.ino;
-  const existing = Buffer.alloc(st.size);
-  let readOff = 0;
-  while (readOff < st.size) {
-    const n = fs.readSync(fd, existing, readOff, st.size - readOff, readOff);
-    if (n <= 0) break;
-    readOff += n;
-  }
-
-  if (bufferHasExactExcludeLine(existing, patternBytes)) {
-    fs.closeSync(fd);
-    if (autoloopLedgerExclusionEffective(workspace, runId)) return;
-    throw new Error('Autoloop could not isolate the run ledger from git status');
-  }
-
-  const suffix =
-    existing.length > 0 && existing[existing.length - 1] !== 0x0a
-      ? Buffer.concat([Buffer.from('\n', 'utf8'), patternLine])
-      : patternLine;
-  const preAppendLength = existing.length;
-  let written = 0;
-  try {
-    written = writeAllSync(fd, suffix, preAppendLength);
-  } catch (writeErr) {
-    written = (writeErr as { bytesWritten?: number }).bytesWritten ?? written;
-    let cleanupErr: unknown;
-    try {
-      if (written > 0) {
-        rollbackOwnedExcludeAppend(fd, ownedDev, ownedIno, preAppendLength, suffix.subarray(0, written));
-      }
-      fs.closeSync(fd);
-    } catch (err) {
-      cleanupErr = err;
-      try {
-        fs.closeSync(fd);
-      } catch {
-        /* ignore */
-      }
-    }
-    if (cleanupErr) {
-      throw new Error(
-        `Autoloop could not update repository-local exclude for ledger isolation; also failed to roll back exclude: ${(cleanupErr as Error).message}`,
-      );
-    }
-    throw new Error('Autoloop could not update repository-local exclude for ledger isolation');
-  }
-
-  if (autoloopLedgerExclusionEffective(workspace, runId)) {
-    fs.closeSync(fd);
-    return;
-  }
-
-  try {
-    rollbackOwnedExcludeAppend(fd, ownedDev, ownedIno, preAppendLength, suffix);
-    fs.closeSync(fd);
-  } catch (cleanupErr) {
-    try {
-      fs.closeSync(fd);
-    } catch {
-      /* ignore */
-    }
-    throw new Error(
-      `Autoloop could not isolate the run ledger from git status; also failed to roll back exclude: ${(cleanupErr as Error).message}`,
-    );
-  }
-  throw new Error('Autoloop could not isolate the run ledger from git status');
 }
 
 /** Only this deterministic git failure means a non-repository workspace. */
