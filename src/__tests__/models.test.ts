@@ -53,6 +53,7 @@ describe('lookupModel', () => {
       'claude-sonnet-5-5',
       'claude-sonnet-5',
       'claude-sonnet-4-6',
+      'claude-haiku-5-5',
       'claude-haiku-4-5',
       'gpt-6-astra',
       'gpt-6-sol',
@@ -87,7 +88,7 @@ describe('resolveAlias', () => {
   it('resolves known aliases', () => {
     expect(resolveAlias('opus')).toBe('claude-opus-5-5');
     expect(resolveAlias('sonnet')).toBe('claude-sonnet-5-5');
-    expect(resolveAlias('haiku')).toBe('claude-haiku-4-5');
+    expect(resolveAlias('haiku')).toBe('claude-haiku-5-5');
     expect(resolveAlias('gemini-pro')).toBe('gemini-3.1-pro-preview');
     expect(resolveAlias('gemini-flash')).toBe('gemini-3-flash-preview');
   });
@@ -311,9 +312,18 @@ describe('claude-sonnet-5-5', () => {
     expect(getContextWindow('sonnet')).toBe(1_000_000);
   });
 
-  it('is priced from the published table, the same as Sonnet 5', () => {
-    expect(lookupModel('claude-sonnet-5-5')!.pricing).toEqual({ input: 2, output: 10, cached: 0.2 });
-    expect(lookupModel('claude-sonnet-5-5')!.pricing).toEqual(lookupModel('claude-sonnet-5')!.pricing);
+  // Same input and output as Sonnet 5, but a cache hit is 0.05× input on
+  // Sonnet 5.5 — the registry used to copy Sonnet 5's 0.1× and charge it double.
+  it('is priced from the published table', () => {
+    expect(lookupModel('claude-sonnet-5-5')!.pricing).toEqual({ input: 2, output: 10, cached: 0.1 });
+  });
+});
+
+describe('claude-haiku-5-5', () => {
+  it('takes the haiku alias, at the published base tier', () => {
+    expect(resolveAlias('haiku')).toBe('claude-haiku-5-5');
+    expect(lookupModel('claude-haiku-5-5')!.pricing).toEqual({ input: 0.1, output: 0.5, cached: 0.01 });
+    expect(getContextWindow('claude-haiku-5-5')).toBe(1_000_000);
   });
 });
 

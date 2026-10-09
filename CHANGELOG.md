@@ -7,7 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Claude Haiku 5.5** is in the model registry, and the `haiku` alias now resolves to it, as
+  `--model haiku` does in Claude Code 2.1.295. It is priced at the tier for prompts up to 100K tokens
+  ($0.10 / $0.50 per Mtok); Claude sessions are billed at the cost Claude Code reports.
+
 ### Fixed
+
+- **Claude Sonnet 5.5's cached input price is $0.10 per Mtok**, not $0.20: a cache hit on Sonnet 5.5
+  is 0.05× the input price.
 
 - **Resume of a committed Coder iteration with no Reviewer verdict starts and
   sends only the Reviewer.** It persists `verdict.json` and does not create or
@@ -16,13 +25,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `spawn_subagents` still starts Coder and Reviewer; a resume with no open
   iteration still starts only the Planner.
 
+### Changed
+
+- Tested with Claude Code 2.1.295, Codex 0.162.0, agy 1.3.2 and grok 1.0.50.
+
 ## [7.9.0] - 2026-10-07
 
 ### Added
 
 - **`clawo solve` and `clawo fanout`.** The built-in `solve` and `fanout` workflows can now be
   started from a terminal, not only through MCP or the SDK. `clawo solve "<task>" --engine codex
-  --check "npm test"` runs triage → implement → verify → repair until the checks pass;
+--check "npm test"` runs triage → implement → verify → repair until the checks pass;
   `clawo fanout "<task>" --engines claude,codex,grok --synthesize` asks several engines at once.
   `--check` adds a command check the runtime runs itself, `--contract` takes a contract file, and
   `--wait` follows the run node by node and exits non-zero unless it completes.
