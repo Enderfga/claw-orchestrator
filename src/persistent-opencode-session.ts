@@ -33,7 +33,7 @@
  * ever wanted — verified against 1.17.15.)
  */
 
-import { killEngineTree, spawnEngine } from './engine-spawn.js';
+import { execEngine, killEngineTree, spawnEngine } from './engine-spawn.js';
 import * as readline from 'node:readline';
 
 import type { SessionConfig, SessionSendOptions, StreamEvent, TurnResult } from './types.js';
@@ -98,6 +98,45 @@ interface TurnState {
   gotUsage: boolean;
 }
 
+// ─── OpenCode 2 ─────────────────────────────────────────────────────────────
+
+/**
+ * What `opencode --version` says, once per binary per process. `undefined`
+ * when it could not be read — a check that cannot run blocks nothing.
+ */
+const versionCache = new Map<string, Promise<string | undefined>>();
+
+function opencodeVersion(bin: string): Promise<string | undefined> {
+  let v = versionCache.get(bin);
+  if (!v) {
+    v = execEngine(bin, ['--version'], { timeout: 15_000 }).then(
+      (r) => `${r.stdout}${r.stderr}`.trim() || undefined,
+      () => undefined,
+    );
+    versionCache.set(bin, v);
+  }
+  return v;
+}
+
+/**
+ * OpenCode 2 — `opencode upgrade --major`, beta-only builds versioned
+ * `0.0.0-beta-N` (as of 2026-10-11) — keeps `run --format json` but breaks this
+ * wrapper three ways, each measured on 0.0.0-beta-17823:
+ *   - `--variant` is gone (effort moved into `provider/model#variant`), so any
+ *     session with an effort level fails every turn;
+ *   - no `step_finish` event, so a turn reports no tokens and no cost;
+ *   - the read-only agent could not be verified: with it, OpenCode's free
+ *     tier answers 403 ("can only be used from within OpenCode").
+ * Refusing up front is the honest answer until a stable V2 is wired and
+ * measured; running it would silently drop effort, cost, and a read-only label.
+ */
+export function isOpencodeV2(version: string | undefined): boolean {
+  if (!version) return false;
+  if (/\b0\.0\.0-(beta|next|dev)/.test(version) || /\bopencode2\b/.test(version)) return true;
+  const m = version.match(/\b(\d+)\.\d+\.\d+/);
+  return !!m && Number(m[1]) >= 2;
+}
+
 // ─── PersistentOpencodeSession ──────────────────────────────────────────────
 
 export class PersistentOpencodeSession extends BaseOneShotSession {
@@ -124,6 +163,17 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
 
   protected override _continuesConversation(): boolean {
     return !!this.opencodeSessionId;
+  }
+
+  override async start(): Promise<this> {
+    const version = await opencodeVersion(this.engineBin);
+    if (isOpencodeV2(version)) {
+      throw new Error(
+        `OpenCode 2 (${version}) is not supported yet: it drops the per-turn usage events and the --variant flag ` +
+          'this engine relies on, and its read-only agent is unverified. claw-orchestrator is tested with OpenCode 1.x.',
+      );
+    }
+    return super.start();
   }
 
   constructor(config: SessionConfig, opencodeBin?: string) {

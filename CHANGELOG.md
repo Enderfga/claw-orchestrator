@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **OpenCode 2 is refused at session start**, with the reason. `opencode upgrade --major` installs a
+  beta whose `run --format json` reports no tokens or cost and has no `--variant` flag, and on which
+  the read-only agent could not be verified; a session would have dropped all three without saying
+  so. OpenCode 1.x runs as before, and so does a session whose `opencode --version` cannot be read.
+- Tested with Claude Code 2.1.296, Codex 0.162.1 and OpenCode 1.19.0.
+
 ### Added
 
 - **`autoloop_start` refuses a dirty Git worktree.** Tracked (staged or
