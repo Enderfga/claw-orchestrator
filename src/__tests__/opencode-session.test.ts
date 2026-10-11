@@ -13,12 +13,19 @@ import { Readable } from 'node:stream';
 
 // Mock child_process before importing the session
 const mockSpawn = vi.fn();
+// `opencode --version`, keyed by binary — the session checks it once at start.
+const versions: Record<string, string | Error> = {};
 vi.mock('../engine-spawn.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../engine-spawn.js')>()),
   spawnEngine: (...args: unknown[]) => mockSpawn(...args),
+  execEngine: async (bin: string) => {
+    const v = versions[bin] ?? '1.19.0';
+    if (v instanceof Error) throw v;
+    return { stdout: `${v}\n`, stderr: '' };
+  },
 }));
 
-const { PersistentOpencodeSession } = await import('../persistent-opencode-session.js');
+const { PersistentOpencodeSession, isOpencodeV2 } = await import('../persistent-opencode-session.js');
 
 // ─── Mock Process Helper ────────────────────────────────────────────────────
 
@@ -748,5 +755,30 @@ describe('PersistentOpencodeSession', () => {
       expect(logs.some((l) => l.includes('ANTHROPIC_API_KEY=***'))).toBe(true);
       expect(logs.some((l) => l.includes('sk-abcdef'))).toBe(false);
     });
+  });
+});
+
+describe('OpenCode 2', () => {
+  it('recognizes OpenCode 2 builds and nothing else', () => {
+    expect(isOpencodeV2('opencode2 v0.0.0-beta-17823')).toBe(true);
+    expect(isOpencodeV2('0.0.0-beta-19271')).toBe(true);
+    expect(isOpencodeV2('2.0.0')).toBe(true);
+    expect(isOpencodeV2('1.19.0')).toBe(false);
+    expect(isOpencodeV2('1.18.35')).toBe(false);
+    expect(isOpencodeV2(undefined)).toBe(false);
+  });
+
+  // On 0.0.0-beta-17823: no step_finish (no tokens or cost), no --variant, and
+  // the read-only agent unverifiable. Running it would drop all three silently.
+  it('refuses to start against OpenCode 2', async () => {
+    versions['opencode-v2-test'] = 'opencode2 v0.0.0-beta-17823';
+    const s = new PersistentOpencodeSession({ name: 't', cwd: '/tmp' }, 'opencode-v2-test');
+    await expect(s.start()).rejects.toThrow(/OpenCode 2 .*not supported yet/);
+  });
+
+  it('starts when the version cannot be read', async () => {
+    versions['opencode-noversion-test'] = new Error('spawn ENOENT');
+    const s = new PersistentOpencodeSession({ name: 't', cwd: '/tmp' }, 'opencode-noversion-test');
+    await expect(s.start()).resolves.toBe(s);
   });
 });

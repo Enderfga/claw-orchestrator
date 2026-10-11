@@ -5,7 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [7.11.0] - 2026-10-11
+
+### Changed
+
+- **OpenCode 2 is refused at session start**, with the reason. `opencode upgrade --major` installs a
+  beta whose `run --format json` reports no tokens or cost and has no `--variant` flag, and on which
+  the read-only agent could not be verified; a session would have dropped all three without saying
+  so. OpenCode 1.x runs as before, and so does a session whose `opencode --version` cannot be read.
+- Tested with Claude Code 2.1.296, Codex 0.162.1 and OpenCode 1.19.0.
 
 ### Added
 
