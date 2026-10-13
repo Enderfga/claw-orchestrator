@@ -2508,6 +2508,8 @@ export class SessionManager {
       anthropicApiKey: process.env.ANTHROPIC_API_KEY,
       openaiApiKey: process.env.OPENAI_API_KEY,
       geminiApiKey: process.env.GEMINI_API_KEY,
+      minimaxApiKey: process.env.MINIMAX_API_KEY,
+      minimaxBaseUrl: process.env.MINIMAX_BASE_URL,
       gatewayUrl,
       gatewayKey,
     });

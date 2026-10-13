@@ -114,6 +114,8 @@ export interface ProxyEnv {
   anthropicApiKey?: string;
   openaiApiKey?: string;
   geminiApiKey?: string;
+  minimaxApiKey?: string;
+  minimaxBaseUrl?: string;
   gatewayUrl?: string;
   gatewayKey?: string;
 }
@@ -201,6 +203,9 @@ export function createProxyHandler(config: ProxyConfig | undefined, env: ProxyEn
       if (provider === 'google') {
         apiUrl = 'https://generativelanguage.googleapis.com/v1beta/chat/completions';
         apiKey = env.geminiApiKey || '';
+      } else if (provider === 'minimax') {
+        apiUrl = `${env.minimaxBaseUrl || 'https://api.minimax.io/v1'}/chat/completions`;
+        apiKey = env.minimaxApiKey || '';
       } else {
         apiUrl = 'https://api.openai.com/v1/chat/completions';
         apiKey = env.openaiApiKey || '';

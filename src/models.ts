@@ -9,7 +9,7 @@ import type { EngineType } from './types.js';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
-export type ProviderName = 'anthropic' | 'openai' | 'google' | 'cursor' | 'xai' | 'custom';
+export type ProviderName = 'anthropic' | 'openai' | 'google' | 'minimax' | 'cursor' | 'xai' | 'custom';
 
 export interface ModelPricing {
   input: number; // per 1M tokens
@@ -37,6 +37,22 @@ export interface ModelDef {
 // ─── Model Definitions ───────────────────────────────────────────────────────
 
 const MODELS: ModelDef[] = [
+  // MiniMax OpenAI-compatible models (global endpoint; callers may override the
+  // base URL to use the regional CN endpoint).
+  {
+    id: 'MiniMax-M3',
+    engine: 'codex',
+    provider: 'minimax',
+    pricing: { input: 0.6, output: 2.4, cached: 0.12 },
+    contextWindow: 1_000_000,
+  },
+  {
+    id: 'MiniMax-M2.7',
+    engine: 'codex',
+    provider: 'minimax',
+    pricing: { input: 0.3, output: 1.2, cached: 0.06 },
+    contextWindow: 204_800,
+  },
   // ── Anthropic ──────────────────────────────────────────────────────────
   // The Fable tier sits above Opus: $10/$50 per Mtok and a full 1M-token
   // context at standard pricing (no long-context surcharge). Mythos is the same
@@ -615,6 +631,7 @@ export function resolveProvider(model: string): { provider: ProviderName; apiMod
     'openai-codex/',
     'gemini/',
     'google/',
+    'minimax/',
     'agy/',
     'cursor/',
     'grok/',
@@ -631,6 +648,7 @@ export function resolveProvider(model: string): { provider: ProviderName; apiMod
 
   // Pattern fallback
   const lower = clean.toLowerCase();
+  if (lower.startsWith('minimax-')) return { provider: 'minimax', apiModel: clean };
   if (
     lower.includes('claude') ||
     lower.includes('opus') ||
