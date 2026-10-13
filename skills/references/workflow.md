@@ -145,7 +145,7 @@ is unrecoverable and reads back as "not found".
 | `human_gate` | Parks the run until a person answers                                                      |
 | `router`     | Picks the next node from declarative conditions; a backwards route is the loop            |
 | `subflow`    | Runs another workflow as a step and adopts its verdict                                    |
-| `autoloop`   | A long-lived Planner / Coder / Reviewer loop; its executor is injected                    |
+| `autoloop`   | A long-lived Planner / Coder / Reviewer loop; its executor is injected. On the node's first visit (`visits === 1`) the shared fresh-start boundary applies (dirty-worktree refusal + run-local `tasks/<config.runId>/.gitignore`); resume and later visits skip it. |
 | `ultraapp_*` | UltraApp's synth and deploy stages; their executors are injected too                      |
 
 Every node takes `retry: { max, backoffMs }`, `timeoutMs`, and

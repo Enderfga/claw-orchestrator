@@ -90,7 +90,7 @@ failing with "Session not found".
 ## UX flow
 
 ```
-1. autoloop_start { run_id, workspace }       → Planner session ready (refuses if the workspace Git tree already has tracked, staged, untracked, or submodule changes — including when repository status configuration hides them, `status.showUntrackedFiles=no`, or the porcelain listing is too large to buffer; unexpected `git status` failures also refuse; untracked (`??`) or index-clean worktree modifications (` M`) under `tasks/<id>/` with a regular `tasks/<id>/goal.json` are ignored so a second start can proceed after a committed ledger is appended, including when workspace is a nested repo subdirectory after stripping a verified `show-prefix`; dirt outside the workspace still refuses; ignored paths and non-repo workspaces still start)
+1. autoloop_start { run_id, workspace }       → Planner session ready (refuses if the workspace Git tree already has tracked, staged, untracked, or submodule changes — including when repository status configuration hides them, `status.showUntrackedFiles=no`, or the porcelain listing is too large to buffer; unexpected `git status` failures also refuse; untracked (`??`) or index-clean worktree modifications (` M`) under `tasks/<id>/` with a regular `tasks/<id>/goal.json` are ignored so a second start can proceed after a committed ledger is appended, including when workspace is a nested repo subdirectory after stripping a verified `show-prefix`; dirt outside the workspace still refuses; ignored paths and non-repo workspaces still start). On a Git workspace, after that dirty check passes, start creates `tasks/<runId>/.gitignore` with `*` as the first ledger file (accepting an existing exact `*`, `*\n`, or `*\r\n` without overwrite), proves the ledger is ignored via `git check-ignore`, and refuses with one fixed generic error when the ledger is tracked, the ignore file is partial/deceptive, or `tasks`/`tasks/<runId>` is not a real in-workspace directory (e.g. a committed `tasks` symlink). Failed proofs and later start failures retain the run-local dirs/`.gitignore` (never deleted). Does not write `info/exclude` or any repository-wide ignore. The same fresh-start boundary runs on the first boot of a workflow `autoloop` node (`visits === 1`); `autoloopResume` / `workflowResume` and later visits skip it. Non-Git starts are unchanged.
 2. autoloop_chat { run_id, "<your goal>" }    → Planner reads workspace,
                                                 drafts plan.md + goal.json,
                                                 asks "ready to spawn?"
@@ -339,8 +339,9 @@ JSONL, one entry per line, ts-prefixed.
 
 ```
 <workspace>/tasks/<run_id>/
-├── plan.md              # Planner-authored, git-committed
-├── goal.json            # Planner-authored, git-committed
+├── .gitignore           # run-local `*`; first file on Git start; keeps the ledger out of status/add
+├── plan.md              # Planner-authored (workspace-root copies are what iters commit)
+├── goal.json            # Planner-authored (workspace-root copies are what iters commit)
 ├── push_log.jsonl       # every notify_user attempt + channel used
 ├── decisions.jsonl      # runner / dispatcher audit trail (see above)
 ├── chat.jsonl           # Planner-pane conversation, replayed by /chat_history
@@ -359,6 +360,11 @@ JSONL, one entry per line, ts-prefixed.
     ├── verdict.json       # Reviewer decision + audit notes (schema_version: 1)
     └── coder_summary.txt
 ```
+
+On a Git workspace, `autoloop_start` writes `.gitignore` before other ledger
+files and fails closed unless `git check-ignore` confirms the ledger is
+ignored. The run-local ignore is self-contained: it does not rely on
+`.git/info/exclude` or a root `.gitignore` entry for `tasks/`.
 
 The orchestrator git-commits each iter automatically. Coder must NOT call
 `git commit` itself — that confuses the diff log. **If `git commit` fails

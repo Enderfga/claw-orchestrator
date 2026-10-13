@@ -135,7 +135,7 @@ import { detectRepoLang } from './kernel/repo.js';
 import { RunKernel, runDir as kernelRunDir } from './kernel/engine.js';
 import { registerDefaultExecutors } from './kernel/nodes/index.js';
 import { autoloopStateFromRecord, makeAutoloopExecutor, type AutoloopHandle } from './kernel/nodes/autoloop.js';
-import { loadRun, readNodeOutput, type RunSummary } from './kernel/store.js';
+import { isValidRunId, loadRun, readNodeOutput, type RunSummary } from './kernel/store.js';
 import {
   LEGACY_NODE,
   joinFindings,
@@ -670,6 +670,164 @@ function porcelainHasDisallowedAutoloopDirt(workspace: string, porcelain: string
     if (x === ' ' && y === 'M' && isTrackedGitlink(workspace, filePath) !== false) return true;
   }
   return false;
+}
+
+/** Fixed generic refusal — no runId, path, file bytes, or git stderr. */
+const AUTOLOOP_LEDGER_ISOLATION_ERROR = 'Autoloop could not isolate the run ledger from Git';
+
+function refuseAutoloopLedgerIsolation(): never {
+  throw new Error(AUTOLOOP_LEDGER_ISOLATION_ERROR);
+}
+
+/** Ensure absPath is a real directory (not a symlink); mkdir non-recursively if missing. */
+function ensureRealAutoloopDir(absPath: string): void {
+  if (!fs.existsSync(absPath)) fs.mkdirSync(absPath);
+  let st: fs.Stats;
+  try {
+    st = fs.lstatSync(absPath);
+  } catch {
+    refuseAutoloopLedgerIsolation();
+  }
+  if (!st.isDirectory() || st.isSymbolicLink()) refuseAutoloopLedgerIsolation();
+}
+
+/**
+ * After dirty refusal: create `tasks/<runId>/.gitignore` (`*`) and prove via
+ * check-ignore. Never deletes ledger state. Invalid runIds skip (kernel rejects).
+ */
+function ensureAutoloopRunLedgerIgnored(workspace: string, runId: string): void {
+  if (!isValidRunId(runId)) return;
+  const relLedger = path.posix.join('tasks', runId);
+  const gitEnv = { ...process.env, LC_ALL: 'C' };
+  let tracked: string;
+  try {
+    tracked = execFileSync('git', ['-C', workspace, '--literal-pathspecs', 'ls-files', '-z', '--', relLedger], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: gitEnv,
+    });
+  } catch {
+    refuseAutoloopLedgerIsolation();
+  }
+  if (tracked.length > 0) refuseAutoloopLedgerIsolation();
+
+  const tasksAbs = path.join(workspace, 'tasks');
+  const ledgerAbs = path.join(tasksAbs, runId);
+  try {
+    ensureRealAutoloopDir(tasksAbs);
+    ensureRealAutoloopDir(ledgerAbs);
+    if (fs.realpathSync(ledgerAbs) !== path.join(fs.realpathSync(workspace), 'tasks', runId)) {
+      refuseAutoloopLedgerIsolation();
+    }
+  } catch (err) {
+    if (err instanceof Error && err.message === AUTOLOOP_LEDGER_ISOLATION_ERROR) throw err;
+    refuseAutoloopLedgerIsolation();
+  }
+
+  const ignoreAbs = path.join(ledgerAbs, '.gitignore');
+  try {
+    const fd = fs.openSync(ignoreAbs, 'wx');
+    try {
+      fs.writeFileSync(fd, '*\n');
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') refuseAutoloopLedgerIsolation();
+    try {
+      const st = fs.lstatSync(ignoreAbs);
+      if (!st.isFile() || st.isSymbolicLink()) refuseAutoloopLedgerIsolation();
+      const bytes = fs.readFileSync(ignoreAbs, 'utf8');
+      if (bytes !== '*' && bytes !== '*\n' && bytes !== '*\r\n') refuseAutoloopLedgerIsolation();
+    } catch (inner) {
+      if (inner instanceof Error && inner.message === AUTOLOOP_LEDGER_ISOLATION_ERROR) throw inner;
+      refuseAutoloopLedgerIsolation();
+    }
+  }
+
+  // check-ignore rejects --literal-pathspecs; valid runIds have no pathspec magic.
+  for (const probe of [
+    `${relLedger}/.gitignore`,
+    `${relLedger}/chat.jsonl`,
+    `${relLedger}/decisions.jsonl`,
+    `${relLedger}/iter/0/verdict.json`,
+    `${relLedger}/reviewer_sandbox/prior_verdict.json`,
+  ]) {
+    try {
+      execFileSync('git', ['-C', workspace, 'check-ignore', '-q', '--', probe], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: gitEnv,
+      });
+    } catch {
+      refuseAutoloopLedgerIsolation();
+    }
+  }
+}
+
+/**
+ * Fresh-start workspace boundary shared by `autoloopStart` and a fresh workflow
+ * `autoloop` boot: refuse a dirty Git worktree, then isolate the run ledger.
+ * `invalidRunId: 'defer'` skips isolation for invalid ids (direct start — the
+ * kernel rejects them). `'refuse'` fails closed with the fixed isolation error
+ * (fresh workflow path — config.runId is not the kernel run id).
+ */
+function applyAutoloopFreshStartBoundary(
+  workspace: string,
+  runId: string,
+  opts: { invalidRunId: 'defer' | 'refuse' },
+): void {
+  // Refuse a dirty git worktree before the run directory or Planner exists.
+  // --porcelain=v1 -z keeps paths literal (spaces/quotes). --untracked-files=all
+  // overrides status.showUntrackedFiles=no, while --ignore-submodules=none
+  // prevents repository config from hiding submodule dirt; do not pass
+  // --ignored. Only the deterministic not-a-git-repository error allows the
+  // start; every other status failure rejects. Do not raise maxBuffer:
+  // ENOBUFS or already-nonempty stdout means dirt. Untracked (??) or
+  // index-clean worktree mods
+  // (` M`) under tasks/<id>/ are ignored only when tasks/<id>/goal.json is a
+  // regular file — every other status (staged/rename/copy/delete/conflict/
+  // malformed) rejects.
+  // Nested workspaces: status paths are repo-root-relative; strip a verified
+  // `rev-parse --show-prefix` before the ledger check; paths outside the
+  // workspace still refuse.
+  const dirtyStartError = new Error('Autoloop workspace has uncommitted changes; commit or stash them before starting');
+  let porcelain = '';
+  let inGitRepository = false;
+  try {
+    porcelain = execFileSync(
+      'git',
+      ['-C', workspace, 'status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignore-submodules=none'],
+      {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: { ...process.env, LC_ALL: 'C' },
+      },
+    );
+    inGitRepository = true;
+  } catch (err) {
+    const e = err as { code?: string; stdout?: string | Buffer };
+    const partial =
+      typeof e.stdout === 'string' ? e.stdout : Buffer.isBuffer(e.stdout) ? e.stdout.toString('utf8') : '';
+    if (e.code === 'ENOBUFS' || partial.trim() !== '' || !isNotGitRepositoryError(err)) {
+      throw dirtyStartError;
+    }
+    porcelain = '';
+  }
+  if (porcelain.length > 0) {
+    const prefix = readVerifiedGitShowPrefix(workspace);
+    if (prefix === null || porcelainHasDisallowedAutoloopDirt(workspace, porcelain, prefix)) {
+      throw dirtyStartError;
+    }
+  }
+  // Run-local ledger isolation: tasks/<runId>/.gitignore (*) + check-ignore proof.
+  // Git workspaces only; skips invalid ids so kernel.start rejects them unchanged.
+  if (inGitRepository) {
+    if (!isValidRunId(runId)) {
+      if (opts.invalidRunId === 'refuse') refuseAutoloopLedgerIsolation();
+      return;
+    }
+    ensureAutoloopRunLedgerIgnored(workspace, runId);
+  }
 }
 
 /**
@@ -1437,13 +1595,18 @@ export class SessionManager {
       kernel.setExecutor(
         'autoloop',
         makeAutoloopExecutor({
-          boot: (config, secrets) =>
+          boot: (config, secrets, { freshStart }) =>
             this._bootAutoloop({
               ...(config as Parameters<SessionManager['_bootAutoloop']>[0]),
               // Custom-engine configs never reach the spec, so they come from
               // the run's in-memory secret bag — supplied at start, and
               // re-supplied by the caller on a resume.
               ...(secrets as Partial<Parameters<SessionManager['_bootAutoloop']>[0]>),
+              // Internal never-persisted marker LAST so spec.config / secrets
+              // cannot override the kernel visits===1 fresh-start signal.
+              // Always set (including false on resume) — omitting false left a
+              // `_freshStart: true` from config/secrets intact.
+              _freshStart: freshStart,
             }),
           ready: (key, value) => {
             const deferred = this._autoloopReady.get(key);
@@ -3449,6 +3612,8 @@ export class SessionManager {
     _resumeTimeoutMigration?: boolean;
     /** In-memory commit barrier for a prepared append-only migration record. */
     _commitTimeoutMigration?: () => void;
+    /** Internal fresh-boot marker from kernel visits===1. Never stored. */
+    _freshStart?: boolean;
   }): Promise<{
     runner: AutoloopRunner;
     dispatcher: ClaudeAgentDispatcher;
@@ -3468,6 +3633,9 @@ export class SessionManager {
       }
     }
     const ledgerDir = path.join(opts.workspace, 'tasks', opts.runId);
+    if (opts._freshStart === true) {
+      applyAutoloopFreshStartBoundary(opts.workspace, opts.runId, { invalidRunId: 'refuse' });
+    }
     if (!fs.existsSync(ledgerDir)) {
       fs.mkdirSync(ledgerDir, { recursive: true });
     }
@@ -3673,49 +3841,7 @@ export class SessionManager {
       }
     }
 
-    // Refuse a dirty git worktree before the run directory or Planner exists.
-    // --porcelain=v1 -z keeps paths literal (spaces/quotes). --untracked-files=all
-    // overrides status.showUntrackedFiles=no, while --ignore-submodules=none
-    // prevents repository config from hiding submodule dirt; do not pass
-    // --ignored. Only the deterministic not-a-git-repository error allows the
-    // start; every other status failure rejects. Do not raise maxBuffer:
-    // ENOBUFS or already-nonempty stdout means dirt. Untracked (??) or
-    // index-clean worktree mods
-    // (` M`) under tasks/<id>/ are ignored only when tasks/<id>/goal.json is a
-    // regular file — every other status (staged/rename/copy/delete/conflict/
-    // malformed) rejects.
-    // Nested workspaces: status paths are repo-root-relative; strip a verified
-    // `rev-parse --show-prefix` before the ledger check; paths outside the
-    // workspace still refuse.
-    const dirtyStartError = new Error(
-      'Autoloop workspace has uncommitted changes; commit or stash them before starting',
-    );
-    let porcelain = '';
-    try {
-      porcelain = execFileSync(
-        'git',
-        ['-C', opts.workspace, 'status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignore-submodules=none'],
-        {
-          encoding: 'utf8',
-          stdio: ['ignore', 'pipe', 'pipe'],
-          env: { ...process.env, LC_ALL: 'C' },
-        },
-      );
-    } catch (err) {
-      const e = err as { code?: string; stdout?: string | Buffer };
-      const partial =
-        typeof e.stdout === 'string' ? e.stdout : Buffer.isBuffer(e.stdout) ? e.stdout.toString('utf8') : '';
-      if (e.code === 'ENOBUFS' || partial.trim() !== '' || !isNotGitRepositoryError(err)) {
-        throw dirtyStartError;
-      }
-      porcelain = '';
-    }
-    if (porcelain.length > 0) {
-      const prefix = readVerifiedGitShowPrefix(opts.workspace);
-      if (prefix === null || porcelainHasDisallowedAutoloopDirt(opts.workspace, porcelain, prefix)) {
-        throw dirtyStartError;
-      }
-    }
+    applyAutoloopFreshStartBoundary(opts.workspace, opts.runId, { invalidRunId: 'defer' });
 
     const tag = `${opts.runId}:${randomUUID()}`;
     const ready = new Promise<{ plannerSession: string; state: AutoloopState }>((resolve, reject) => {
