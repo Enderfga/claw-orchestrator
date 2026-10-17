@@ -803,3 +803,873 @@ describe('autoloopStart dirty worktree preflight', () => {
     assertRejectedBeforeSideEffects(mgr, runId, thrown);
   });
 });
+
+/** Fixed generic refusal from run-local ledger isolation (no path/runId/stderr). */
+const LEDGER_ISOLATION_ERROR = 'Autoloop could not isolate the run ledger from Git';
+
+function assertLedgerNotIgnored(workspace: string, runId: string): void {
+  let ignored = false;
+  try {
+    execFileSync('git', ['-C', workspace, 'check-ignore', '-q', '--', `tasks/${runId}/chat.jsonl`], {
+      stdio: 'pipe',
+      env: { ...process.env, LC_ALL: 'C' },
+    });
+    ignored = true;
+  } catch {
+    ignored = false;
+  }
+  expect(ignored).toBe(false);
+}
+
+function porcelainUntrackedAll(cwd: string): string {
+  return execFileSync('git', ['-C', cwd, 'status', '--porcelain=v1', '--untracked-files=all'], {
+    encoding: 'utf8',
+    env: { ...process.env, LC_ALL: 'C' },
+  });
+}
+
+function addDryRun(cwd: string): string {
+  return execFileSync('git', ['-C', cwd, 'add', '-A', '--dry-run'], {
+    encoding: 'utf8',
+    env: { ...process.env, LC_ALL: 'C' },
+  });
+}
+
+function listDirSorted(dir: string): string[] {
+  return fs.readdirSync(dir).sort();
+}
+
+function snapshotTree(dir: string): Map<string, string> {
+  const out = new Map<string, string>();
+  const walk = (rel: string) => {
+    const abs = path.join(dir, rel);
+    const st = fs.lstatSync(abs);
+    if (st.isDirectory()) {
+      for (const name of fs.readdirSync(abs)) {
+        walk(rel ? `${rel}/${name}` : name);
+      }
+      return;
+    }
+    if (st.isSymbolicLink()) {
+      out.set(rel, `symlink:${fs.readlinkSync(abs)}`);
+      return;
+    }
+    out.set(rel, fs.readFileSync(abs, 'utf8'));
+  };
+  if (fs.existsSync(dir)) {
+    for (const name of fs.readdirSync(dir)) walk(name);
+  }
+  return out;
+}
+
+describe('run ledger: isolation via tasks/<runId>/.gitignore', () => {
+  let mgr: SessionManager;
+  const repos: string[] = [];
+
+  beforeEach(() => {
+    fs.rmSync(TEST_WF_DIR, { recursive: true, force: true });
+    fs.mkdirSync(TEST_WF_DIR, { recursive: true });
+    mgr = createManager();
+  });
+
+  afterEach(async () => {
+    await mgr.shutdown();
+    for (const dir of repos.splice(0)) {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('R1: clean start + chat leaves porcelain empty and add -A dry-run skips tasks/', async () => {
+    const workspace = createTempRepo();
+    repos.push(workspace);
+    const runId = 'ledger-r1';
+    assertLedgerNotIgnored(workspace, runId);
+    const beforeHead = headSha(workspace);
+
+    await mgr.autoloopStart({ runId, workspace, plannerEngine: 'codex' });
+    await mgr.autoloopChat(runId, 'hello ledger');
+
+    expect(fs.existsSync(path.join(workspace, 'tasks', runId, 'chat.jsonl'))).toBe(true);
+    expect(porcelainUntrackedAll(workspace).trim()).toBe('');
+    expect(addDryRun(workspace)).not.toMatch(/(^|\s)tasks\//);
+    expect(headSha(workspace)).toBe(beforeHead);
+  });
+
+  it('R2: second run id starts after first ledger wrote chat; both ignored; README unchanged', async () => {
+    const workspace = createTempRepo();
+    repos.push(workspace);
+    const readmePath = path.join(workspace, 'README.md');
+    const readmeBytes = fs.readFileSync(readmePath, 'utf8');
+    const runA = 'ledger-r2-a';
+    const runB = 'ledger-r2-b';
+    assertLedgerNotIgnored(workspace, runA);
+    assertLedgerNotIgnored(workspace, runB);
+
+    await mgr.autoloopStart({ runId: runA, workspace, plannerEngine: 'codex' });
+    await mgr.autoloopChat(runA, 'first run chat');
+    expect(fs.existsSync(path.join(workspace, 'tasks', runA, 'chat.jsonl'))).toBe(true);
+
+    const resultB = await mgr.autoloopStart({ runId: runB, workspace, plannerEngine: 'codex' });
+    expect(resultB.runId).toBe(runB);
+    await mgr.autoloopChat(runB, 'second run chat');
+
+    expect(porcelainUntrackedAll(workspace).trim()).toBe('');
+    expect(addDryRun(workspace)).not.toMatch(/(^|\s)tasks\//);
+    expect(fs.readFileSync(readmePath, 'utf8')).toBe(readmeBytes);
+  });
+
+  it('R3: committed tracked file under tasks/<id>/ refuses; no Planner; tracked bytes unchanged', async () => {
+    const workspace = createTempRepo();
+    repos.push(workspace);
+    const runId = 'ledger-r3';
+    const trackedPath = path.join(workspace, 'tasks', runId, 'keep.txt');
+    fs.mkdirSync(path.dirname(trackedPath), { recursive: true });
+    const trackedBytes = 'tracked keep\n';
+    fs.writeFileSync(trackedPath, trackedBytes);
+    execFileSync('git', ['add', 'tasks'], { cwd: workspace, stdio: 'pipe' });
+    execFileSync('git', ['commit', '-m', 'tracked ledger'], { cwd: workspace, stdio: 'pipe' });
+    expect(porcelain(workspace).trim()).toBe('');
+    assertLedgerNotIgnored(workspace, runId);
+
+    let thrown: unknown;
+    try {
+      await mgr.autoloopStart({ runId, workspace, plannerEngine: 'codex' });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(Error);
+    expect((thrown as Error).message).toBe(LEDGER_ISOLATION_ERROR);
+    expect(fs.existsSync(runDir(runId))).toBe(false);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((mgr as any).sessions.has(plannerSessionName(runId))).toBe(false);
+    expect(mgr.getAutoloop(runId)).toBeUndefined();
+    expect(fs.readFileSync(trackedPath, 'utf8')).toBe(trackedBytes);
+    expect(fs.existsSync(path.join(workspace, 'tasks', runId, '.gitignore'))).toBe(false);
+  });
+
+  it('R4: partial self-ignoring .gitignore (.gitignore\\n) refuses; bytes unchanged', async () => {
+    const workspace = createTempRepo();
+    repos.push(workspace);
+    const runId = 'ledger-r4';
+    const ignorePath = path.join(workspace, 'tasks', runId, '.gitignore');
+    fs.mkdirSync(path.dirname(ignorePath), { recursive: true });
+    const partialBytes = '.gitignore\n';
+    fs.writeFileSync(ignorePath, partialBytes);
+    expect(porcelainUntrackedAll(workspace).trim()).toBe('');
+    assertLedgerNotIgnored(workspace, runId);
+
+    let thrown: unknown;
+    try {
+      await mgr.autoloopStart({ runId, workspace, plannerEngine: 'codex' });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(Error);
+    expect((thrown as Error).message).toBe(LEDGER_ISOLATION_ERROR);
+    expect(fs.readFileSync(ignorePath, 'utf8')).toBe(partialBytes);
+    expect(fs.existsSync(runDir(runId))).toBe(false);
+    expect(mgr.getAutoloop(runId)).toBeUndefined();
+  });
+
+  it('R5: committed symlink tasks → outside dir refuses; outside listing/bytes unchanged', async () => {
+    const workspace = createTempRepo();
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'clawo-ledger-r5-outside-'));
+    repos.push(workspace, outside);
+    fs.writeFileSync(path.join(outside, 'sentinel.txt'), 'outside sentinel\n');
+    const beforeOutside = snapshotTree(outside);
+    const beforeListing = listDirSorted(outside);
+
+    const tasksLink = path.join(workspace, 'tasks');
+    fs.symlinkSync(outside, tasksLink);
+    execFileSync('git', ['add', 'tasks'], { cwd: workspace, stdio: 'pipe' });
+    execFileSync('git', ['commit', '-m', 'tasks symlink'], { cwd: workspace, stdio: 'pipe' });
+    expect(porcelain(workspace).trim()).toBe('');
+
+    const runId = 'ledger-r5';
+    let thrown: unknown;
+    try {
+      await mgr.autoloopStart({ runId, workspace, plannerEngine: 'codex' });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(Error);
+    expect((thrown as Error).message).toBe(LEDGER_ISOLATION_ERROR);
+    expect(listDirSorted(outside)).toEqual(beforeListing);
+    expect(snapshotTree(outside)).toEqual(beforeOutside);
+    expect(fs.existsSync(path.join(outside, runId))).toBe(false);
+    expect(fs.existsSync(path.join(outside, '.gitignore'))).toBe(false);
+    expect(fs.existsSync(path.join(outside, 'chat.jsonl'))).toBe(false);
+    expect(fs.existsSync(runDir(runId))).toBe(false);
+    expect(mgr.getAutoloop(runId)).toBeUndefined();
+  });
+
+  it('guard: dirty-tree refusal still fires and creates no ledger', async () => {
+    const workspace = createTempRepo();
+    repos.push(workspace);
+    fs.writeFileSync(path.join(workspace, 'README.md'), '# still dirty\n');
+    const runId = 'ledger-guard-dirty';
+    let thrown: unknown;
+    try {
+      await mgr.autoloopStart({ runId, workspace, plannerEngine: 'codex' });
+    } catch (err) {
+      thrown = err;
+    }
+    assertRejectedBeforeSideEffects(mgr, runId, thrown);
+    expect(fs.existsSync(path.join(workspace, 'tasks', runId))).toBe(false);
+  });
+
+  it('guard: non-Git start is unchanged', async () => {
+    const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'clawo-ledger-guard-norepo-'));
+    repos.push(workspace);
+    const runId = 'ledger-guard-norepo';
+    const result = await mgr.autoloopStart({ runId, workspace, plannerEngine: 'codex' });
+    expect(result.runId).toBe(runId);
+    expect(fs.existsSync(runDir(runId))).toBe(true);
+    expect(fs.existsSync(path.join(workspace, 'tasks', runId, '.gitignore'))).toBe(false);
+  });
+
+  it('guard: nested workspace start leaves ledger ignored', async () => {
+    const { repoRoot, workspace } = createNestedWorkspaceRepo();
+    repos.push(repoRoot);
+    const runId = 'ledger-guard-nested';
+    assertLedgerNotIgnored(workspace, runId);
+    await mgr.autoloopStart({ runId, workspace, plannerEngine: 'codex' });
+    await mgr.autoloopChat(runId, 'nested chat');
+    expect(porcelainUntrackedAll(workspace).trim()).toBe('');
+    expect(addDryRun(workspace)).not.toMatch(/tasks\//);
+  });
+
+  it('guard: linked git worktree start leaves ledger ignored', async () => {
+    const main = createTempRepo();
+    repos.push(main);
+    const worktree = path.join(os.tmpdir(), `clawo-ledger-wt-${Date.now()}`);
+    execFileSync('git', ['-C', main, 'worktree', 'add', worktree, 'HEAD'], { stdio: 'pipe' });
+    repos.push(worktree);
+    const runId = 'ledger-guard-worktree';
+    assertLedgerNotIgnored(worktree, runId);
+    await mgr.autoloopStart({ runId, workspace: worktree, plannerEngine: 'codex' });
+    await mgr.autoloopChat(runId, 'worktree chat');
+    expect(porcelainUntrackedAll(worktree).trim()).toBe('');
+    expect(addDryRun(worktree)).not.toMatch(/tasks\//);
+  });
+
+  it('guard: info/exclude, root .gitignore and core.excludesFile unchanged after start', async () => {
+    const workspace = createTempRepo();
+    repos.push(workspace);
+    const rootIgnore = path.join(workspace, '.gitignore');
+    fs.writeFileSync(rootIgnore, 'node_modules/\n');
+    execFileSync('git', ['add', '.gitignore'], { cwd: workspace, stdio: 'pipe' });
+    execFileSync('git', ['commit', '-m', 'root ignore'], { cwd: workspace, stdio: 'pipe' });
+    const excludePath = execFileSync('git', ['-C', workspace, 'rev-parse', '--git-path', 'info/exclude'], {
+      encoding: 'utf8',
+    }).trim();
+    const excludeAbs = path.isAbsolute(excludePath) ? excludePath : path.join(workspace, excludePath);
+    fs.mkdirSync(path.dirname(excludeAbs), { recursive: true });
+    const excludeBytes = '# keep exclude\n';
+    fs.writeFileSync(excludeAbs, excludeBytes);
+    const externalExcludes = fs.mkdtempSync(path.join(os.tmpdir(), 'clawo-excludes-file-'));
+    repos.push(externalExcludes);
+    const excludesFile = path.join(externalExcludes, 'excludes');
+    const excludesBytes = '*.tmp\n';
+    fs.writeFileSync(excludesFile, excludesBytes);
+    execFileSync('git', ['config', 'core.excludesFile', excludesFile], { cwd: workspace, stdio: 'pipe' });
+    const rootIgnoreBytes = fs.readFileSync(rootIgnore, 'utf8');
+    const runId = 'ledger-guard-shared-ignore';
+    await mgr.autoloopStart({ runId, workspace, plannerEngine: 'codex' });
+    expect(fs.readFileSync(excludeAbs, 'utf8')).toBe(excludeBytes);
+    expect(fs.readFileSync(rootIgnore, 'utf8')).toBe(rootIgnoreBytes);
+    expect(fs.readFileSync(excludesFile, 'utf8')).toBe(excludesBytes);
+    expect(
+      execFileSync('git', ['-C', workspace, 'config', '--get', 'core.excludesFile'], { encoding: 'utf8' }).trim(),
+    ).toBe(excludesFile);
+  });
+
+  it('guard: existing *, *\\n or *\\r\\n .gitignore is accepted and bytes preserved', async () => {
+    const workspace = createTempRepo();
+    repos.push(workspace);
+    const cases: Array<{ runId: string; bytes: string }> = [
+      { runId: 'ledger-guard-star', bytes: '*' },
+      { runId: 'ledger-guard-star-lf', bytes: '*\n' },
+      { runId: 'ledger-guard-star-crlf', bytes: '*\r\n' },
+    ];
+    for (const { runId, bytes } of cases) {
+      const ignorePath = path.join(workspace, 'tasks', runId, '.gitignore');
+      fs.mkdirSync(path.dirname(ignorePath), { recursive: true });
+      fs.writeFileSync(ignorePath, bytes);
+      await mgr.autoloopStart({ runId, workspace, plannerEngine: 'codex' });
+      expect(fs.readFileSync(ignorePath, 'utf8')).toBe(bytes);
+      await mgr.autoloopChat(runId, `chat ${runId}`);
+      expect(porcelainUntrackedAll(workspace).trim()).toBe('');
+    }
+  });
+
+  it('guard: same-id retry after Planner start failure keeps retained *\\n .gitignore', async () => {
+    const workspace = createTempRepo();
+    repos.push(workspace);
+    const runId = 'ledger-guard-retry';
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (mgr as any)._createSession = (): ISession => {
+      const mock = new MockSession();
+      mock.start = async () => {
+        throw new Error('planner startup failed');
+      };
+      return mock;
+    };
+    await expect(mgr.autoloopStart({ runId, workspace, plannerEngine: 'codex' })).rejects.toThrow(
+      'planner startup failed',
+    );
+    const ignorePath = path.join(workspace, 'tasks', runId, '.gitignore');
+    expect(fs.readFileSync(ignorePath, 'utf8')).toBe('*\n');
+    expect(fs.existsSync(runDir(runId))).toBe(false);
+
+    mgr = createManager();
+    await mgr.autoloopStart({ runId, workspace, plannerEngine: 'codex' });
+    expect(fs.readFileSync(ignorePath, 'utf8')).toBe('*\n');
+    expect(fs.existsSync(runDir(runId))).toBe(true);
+  });
+
+  it('guard: isolation error equals fixed constant with no runId, path or stderr', async () => {
+    const workspace = createTempRepo();
+    repos.push(workspace);
+    const runId = 'ledger-guard-err-msg';
+    const trackedPath = path.join(workspace, 'tasks', runId, 'keep.txt');
+    fs.mkdirSync(path.dirname(trackedPath), { recursive: true });
+    fs.writeFileSync(trackedPath, 'x\n');
+    execFileSync('git', ['add', 'tasks'], { cwd: workspace, stdio: 'pipe' });
+    execFileSync('git', ['commit', '-m', 'tracked'], { cwd: workspace, stdio: 'pipe' });
+
+    let thrown: unknown;
+    try {
+      await mgr.autoloopStart({ runId, workspace, plannerEngine: 'codex' });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(Error);
+    const msg = (thrown as Error).message;
+    expect(msg).toBe(LEDGER_ISOLATION_ERROR);
+    expect(msg).not.toContain(runId);
+    expect(msg).not.toContain(workspace);
+    expect(msg).not.toContain('keep.txt');
+    expect(msg).not.toMatch(/fatal:|error:/i);
+  });
+});
+
+describe('workflow autoloop node fresh-start boundary', () => {
+  let mgr: SessionManager;
+  const repos: string[] = [];
+
+  beforeEach(() => {
+    fs.rmSync(TEST_WF_DIR, { recursive: true, force: true });
+    fs.mkdirSync(TEST_WF_DIR, { recursive: true });
+    mgr = createManager();
+  });
+
+  afterEach(async () => {
+    await mgr.shutdown();
+    for (const dir of repos.splice(0)) {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  async function waitUntil(check: () => boolean, label: string, timeoutMs = 15_000): Promise<void> {
+    const t0 = Date.now();
+    while (Date.now() - t0 < timeoutMs) {
+      if (check()) return;
+      await new Promise((r) => setTimeout(r, 40));
+    }
+    throw new Error(`timeout: ${label}`);
+  }
+
+  function autoloopWorkflowSpec(
+    workspace: string,
+    ledgerId: string,
+    extra: { retry?: { max: number; backoffMs?: number }; configExtras?: Record<string, unknown> } = {},
+  ) {
+    return {
+      name: 'wf-autoloop-fresh',
+      cwd: workspace,
+      nodes: [
+        {
+          id: 'loop',
+          kind: 'autoloop' as const,
+          workspace,
+          ...(extra.retry ? { retry: extra.retry } : {}),
+          config: {
+            runId: ledgerId,
+            workspace,
+            plannerEngine: 'codex',
+            ...(extra.configExtras ?? {}),
+          },
+        },
+      ],
+    };
+  }
+
+  // W1 dirty: unstaged README + untracked-file variant
+  it('W1: dirty workflowStart fails with uncommitted changes; no Planner, no tasks/, tree unchanged', async () => {
+    const workspace = createTempRepo();
+    repos.push(workspace);
+    const readmePath = path.join(workspace, 'README.md');
+    const beforeHead = headSha(workspace);
+    const beforeReadme = fs.readFileSync(readmePath, 'utf8');
+    const beforePorcelain = porcelainUntrackedAll(workspace);
+
+    // Variant A: unstaged tracked dirt
+    fs.writeFileSync(readmePath, '# dirty unstaged\n');
+    const workflowRunId = 'wf-w1-unstaged';
+    const ledgerId = 'ledger-w1-unstaged';
+    await mgr.workflowStart(autoloopWorkflowSpec(workspace, ledgerId), {
+      runId: workflowRunId,
+      cwd: workspace,
+    });
+    await waitUntil(() => {
+      const rec = mgr.workflowStatus(workflowRunId);
+      return rec.state === 'failed' || rec.nodes.loop?.state === 'failed';
+    }, 'W1 unstaged fail');
+    const failedA = mgr.workflowStatus(workflowRunId);
+    expect(failedA.state).toBe('failed');
+    expect(failedA.nodes.loop.state).toBe('failed');
+    expect(failedA.nodes.loop.error ?? failedA.error ?? '').toMatch(/uncommitted changes/);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((mgr as any).sessions.has(plannerSessionName(ledgerId))).toBe(false);
+    expect(fs.existsSync(path.join(workspace, 'tasks'))).toBe(false);
+    expect(fs.readFileSync(readmePath, 'utf8')).toBe('# dirty unstaged\n');
+    expect(headSha(workspace)).toBe(beforeHead);
+
+    // Variant B: untracked file (restore README first)
+    fs.writeFileSync(readmePath, beforeReadme);
+    fs.writeFileSync(path.join(workspace, 'extra-untracked.txt'), 'nope\n');
+    const workflowRunIdB = 'wf-w1-untracked';
+    const ledgerIdB = 'ledger-w1-untracked';
+    await mgr.workflowStart(autoloopWorkflowSpec(workspace, ledgerIdB), {
+      runId: workflowRunIdB,
+      cwd: workspace,
+    });
+    await waitUntil(() => {
+      const rec = mgr.workflowStatus(workflowRunIdB);
+      return rec.state === 'failed' || rec.nodes.loop?.state === 'failed';
+    }, 'W1 untracked fail');
+    const failedB = mgr.workflowStatus(workflowRunIdB);
+    expect(failedB.state).toBe('failed');
+    expect(failedB.nodes.loop.state).toBe('failed');
+    expect(failedB.nodes.loop.error ?? failedB.error ?? '').toMatch(/uncommitted changes/);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((mgr as any).sessions.has(plannerSessionName(ledgerIdB))).toBe(false);
+    expect(fs.existsSync(path.join(workspace, 'tasks', ledgerIdB))).toBe(false);
+    expect(headSha(workspace)).toBe(beforeHead);
+    expect(porcelainUntrackedAll(workspace)).toContain('extra-untracked.txt');
+    void beforePorcelain;
+  });
+
+  // W2 clean: ignore file exists before MockSession.start; porcelain empty; identity is ledger id
+  it('W2: clean workflowStart creates ledger .gitignore before Planner start; workflow run id not used', async () => {
+    const workspace = createTempRepo();
+    repos.push(workspace);
+    const workflowRunId = 'wf-w2-workflow';
+    const ledgerId = 'ledger-w2-ledger';
+    const ignorePath = path.join(workspace, 'tasks', ledgerId, '.gitignore');
+    const rootIgnore = path.join(workspace, '.gitignore');
+    fs.writeFileSync(rootIgnore, 'node_modules/\n');
+    execFileSync('git', ['add', '.gitignore'], { cwd: workspace, stdio: 'pipe' });
+    execFileSync('git', ['commit', '-m', 'root ignore'], { cwd: workspace, stdio: 'pipe' });
+    const rootIgnoreBytes = fs.readFileSync(rootIgnore, 'utf8');
+    const excludePath = execFileSync('git', ['-C', workspace, 'rev-parse', '--git-path', 'info/exclude'], {
+      encoding: 'utf8',
+    }).trim();
+    const excludeAbs = path.isAbsolute(excludePath) ? excludePath : path.join(workspace, excludePath);
+    fs.mkdirSync(path.dirname(excludeAbs), { recursive: true });
+    const excludeBytes = '# keep\n';
+    fs.writeFileSync(excludeAbs, excludeBytes);
+    const externalExcludes = fs.mkdtempSync(path.join(os.tmpdir(), 'clawo-w2-excludes-'));
+    repos.push(externalExcludes);
+    const excludesFile = path.join(externalExcludes, 'excludes');
+    const excludesBytes = '*.tmp\n';
+    fs.writeFileSync(excludesFile, excludesBytes);
+    execFileSync('git', ['config', 'core.excludesFile', excludesFile], { cwd: workspace, stdio: 'pipe' });
+
+    let sawIgnoreAtStart = false;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (mgr as any)._createSession = (_engine: string, _config: SessionConfig): ISession => {
+      const mock = new MockSession();
+      const orig = mock.start.bind(mock);
+      mock.start = async () => {
+        if (fs.existsSync(ignorePath) && fs.readFileSync(ignorePath, 'utf8') === '*\n') {
+          sawIgnoreAtStart = true;
+        }
+        return orig();
+      };
+      return mock;
+    };
+
+    await mgr.workflowStart(autoloopWorkflowSpec(workspace, ledgerId), {
+      runId: workflowRunId,
+      cwd: workspace,
+    });
+    await waitUntil(() => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return (mgr as any).sessions.has(plannerSessionName(ledgerId));
+    }, 'W2 planner ready');
+
+    expect(sawIgnoreAtStart).toBe(true);
+    expect(fs.readFileSync(ignorePath, 'utf8')).toBe('*\n');
+    expect(porcelainUntrackedAll(workspace).trim()).toBe('');
+    for (const probe of [
+      `tasks/${ledgerId}/.gitignore`,
+      `tasks/${ledgerId}/chat.jsonl`,
+      `tasks/${ledgerId}/decisions.jsonl`,
+      `tasks/${ledgerId}/iter/0/verdict.json`,
+    ]) {
+      execFileSync('git', ['-C', workspace, 'check-ignore', '-q', '--', probe], {
+        stdio: 'pipe',
+        env: { ...process.env, LC_ALL: 'C' },
+      });
+    }
+    expect(addDryRun(workspace)).not.toMatch(/(^|\s)tasks\//);
+    expect(fs.readFileSync(rootIgnore, 'utf8')).toBe(rootIgnoreBytes);
+    expect(fs.readFileSync(excludeAbs, 'utf8')).toBe(excludeBytes);
+    expect(fs.readFileSync(excludesFile, 'utf8')).toBe(excludesBytes);
+    expect(fs.existsSync(path.join(workspace, 'tasks', workflowRunId))).toBe(false);
+  });
+
+  // W3 second start with different ledger id
+  it('W3: second workflowStart with different ledger id keeps both ignored and porcelain empty', async () => {
+    const workspace = createTempRepo();
+    repos.push(workspace);
+    const ledgerA = 'ledger-w3-a';
+    const ledgerB = 'ledger-w3-b';
+    await mgr.workflowStart(autoloopWorkflowSpec(workspace, ledgerA), {
+      runId: 'wf-w3-a',
+      cwd: workspace,
+    });
+    await waitUntil(() => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return (mgr as any).sessions.has(plannerSessionName(ledgerA));
+    }, 'W3a planner');
+    fs.writeFileSync(path.join(workspace, 'tasks', ledgerA, 'chat.jsonl'), '{"t":1}\n');
+
+    await mgr.workflowStart(autoloopWorkflowSpec(workspace, ledgerB), {
+      runId: 'wf-w3-b',
+      cwd: workspace,
+    });
+    await waitUntil(() => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return (mgr as any).sessions.has(plannerSessionName(ledgerB));
+    }, 'W3b planner');
+
+    expect(fs.existsSync(path.join(workspace, 'tasks', ledgerA, '.gitignore'))).toBe(true);
+    expect(fs.existsSync(path.join(workspace, 'tasks', ledgerB, '.gitignore'))).toBe(true);
+    expect(porcelainUntrackedAll(workspace).trim()).toBe('');
+  });
+
+  // W4 Git + invalid config.runId
+  it('W4: invalid config.runId on Git workflowStart fails with fixed isolation error only', async () => {
+    const workspace = createTempRepo();
+    repos.push(workspace);
+    const beforeListing = listDirSorted(workspace);
+    const beforeTree = snapshotTree(workspace);
+    const workflowRunId = 'wf-w4-valid';
+    const badLedger = '../escape';
+    await mgr.workflowStart(autoloopWorkflowSpec(workspace, badLedger), {
+      runId: workflowRunId,
+      cwd: workspace,
+    });
+    await waitUntil(() => {
+      const rec = mgr.workflowStatus(workflowRunId);
+      return rec.state === 'failed' || rec.nodes.loop?.state === 'failed';
+    }, 'W4 fail');
+    const failed = mgr.workflowStatus(workflowRunId);
+    const err = failed.nodes.loop.error ?? failed.error ?? '';
+    expect(err).toBe(LEDGER_ISOLATION_ERROR);
+    expect(err).not.toContain(badLedger);
+    expect(err).not.toContain(workspace);
+    expect(err).not.toMatch(/fatal:|error:/i);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((mgr as any).sessions.has(plannerSessionName(badLedger))).toBe(false);
+    expect(fs.existsSync(path.join(workspace, 'escape'))).toBe(false);
+    expect(listDirSorted(workspace)).toEqual(beforeListing);
+    expect(snapshotTree(workspace)).toEqual(beforeTree);
+  });
+
+  // W5 non-Git control
+  it('W5: non-Git workflowStart starts Planner and creates no .gitignore', async () => {
+    const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'clawo-w5-norepo-'));
+    repos.push(workspace);
+    const ledgerId = 'ledger-w5';
+    await mgr.workflowStart(autoloopWorkflowSpec(workspace, ledgerId), {
+      runId: 'wf-w5',
+      cwd: workspace,
+    });
+    await waitUntil(() => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return (mgr as any).sessions.has(plannerSessionName(ledgerId));
+    }, 'W5 planner');
+    expect(fs.existsSync(path.join(workspace, 'tasks', ledgerId, '.gitignore'))).toBe(false);
+  });
+
+  // W6 resume control (workflow): seed via store createAndAcquire/commit (invariants.test.ts:1703
+  // precedent) — deterministic in-process non-terminal record with visits>=1; avoids SIGKILL child.
+  it('W6: workflowResume with visits>=1 skips boundary; dirt and .gitignore untouched', async () => {
+    const { acquireLease, commit, createAndAcquire, releaseLease } = await import('../kernel/store.js');
+    const workspace = createTempRepo();
+    repos.push(workspace);
+    const workflowRunId = 'wf-w6-resume';
+    const ledgerId = 'ledger-w6';
+    const ignorePath = path.join(workspace, 'tasks', ledgerId, '.gitignore');
+    fs.mkdirSync(path.dirname(ignorePath), { recursive: true });
+    fs.writeFileSync(ignorePath, '*\n');
+    const ignoreStatBefore = fs.statSync(ignorePath);
+    const ignoreBytesBefore = fs.readFileSync(ignorePath, 'utf8');
+
+    const spec = autoloopWorkflowSpec(workspace, ledgerId);
+    releaseLease(createAndAcquire(workflowRunId, spec as never, 'w6-seed'));
+    const fixture = acquireLease(workflowRunId, 'w6-fixture');
+    commit(fixture, {
+      record: {
+        runId: workflowRunId,
+        workflow: 'wf-autoloop-fresh',
+        spec,
+        state: 'running',
+        outcome: 'unverified',
+        cwd: workspace,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        nodes: {
+          loop: { id: 'loop', kind: 'autoloop', state: 'running', attempts: 1, visits: 1 },
+        },
+      } as never,
+    });
+    releaseLease(fixture);
+
+    fs.writeFileSync(path.join(workspace, 'README.md'), '# dirt during resume\n');
+    const dirtBytes = fs.readFileSync(path.join(workspace, 'README.md'), 'utf8');
+
+    await mgr.workflowResume(workflowRunId);
+    await waitUntil(() => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return (mgr as any).sessions.has(plannerSessionName(ledgerId));
+    }, 'W6 planner');
+
+    expect(fs.readFileSync(path.join(workspace, 'README.md'), 'utf8')).toBe(dirtBytes);
+    expect(fs.existsSync(ignorePath)).toBe(true);
+    expect(fs.readFileSync(ignorePath, 'utf8')).toBe(ignoreBytesBefore);
+    const ignoreStatAfter = fs.statSync(ignorePath);
+    expect(ignoreStatAfter.ino).toBe(ignoreStatBefore.ino);
+    expect(ignoreStatAfter.mtimeMs).toBe(ignoreStatBefore.mtimeMs);
+
+    // Deleted .gitignore is not recreated on a further resume seed
+    await mgr.shutdown();
+    mgr = createManager();
+    fs.rmSync(ignorePath, { force: true });
+    expect(fs.existsSync(ignorePath)).toBe(false);
+    const workflowRunId2 = 'wf-w6-resume-deleted';
+    releaseLease(createAndAcquire(workflowRunId2, spec as never, 'w6-seed2'));
+    const fixture2 = acquireLease(workflowRunId2, 'w6-fixture2');
+    commit(fixture2, {
+      record: {
+        runId: workflowRunId2,
+        workflow: 'wf-autoloop-fresh',
+        spec,
+        state: 'running',
+        outcome: 'unverified',
+        cwd: workspace,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        nodes: {
+          loop: { id: 'loop', kind: 'autoloop', state: 'running', attempts: 1, visits: 1 },
+        },
+      } as never,
+    });
+    releaseLease(fixture2);
+    await mgr.workflowResume(workflowRunId2);
+    await waitUntil(() => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return (mgr as any).sessions.has(plannerSessionName(ledgerId));
+    }, 'W6b planner');
+    expect(fs.existsSync(ignorePath)).toBe(false);
+    expect(fs.readFileSync(path.join(workspace, 'README.md'), 'utf8')).toBe(dirtBytes);
+  });
+
+  // W7 resume control (direct)
+  it('W7: autoloopResume after dirty + deleted .gitignore starts Planner without recreating ignore', async () => {
+    const workspace = createTempRepo();
+    repos.push(workspace);
+    const runId = 'direct-w7';
+    await mgr.autoloopStart({ runId, workspace, plannerEngine: 'codex' });
+    const ignorePath = path.join(workspace, 'tasks', runId, '.gitignore');
+    await mgr.autoloopStop(runId, 'w7-stop');
+    await waitUntil(() => {
+      try {
+        const st = mgr.workflowStatus(runId).state;
+        return st === 'completed' || st === 'cancelled' || st === 'failed';
+      } catch {
+        return false;
+      }
+    }, 'W7 stop terminal');
+
+    fs.writeFileSync(path.join(workspace, 'README.md'), '# w7 dirt\n');
+    const dirtBytes = fs.readFileSync(path.join(workspace, 'README.md'), 'utf8');
+    // Delete if present (PR head creates it; 5221a89 may not). Resume must not create one.
+    fs.rmSync(ignorePath, { force: true });
+
+    await mgr.autoloopResume(runId);
+    await waitUntil(() => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return (mgr as any).sessions.has(plannerSessionName(runId));
+    }, 'W7 planner after resume');
+    expect(fs.existsSync(ignorePath)).toBe(false);
+    expect(fs.readFileSync(path.join(workspace, 'README.md'), 'utf8')).toBe(dirtBytes);
+  });
+
+  // W8 dirty + retry
+  it('W8: dirty node with retry max 1 refuses both attempts; zero Planner sessions', async () => {
+    const workspace = createTempRepo();
+    repos.push(workspace);
+    fs.writeFileSync(path.join(workspace, 'README.md'), '# w8 dirty\n');
+    const ledgerId = 'ledger-w8';
+    const workflowRunId = 'wf-w8';
+    await mgr.workflowStart(autoloopWorkflowSpec(workspace, ledgerId, { retry: { max: 1, backoffMs: 1 } }), {
+      runId: workflowRunId,
+      cwd: workspace,
+    });
+    await waitUntil(() => mgr.workflowStatus(workflowRunId).state === 'failed', 'W8 fail');
+    const failed = mgr.workflowStatus(workflowRunId);
+    expect(failed.state).toBe('failed');
+    expect(failed.nodes.loop.state).toBe('failed');
+    expect(failed.nodes.loop.error ?? '').toMatch(/uncommitted changes/);
+    expect(failed.nodes.loop.attempts).toBeGreaterThanOrEqual(2);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((mgr as any).sessions.has(plannerSessionName(ledgerId))).toBe(false);
+  });
+
+  // W9 config marker cannot disable fresh boundary
+  it('W9: dirty node still refused when spec.config carries _freshStart: false', async () => {
+    const workspace = createTempRepo();
+    repos.push(workspace);
+    fs.writeFileSync(path.join(workspace, 'README.md'), '# w9 dirty\n');
+    for (const [suffix, extras] of [
+      ['false', { _freshStart: false }],
+      ['zero', { _freshStart: 0 }],
+      ['str', { freshStart: false }],
+      ['nested', { _freshStart: 'false' }],
+    ] as Array<[string, Record<string, unknown>]>) {
+      const ledgerId = `ledger-w9-${suffix}`;
+      const workflowRunId = `wf-w9-${suffix}`;
+      await mgr.workflowStart(autoloopWorkflowSpec(workspace, ledgerId, { configExtras: extras }), {
+        runId: workflowRunId,
+        cwd: workspace,
+      });
+      await waitUntil(() => mgr.workflowStatus(workflowRunId).state === 'failed', `W9 ${suffix} fail`);
+      const failed = mgr.workflowStatus(workflowRunId);
+      expect(failed.nodes.loop.error ?? '').toMatch(/uncommitted changes/);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((mgr as any).sessions.has(plannerSessionName(ledgerId))).toBe(false);
+    }
+  });
+
+  // Resume must ignore an injected `_freshStart: true` from spec.config or secrets:
+  // the kernel-computed flag wins LAST. Reuses W6 store-seed (visits>=1, non-terminal).
+  it('resume override: workflowResume ignores _freshStart:true from config and secrets on a dirty tree', async () => {
+    const { acquireLease, commit, createAndAcquire, releaseLease } = await import('../kernel/store.js');
+
+    const waitPlannerOrFail = async (
+      workflowRunId: string,
+      ledgerId: string,
+      ignorePath: string,
+      ignoreMode: 'existing' | 'deleted',
+      timeoutMs = 8_000,
+    ): Promise<void> => {
+      const t0 = Date.now();
+      while (Date.now() - t0 < timeoutMs) {
+        const rec = mgr.workflowStatus(workflowRunId);
+        const node = rec.nodes.loop;
+        if (rec.state === 'failed' || node?.state === 'failed') {
+          const detail = `run.state=${rec.state} run.error=${JSON.stringify(rec.error)} node.state=${node?.state} node.error=${JSON.stringify(node?.error)}`;
+          expect(rec.state, detail).not.toBe('failed');
+          expect(node?.state, detail).not.toBe('failed');
+        }
+        if (ignoreMode === 'deleted' && fs.existsSync(ignorePath)) {
+          expect(fs.existsSync(ignorePath), 'gitignore recreated on resume').toBe(false);
+        }
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        if ((mgr as any).sessions.has(plannerSessionName(ledgerId))) return;
+        await new Promise((r) => setTimeout(r, 40));
+      }
+      throw new Error(`timeout waiting for Planner after resume of ${workflowRunId}`);
+    };
+
+    const runCase = async (opts: {
+      workflowRunId: string;
+      ledgerId: string;
+      via: 'config' | 'secrets';
+      ignoreMode: 'existing' | 'deleted';
+    }) => {
+      const workspace = createTempRepo();
+      repos.push(workspace);
+      const ignorePath = path.join(workspace, 'tasks', opts.ledgerId, '.gitignore');
+      fs.mkdirSync(path.dirname(ignorePath), { recursive: true });
+      fs.writeFileSync(ignorePath, '*\n');
+      const ignoreStatBefore = opts.ignoreMode === 'existing' ? fs.statSync(ignorePath) : null;
+      const ignoreBytesBefore = opts.ignoreMode === 'existing' ? fs.readFileSync(ignorePath, 'utf8') : null;
+      if (opts.ignoreMode === 'deleted') {
+        fs.rmSync(ignorePath, { force: true });
+        expect(fs.existsSync(ignorePath)).toBe(false);
+      }
+
+      const configExtras = opts.via === 'config' ? { _freshStart: true } : {};
+      const spec = autoloopWorkflowSpec(workspace, opts.ledgerId, { configExtras });
+      releaseLease(createAndAcquire(opts.workflowRunId, spec as never, `seed-${opts.workflowRunId}`));
+      const fixture = acquireLease(opts.workflowRunId, `fix-${opts.workflowRunId}`);
+      commit(fixture, {
+        record: {
+          runId: opts.workflowRunId,
+          workflow: 'wf-autoloop-fresh',
+          spec,
+          state: 'running',
+          outcome: 'unverified',
+          cwd: workspace,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          nodes: {
+            loop: { id: 'loop', kind: 'autoloop', state: 'running', attempts: 1, visits: 1 },
+          },
+        } as never,
+      });
+      releaseLease(fixture);
+
+      fs.writeFileSync(path.join(workspace, 'README.md'), `# dirt ${opts.workflowRunId}\n`);
+      const dirtBytes = fs.readFileSync(path.join(workspace, 'README.md'), 'utf8');
+      const porcelainBefore = porcelainUntrackedAll(workspace);
+
+      const resumeSecrets = opts.via === 'secrets' ? { _freshStart: true } : undefined;
+      await mgr.workflowResume(opts.workflowRunId, resumeSecrets ? { secrets: resumeSecrets } : {});
+      await waitPlannerOrFail(opts.workflowRunId, opts.ledgerId, ignorePath, opts.ignoreMode);
+
+      expect(fs.readFileSync(path.join(workspace, 'README.md'), 'utf8')).toBe(dirtBytes);
+      expect(porcelainUntrackedAll(workspace)).toBe(porcelainBefore);
+      if (opts.ignoreMode === 'deleted') {
+        expect(fs.existsSync(ignorePath)).toBe(false);
+      } else {
+        expect(fs.readFileSync(ignorePath, 'utf8')).toBe(ignoreBytesBefore);
+        const after = fs.statSync(ignorePath);
+        expect(after.ino).toBe(ignoreStatBefore!.ino);
+        expect(after.mtimeMs).toBe(ignoreStatBefore!.mtimeMs);
+      }
+
+      await mgr.shutdown();
+      mgr = createManager();
+    };
+
+    await runCase({
+      workflowRunId: 'wf-resume-override-config',
+      ledgerId: 'ledger-resume-override-config',
+      via: 'config',
+      ignoreMode: 'existing',
+    });
+    await runCase({
+      workflowRunId: 'wf-resume-override-secrets',
+      ledgerId: 'ledger-resume-override-secrets',
+      via: 'secrets',
+      ignoreMode: 'deleted',
+    });
+  }, 20_000);
+});

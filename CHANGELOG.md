@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **`autoloop_start` and a fresh workflow `autoloop` node share one workspace
+  boundary.** The dirty-worktree refusal and run-local ledger isolation
+  (`tasks/<runId>/.gitignore` with `*`, proven via `git check-ignore`) live in
+  one helper. Direct start keeps calling it before the run directory exists
+  (`invalid` ledger ids still defer to the kernel). A workflow `autoloop` node
+  whose kernel `visits === 1` applies the same helper on first boot (invalid
+  ledger ids fail closed with the fixed isolation error); resume / revisit
+  (`visits >= 2`), including `workflowResume` and `autoloopResume`, skip it.
+  Tracked paths under that ledger, a partial/deceptive ignore file, or a
+  `tasks` symlink/escape refuse with one fixed generic error and leave caller
+  bytes untouched; newly created ledger dirs and `.gitignore` are retained
+  (never deleted). Does not write `.git/info/exclude`, root `.gitignore`, or
+  `core.excludesFile`. Non-repository workspaces unchanged. Residual: a process
+  that dies between the visit commit and the first boot resumes without the
+  fresh boundary (existing resume semantics; no new durable marker).
+
 ## [7.11.0] - 2026-10-11
 
 ### Changed

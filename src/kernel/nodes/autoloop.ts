@@ -34,7 +34,11 @@ export interface AutoloopHandle {
 
 export interface AutoloopNodeDeps {
   /** `secrets` carries what the spec deliberately does not — custom-engine configs. */
-  boot(config: Record<string, unknown>, secrets: Record<string, unknown>): Promise<AutoloopHandle>;
+  boot(
+    config: Record<string, unknown>,
+    secrets: Record<string, unknown>,
+    opts: { freshStart: boolean },
+  ): Promise<AutoloopHandle>;
   /**
    * Resolve/reject the deferred the caller is waiting on.
    *
@@ -69,7 +73,9 @@ export function makeAutoloopExecutor(deps: AutoloopNodeDeps) {
     const spec = node as AutoloopNode;
     let handle: AutoloopHandle;
     try {
-      handle = await deps.boot(spec.config, ctx.secrets);
+      // Kernel commits visits += 1 before execute; first visit in the run is fresh.
+      const freshStart = ctx.record.nodes[node.id]?.visits === 1;
+      handle = await deps.boot(spec.config, ctx.secrets, { freshStart });
     } catch (err) {
       deps.ready(ctx.tag ?? ctx.runId, err as Error);
       return { ok: false, error: (err as Error).message };
