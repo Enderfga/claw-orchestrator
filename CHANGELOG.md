@@ -5,25 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [7.12.0] - 2026-10-17
 
 ### Fixed
 
-- **`autoloop_start` and a fresh workflow `autoloop` node share one workspace
-  boundary.** The dirty-worktree refusal and run-local ledger isolation
-  (`tasks/<runId>/.gitignore` with `*`, proven via `git check-ignore`) live in
-  one helper. Direct start keeps calling it before the run directory exists
-  (`invalid` ledger ids still defer to the kernel). A workflow `autoloop` node
-  whose kernel `visits === 1` applies the same helper on first boot (invalid
-  ledger ids fail closed with the fixed isolation error); resume / revisit
-  (`visits >= 2`), including `workflowResume` and `autoloopResume`, skip it.
-  Tracked paths under that ledger, a partial/deceptive ignore file, or a
-  `tasks` symlink/escape refuse with one fixed generic error and leave caller
-  bytes untouched; newly created ledger dirs and `.gitignore` are retained
-  (never deleted). Does not write `.git/info/exclude`, root `.gitignore`, or
-  `core.excludesFile`. Non-repository workspaces unchanged. Residual: a process
-  that dies between the visit commit and the first boot resumes without the
-  fresh boundary (existing resume semantics; no new durable marker).
+- **Each Autoloop run ledger ignores itself.** A fresh run writes `tasks/<runId>/.gitignore`
+  containing `*` before anything else, and starts only once `git check-ignore` confirms the
+  ledger is ignored — so the ledger no longer dirties the repository or lands in the iteration
+  commits that `git add -A` makes. Nothing is written to `.git/info/exclude`, the root `.gitignore`
+  or `core.excludesFile`. A ledger that is already tracked, an ignore file with other contents, or a
+  `tasks` path that is a symlink refuses the start.
+- **A workflow `autoloop` node gets the same start checks as `autoloop_start`:** a dirty worktree
+  is refused and the ledger is isolated on its first run. Resuming a run skips both, as before.
+
+### Changed
+
+- Tested with Claude Code 2.1.302, Codex 0.163.0, agy 1.4.0, grok 1.0.62 and OpenCode 1.19.3.
 
 ## [7.11.0] - 2026-10-11
 
