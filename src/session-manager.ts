@@ -223,7 +223,12 @@ import { Fanout, type FanoutConfig, type FanoutSession, type FanoutAgentSpec } f
 import { AutoloopRunner } from './autoloop/runner.js';
 import { ClaudeAgentDispatcher, type ClaudeAgentDispatcherConfig } from './autoloop/dispatcher.js';
 import type { AutoloopState, PushPolicy } from './autoloop/types.js';
-import { DEFAULT_PUSH_POLICY, DEFAULT_SEND_TIMEOUT_MS, validateAutoloopTimeoutConfig } from './autoloop/types.js';
+import {
+  DEFAULT_PUSH_POLICY,
+  DEFAULT_SEND_TIMEOUT_MS,
+  MAX_METRIC_HISTORY,
+  validateAutoloopTimeoutConfig,
+} from './autoloop/types.js';
 import { Msg as AutoloopMsg, type PushChannel, type PushLevel, type SendTimeoutPayload } from './autoloop/messages.js';
 import { appendPushLog, notifyUserFallbackChain } from './autoloop/notify.js';
 import { UltraappManager } from './ultraapp/manager.js';
@@ -861,6 +866,125 @@ function readPermissionDenials(evt: Record<string, unknown> | undefined): Permis
     });
   }
   return out;
+}
+
+/** Fixed refusal when a non-fresh boot cannot trust the closed-ledger prefix. */
+const AUTOLOOP_CLOSED_LEDGER_REFUSAL = 'Autoloop resume refused: ledger closed-prefix is incomplete or malformed';
+
+const REVIEWER_DECISIONS = new Set(['advance', 'hold', 'rollback']);
+
+type ClosedLedgerRestore = { iter: number; metric_history: number[] };
+
+/**
+ * One-reader closed-ledger restore for non-fresh `_bootAutoloop`.
+ *
+ * Derives typed `iter` / `metric_history` from the contiguous valid closed
+ * prefix starting at 0. Checkpoint bytes are never progress authority.
+ * Returns null when there is no valid prefix (legacy lone verdict, empty).
+ * Throws {@link AUTOLOOP_CLOSED_LEDGER_REFUSAL} on gap / malformed tail.
+ */
+/** Canonical numeric iter directory names — no leading zeros. */
+const CLOSED_LEDGER_ITER_DIR = /^(0|[1-9][0-9]*)$/;
+
+function readClosedLedgerRestore(ledgerDir: string): ClosedLedgerRestore | null {
+  const iterRoot = path.join(ledgerDir, 'iter');
+  if (!fs.existsSync(iterRoot)) return null;
+
+  let numericDirs: number[];
+  try {
+    numericDirs = fs
+      .readdirSync(iterRoot)
+      .filter((name) => CLOSED_LEDGER_ITER_DIR.test(name))
+      .map((name) => Number(name))
+      .sort((a, b) => a - b);
+  } catch {
+    return null;
+  }
+  if (numericDirs.length === 0) return null;
+  const present = new Set(numericDirs);
+
+  const metrics: number[] = [];
+  let i = 0;
+  for (;;) {
+    const iterDir = path.join(iterRoot, String(i));
+    if (!fs.existsSync(iterDir)) {
+      // K=-1 / no valid closed prefix: never refuse on higher dirs (base Planner-only).
+      if (i === 0) return null;
+      for (const j of present) {
+        if (j > i) throw new Error(AUTOLOOP_CLOSED_LEDGER_REFUSAL);
+      }
+      break;
+    }
+
+    const directivePath = path.join(iterDir, 'directive.json');
+    const verdictPath = path.join(iterDir, 'verdict.json');
+    const hasDirective = fs.existsSync(directivePath);
+    const hasVerdict = fs.existsSync(verdictPath);
+
+    if (!hasDirective) {
+      if (hasVerdict) {
+        // Legacy lone verdict (or directive-less "closed" appearance).
+        if (i === 0) return null;
+        throw new Error(AUTOLOOP_CLOSED_LEDGER_REFUSAL);
+      }
+      // Empty/non-closed at 0: prefixless compat before any gap check.
+      if (i === 0) return null;
+      for (const j of present) {
+        if (j > i) throw new Error(AUTOLOOP_CLOSED_LEDGER_REFUSAL);
+      }
+      break;
+    }
+
+    if (!hasVerdict) {
+      // Open / directive-only / committed-without-review tail at i.
+      // No closed prefix yet: return null before gap checks (open0+lateriter1 compat).
+      if (i === 0) return null;
+      for (const j of present) {
+        if (j > i) throw new Error(AUTOLOOP_CLOSED_LEDGER_REFUSAL);
+      }
+      const history =
+        metrics.length > MAX_METRIC_HISTORY ? metrics.slice(metrics.length - MAX_METRIC_HISTORY) : metrics.slice();
+      return { iter: i, metric_history: history };
+    }
+
+    let raw: string;
+    try {
+      raw = fs.readFileSync(verdictPath, 'utf8');
+    } catch {
+      // Prefixless unreadable verdict at 0: no-restore / no-refusal (base compat).
+      if (i === 0) return null;
+      throw new Error(AUTOLOOP_CLOSED_LEDGER_REFUSAL);
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      if (i === 0) return null;
+      throw new Error(AUTOLOOP_CLOSED_LEDGER_REFUSAL);
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      if (i === 0) return null;
+      throw new Error(AUTOLOOP_CLOSED_LEDGER_REFUSAL);
+    }
+    const verdict = parsed as Record<string, unknown>;
+    if (verdict.iter !== i) {
+      if (i === 0) return null;
+      throw new Error(AUTOLOOP_CLOSED_LEDGER_REFUSAL);
+    }
+    if (typeof verdict.decision !== 'string' || !REVIEWER_DECISIONS.has(verdict.decision)) {
+      if (i === 0) return null;
+      throw new Error(AUTOLOOP_CLOSED_LEDGER_REFUSAL);
+    }
+    if (typeof verdict.metric === 'number' && Number.isFinite(verdict.metric)) {
+      metrics.push(verdict.metric);
+    }
+    i += 1;
+  }
+
+  if (i === 0) return null;
+  const history =
+    metrics.length > MAX_METRIC_HISTORY ? metrics.slice(metrics.length - MAX_METRIC_HISTORY) : metrics.slice();
+  return { iter: i, metric_history: history };
 }
 
 export class SessionManager {
@@ -3639,6 +3763,13 @@ export class SessionManager {
     if (!fs.existsSync(ledgerDir)) {
       fs.mkdirSync(ledgerDir, { recursive: true });
     }
+    // Non-fresh boots: restore typed progress from the contiguous closed ledger
+    // prefix before any dispatcher/runner/session work. Refusal throws here so
+    // no Planner start or checkpoint publish occurs.
+    let closedLedgerRestore: ClosedLedgerRestore | null = null;
+    if (opts._freshStart !== true) {
+      closedLedgerRestore = readClosedLedgerRestore(ledgerDir);
+    }
     // Per-run policy object — mutable so Planner's update_push_policy is visible
     // to the runner without re-wiring.
     const pushPolicy: PushPolicy = JSON.parse(JSON.stringify(DEFAULT_PUSH_POLICY)) as PushPolicy;
@@ -3712,6 +3843,10 @@ export class SessionManager {
       autoloopHardTimeoutMs: opts.autoloopHardTimeoutMs,
     });
     runnerRef = runner;
+    if (closedLedgerRestore) {
+      runner.state.iter = closedLedgerRestore.iter;
+      runner.state.metric_history = closedLedgerRestore.metric_history.slice();
+    }
     try {
       await runner.start();
       // A reconstructed migration becomes externally visible only after its

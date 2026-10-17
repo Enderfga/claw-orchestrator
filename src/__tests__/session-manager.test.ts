@@ -9,6 +9,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { EventEmitter } from 'node:events';
 import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -2881,5 +2882,1557 @@ describe('SessionManager', () => {
       expect(typeof version).toBe('string');
       expect(version.length).toBeGreaterThan(0);
     });
+  });
+
+  // ─── Closed-ledger resume (S1 RED) + preserve controls (S1 GREEN) ─────
+  // Authorized test-only fixtures on pristine base src. NO production fix.
+  describe('closed-ledger-resume', () => {
+    const OWNER_CHILD = fileURLToPath(new URL('./helpers/autoloop-owner-child.ts', import.meta.url));
+    const MARKER = 'CLOSED_LEDGER_MALFORMED_MARKER_9f3c2a';
+
+    const fence = (tool: string, args: Record<string, unknown>): string =>
+      `\`\`\`autoloop\n${JSON.stringify({ tool, args })}\n\`\`\``;
+
+    const sha256Hex = (data: Buffer | string): string => {
+      const input = typeof data === 'string' ? Buffer.from(data) : data;
+      return createHash('sha256').update(input).digest('hex');
+    };
+
+    /** Observation-only fact line; must print before the first failing assertion. */
+    const s1Fact = (fields: Record<string, unknown>): void => {
+      // Paths in fields must already be workspace-relative; no secrets.
+      console.log(`S1_FACT ${JSON.stringify(fields)}`);
+    };
+
+    /**
+     * Capture logger console channels used by the default Logger (info/debug →
+     * console.log). Forward every call to the originals so S1_FACT stdout
+     * emission and vitest tee keep working.
+     */
+    const withCapturedConsoleLogs = async <T>(fn: () => Promise<T>): Promise<{ result: T; logText: string }> => {
+      const logChunks: string[] = [];
+      const origLog = console.log;
+      const origInfo = console.info;
+      const origWarn = console.warn;
+      const origError = console.error;
+      const captureAndForward =
+        (orig: (...a: unknown[]) => void) =>
+        (...args: unknown[]) => {
+          logChunks.push(args.map(String).join(' '));
+          orig(...args);
+        };
+      console.log = captureAndForward(origLog) as typeof console.log;
+      console.info = captureAndForward(origInfo) as typeof console.info;
+      console.warn = captureAndForward(origWarn) as typeof console.warn;
+      console.error = captureAndForward(origError) as typeof console.error;
+      try {
+        const result = await fn();
+        return { result, logText: logChunks.join('\n') };
+      } finally {
+        console.log = origLog;
+        console.info = origInfo;
+        console.warn = origWarn;
+        console.error = origError;
+      }
+    };
+
+    const initGitWorkspace = (workspace: string): void => {
+      fs.mkdirSync(workspace, { recursive: true });
+      execFileSync('git', ['init', '-b', 'main'], { cwd: workspace });
+      execFileSync('git', ['config', 'user.email', 'autoloop-test@example.com'], { cwd: workspace });
+      execFileSync('git', ['config', 'user.name', 'autoloop-test'], { cwd: workspace });
+      execFileSync('git', ['config', 'commit.gpgsign', 'false'], { cwd: workspace });
+      fs.writeFileSync(path.join(workspace, 'README.md'), 'workspace\n');
+      execFileSync('git', ['add', 'README.md'], { cwd: workspace });
+      execFileSync('git', ['commit', '-m', 'init'], { cwd: workspace });
+    };
+
+    const runJsonPath = (runId: string): string => path.join(TEST_WF_DIR, runId, 'run.json');
+
+    const relCheckpoint = (runId: string): string => `${runId}/run.json`;
+
+    const readPublishedState = (
+      manager: InstanceType<typeof SessionManager>,
+      runId: string,
+    ): { iter: number; metric_history: number[]; status: string; pending_dispatch: unknown } => {
+      const status = manager.workflowStatus(runId);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const state = (status.nodes.main?.data as any)?.state;
+      return {
+        iter: state?.iter ?? -1,
+        metric_history: Array.isArray(state?.metric_history) ? state.metric_history : [],
+        status: String(state?.status ?? status.state),
+        pending_dispatch: state?.pending_dispatch ?? null,
+      };
+    };
+
+    const recordCheckpointFact = (
+      test: string,
+      phase: string,
+      manager: InstanceType<typeof SessionManager> | null,
+      runId: string,
+    ): { iter: number; metric_history: number[]; bytes: Buffer; sha256: string; len: number } => {
+      const bytes = fs.existsSync(runJsonPath(runId)) ? fs.readFileSync(runJsonPath(runId)) : Buffer.alloc(0);
+      const published = manager
+        ? readPublishedState(manager, runId)
+        : { iter: -1, metric_history: [], status: 'n/a', pending_dispatch: null };
+      // Prefer live published state when a manager is attached; fall back to durable bytes.
+      let iter = published.iter;
+      let metric_history = published.metric_history;
+      let pending = published.pending_dispatch !== null && published.pending_dispatch !== undefined;
+      if (manager === null && bytes.length > 0) {
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const parsed = JSON.parse(bytes.toString('utf8')) as any;
+          const state = parsed?.nodes?.main?.data?.state;
+          iter = state?.iter ?? -1;
+          metric_history = Array.isArray(state?.metric_history) ? state.metric_history : [];
+          pending = state?.pending_dispatch != null;
+        } catch {
+          /* durable parse failure recorded via iter=-1 */
+        }
+      }
+      const sha = sha256Hex(bytes);
+      s1Fact({
+        test,
+        path: relCheckpoint(runId),
+        phase,
+        iter,
+        metric_history,
+        pending_dispatch: pending,
+        checkpoint_sha256: sha,
+        checkpoint_len: bytes.length,
+      });
+      return { iter, metric_history, bytes, sha256: sha, len: bytes.length };
+    };
+
+    const snapshotLedgerIter = (workspace: string, runId: string, uptoExclusive: number): Record<string, Buffer> => {
+      const out: Record<string, Buffer> = {};
+      for (let i = 0; i < uptoExclusive; i++) {
+        const dir = path.join(workspace, 'tasks', runId, 'iter', String(i));
+        if (!fs.existsSync(dir)) continue;
+        for (const name of fs.readdirSync(dir)) {
+          const p = path.join(dir, name);
+          if (fs.statSync(p).isFile()) out[`iter/${i}/${name}`] = fs.readFileSync(p);
+        }
+      }
+      return out;
+    };
+
+    const ledgerFileShas = (workspace: string, runId: string, uptoExclusive: number): Record<string, string> => {
+      const snap = snapshotLedgerIter(workspace, runId, uptoExclusive);
+      const out: Record<string, string> = {};
+      for (const [k, v] of Object.entries(snap)) out[k] = sha256Hex(v);
+      return out;
+    };
+
+    /** Exact fixed refusal message (message property, not substring). */
+    const CLOSED_LEDGER_REFUSAL_MSG = 'Autoloop resume refused: ledger closed-prefix is incomplete or malformed';
+
+    const snapshotLedgerAll = (workspace: string, runId: string): Record<string, Buffer> => {
+      const root = path.join(workspace, 'tasks', runId);
+      const out: Record<string, Buffer> = {};
+      if (!fs.existsSync(root)) return out;
+      const walk = (dir: string, rel: string): void => {
+        for (const name of fs.readdirSync(dir).sort()) {
+          const p = path.join(dir, name);
+          const r = rel ? `${rel}/${name}` : name;
+          const st = fs.statSync(p);
+          if (st.isDirectory()) walk(p, r);
+          else if (st.isFile()) out[r] = fs.readFileSync(p);
+        }
+      };
+      walk(root, '');
+      return out;
+    };
+
+    const assertLedgerInventoryEqual = (before: Record<string, Buffer>, workspace: string, runId: string): void => {
+      const after = snapshotLedgerAll(workspace, runId);
+      expect(Object.keys(after).sort()).toEqual(Object.keys(before).sort());
+      for (const [k, v] of Object.entries(before)) {
+        expect(after[k]?.equals(v)).toBe(true);
+      }
+    };
+
+    type CheckpointProgress = {
+      iter: number | undefined;
+      metric_history: number[];
+      pending_dispatch: unknown;
+    };
+
+    const readCheckpointProgress = (runId: string): CheckpointProgress => {
+      const p = runJsonPath(runId);
+      if (!fs.existsSync(p)) return { iter: undefined, metric_history: [], pending_dispatch: null };
+      const rec = JSON.parse(fs.readFileSync(p, 'utf8')) as {
+        nodes?: { main?: { data?: { state?: Record<string, unknown> } } };
+      };
+      const state = rec.nodes?.main?.data?.state;
+      return {
+        iter: typeof state?.iter === 'number' ? state.iter : undefined,
+        metric_history: Array.isArray(state?.metric_history) ? (state.metric_history as number[]) : [],
+        pending_dispatch: state?.pending_dispatch ?? null,
+      };
+    };
+
+    const worktreeGitSnapshot = (workspace: string): { head: string; porcelain: string } => ({
+      head: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: workspace }).toString('utf8').trim(),
+      porcelain: execFileSync('git', ['status', '--porcelain'], { cwd: workspace }).toString('utf8'),
+    });
+
+    type WireMode = 'auto-continue' | 'chat-driven';
+
+    const wireClosedLedgerSessions = (
+      manager: InstanceType<typeof SessionManager>,
+      workspace: string,
+      closeCount: number,
+      opts: {
+        mode?: WireMode;
+        afterClose?: 'idle' | 'directive-only';
+        directiveOnlyIter?: number;
+      } = {},
+    ): { coderSends: string[]; reviewerSends: string[]; plannerSends: string[]; plannerDirectives: number } => {
+      const mode: WireMode = opts.mode ?? 'auto-continue';
+      const coderSends: string[] = [];
+      const reviewerSends: string[] = [];
+      const plannerSends: string[] = [];
+      let plannerDirectives = 0;
+      let chatDrivenSpawned = false;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const origCreate = (manager as any)._createSession.bind(manager);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (manager as any)._createSession = (engine: string, config: SessionConfig): ISession => {
+        const mock = origCreate(engine, config) as MockSession;
+        if (config.name.endsWith('-planner')) {
+          mock.sendImplementation = async (message) => {
+            const text = typeof message === 'string' ? message : JSON.stringify(message);
+            plannerSends.push(text);
+            const isIterDone = /\[system\] iter \d+ done\./.test(text);
+            const isAck = text.includes('directive_ack') || text.includes('[system] coder');
+            const isChat = !isIterDone && !isAck;
+
+            if (mode === 'chat-driven') {
+              // Exactly one send_directive (or spawn+initial) per chat; plain text otherwise.
+              if (isIterDone || isAck) {
+                return { text: 'chat-driven: no control on iter_done/ack', event: { type: 'result', result: 'ok' } };
+              }
+              if (isChat) {
+                if (!chatDrivenSpawned) {
+                  chatDrivenSpawned = true;
+                  plannerDirectives += 1;
+                  return {
+                    text: fence('spawn_subagents', {
+                      initial_directive: {
+                        goal: 'close iteration 0',
+                        constraints: [],
+                        success_criteria: [],
+                        max_attempts: 1,
+                      },
+                    }),
+                    event: { type: 'result', result: 'ok' },
+                  };
+                }
+                plannerDirectives += 1;
+                return {
+                  text: fence('send_directive', {
+                    goal: 'chat-driven next iteration',
+                    constraints: [],
+                    success_criteria: [],
+                    max_attempts: 1,
+                  }),
+                  event: { type: 'result', result: 'ok' },
+                };
+              }
+              return { text: 'chat-driven: plain', event: { type: 'result', result: 'ok' } };
+            }
+
+            // auto-continue mode (R1, idempotency, partial, gap, malformed, boot, workflow)
+            const done = text.match(/\[system\] iter (\d+) done\./);
+            if (done) {
+              const finished = Number(done[1]);
+              const next = finished + 1;
+              if (opts.afterClose === 'directive-only' && opts.directiveOnlyIter === next) {
+                plannerDirectives += 1;
+                return {
+                  text: fence('send_directive', {
+                    goal: `directive-only trailing iter ${next}`,
+                    constraints: [],
+                    success_criteria: [],
+                    max_attempts: 1,
+                  }),
+                  event: { type: 'result', result: 'ok' },
+                };
+              }
+              if (next < closeCount) {
+                plannerDirectives += 1;
+                return {
+                  text: fence('send_directive', {
+                    goal: `close iteration ${next}`,
+                    constraints: [],
+                    success_criteria: [],
+                    max_attempts: 1,
+                  }),
+                  event: { type: 'result', result: 'ok' },
+                };
+              }
+              return { text: 'ledger closed', event: { type: 'result', result: 'ok' } };
+            }
+            if (isAck) {
+              return { text: 'ack noted', event: { type: 'result', result: 'ok' } };
+            }
+            plannerDirectives += 1;
+            return {
+              text: fence('spawn_subagents', {
+                initial_directive: {
+                  goal: 'close iteration 0',
+                  constraints: [],
+                  success_criteria: [],
+                  max_attempts: 1,
+                },
+              }),
+              event: { type: 'result', result: 'ok' },
+            };
+          };
+        } else if (config.name.endsWith('-coder')) {
+          mock.sendImplementation = async (message) => {
+            const text = typeof message === 'string' ? message : JSON.stringify(message);
+            coderSends.push(text);
+            if (opts.afterClose === 'directive-only' && opts.directiveOnlyIter !== undefined) {
+              const m = text.match(/\[directive iter=(\d+)\]/);
+              const iter = m ? Number(m[1]) : -1;
+              if (iter === opts.directiveOnlyIter) {
+                return { text: 'need clarification on trailing directive', event: { type: 'result', result: 'ok' } };
+              }
+            }
+            const m = text.match(/\[directive iter=(\d+)\]/);
+            const iter = m ? Number(m[1]) : 0;
+            const metric = 100 + iter;
+            fs.writeFileSync(path.join(workspace, `closed-${iter}.txt`), `closed-bytes-${iter}\n`);
+            return {
+              text: fence('iter_complete', {
+                summary: `closed iter ${iter}`,
+                eval_output: { metric, gates: [] },
+              }),
+              event: { type: 'result', result: 'ok' },
+            };
+          };
+        } else if (config.name.endsWith('-reviewer')) {
+          mock.sendImplementation = async (message) => {
+            const text = typeof message === 'string' ? message : JSON.stringify(message);
+            reviewerSends.push(text);
+            const m = text.match(/\[review_request iter=(\d+)\]/);
+            const iter = m ? Number(m[1]) : 0;
+            const metric = 100 + iter;
+            return {
+              text: fence('review_complete', {
+                decision: 'advance',
+                metric,
+                audit_notes: `advance ${iter}`,
+              }),
+              event: { type: 'result', result: 'ok' },
+            };
+          };
+        }
+        return mock;
+      };
+      return {
+        coderSends,
+        reviewerSends,
+        plannerSends,
+        get plannerDirectives() {
+          return plannerDirectives;
+        },
+      };
+    };
+
+    const closeLedger = async (
+      manager: InstanceType<typeof SessionManager>,
+      runId: string,
+      workspace: string,
+      closeCount: number,
+      opts: {
+        mode?: WireMode;
+        afterClose?: 'idle' | 'directive-only';
+        directiveOnlyIter?: number;
+      } = {},
+    ) => {
+      const tracks = wireClosedLedgerSessions(manager, workspace, closeCount, opts);
+      await manager.autoloopStart({ runId, workspace });
+      if (opts.mode === 'chat-driven') {
+        for (let i = 0; i < closeCount; i++) {
+          await manager.autoloopChat(runId, `chat-driven close step ${i}`);
+          await vi.waitFor(
+            () => {
+              expect(fs.existsSync(path.join(workspace, 'tasks', runId, 'iter', String(i), 'verdict.json'))).toBe(true);
+            },
+            { timeout: 15_000, interval: 50 },
+          );
+        }
+      } else {
+        await manager.autoloopChat(runId, `close ${closeCount} iterations`);
+        for (let i = 0; i < closeCount; i++) {
+          await vi.waitFor(
+            () => {
+              expect(fs.existsSync(path.join(workspace, 'tasks', runId, 'iter', String(i), 'verdict.json'))).toBe(true);
+            },
+            { timeout: 15_000, interval: 50 },
+          );
+        }
+        if (opts.afterClose === 'directive-only' && opts.directiveOnlyIter !== undefined) {
+          await vi.waitFor(
+            () => {
+              expect(
+                fs.existsSync(
+                  path.join(workspace, 'tasks', runId, 'iter', String(opts.directiveOnlyIter), 'directive.json'),
+                ),
+              ).toBe(true);
+            },
+            { timeout: 10_000, interval: 50 },
+          );
+        }
+      }
+      return tracks;
+    };
+
+    const terminateAndReconstruct = async (runId: string): Promise<InstanceType<typeof SessionManager>> => {
+      await mgr.autoloopStop(runId, 'closed-ledger-stop');
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (mgr as any).kernel.wait(runId);
+      await mgr.shutdown();
+      mgr = createManager();
+      return mgr;
+    };
+
+    const spawnClosedOwner = (runId: string, workspace: string, closeCount: number): ChildProcess =>
+      spawn(process.execPath, ['--import', 'tsx', OWNER_CHILD], {
+        env: {
+          ...process.env,
+          AUTOLOOP_MODE: 'closed-iterations',
+          AUTOLOOP_CLOSE_COUNT: String(closeCount),
+          AUTOLOOP_RUN_ID: runId,
+          AUTOLOOP_WORKSPACE: workspace,
+          CLAWO_WF_DIR: TEST_WF_DIR,
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+
+    const waitReadyThenSigkill = async (proc: ChildProcess): Promise<void> => {
+      let stderr = '';
+      proc.stderr?.on('data', (chunk: Buffer) => {
+        stderr += chunk.toString();
+      });
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(`owner child never READY: ${stderr.slice(0, 800)}`)), 60_000);
+        proc.stdout?.on('data', (chunk: Buffer) => {
+          if (chunk.toString().includes('READY')) {
+            clearTimeout(timer);
+            resolve();
+          }
+        });
+        proc.on('exit', (code, signal) => {
+          clearTimeout(timer);
+          reject(new Error(`owner child exited before READY code=${String(code)} signal=${String(signal)} ${stderr}`));
+        });
+        proc.on('error', reject);
+      });
+      proc.kill('SIGKILL');
+      await new Promise<void>((resolve) => {
+        proc.on('exit', () => resolve());
+      });
+    };
+
+    beforeEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('R1 two-iteration shape: closed 0..1 then stop/reconstruct/resume restores iter 2 and metrics', async () => {
+      const test = 'R1-two-iterations';
+      const runId = 'closed-two-iterations-r1';
+      const workspace = path.join(TEST_WF_DIR, 'workspaces', runId);
+      initGitWorkspace(workspace);
+      const expectedMetrics = [100, 101];
+
+      await closeLedger(mgr, runId, workspace, 2);
+      const beforeStop = recordCheckpointFact(test, 'before-stop', mgr, runId);
+      expect(beforeStop.iter).toBe(2);
+      expect(beforeStop.metric_history).toEqual(expectedMetrics);
+
+      await terminateAndReconstruct(runId);
+      const storedBeforeResume = recordCheckpointFact(test, 'after-stop-before-resume', null, runId);
+      expect(storedBeforeResume.iter).toBe(2);
+      expect(storedBeforeResume.metric_history).toEqual(expectedMetrics);
+
+      wireClosedLedgerSessions(mgr, workspace, 2);
+      const after = await mgr.autoloopResume(runId);
+      const afterResume = recordCheckpointFact(test, 'after-resume', mgr, runId);
+      // Target behaviour (expected RED on base): resume continues at K+1 with rebuilt history.
+      expect(after.iter).toBe(2);
+      expect(after.metric_history).toEqual(expectedMetrics);
+      expect(afterResume.iter).toBe(2);
+      expect(beforeStop.sha256 === afterResume.sha256).toBe(false);
+    }, 60_000);
+
+    it('R2 six-iteration shape: closed 0..5, resume bytes, second fresh manager expects iter 6 only', async () => {
+      const test = 'R2-six-iterations';
+      const runId = 'closed-six-iterations-r2';
+      const workspace = path.join(TEST_WF_DIR, 'workspaces', runId);
+      initGitWorkspace(workspace);
+      const expectedMetrics = [100, 101, 102, 103, 104, 105];
+
+      // Phase 1: close 0..5 via chat-driven planner (one directive per chat).
+      const closeTracks = await closeLedger(mgr, runId, workspace, 6, { mode: 'chat-driven' });
+      s1Fact({
+        test,
+        path: 'planner',
+        phase: 'after-close',
+        plannerDirectives: closeTracks.plannerDirectives,
+        coderSends: closeTracks.coderSends.length,
+        reviewerSends: closeTracks.reviewerSends.length,
+      });
+
+      // Phase 2: before any stop, assert checkpoint current; record facts + ledger shas + commits.
+      const beforeStop = recordCheckpointFact(test, 'before-stop', mgr, runId);
+      expect(beforeStop.iter).toBe(6);
+      expect(beforeStop.metric_history).toEqual(expectedMetrics);
+      const ledgerShasBefore = ledgerFileShas(workspace, runId, 6);
+      s1Fact({ test, path: 'tasks/' + runId + '/iter', phase: 'before-stop-ledger-shas', shas: ledgerShasBefore });
+      const commitsBefore = execFileSync('git', ['log', '--format=%H %s'], { cwd: workspace, encoding: 'utf8' })
+        .trim()
+        .split('\n')
+        .filter((line) => line.includes('autoloop/iter-'));
+      s1Fact({ test, path: 'git', phase: 'before-stop-iter-commits', commits: commitsBefore });
+      expect(commitsBefore.length).toBe(6);
+
+      // Phase 3: stop, reconstruct, resume once — record published checkpoint as FACT ONLY.
+      await terminateAndReconstruct(runId);
+      wireClosedLedgerSessions(mgr, workspace, 6, { mode: 'chat-driven' });
+      const firstResume = await mgr.autoloopResume(runId);
+      const firstResumeFact = recordCheckpointFact(test, 'after-first-resume-fact-only', mgr, runId);
+      const publishedBytes = firstResumeFact.bytes;
+      s1Fact({
+        test,
+        path: relCheckpoint(runId),
+        phase: 'first-resume-returned-iter',
+        returned_iter: firstResume.iter,
+        returned_metrics: firstResume.metric_history,
+      });
+
+      await mgr.autoloopStop(runId, 'capture-bytes');
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (mgr as any).kernel.wait(runId);
+      await mgr.shutdown();
+
+      // Phase 4–5: plant those bytes; second fresh manager; TARGET iter 6 (expected RED on base).
+      mgr = createManager();
+      fs.writeFileSync(runJsonPath(runId), publishedBytes);
+      const tracks = wireClosedLedgerSessions(mgr, workspace, 6, { mode: 'chat-driven' });
+      const second = await mgr.autoloopResume(runId);
+      recordCheckpointFact(test, 'after-second-resume', mgr, runId);
+      expect(second.iter).toBe(6);
+      // NOT REACHED on base after the tip-reset assertion above fails:
+      // expect(second.metric_history).toEqual(expectedMetrics)
+      // one chat → only iter/6, one coder, one reviewer with 6 prior_metrics
+      // iter/0..5 byte-identical; six iteration commits still present
+      expect(second.metric_history).toEqual(expectedMetrics);
+
+      const coderBefore = tracks.coderSends.length;
+      const reviewerBefore = tracks.reviewerSends.length;
+      const plannerName = `autoloop-${runId}-planner`;
+      const planner = mockSessions.find((_, i) => createdConfigs[i]?.name === plannerName);
+      expect(planner).toBeDefined();
+      // One chat → exactly one send_directive (chat-driven already enforces this).
+      await mgr.autoloopChat(runId, 'open only the next iteration');
+      await vi.waitFor(
+        () => {
+          expect(fs.existsSync(path.join(workspace, 'tasks', runId, 'iter', '6', 'directive.json'))).toBe(true);
+        },
+        { timeout: 15_000, interval: 50 },
+      );
+      await vi.waitFor(
+        () => {
+          expect(fs.existsSync(path.join(workspace, 'tasks', runId, 'iter', '6', 'verdict.json'))).toBe(true);
+        },
+        { timeout: 15_000, interval: 50 },
+      );
+      expect(tracks.coderSends.length - coderBefore).toBe(1);
+      expect(tracks.reviewerSends.length - reviewerBefore).toBe(1);
+      const lastReview = tracks.reviewerSends[tracks.reviewerSends.length - 1] ?? '';
+      // prior_metrics rebuilt with six closed metrics
+      for (const m of expectedMetrics) {
+        expect(lastReview).toContain(String(m));
+      }
+      const ledgerShasAfter = ledgerFileShas(workspace, runId, 6);
+      for (const [k, v] of Object.entries(ledgerShasBefore)) {
+        expect(ledgerShasAfter[k], k).toBe(v);
+      }
+      const commitsAfter = execFileSync('git', ['log', '--format=%H %s'], { cwd: workspace, encoding: 'utf8' })
+        .trim()
+        .split('\n')
+        .filter((line) => /autoloop\/iter-[0-5]:/.test(line));
+      expect(commitsAfter.length).toBe(6);
+    }, 180_000);
+
+    it('idempotency: two consecutive resumes yield the same state and write no ledger bytes', async () => {
+      const test = 'idempotency';
+      const runId = 'closed-idempotent';
+      const workspace = path.join(TEST_WF_DIR, 'workspaces', runId);
+      initGitWorkspace(workspace);
+      await closeLedger(mgr, runId, workspace, 2);
+      recordCheckpointFact(test, 'before-stop', mgr, runId);
+      await terminateAndReconstruct(runId);
+      wireClosedLedgerSessions(mgr, workspace, 2);
+      const ledgerBefore = snapshotLedgerIter(workspace, runId, 2);
+      const a = await mgr.autoloopResume(runId);
+      recordCheckpointFact(test, 'after-first-resume', mgr, runId);
+      const mid = snapshotLedgerIter(workspace, runId, 2);
+      const b = await mgr.autoloopResume(runId);
+      recordCheckpointFact(test, 'after-second-resume', mgr, runId);
+      expect(a.iter).toBe(2);
+      expect(b.iter).toBe(2);
+      expect(a.metric_history).toEqual([100, 101]);
+      expect(b.metric_history).toEqual(a.metric_history);
+      for (const [k, v] of Object.entries(ledgerBefore)) {
+        expect(mid[k]?.equals(v), `after first resume ${k}`).toBe(true);
+        expect(snapshotLedgerIter(workspace, runId, 2)[k]?.equals(v), `after second resume ${k}`).toBe(true);
+      }
+    }, 60_000);
+
+    it('partial trailing directive-only iter/K+1: resume expects K+1 and no Coder retry', async () => {
+      const test = 'partial-directive-only';
+      const runId = 'closed-directive-only';
+      const workspace = path.join(TEST_WF_DIR, 'workspaces', runId);
+      initGitWorkspace(workspace);
+      const tracks = await closeLedger(mgr, runId, workspace, 2, {
+        afterClose: 'directive-only',
+        directiveOnlyIter: 2,
+      });
+      recordCheckpointFact(test, 'before-stop', mgr, runId);
+      expect(fs.existsSync(path.join(workspace, 'tasks', runId, 'iter', '2', 'directive.json'))).toBe(true);
+      expect(fs.existsSync(path.join(workspace, 'tasks', runId, 'iter', '2', 'verdict.json'))).toBe(false);
+      const coderBefore = tracks.coderSends.length;
+
+      await terminateAndReconstruct(runId);
+      const tracks2 = wireClosedLedgerSessions(mgr, workspace, 2);
+      const after = await mgr.autoloopResume(runId);
+      recordCheckpointFact(test, 'after-resume', mgr, runId);
+      expect(after.iter).toBe(2);
+      expect(tracks2.coderSends.length).toBe(0);
+      expect(tracks.coderSends.length).toBe(coderBefore);
+    }, 60_000);
+
+    it('owner-loss path: closed iterations then SIGKILL, reconstruct + resume restores tip', async () => {
+      const test = 'owner-loss';
+      const runId = 'closed-owner-loss';
+      const workspace = path.join(TEST_WF_DIR, 'workspaces', runId);
+      initGitWorkspace(workspace);
+      const proc = spawnClosedOwner(runId, workspace, 2);
+      await waitReadyThenSigkill(proc);
+
+      const observer = createManager();
+      try {
+        await vi.waitFor(
+          () => {
+            expect(leaseIsStale(readLease(runId))).toBe(true);
+            expect(observer.workflowStatus(runId).state).toBe('running');
+          },
+          { timeout: 5_000, interval: 50 },
+        );
+        const beforeKill = recordCheckpointFact(test, 'before-resume-after-kill', observer, runId);
+        expect(beforeKill.iter).toBe(2);
+        expect(beforeKill.metric_history).toEqual([100, 101]);
+
+        createdConfigs = [];
+        mockSessions = [];
+        const resumeMgr = createManager();
+        try {
+          wireClosedLedgerSessions(resumeMgr, workspace, 2);
+          const after = await resumeMgr.autoloopResume(runId);
+          recordCheckpointFact(test, 'after-resume', resumeMgr, runId);
+          expect(after.iter).toBe(2);
+          expect(after.metric_history).toEqual([100, 101]);
+        } finally {
+          await resumeMgr.shutdown();
+        }
+      } finally {
+        await observer.shutdown();
+      }
+    }, 90_000);
+
+    it('workflowResume on terminal closed run records unreachable', async () => {
+      const test = 'workflowResume-unreachable';
+      const runId = 'closed-workflow-resume';
+      const workspace = path.join(TEST_WF_DIR, 'workspaces', runId);
+      initGitWorkspace(workspace);
+      await closeLedger(mgr, runId, workspace, 2);
+      await terminateAndReconstruct(runId);
+      const before = recordCheckpointFact(test, 'before-workflowResume', null, runId);
+      const plannerStartsBefore = createdConfigs.filter((c) => c.name.endsWith('-planner')).length;
+      await mgr.workflowResume(runId);
+      const after = recordCheckpointFact(test, 'after-workflowResume', null, runId);
+      const plannerStartsAfter = createdConfigs.filter((c) => c.name.endsWith('-planner')).length;
+      s1Fact({
+        test,
+        path: 'workflowResume',
+        phase: 'reachability',
+        reachable: false,
+        planner_starts_before: plannerStartsBefore,
+        planner_starts_after: plannerStartsAfter,
+        checkpoint_unchanged: before.sha256 === after.sha256,
+      });
+      // Direct unreachability asserts (not a tip-restore success).
+      expect(plannerStartsAfter).toBe(plannerStartsBefore);
+      expect(after.sha256).toBe(before.sha256);
+      expect(before.iter).toBe(2);
+    }, 60_000);
+
+    it('gap fixture: closed 0..1 with closed iter/3 marker; no iter/2', async () => {
+      const test = 'gap-marker';
+      const runId = 'closed-gap-marker';
+      const workspace = path.join(TEST_WF_DIR, 'workspaces', runId);
+      initGitWorkspace(workspace);
+      await closeLedger(mgr, runId, workspace, 2);
+      // Gap: no iter/2; correctly shaped closed iter/3 with marker in a string field.
+      expect(fs.existsSync(path.join(workspace, 'tasks', runId, 'iter', '2'))).toBe(false);
+      const iter3 = path.join(workspace, 'tasks', runId, 'iter', '3');
+      fs.mkdirSync(iter3, { recursive: true });
+      fs.writeFileSync(
+        path.join(iter3, 'directive.json'),
+        JSON.stringify({
+          schema_version: 1,
+          iter: 3,
+          goal: 'gap',
+          constraints: [],
+          success_criteria: [],
+          max_attempts: 1,
+        }),
+      );
+      fs.writeFileSync(
+        path.join(iter3, 'eval_output.json'),
+        JSON.stringify({ schema_version: 1, iter: 3, eval_output: { metric: 103, gates: [] } }),
+      );
+      fs.writeFileSync(path.join(iter3, 'coder_summary.txt'), 'gap planted\n');
+      fs.writeFileSync(path.join(iter3, 'diff.patch'), '');
+      const verdict3 = {
+        schema_version: 1,
+        iter: 3,
+        decision: 'advance',
+        metric: 103,
+        audit_notes: `gap fixture contains ${MARKER}`,
+      };
+      fs.writeFileSync(path.join(iter3, 'verdict.json'), JSON.stringify(verdict3, null, 2));
+      const markerLedgerSha = sha256Hex(fs.readFileSync(path.join(iter3, 'verdict.json')));
+      s1Fact({
+        test,
+        path: `tasks/${runId}/iter/3/verdict.json`,
+        phase: 'planted',
+        sha256: markerLedgerSha,
+        has_marker: true,
+      });
+
+      const acceptedHistoryBefore = snapshotLedgerIter(workspace, runId, 2);
+      const sessionsBeforeReset = createdConfigs.length;
+      const specPath = path.join(TEST_WF_DIR, runId, 'spec.json');
+
+      await terminateAndReconstruct(runId);
+      createdConfigs = [];
+      mockSessions = [];
+      const sessionsAfterReset = createdConfigs.length;
+      // Snapshot immediately before refusal attempt (after stop/reconstruct).
+      const ledgerAllBefore = snapshotLedgerAll(workspace, runId);
+      const progressBefore = readCheckpointProgress(runId);
+      const checkpointEnvelopeBefore = fs.existsSync(runJsonPath(runId))
+        ? fs.readFileSync(runJsonPath(runId))
+        : Buffer.alloc(0);
+      const specBefore = fs.existsSync(specPath) ? fs.readFileSync(specPath) : Buffer.alloc(0);
+      const gitBefore = worktreeGitSnapshot(workspace);
+      wireClosedLedgerSessions(mgr, workspace, 2);
+      const { result: resumeOutcome, logText } = await withCapturedConsoleLogs(async () => {
+        let resumeErr: unknown = null;
+        let after: { iter: number; metric_history: number[] } | null = null;
+        try {
+          after = await mgr.autoloopResume(runId);
+        } catch (err) {
+          resumeErr = err;
+        }
+        return { resumeErr, after };
+      });
+      const { resumeErr, after } = resumeOutcome;
+      const sessionsAfterResumeAttempt = createdConfigs.length;
+
+      const errMessage = resumeErr instanceof Error ? resumeErr.message : '';
+      const errText =
+        resumeErr instanceof Error ? `${resumeErr.message}\n${resumeErr.stack ?? ''}` : String(resumeErr ?? '');
+      const statusText = JSON.stringify(mgr.autoloopStatus(runId) ?? null);
+      const checkpointEnvelopeAfter = fs.existsSync(runJsonPath(runId))
+        ? fs.readFileSync(runJsonPath(runId))
+        : Buffer.alloc(0);
+      const progressImmediate = readCheckpointProgress(runId);
+      const specAfter = fs.existsSync(specPath) ? fs.readFileSync(specPath) : Buffer.alloc(0);
+      const gitImmediate = worktreeGitSnapshot(workspace);
+      const markerStillInLedger = fs.readFileSync(path.join(iter3, 'verdict.json'), 'utf8').includes(MARKER);
+      const markerShaUnchanged = sha256Hex(fs.readFileSync(path.join(iter3, 'verdict.json'))) === markerLedgerSha;
+
+      const markerInError = errText.includes(MARKER);
+      const markerInLogs = logText.includes(MARKER);
+      const markerInStatus = statusText.includes(MARKER);
+      const markerInCheckpoint = checkpointEnvelopeAfter.toString('utf8').includes(MARKER);
+      s1Fact({
+        test,
+        path: 'marker-checks',
+        phase: 'after-resume',
+        resumeThrew: Boolean(resumeErr),
+        markerInError,
+        markerInLogs,
+        markerInStatus,
+        markerInCheckpoint,
+        markerStillInLedger,
+        markerShaUnchanged,
+        captured_console_log: true,
+        returned_iter: after?.iter ?? null,
+        sessions_before_reset: sessionsBeforeReset,
+        sessions_after_reset: sessionsAfterReset,
+        sessions_after_resume_attempt: sessionsAfterResumeAttempt,
+      });
+      expect(markerInError).toBe(false);
+      expect(markerInLogs).toBe(false);
+      expect(markerInStatus).toBe(false);
+      expect(markerInCheckpoint).toBe(false);
+      expect(markerStillInLedger).toBe(true);
+      expect(markerShaUnchanged).toBe(true);
+
+      expect(resumeErr).toBeInstanceOf(Error);
+      expect(errMessage).toBe(CLOSED_LEDGER_REFUSAL_MSG);
+      expect(sessionsAfterReset).toBe(0);
+      expect(sessionsAfterResumeAttempt).toBe(0);
+      expect(createdConfigs.length).toBe(0);
+      expect(specAfter.equals(specBefore)).toBe(true);
+      expect(gitImmediate).toEqual(gitBefore);
+      assertLedgerInventoryEqual(ledgerAllBefore, workspace, runId);
+      // Checkpoint PROGRESS preserved (envelope lifecycle may rewrite run.json).
+      expect(progressImmediate).toEqual(progressBefore);
+      s1Fact({
+        test,
+        path: 'preservation',
+        phase: 'immediate-after-refusal',
+        progress_before: progressBefore,
+        progress_immediate: progressImmediate,
+        progress_equal: JSON.stringify(progressImmediate) === JSON.stringify(progressBefore),
+        envelope_bytes_equal: checkpointEnvelopeAfter.equals(checkpointEnvelopeBefore),
+        envelope_lifecycle_rewrite_without_progress_loss:
+          !checkpointEnvelopeAfter.equals(checkpointEnvelopeBefore) &&
+          JSON.stringify(progressImmediate) === JSON.stringify(progressBefore),
+        spec_bytes_equal: specAfter.equals(specBefore),
+        worktree_git_equal: gitImmediate.head === gitBefore.head && gitImmediate.porcelain === gitBefore.porcelain,
+        sessions_after_resume_attempt: sessionsAfterResumeAttempt,
+      });
+
+      await vi.waitFor(
+        () => {
+          expect(['failed', 'cancelled', 'succeeded']).toContain(mgr.workflowStatus(runId).state);
+        },
+        { timeout: 15_000, interval: 50 },
+      );
+      const settled = mgr.workflowStatus(runId);
+      const progressSettled = readCheckpointProgress(runId);
+      const checkpointEnvelopeSettled = fs.existsSync(runJsonPath(runId))
+        ? fs.readFileSync(runJsonPath(runId))
+        : Buffer.alloc(0);
+      const specSettled = fs.existsSync(specPath) ? fs.readFileSync(specPath) : Buffer.alloc(0);
+      const gitSettled = worktreeGitSnapshot(workspace);
+      s1Fact({
+        test,
+        path: 'record',
+        phase: 'settled-after-refusal',
+        record_state: settled.state,
+        main_node_state: settled.nodes?.main?.state,
+        progress_before: progressBefore,
+        progress_settled: progressSettled,
+        progress_equal: JSON.stringify(progressSettled) === JSON.stringify(progressBefore),
+        envelope_bytes_equal: checkpointEnvelopeSettled.equals(checkpointEnvelopeBefore),
+        envelope_lifecycle_rewrite_without_progress_loss:
+          !checkpointEnvelopeSettled.equals(checkpointEnvelopeBefore) &&
+          JSON.stringify(progressSettled) === JSON.stringify(progressBefore),
+        spec_unchanged: specBefore.equals(specSettled),
+      });
+      expect(settled.state).toBe('failed');
+      expect(settled.nodes?.main?.state).toBe('failed');
+      expect(progressSettled).toEqual(progressBefore);
+      expect(specSettled.equals(specBefore)).toBe(true);
+      expect(gitSettled).toEqual(gitBefore);
+      assertLedgerInventoryEqual(ledgerAllBefore, workspace, runId);
+
+      // Temp-fixture repair only: remove gapped iter/3, then fresh-manager retry restores tip.
+      fs.rmSync(path.join(workspace, 'tasks', runId, 'iter', '3'), { recursive: true, force: true });
+      const acceptedAfterRepairPlant = snapshotLedgerIter(workspace, runId, 2);
+      expect(Object.keys(acceptedAfterRepairPlant).sort()).toEqual(Object.keys(acceptedHistoryBefore).sort());
+      for (const [k, v] of Object.entries(acceptedHistoryBefore)) {
+        expect(acceptedAfterRepairPlant[k]?.equals(v)).toBe(true);
+      }
+      await mgr.shutdown();
+      mgr = createManager();
+      createdConfigs = [];
+      mockSessions = [];
+      const tracks = wireClosedLedgerSessions(mgr, workspace, 2);
+      const repaired = await mgr.autoloopResume(runId);
+      await new Promise((r) => setTimeout(r, 300));
+      s1Fact({
+        test,
+        path: 'record',
+        phase: 'after-repaired-retry',
+        resumed_iter: repaired.iter,
+        resumed_metrics: repaired.metric_history,
+        coder_sends: tracks.coderSends.length,
+        reviewer_sends: tracks.reviewerSends.length,
+        planner_directives: tracks.plannerDirectives,
+      });
+      expect(repaired.iter).toBe(2);
+      expect(repaired.metric_history).toEqual([100, 101]);
+      expect(tracks.coderSends).toEqual([]);
+      expect(tracks.reviewerSends).toEqual([]);
+      expect(tracks.plannerDirectives).toBe(0);
+      const acceptedAfterRetry = snapshotLedgerIter(workspace, runId, 2);
+      for (const [k, v] of Object.entries(acceptedHistoryBefore)) {
+        expect(acceptedAfterRetry[k]?.equals(v)).toBe(true);
+      }
+      expect(fs.existsSync(path.join(workspace, 'tasks', runId, 'iter', '2'))).toBe(false);
+      expect(fs.existsSync(path.join(workspace, 'tasks', runId, 'iter', '3'))).toBe(false);
+    }, 90_000);
+
+    it('malformed fixture: closed 0..1 with invalid JSON verdict marker at iter/2', async () => {
+      const test = 'malformed-marker';
+      const runId = 'closed-malformed-marker';
+      const workspace = path.join(TEST_WF_DIR, 'workspaces', runId);
+      initGitWorkspace(workspace);
+      await closeLedger(mgr, runId, workspace, 2);
+      const badDir = path.join(workspace, 'tasks', runId, 'iter', '2');
+      fs.mkdirSync(badDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(badDir, 'directive.json'),
+        JSON.stringify({
+          schema_version: 1,
+          iter: 2,
+          goal: 'malformed',
+          constraints: [],
+          success_criteria: [],
+          max_attempts: 1,
+        }),
+      );
+      const badVerdict = `{not-json ${MARKER}`;
+      fs.writeFileSync(path.join(badDir, 'verdict.json'), badVerdict);
+      const markerLedgerSha = sha256Hex(Buffer.from(badVerdict));
+      s1Fact({ test, path: `tasks/${runId}/iter/2/verdict.json`, phase: 'planted', sha256: markerLedgerSha });
+
+      const acceptedHistoryBefore = snapshotLedgerIter(workspace, runId, 2);
+      const sessionsBeforeReset = createdConfigs.length;
+      const specPath = path.join(TEST_WF_DIR, runId, 'spec.json');
+
+      await terminateAndReconstruct(runId);
+      createdConfigs = [];
+      mockSessions = [];
+      const sessionsAfterReset = createdConfigs.length;
+      const ledgerAllBefore = snapshotLedgerAll(workspace, runId);
+      const progressBefore = readCheckpointProgress(runId);
+      const checkpointEnvelopeBefore = fs.existsSync(runJsonPath(runId))
+        ? fs.readFileSync(runJsonPath(runId))
+        : Buffer.alloc(0);
+      const specBefore = fs.existsSync(specPath) ? fs.readFileSync(specPath) : Buffer.alloc(0);
+      const gitBefore = worktreeGitSnapshot(workspace);
+      wireClosedLedgerSessions(mgr, workspace, 2);
+      const { result: resumeOutcome, logText } = await withCapturedConsoleLogs(async () => {
+        let resumeErr: unknown = null;
+        let after: { iter: number; metric_history: number[] } | null = null;
+        try {
+          after = await mgr.autoloopResume(runId);
+        } catch (err) {
+          resumeErr = err;
+        }
+        return { resumeErr, after };
+      });
+      const { resumeErr, after } = resumeOutcome;
+      const sessionsAfterResumeAttempt = createdConfigs.length;
+
+      const errMessage = resumeErr instanceof Error ? resumeErr.message : '';
+      const errText =
+        resumeErr instanceof Error ? `${resumeErr.message}\n${resumeErr.stack ?? ''}` : String(resumeErr ?? '');
+      const statusText = JSON.stringify(mgr.autoloopStatus(runId) ?? null);
+      const checkpointEnvelopeAfter = fs.existsSync(runJsonPath(runId))
+        ? fs.readFileSync(runJsonPath(runId))
+        : Buffer.alloc(0);
+      const progressImmediate = readCheckpointProgress(runId);
+      const specAfter = fs.existsSync(specPath) ? fs.readFileSync(specPath) : Buffer.alloc(0);
+      const gitImmediate = worktreeGitSnapshot(workspace);
+      const markerStillInLedger = fs.readFileSync(path.join(badDir, 'verdict.json'), 'utf8').includes(MARKER);
+      const markerShaUnchanged = sha256Hex(fs.readFileSync(path.join(badDir, 'verdict.json'))) === markerLedgerSha;
+
+      const markerInError = errText.includes(MARKER);
+      const markerInLogs = logText.includes(MARKER);
+      const markerInStatus = statusText.includes(MARKER);
+      const markerInCheckpoint = checkpointEnvelopeAfter.toString('utf8').includes(MARKER);
+      s1Fact({
+        test,
+        path: 'marker-checks',
+        phase: 'after-resume',
+        resumeThrew: Boolean(resumeErr),
+        markerInError,
+        markerInLogs,
+        markerInStatus,
+        markerInCheckpoint,
+        markerStillInLedger,
+        markerShaUnchanged,
+        captured_console_log: true,
+        returned_iter: after?.iter ?? null,
+        sessions_before_reset: sessionsBeforeReset,
+        sessions_after_reset: sessionsAfterReset,
+        sessions_after_resume_attempt: sessionsAfterResumeAttempt,
+      });
+      expect(markerInError).toBe(false);
+      expect(markerInLogs).toBe(false);
+      expect(markerInStatus).toBe(false);
+      expect(markerInCheckpoint).toBe(false);
+      expect(markerStillInLedger).toBe(true);
+      expect(markerShaUnchanged).toBe(true);
+
+      // Independent early-refusal evidence for the malformed fixture (not inferred from gap).
+      expect(resumeErr).toBeInstanceOf(Error);
+      expect(errMessage).toBe(CLOSED_LEDGER_REFUSAL_MSG);
+      expect(sessionsAfterReset).toBe(0);
+      expect(sessionsAfterResumeAttempt).toBe(0);
+      expect(createdConfigs.length).toBe(0);
+      expect(specAfter.equals(specBefore)).toBe(true);
+      expect(gitImmediate).toEqual(gitBefore);
+      assertLedgerInventoryEqual(ledgerAllBefore, workspace, runId);
+      expect(fs.readFileSync(path.join(badDir, 'verdict.json'), 'utf8')).toBe(badVerdict);
+      expect(progressImmediate).toEqual(progressBefore);
+      s1Fact({
+        test,
+        path: 'preservation',
+        phase: 'immediate-after-refusal',
+        progress_before: progressBefore,
+        progress_immediate: progressImmediate,
+        progress_equal: JSON.stringify(progressImmediate) === JSON.stringify(progressBefore),
+        envelope_bytes_equal: checkpointEnvelopeAfter.equals(checkpointEnvelopeBefore),
+        envelope_lifecycle_rewrite_without_progress_loss:
+          !checkpointEnvelopeAfter.equals(checkpointEnvelopeBefore) &&
+          JSON.stringify(progressImmediate) === JSON.stringify(progressBefore),
+        spec_bytes_equal: specAfter.equals(specBefore),
+        worktree_git_equal: gitImmediate.head === gitBefore.head && gitImmediate.porcelain === gitBefore.porcelain,
+        sessions_after_resume_attempt: sessionsAfterResumeAttempt,
+      });
+
+      await vi.waitFor(
+        () => {
+          expect(['failed', 'cancelled', 'succeeded']).toContain(mgr.workflowStatus(runId).state);
+        },
+        { timeout: 15_000, interval: 50 },
+      );
+      const settled = mgr.workflowStatus(runId);
+      const progressSettled = readCheckpointProgress(runId);
+      const checkpointEnvelopeSettled = fs.readFileSync(runJsonPath(runId));
+      const specSettled = fs.existsSync(specPath) ? fs.readFileSync(specPath) : Buffer.alloc(0);
+      const gitSettled = worktreeGitSnapshot(workspace);
+      s1Fact({
+        test,
+        path: 'record',
+        phase: 'settled-after-refusal',
+        record_state: settled.state,
+        main_node_state: settled.nodes?.main?.state,
+        progress_before: progressBefore,
+        progress_settled: progressSettled,
+        progress_equal: JSON.stringify(progressSettled) === JSON.stringify(progressBefore),
+        envelope_bytes_equal: checkpointEnvelopeSettled.equals(checkpointEnvelopeBefore),
+        envelope_lifecycle_rewrite_without_progress_loss:
+          !checkpointEnvelopeSettled.equals(checkpointEnvelopeBefore) &&
+          JSON.stringify(progressSettled) === JSON.stringify(progressBefore),
+        spec_unchanged: specBefore.equals(specSettled),
+      });
+      expect(settled.state).toBe('failed');
+      expect(settled.nodes?.main?.state).toBe('failed');
+      expect(progressSettled).toEqual(progressBefore);
+      expect(specSettled.equals(specBefore)).toBe(true);
+      expect(gitSettled).toEqual(gitBefore);
+      assertLedgerInventoryEqual(ledgerAllBefore, workspace, runId);
+
+      // Temp-fixture repair: remove malformed iter/2, fresh-manager retry restores tip.
+      fs.rmSync(badDir, { recursive: true, force: true });
+      const acceptedAfterRepairPlant = snapshotLedgerIter(workspace, runId, 2);
+      for (const [k, v] of Object.entries(acceptedHistoryBefore)) {
+        expect(acceptedAfterRepairPlant[k]?.equals(v)).toBe(true);
+      }
+      await mgr.shutdown();
+      mgr = createManager();
+      createdConfigs = [];
+      mockSessions = [];
+      const tracks = wireClosedLedgerSessions(mgr, workspace, 2);
+      const repaired = await mgr.autoloopResume(runId);
+      await new Promise((r) => setTimeout(r, 300));
+      s1Fact({
+        test,
+        path: 'record',
+        phase: 'after-repaired-retry',
+        resumed_iter: repaired.iter,
+        resumed_metrics: repaired.metric_history,
+        coder_sends: tracks.coderSends.length,
+        reviewer_sends: tracks.reviewerSends.length,
+        planner_directives: tracks.plannerDirectives,
+      });
+      expect(repaired.iter).toBe(2);
+      expect(repaired.metric_history).toEqual([100, 101]);
+      expect(tracks.coderSends).toEqual([]);
+      expect(tracks.reviewerSends).toEqual([]);
+      expect(tracks.plannerDirectives).toBe(0);
+      const acceptedAfterRetry = snapshotLedgerIter(workspace, runId, 2);
+      for (const [k, v] of Object.entries(acceptedHistoryBefore)) {
+        expect(acceptedAfterRetry[k]?.equals(v)).toBe(true);
+      }
+      expect(fs.existsSync(badDir)).toBe(false);
+    }, 90_000);
+
+    // K=-1 / no-valid-closed-prefix: missing or open (or malformed) iter/0 plus a
+    // later canonical dir must Planner-only resume — same as exact base — before
+    // any gap refusal. Valid-prefix gap/malformed fixtures above stay refuse.
+    for (const mode of ['missing-zero', 'open-zero', 'malformed-zero'] as const) {
+      it(`prefixless ${mode} with later iter/1: no restore no refusal (Planner-only)`, async () => {
+        const runId = `closed-prefixless-${mode}-later1`;
+        const workspace = path.join(TEST_WF_DIR, 'workspaces', runId);
+        initGitWorkspace(workspace);
+        await mgr.autoloopStart({ runId, workspace });
+        const iterRoot = path.join(workspace, 'tasks', runId, 'iter');
+        fs.mkdirSync(path.join(iterRoot, '1'), { recursive: true });
+        if (mode !== 'missing-zero') {
+          fs.mkdirSync(path.join(iterRoot, '0'), { recursive: true });
+          fs.writeFileSync(
+            path.join(iterRoot, '0', 'directive.json'),
+            JSON.stringify({
+              schema_version: 1,
+              iter: 0,
+              goal: mode,
+              constraints: [],
+              success_criteria: [],
+              max_attempts: 1,
+            }),
+          );
+          if (mode === 'malformed-zero') {
+            fs.writeFileSync(path.join(iterRoot, '0', 'verdict.json'), `{not-json ${MARKER}`);
+          }
+        }
+        await terminateAndReconstruct(runId);
+        createdConfigs = [];
+        mockSessions = [];
+        wireClosedLedgerSessions(mgr, workspace, 0);
+        let resumeErr: unknown = null;
+        let after: { iter: number; metric_history: number[] } | null = null;
+        try {
+          after = await mgr.autoloopResume(runId);
+        } catch (err) {
+          resumeErr = err;
+        }
+        expect(resumeErr).toBeNull();
+        expect(after?.iter).toBe(0);
+        expect(after?.metric_history).toEqual([]);
+        expect(createdConfigs.map((c) => c.name)).toEqual([`autoloop-${runId}-planner`]);
+      }, 60_000);
+    }
+
+    it('boot throw on resume: records base RunRecord state via existing planner-start failure', async () => {
+      const test = 'boot-throw';
+      const runId = 'closed-boot-throw';
+      const workspace = path.join(TEST_WF_DIR, 'workspaces', runId);
+      initGitWorkspace(workspace);
+      await closeLedger(mgr, runId, workspace, 2);
+      await terminateAndReconstruct(runId);
+      const before = mgr.workflowStatus(runId);
+      const beforeFact = recordCheckpointFact(test, 'before-failed-resume', null, runId);
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (mgr as any)._createSession = (): ISession => {
+        const mock = new MockSession();
+        mock.start = async () => {
+          throw new Error('closed-ledger boot throw');
+        };
+        return mock;
+      };
+      let rejectText = '';
+      try {
+        await mgr.autoloopResume(runId);
+      } catch (err) {
+        rejectText = err instanceof Error ? err.message : String(err);
+      }
+
+      // Immediate observation: base may still show running/running while failure settles async.
+      const immediate = mgr.workflowStatus(runId);
+      const immediateFact = recordCheckpointFact(test, 'immediate-after-boot-throw', null, runId);
+      s1Fact({
+        test,
+        path: 'record',
+        phase: 'immediate-after-boot-throw',
+        rejectText,
+        record_state: immediate?.state,
+        main_node_state: immediate?.nodes?.main?.state,
+        tip_iter: immediateFact.iter,
+        tip_metrics: immediateFact.metric_history,
+      });
+
+      // Deterministic settled-state observation (do not race a retry against running).
+      await vi.waitFor(
+        () => {
+          const st = mgr.workflowStatus(runId);
+          expect(['failed', 'cancelled', 'succeeded']).toContain(st.state);
+        },
+        { timeout: 15_000, interval: 50 },
+      );
+      const settled = mgr.workflowStatus(runId);
+      const settledFact = recordCheckpointFact(test, 'settled-after-boot-throw', null, runId);
+      s1Fact({
+        test,
+        path: 'record',
+        phase: 'settled-after-boot-throw',
+        record_state: settled?.state,
+        main_node_state: settled?.nodes?.main?.state,
+        tip_iter: settledFact.iter,
+        tip_metrics: settledFact.metric_history,
+      });
+
+      // Later resume after settlement, on a fresh manager (optional but clearer isolation).
+      await mgr.shutdown();
+      mgr = createManager();
+      wireClosedLedgerSessions(mgr, workspace, 2);
+      let laterErr: unknown = null;
+      let later: { iter: number; metric_history: number[] } | null = null;
+      try {
+        later = await mgr.autoloopResume(runId);
+      } catch (err) {
+        laterErr = err;
+      }
+      const laterFact = recordCheckpointFact(test, 'after-settled-resume-attempt', mgr, runId);
+      const laterStatus = mgr.workflowStatus(runId);
+      s1Fact({
+        test,
+        path: 'record',
+        phase: 'after-settled-resume-attempt',
+        resumed: !laterErr,
+        resumed_iter: later?.iter ?? null,
+        resumed_metrics: later?.metric_history ?? null,
+        later_error: laterErr instanceof Error ? laterErr.message : laterErr ? String(laterErr) : null,
+        record_state: laterStatus?.state,
+        main_node_state: laterStatus?.nodes?.main?.state,
+        checkpoint_iter: laterFact.iter,
+        checkpoint_metrics: laterFact.metric_history,
+        tip_reset_on_later_resume: !laterErr && typeof later?.iter === 'number' ? later.iter === 0 : null,
+      });
+
+      // Tip at throw / settlement is not lost; later resume after settlement restores tip.
+      expect(rejectText).toContain('closed-ledger boot throw');
+      expect(immediate).toBeDefined();
+      expect(settled).toBeDefined();
+      expect(settled.spec).toEqual(before.spec);
+      expect(beforeFact.iter).toBe(2);
+      expect(beforeFact.metric_history).toEqual([100, 101]);
+      expect(immediateFact.iter).toBe(2);
+      expect(immediateFact.metric_history).toEqual([100, 101]);
+      expect(settledFact.iter).toBe(2);
+      expect(settledFact.metric_history).toEqual([100, 101]);
+      expect(laterErr).toBeNull();
+      expect(later?.iter).toBe(2);
+      expect(later?.metric_history).toEqual([100, 101]);
+      expect(laterFact.iter).toBe(2);
+    }, 90_000);
+
+    it('ordered finite metrics restore caps at MAX_METRIC_HISTORY (20) via public resume', async () => {
+      const test = 'cap20-metrics';
+      const runId = 'closed-cap20';
+      const workspace = path.join(TEST_WF_DIR, 'workspaces', runId);
+      initGitWorkspace(workspace);
+      // Provenance: public autoloopStart creates the durable run; contiguous closed
+      // prefix 0..21 is written as real ledger bytes (directive+verdict, metric=100+i)
+      // after stop — not invented runner state. Live auto-continue close of 22 hits
+      // default maxDispatchDepth before the tip; public autoloopResume is still the
+      // sole restore path under test (reader → runner.state before runner.start).
+      await mgr.autoloopStart({ runId, workspace });
+      await terminateAndReconstruct(runId);
+      for (let i = 0; i < 22; i++) {
+        const iterDir = path.join(workspace, 'tasks', runId, 'iter', String(i));
+        fs.mkdirSync(iterDir, { recursive: true });
+        fs.writeFileSync(
+          path.join(iterDir, 'directive.json'),
+          JSON.stringify({
+            schema_version: 1,
+            iter: i,
+            goal: `cap20 ${i}`,
+            constraints: [],
+            success_criteria: [],
+            max_attempts: 1,
+          }),
+        );
+        fs.writeFileSync(
+          path.join(iterDir, 'verdict.json'),
+          JSON.stringify(
+            {
+              schema_version: 1,
+              iter: i,
+              decision: 'advance',
+              metric: 100 + i,
+              audit_notes: `cap20 ${i}`,
+            },
+            null,
+            2,
+          ),
+        );
+      }
+      s1Fact({
+        test,
+        path: `tasks/${runId}/iter`,
+        phase: 'planted-closed-prefix',
+        closed_count: 22,
+        metric_first: 100,
+        metric_last: 121,
+        provenance: 'ledger-bytes-after-public-start-stop',
+      });
+      wireClosedLedgerSessions(mgr, workspace, 22);
+      const after = await mgr.autoloopResume(runId);
+      recordCheckpointFact(test, 'after-resume', mgr, runId);
+      expect(after.iter).toBe(22);
+      expect(after.metric_history).toEqual(Array.from({ length: 20 }, (_, i) => 100 + (22 - 20 + i)));
+    }, 90_000);
+  });
+
+  describe('closed-ledger-preserve', () => {
+    const fence = (tool: string, args: Record<string, unknown>): string =>
+      `\`\`\`autoloop\n${JSON.stringify({ tool, args })}\n\`\`\``;
+
+    const initGitWorkspace = (workspace: string): void => {
+      fs.mkdirSync(workspace, { recursive: true });
+      execFileSync('git', ['init', '-b', 'main'], { cwd: workspace });
+      execFileSync('git', ['config', 'user.email', 'autoloop-test@example.com'], { cwd: workspace });
+      execFileSync('git', ['config', 'user.name', 'autoloop-test'], { cwd: workspace });
+      execFileSync('git', ['config', 'commit.gpgsign', 'false'], { cwd: workspace });
+      fs.writeFileSync(path.join(workspace, 'README.md'), 'workspace\n');
+      execFileSync('git', ['add', 'README.md'], { cwd: workspace });
+      execFileSync('git', ['commit', '-m', 'init'], { cwd: workspace });
+    };
+
+    beforeEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('legacy lone iter/0/verdict.json does not crash resume and stays Planner-only', async () => {
+      const runId = 'preserve-lone-verdict';
+      const workspace = path.join(TEST_WF_DIR, 'workspaces', runId);
+      initGitWorkspace(workspace);
+      await mgr.autoloopStart({ runId, workspace });
+      const iter0 = path.join(workspace, 'tasks', runId, 'iter', '0');
+      fs.mkdirSync(iter0, { recursive: true });
+      fs.writeFileSync(
+        path.join(iter0, 'verdict.json'),
+        JSON.stringify({ schema_version: 1, iter: 0, decision: 'hold', metric: null, audit_notes: 'legacy' }, null, 2),
+      );
+      await mgr.autoloopStop(runId, 'plant-lone-verdict');
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (mgr as any).kernel.wait(runId);
+      await mgr.shutdown();
+      mgr = createManager();
+      createdConfigs = [];
+      mockSessions = [];
+      await mgr.autoloopResume(runId);
+      await new Promise((r) => setTimeout(r, 300));
+      expect(createdConfigs.map((c) => c.name)).toEqual([`autoloop-${runId}-planner`]);
+      expect(fs.existsSync(path.join(iter0, 'verdict.json'))).toBe(true);
+    }, 60_000);
+
+    it('empty or missing ledger fresh start still boots at iter 0', async () => {
+      const runId = 'preserve-empty-ledger';
+      const workspace = path.join(TEST_WF_DIR, 'workspaces', runId);
+      initGitWorkspace(workspace);
+      await mgr.autoloopStart({ runId, workspace });
+      const handle = mgr.getAutoloop(runId)!;
+      expect(handle.runner.state.iter).toBe(0);
+      expect(handle.runner.state.metric_history).toEqual([]);
+      expect(fs.existsSync(path.join(workspace, 'tasks', runId, 'iter'))).toBe(false);
+    }, 30_000);
+
+    it('#132 pending_dispatch resume retains pause without replaying Planner', async () => {
+      const runId = 'preserve-pending-dispatch';
+      const workspace = path.join(TEST_WF_DIR, 'workspaces', runId);
+      fs.mkdirSync(workspace, { recursive: true });
+      await mgr.autoloopStart({ runId, workspace, sendTimeoutMs: 600_000 });
+      const handle = mgr.getAutoloop(runId)!;
+      const pending = {
+        status: 'awaiting_resume' as const,
+        dispatch_id: 'dispatch-preserve-planner-0',
+        agent: 'planner' as const,
+        message_id: 'message-preserve',
+        message_type: 'chat' as const,
+        iter: 0,
+        timeout_ms: 600_000,
+        error: 'Timed out after 600000ms',
+      };
+      await handle.runner.send(AutoloopMsg.sendTimeout(0, pending));
+      expect(handle.runner.state).toMatchObject({ status: 'paused', pending_dispatch: pending });
+      const sendsBefore = mockSessions[0].sendCalls.length;
+      await expect(mgr.autoloopResume(runId)).resolves.toBe(handle.runner.state);
+      expect(handle.runner.state).toMatchObject({ status: 'paused', pending_dispatch: pending });
+      expect(mockSessions[0].sendCalls).toHaveLength(sendsBefore);
+    }, 30_000);
+
+    it('#134/#138 closed prefix plus open committed K+1 is Reviewer-only once', async () => {
+      const runId = 'preserve-open-committed';
+      const workspace = path.join(TEST_WF_DIR, 'workspaces', runId);
+      initGitWorkspace(workspace);
+
+      // Reuse the closed-ledger harness helpers from the sibling describe via local mirrors.
+      const wire = (manager: InstanceType<typeof SessionManager>, closeCount: number): void => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const origCreate = (manager as any)._createSession.bind(manager);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (manager as any)._createSession = (engine: string, config: SessionConfig): ISession => {
+          const mock = origCreate(engine, config) as MockSession;
+          if (config.name.endsWith('-planner')) {
+            mock.sendImplementation = async (message) => {
+              const text = typeof message === 'string' ? message : JSON.stringify(message);
+              const done = text.match(/\[system\] iter (\d+) done\./);
+              if (done) {
+                const next = Number(done[1]) + 1;
+                if (next < closeCount) {
+                  return {
+                    text: fence('send_directive', {
+                      goal: `close ${next}`,
+                      constraints: [],
+                      success_criteria: [],
+                      max_attempts: 1,
+                    }),
+                    event: { type: 'result', result: 'ok' },
+                  };
+                }
+                return { text: 'done', event: { type: 'result', result: 'ok' } };
+              }
+              return {
+                text: fence('spawn_subagents', {
+                  initial_directive: {
+                    goal: 'close 0',
+                    constraints: [],
+                    success_criteria: [],
+                    max_attempts: 1,
+                  },
+                }),
+                event: { type: 'result', result: 'ok' },
+              };
+            };
+          } else if (config.name.endsWith('-coder')) {
+            mock.sendImplementation = async (message) => {
+              const text = typeof message === 'string' ? message : JSON.stringify(message);
+              const m = text.match(/\[directive iter=(\d+)\]/);
+              const iter = m ? Number(m[1]) : 0;
+              fs.writeFileSync(path.join(workspace, `preserve-${iter}.txt`), `p-${iter}\n`);
+              return {
+                text: fence('iter_complete', {
+                  summary: `preserve ${iter}`,
+                  eval_output: { metric: 10 + iter, gates: [] },
+                }),
+                event: { type: 'result', result: 'ok' },
+              };
+            };
+          } else if (config.name.endsWith('-reviewer')) {
+            mock.sendImplementation = async (message) => {
+              const text = typeof message === 'string' ? message : JSON.stringify(message);
+              const m = text.match(/\[review_request iter=(\d+)\]/);
+              const iter = m ? Number(m[1]) : 0;
+              return {
+                text: fence('review_complete', {
+                  decision: 'advance',
+                  metric: 10 + iter,
+                  audit_notes: `advance ${iter}`,
+                }),
+                event: { type: 'result', result: 'ok' },
+              };
+            };
+          }
+          return mock;
+        };
+      };
+
+      wire(mgr, 1);
+      await mgr.autoloopStart({ runId, workspace });
+      await mgr.autoloopChat(runId, 'close only iter 0');
+      await vi.waitFor(
+        () => {
+          expect(fs.existsSync(path.join(workspace, 'tasks', runId, 'iter', '0', 'verdict.json'))).toBe(true);
+        },
+        { timeout: 15_000, interval: 50 },
+      );
+
+      // Plant open committed iter 1 (artifacts + git subject) without verdict.
+      const iter1 = path.join(workspace, 'tasks', runId, 'iter', '1');
+      fs.mkdirSync(iter1, { recursive: true });
+      fs.writeFileSync(
+        path.join(iter1, 'directive.json'),
+        JSON.stringify({
+          schema_version: 1,
+          iter: 1,
+          goal: 'open',
+          constraints: [],
+          success_criteria: [],
+          max_attempts: 1,
+        }),
+      );
+      fs.writeFileSync(
+        path.join(iter1, 'eval_output.json'),
+        JSON.stringify({ schema_version: 1, iter: 1, eval_output: { metric: 11, gates: [] } }),
+      );
+      fs.writeFileSync(path.join(iter1, 'coder_summary.txt'), 'planted open committed\n');
+      fs.writeFileSync(path.join(iter1, 'diff.patch'), '');
+      fs.writeFileSync(path.join(workspace, 'preserve-1.txt'), 'p-1\n');
+      execFileSync('git', ['add', '-A'], { cwd: workspace });
+      execFileSync('git', ['commit', '-m', 'autoloop/iter-1: planted open committed'], { cwd: workspace });
+
+      await mgr.autoloopStop(runId, 'preserve-open-stop');
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (mgr as any).kernel.wait(runId);
+      await mgr.shutdown();
+
+      createdConfigs = [];
+      mockSessions = [];
+      mgr = createManager();
+      let resumeReviewerSends = 0;
+      let resumeCoderSends = 0;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const orig2 = (mgr as any)._createSession.bind(mgr);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (mgr as any)._createSession = (engine: string, config: SessionConfig): ISession => {
+        const mock = orig2(engine, config) as MockSession;
+        if (config.name.endsWith('-reviewer')) {
+          mock.sendImplementation = async (message) => {
+            const text = typeof message === 'string' ? message : JSON.stringify(message);
+            resumeReviewerSends += 1;
+            expect(text).toContain('[review_request iter=1]');
+            return {
+              text: fence('review_complete', {
+                decision: 'hold',
+                metric: null,
+                audit_notes: 'recovered open committed',
+              }),
+              event: { type: 'result', result: 'ok' },
+            };
+          };
+        } else if (config.name.endsWith('-coder')) {
+          mock.sendImplementation = async () => {
+            resumeCoderSends += 1;
+            return { text: 'should not run', event: { type: 'result', result: 'ok' } };
+          };
+        }
+        return mock;
+      };
+
+      await mgr.autoloopResume(runId);
+      await vi.waitFor(
+        () => {
+          expect(fs.existsSync(path.join(workspace, 'tasks', runId, 'iter', '1', 'verdict.json'))).toBe(true);
+        },
+        { timeout: 10_000, interval: 50 },
+      );
+      expect(resumeReviewerSends).toBe(1);
+      expect(resumeCoderSends).toBe(0);
+      // After a hold on recovered iter 1 the runner advances the tip to 2 —
+      // the preserve contract is Reviewer-only once with no Coder replay.
+      expect(mgr.getAutoloop(runId)!.runner.state.iter).toBe(2);
+      expect(createdConfigs.some((c) => c.name.endsWith('-coder'))).toBe(false);
+    }, 90_000);
   });
 });

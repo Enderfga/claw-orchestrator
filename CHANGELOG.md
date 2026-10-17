@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Autoloop resume restores progress from a closed ledger.** A non-fresh
+  `_bootAutoloop` reads the run ledger once before any Planner session or
+  checkpoint publish and restores typed `iter` / `metric_history` from the
+  contiguous valid closed prefix `iter/0..K` (directive plus parsed verdict with
+  matching `iter` and a supported Reviewer decision). Finite metrics stay in
+  order and are capped at `MAX_METRIC_HISTORY` (20). Checkpoint `iter` is never
+  progress authority. Fresh starts skip the read. Legacy lone-verdict / empty
+  ledgers, and any ledger with no valid closed prefix (including missing or
+  open/malformed `iter/0` plus a later numeric directory), pending_dispatch
+  pause, and committed-open Reviewer-only recovery (`#134`/`#138`) keep their
+  prior behaviour. A gap or malformed closed tail after a valid
+  prefix refuses with a fixed generic error before any new session or effect
+  (ledger text is not echoed). Terminal plain `workflowResume` still does not
+  restart a stopped autoloop.
+
 ## [7.12.0] - 2026-10-17
 
 ### Fixed
