@@ -464,13 +464,27 @@ Resume is explicit. `POST /autoloop/<id>/resume` (or
 `SessionManager.autoloopResume()`) restarts a run from its stored spec.
 Custom-engine configs are the one thing the spec does not carry (they can hold
 secrets), so a resume must be given them again. Cancelling a run stops all three
-agents, the same as `autoloop_stop`. If the highest committed Coder iteration
+agents, the same as `autoloop_stop`.
+
+On a non-fresh boot (resume / revisit), before any Planner session or
+checkpoint publish, the boot reads the run ledger once and restores typed
+`iter` and `metric_history` from the contiguous valid closed prefix of
+`iter/0..K` (each closed entry needs `directive.json` plus a parsed
+`verdict.json` whose `iter` matches and whose `decision` is a supported
+Reviewer decision). Finite verdict metrics are kept in order, capped at
+`MAX_METRIC_HISTORY` (20). The stored checkpoint's `iter` / `metric_history`
+are never progress authority. A fresh start skips that read. When there is no
+valid closed prefix (including missing or open/malformed `iter/0` with a later
+canonical directory present), the reader returns without restore or refusal —
+same Planner-only resume as before. If the highest committed Coder iteration
 has ledger artifacts and no `verdict.json`, and `HEAD` still names that iter,
-resume starts and sends only the Reviewer: one `review_request` for that
-checkpoint, and the dispatcher persists `verdict.json`. It does not create or
-resume a Coder session, and a historical persisted Coder registry row is left
-unchanged. An in-flight send is still not retried, and there is no message
-outbox.
+resume still starts and sends only the Reviewer: one `review_request` for that
+iteration (with rebuilt `prior_metrics`), and the dispatcher persists
+`verdict.json`. It does not create or resume a Coder session, and a historical
+persisted Coder registry row is left unchanged. An in-flight send is still not
+retried, and there is no message outbox. A gap or malformed closed tail after a
+valid prefix refuses the resume with a fixed generic error before any new
+session or effect; ledger text is never echoed into the error.
 
 ## Known limitations
 
@@ -489,6 +503,11 @@ outbox.
   process until it is resumed, and a send that was in flight is not retried.
 - **Multi-run / same workspace** races on `git index.lock`. Run separate
   workspaces (or git worktrees) for concurrent runs.
+- **Closed-ledger restore does not rebuild streaks or status.** Only `iter` and
+  capped `metric_history` are restored from the closed prefix; `rejectStreak`,
+  `regressionStreak`, and run `status` fields are not reconstructed. Prefixless
+  corruption, path/symlink size hardening, and fresh `autoloop_start` reuse of a
+  retained ledger id remain out of scope.
 
 ## Related
 

@@ -2,14 +2,18 @@
  * Owner-process child for abrupt-loss autoloop tests.
  *
  * Env:
- *   AUTOLOOP_MODE        committed-iter | planner-only
+ *   AUTOLOOP_MODE        committed-iter | planner-only | closed-iterations
  *   AUTOLOOP_RUN_ID      kernel run id
  *   AUTOLOOP_WORKSPACE   git workspace shared with the parent
  *   CLAWO_WF_DIR         shared run store
+ *   AUTOLOOP_CLOSE_COUNT for closed-iterations: how many iters (0..N-1) to close
  *
  * Public API only: SessionManager.autoloopStart / autoloopChat.
  * Reviewer send in committed-iter never settles; stdout emits READY once
  * that send has started (or once start returns, for planner-only).
+ * closed-iterations closes N verdicts via the real runner/dispatcher, then
+ * emits READY and hangs so the parent can SIGKILL an owner with a current
+ * closed-ledger checkpoint.
  */
 import { EventEmitter } from 'node:events';
 import * as fs from 'node:fs';
@@ -45,14 +49,58 @@ const CODER_COMPLETE = fence('iter_complete', {
   eval_output: { metric: 1, gates: [] },
 });
 
+function coderComplete(iter: number, metric: number): string {
+  return fence('iter_complete', {
+    summary: `closed-iterations iter ${iter}`,
+    eval_output: { metric, gates: [] },
+  });
+}
+
+function reviewAdvance(iter: number, metric: number): string {
+  return fence('review_complete', {
+    decision: 'advance',
+    metric,
+    audit_notes: `closed-iterations verdict ${iter}`,
+  });
+}
+
+function sendDirective(iter: number): string {
+  return fence('send_directive', {
+    goal: `close iteration ${iter}`,
+    constraints: ['closed-iterations owner mode'],
+    success_criteria: [`iter ${iter} has verdict.json`],
+    max_attempts: 1,
+  });
+}
+
+function parseDirectiveIter(message: string | unknown[]): number | null {
+  const text = typeof message === 'string' ? message : JSON.stringify(message);
+  const m = text.match(/\[directive iter=(\d+)\]/);
+  return m ? Number(m[1]) : null;
+}
+
+function parseReviewIter(message: string | unknown[]): number | null {
+  const text = typeof message === 'string' ? message : JSON.stringify(message);
+  const m = text.match(/\[review_request iter=(\d+)\]/);
+  return m ? Number(m[1]) : null;
+}
+
+function parseIterDone(message: string | unknown[]): number | null {
+  const text = typeof message === 'string' ? message : JSON.stringify(message);
+  const m = text.match(/\[system\] iter (\d+) done\./);
+  return m ? Number(m[1]) : null;
+}
+
 class OwnerMockSession extends EventEmitter implements ISession {
   sessionId?: string;
   private readonly role: 'planner' | 'coder' | 'reviewer' | 'other';
   private readonly workspace: string;
+  private readonly closeCount: number | null;
 
-  constructor(config: SessionConfig, workspace: string) {
+  constructor(config: SessionConfig, workspace: string, closeCount: number | null = null) {
     super();
     this.workspace = workspace;
+    this.closeCount = closeCount;
     const name = config.name ?? '';
     if (name.endsWith('-planner')) this.role = 'planner';
     else if (name.endsWith('-coder')) this.role = 'coder';
@@ -83,6 +131,34 @@ class OwnerMockSession extends EventEmitter implements ISession {
     message: string | unknown[],
     _options?: SessionSendOptions,
   ): Promise<TurnResult | { requestId: number; sent: boolean }> {
+    if (this.closeCount !== null) {
+      if (this.role === 'planner') {
+        const text = typeof message === 'string' ? message : JSON.stringify(message);
+        const doneIter = parseIterDone(message);
+        if (doneIter !== null) {
+          const next = doneIter + 1;
+          if (next < this.closeCount) {
+            return { text: sendDirective(next), event: { type: 'result', result: 'ok' } };
+          }
+          return { text: 'closed-iterations: ledger closed', event: { type: 'result', result: 'ok' } };
+        }
+        if (text.includes('directive_ack') || text.includes('[system] coder')) {
+          return { text: 'ack noted', event: { type: 'result', result: 'ok' } };
+        }
+        return { text: PLANNER_SPAWN, event: { type: 'result', result: 'ok' } };
+      }
+      if (this.role === 'coder') {
+        const iter = parseDirectiveIter(message) ?? 0;
+        const metric = 100 + iter;
+        fs.writeFileSync(path.join(this.workspace, `closed-${iter}.txt`), `closed-bytes-${iter}\n`);
+        return { text: coderComplete(iter, metric), event: { type: 'result', result: 'ok' } };
+      }
+      if (this.role === 'reviewer') {
+        const iter = parseReviewIter(message) ?? 0;
+        const metric = 100 + iter;
+        return { text: reviewAdvance(iter, metric), event: { type: 'result', result: 'ok' } };
+      }
+    }
     if (this.role === 'planner') {
       return { text: PLANNER_SPAWN, event: { type: 'result', result: 'ok' } };
     }
@@ -149,11 +225,11 @@ class OwnerMockSession extends EventEmitter implements ISession {
   }
 }
 
-function patchCreateSession(manager: SessionManager, workspace: string): void {
+function patchCreateSession(manager: SessionManager, workspace: string, closeCount: number | null = null): void {
   (manager as unknown as { _createSession: (engine: string, config: SessionConfig) => ISession })._createSession = (
     _engine: string,
     config: SessionConfig,
-  ): ISession => new OwnerMockSession(config, workspace);
+  ): ISession => new OwnerMockSession(config, workspace, closeCount);
 }
 
 async function main(): Promise<void> {
@@ -161,9 +237,12 @@ async function main(): Promise<void> {
   const runId = process.env.AUTOLOOP_RUN_ID;
   const workspace = process.env.AUTOLOOP_WORKSPACE;
   if (!runId || !workspace) throw new Error('AUTOLOOP_RUN_ID and AUTOLOOP_WORKSPACE are required');
-  if (mode !== 'committed-iter' && mode !== 'planner-only') {
+  if (mode !== 'committed-iter' && mode !== 'planner-only' && mode !== 'closed-iterations') {
     throw new Error(`unknown AUTOLOOP_MODE ${String(mode)}`);
   }
+
+  const closeCount =
+    mode === 'closed-iterations' ? Math.max(1, Number(process.env.AUTOLOOP_CLOSE_COUNT ?? '2') || 2) : null;
 
   const mgr = new SessionManager({
     claudeBin: 'mock-claude',
@@ -171,10 +250,24 @@ async function main(): Promise<void> {
     sessionTtlMinutes: 120,
     defaultPermissionMode: 'acceptEdits',
   });
-  patchCreateSession(mgr, workspace);
+  patchCreateSession(mgr, workspace, closeCount);
 
   await mgr.autoloopStart({ runId, workspace });
   if (mode === 'planner-only') {
+    process.stdout.write('READY\n');
+    await new Promise(() => undefined);
+    return;
+  }
+  if (mode === 'closed-iterations') {
+    await mgr.autoloopChat(runId, `close ${closeCount} iterations then park`);
+    const ledgerIter = path.join(workspace, 'tasks', runId, 'iter');
+    const target = closeCount!;
+    for (let i = 0; i < target; i++) {
+      const verdict = path.join(ledgerIter, String(i), 'verdict.json');
+      if (!fs.existsSync(verdict)) {
+        throw new Error(`closed-iterations missing verdict for iter ${i}`);
+      }
+    }
     process.stdout.write('READY\n');
     await new Promise(() => undefined);
     return;
