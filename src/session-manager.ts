@@ -4176,7 +4176,17 @@ export class SessionManager {
       LEGACY_NODE,
     );
     if (live) {
-      if (!hasTimeoutIncrease) return live.runner.state;
+      if (!hasTimeoutIncrease) {
+        // Ordinary and activity-lease pauses have no uncertain in-flight
+        // dispatch. A pending send timeout stays the historical no-op until
+        // an explicit timeout increase names that dispatch.
+        if (live.runner.state.status === 'paused' && live.runner.state.pending_dispatch === null) {
+          live.runner.resumePaused();
+          await live.runner.parkedDelivery;
+          this._autoloopPublishers.get(runId)?.();
+        }
+        return live.runner.state;
+      }
 
       const pending = live.runner.state.pending_dispatch;
       if (live.runner.state.status !== 'paused' || !pending) {

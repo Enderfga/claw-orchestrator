@@ -319,6 +319,52 @@ export class AutoloopRunner extends EventEmitter {
   }
 
   /**
+   * Work started by the latest `resumePaused`. SessionManager awaits it.
+   * When this call starts the drain, the promise is that drain: restored
+   * input is delivered once, in order, before it settles. When a drain is
+   * already running, `drain()` returns at its guard and this promise settles
+   * immediately; that active drain delivers the restored input once, in
+   * order, and nothing here starts a second delivery. A hard-deadline resume
+   * settles when expiry, including dispatcher shutdown, finishes. The
+   * original hard deadline is not moved.
+   */
+  parkedDelivery: Promise<void> = Promise.resolve();
+
+  /**
+   * Continue a live ordinary or activity-lease pause. A pending send-timeout
+   * dispatch is not this transition. The state write is synchronous. Parked
+   * input is delivered by the active drain; `parkedDelivery` is that drain
+   * when this call starts it, or the hard-deadline expiry when the original
+   * deadline has already passed.
+   */
+  resumePaused(): boolean {
+    if (
+      this.state.status !== 'paused' ||
+      this.state.pending_dispatch !== null ||
+      this.terminationStarted ||
+      this.timeoutMonitoringStopped
+    ) {
+      return false;
+    }
+    if (Date.now() >= this.hardDeadlineAt) {
+      this.parkedDelivery = this.expireHardDeadline().catch((err) => {
+        this.emit('error', err);
+      });
+      return false;
+    }
+    this.activityLeaseExpired = false;
+    this.state.status = this.state.subagents_spawned ? 'running' : 'planning';
+    this.state.status_reason = null;
+    this.recordActivity('lifecycle_transition');
+    this.restorePausedMessages();
+    this.emit('state', this.state);
+    this.parkedDelivery = this.drain().catch((err) => {
+      this.emit('error', err);
+    });
+    return true;
+  }
+
+  /**
    * Advance one exact recoverable send-timeout pause without replaying the
    * logical dispatch that timed out. SessionManager validates and audits the
    * timeout increase before calling this synchronous transition.
@@ -548,16 +594,7 @@ export class AutoloopRunner extends EventEmitter {
         return;
       }
       case 'resume': {
-        if (this.state.status === 'paused') {
-          // I4 owns the explicit timeout-increase resume contract. Until that
-          // arrives, an ordinary resume envelope must not silently discard a
-          // pending send deadline and risk replaying its side effects.
-          if (this.state.pending_dispatch) return;
-          this.state.status = 'running';
-          this.state.status_reason = null;
-          this.restorePausedMessages();
-          this.emit('state', this.state);
-        }
+        this.resumePaused();
         return;
       }
       case 'terminate': {

@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A live ordinary or activity-lease autoloop pause resumes in place.**
+  `autoloopResume` with no timeout increase continues a paused live run whose
+  `pending_dispatch` is null: status returns to `planning` or `running`, the
+  activity lease re-arms, and the original hard deadline stays put. Planner
+  chat accepted during the pause is delivered once, in order. A pending
+  send-timeout pause is still a no-op until an explicit timeout increase. The
+  dashboard Resume button is shown for every live paused run, and sends
+  timeout fields only when a dispatch is pending.
 - **Autoloop resume restores progress from a closed ledger.** A non-fresh
   `_bootAutoloop` reads the run ledger once before any Planner session or
   checkpoint publish and restores typed `iter` / `metric_history` from the

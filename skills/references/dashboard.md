@@ -120,7 +120,11 @@ that both read the file always agree.
 Opening a run whose `status` is `terminated` (because its process has
 exited, or because you're viewing it cross-process) fetches
 `/autoloop/<id>/chat_history`, replays the conversation into the Planner pane,
-and shows a green **Resume run** button in the topbar. Clicking it POSTs `/autoloop/<id>/resume`;
+and shows a green **Resume run** button in the topbar. The same button is shown
+for any live paused run, and it follows later SSE state: a pause adds it, and
+returning to an active status removes it. Timeout fields are included only when
+`pending_dispatch` exists; an ordinary or activity-lease pause resumes with
+an empty timeout body. Clicking it POSTs `/autoloop/<id>/resume`;
 the orchestrator re-attaches the Planner (reusing the persisted Claude
 session ID when available, so Claude's context picks up where it left
 off) and the dashboard reconnects to `/events` for live updates.
