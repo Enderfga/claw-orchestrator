@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Resource gate on every Claw start.** `workflow_start`, `fanout_start`, `council_start`,
+  `autoloop_start`, `ultrareview_start`, and `ultraplan_start` run `resource-gate.sh` before
+  creating any session or run. Set `CLAW_RESOURCE_GATE` to the script path. When it is unset
+  and `/home/openclaw/.openclaw/workspace-twin/tools/resource-gate.sh` exists, that copy is
+  used. Otherwise the gate is a no-op. A non-zero exit refuses the start with the script's
+  own `OVERLOADED:` line. The gate runs inside the tool, so the model does not matter.
+
 ## [7.12.1] - 2026-10-22
 
 ### Fixed

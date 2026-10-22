@@ -29,6 +29,7 @@ import { readEvents as readKernelEvents } from './kernel/store.js';
 import { resolveSecretRefs } from './kernel/secrets.js';
 import type { RunState, WorkflowSpec } from './kernel/types.js';
 import { AUTOLOOP_TIMEOUT_SCHEMA, validateAutoloopTimeoutConfig } from './autoloop/types.js';
+import { assertResourceGate, isResourceGatedStart } from './resource-gate.js';
 
 // ─── Standalone Export ───────────────────────────────────────────────────────
 
@@ -169,9 +170,15 @@ const plugin = {
     const rawConfig = (api.pluginConfig || {}) as Partial<PluginConfig>;
 
     const registerTool = (definition: ToolDefinition): void => {
+      const execute: ToolExecute = isResourceGatedStart(definition.name)
+        ? async (toolCallId, params) => {
+            await assertResourceGate();
+            return definition.execute(toolCallId, params);
+          }
+        : definition.execute;
       api.registerTool({
         ...definition,
-        execute: async (toolCallId, params) => normalizeToolResult(await definition.execute(toolCallId, params)),
+        execute: async (toolCallId, params) => normalizeToolResult(await execute(toolCallId, params)),
       });
     };
 
