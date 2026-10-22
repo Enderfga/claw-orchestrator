@@ -17,6 +17,7 @@ import type {
   CostBreakdown,
   EffortLevel,
 } from '../types.js';
+import type { Logger } from '../logger.js';
 
 class MockSession extends EventEmitter implements ISession {
   sessionId?: string;
@@ -183,14 +184,17 @@ vi.mock('node:fs', async () => {
 
 const { SessionManager } = await import('../session-manager.js');
 
-function createManager(): InstanceType<typeof SessionManager> {
-  const mgr = new SessionManager({
-    claudeBin: 'mock-claude',
-    maxConcurrentSessions: 5,
-    sessionTtlMinutes: 120,
-    defaultPermissionMode: 'acceptEdits',
-    defaultEffort: 'auto',
-  });
+function createManager(logger?: Logger): InstanceType<typeof SessionManager> {
+  const mgr = new SessionManager(
+    {
+      claudeBin: 'mock-claude',
+      maxConcurrentSessions: 5,
+      sessionTtlMinutes: 120,
+      defaultPermissionMode: 'acceptEdits',
+      defaultEffort: 'auto',
+    },
+    logger,
+  );
   patchCreateSession(mgr);
   return mgr;
 }
@@ -203,6 +207,10 @@ const messageText = (message: string | unknown[]): string =>
 
 const textsIncluding = (planner: MockSession, needle: string): string[] =>
   planner.sendCalls.map((call) => messageText(call.message)).filter((text) => text.includes(needle));
+
+/** Exact parked-chat label match: U1 must not match U10. */
+const textsExactChat = (planner: MockSession, needle: string): string[] =>
+  planner.sendCalls.map((call) => messageText(call.message)).filter((text) => text === needle);
 
 describe('Autoloop live pause resume regressions', () => {
   let mgr: InstanceType<typeof SessionManager>;
@@ -619,5 +627,82 @@ describe('Autoloop live pause resume regressions', () => {
     expect(coder.sendCalls).toHaveLength(1);
     expect(createdConfigs.map((config) => config.name)).toEqual(namesAfterSpawn);
     expect(mockSessions).toHaveLength(namesAfterSpawn.length);
+  });
+
+  it('(j) depth-guard drain failure logs once without unhandledRejection', async () => {
+    const runId = 'regress-depth-guard-drain-error';
+    const errorLogs: string[] = [];
+    const logger: Logger = {
+      debug: () => {},
+      info: () => {},
+      warn: () => {},
+      error: (msg: string) => {
+        errorLogs.push(msg);
+      },
+    };
+    await settleShutdown(mgr);
+    mgr = createManager(logger);
+    const { planner } = await startPaused(runId);
+    planner.sendImplementation = async () => ({ text: 'ack', event: { type: 'result', result: 'ok' } });
+
+    for (let i = 1; i <= 66; i++) {
+      await mgr.autoloopChat(runId, `U${i}`);
+    }
+    expect(planner.sendCalls.map((call) => messageText(call.message)).some((text) => text.includes('U1'))).toBe(false);
+
+    const rejections: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      rejections.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const resumed = await mgr.autoloopResume(runId);
+      expect(resumed).toMatchObject({
+        status: 'planning',
+        status_reason: null,
+        pending_dispatch: null,
+      });
+      await vi.waitFor(() => {
+        expect(errorLogs).toHaveLength(1);
+      });
+      expect(rejections).toEqual([]);
+      expect(errorLogs[0]).toBe(`[autoloop/${runId}] background runner task failed`);
+      await vi.waitFor(() => {
+        for (let i = 1; i <= 65; i++) {
+          expect(textsExactChat(planner, `U${i}`)).toEqual([`U${i}`]);
+        }
+      });
+      expect(textsExactChat(planner, 'U66')).toEqual([]);
+
+      const namesBefore = createdConfigs.map((config) => config.name);
+      await mgr.autoloopChat(runId, 'U67');
+      await vi.waitFor(() => {
+        expect(textsExactChat(planner, 'U66')).toEqual(['U66']);
+        expect(textsExactChat(planner, 'U67')).toEqual(['U67']);
+      });
+      for (let i = 1; i <= 67; i++) {
+        expect(textsExactChat(planner, `U${i}`)).toEqual([`U${i}`]);
+      }
+      const delivered = planner.sendCalls.map((call) => messageText(call.message));
+      const uIndexes = Array.from({ length: 67 }, (_, i) => {
+        const needle = `U${i + 1}`;
+        const hits = delivered.flatMap((text, index) => (text === needle ? [index] : []));
+        expect(hits).toHaveLength(1);
+        return hits[0]!;
+      });
+      for (let i = 1; i < uIndexes.length; i++) {
+        expect(uIndexes[i]).toBeGreaterThan(uIndexes[i - 1]!);
+      }
+      expect(createdConfigs.map((config) => config.name)).toEqual(namesBefore);
+      expect(mgr.getAutoloop(runId)!.runner.state).toMatchObject({
+        status: 'planning',
+        status_reason: null,
+        pending_dispatch: null,
+      });
+      expect(rejections).toEqual([]);
+      expect(errorLogs).toHaveLength(1);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
   });
 });

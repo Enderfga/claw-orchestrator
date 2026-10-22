@@ -3842,6 +3842,11 @@ export class SessionManager {
       activityLeaseMs: opts.activityLeaseMs,
       autoloopHardTimeoutMs: opts.autoloopHardTimeoutMs,
     });
+    // Background resume/deadline/stall paths emit 'error' after a void catch.
+    // Without a listener, Node turns that into an unhandled rejection.
+    runner.on('error', () => {
+      this.logger.error?.(`[autoloop/${runId}] background runner task failed`);
+    });
     runnerRef = runner;
     if (closedLedgerRestore) {
       runner.state.iter = closedLedgerRestore.iter;

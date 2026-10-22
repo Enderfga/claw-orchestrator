@@ -17,7 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is then delivered once, in order. A pending send-timeout pause is still a
   no-op until an explicit timeout increase. The dashboard Resume button is
   shown for every live paused run, and sends timeout fields only when a
-  dispatch is pending.
+  dispatch is pending. A background runner task failure after that return is
+  logged once through the SessionManager logger instead of becoming an
+  unhandled rejection.
 
 ## [7.12.1] - 2026-10-22
 
