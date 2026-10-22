@@ -1,6 +1,6 @@
 /**
  * Regressions for a live ordinary / activity-lease resume.
- * The frozen cases live in session-manager.test.ts and must not be edited.
+ * Companion cases R1/R2/C1/C2 live in session-manager.test.ts (same public API).
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -299,8 +299,11 @@ describe('Autoloop live pause resume regressions', () => {
     await mgr.autoloopChat(runId, 'U2');
     await mgr.autoloopResume(runId);
     await mgr.autoloopResume(runId);
-    expect(textsIncluding(planner, 'U1')).toEqual(['U1']);
-    expect(textsIncluding(planner, 'U2')).toEqual(['U2']);
+    // Delivery is async once resume returns after the sync transition only.
+    await vi.waitFor(() => {
+      expect(textsIncluding(planner, 'U1')).toEqual(['U1']);
+      expect(textsIncluding(planner, 'U2')).toEqual(['U2']);
+    });
 
     const runId2 = 'regress-parallel-resume';
     mockSessions = [];
@@ -315,7 +318,9 @@ describe('Autoloop live pause resume regressions', () => {
     planner2.sendImplementation = async () => ({ text: 'ack', event: { type: 'result', result: 'ok' } });
     await mgr.autoloopChat(runId2, 'ONCE');
     await Promise.all([mgr.autoloopResume(runId2), mgr.autoloopResume(runId2)]);
-    expect(textsIncluding(planner2, 'ONCE')).toEqual(['ONCE']);
+    await vi.waitFor(() => {
+      expect(textsIncluding(planner2, 'ONCE')).toEqual(['ONCE']);
+    });
   });
 
   it('(c) after spawn_subagents, pause+resume gives running and creates no new role sessions', async () => {
@@ -451,7 +456,10 @@ describe('Autoloop live pause resume regressions', () => {
     planner.sendImplementation = undefined;
     await mgr.autoloopResume(runId);
     expect(handle.runner.state).toMatchObject({ status: 'planning', status_reason: null });
-    expect(textsIncluding(planner, 'INFLIGHT')).toEqual(['INFLIGHT']);
+    // Parked INFLIGHT is drained after the sync resume return.
+    await vi.waitFor(() => {
+      expect(textsIncluding(planner, 'INFLIGHT')).toEqual(['INFLIGHT']);
+    });
   });
 
   it("(g) a non-owning manager's autoloopStatus agrees with the resumed status", async () => {
@@ -459,7 +467,9 @@ describe('Autoloop live pause resume regressions', () => {
     const { planner } = await startPaused(runId);
     await mgr.autoloopChat(runId, 'U1');
     const resumed = await mgr.autoloopResume(runId);
-    expect(textsIncluding(planner, 'U1')).toEqual(['U1']);
+    await vi.waitFor(() => {
+      expect(textsIncluding(planner, 'U1')).toEqual(['U1']);
+    });
     const observer = createManager();
     try {
       const observed = observer.autoloopStatus(runId);
@@ -510,5 +520,104 @@ describe('Autoloop live pause resume regressions', () => {
     expect(handle.runner.state.pending_dispatch).toEqual(before.pending);
     expect(handle.runner.state.last_activity_at).toBe(before.last_activity_at);
     expect(timeouts).toEqual([]);
+  });
+
+  it('(i) public resume returns while a follow-up is blocked', async () => {
+    const runId = 'regress-resume-returns-while-follow-up-blocked';
+    await mgr.autoloopStart({ runId, workspace: workspaceFor(runId) });
+    const planner = mockSessions[0];
+    planner.sendImplementation = async (message) => {
+      const text = messageText(message);
+      if (text.includes('spawn-now')) {
+        return { text: fence('spawn_subagents', {}), event: { type: 'result', result: 'ok' } };
+      }
+      if (text.includes('pause-now')) {
+        return {
+          text: fence('pause_loop', { reason: 'operator-hold' }),
+          event: { type: 'result', result: 'ok' },
+        };
+      }
+      if (text.includes('U1')) {
+        return {
+          text: fence('send_directive', {
+            goal: 'follow-up-while-resume-returns',
+            constraints: [],
+            success_criteria: [],
+            max_attempts: 1,
+          }),
+          event: { type: 'result', result: 'ok' },
+        };
+      }
+      return { text: 'ack', event: { type: 'result', result: 'ok' } };
+    };
+    await mgr.autoloopChat(runId, 'spawn-now');
+    expect(mgr.getAutoloop(runId)!.runner.state.status).toBe('running');
+    const namesAfterSpawn = createdConfigs.map((config) => config.name);
+    expect(namesAfterSpawn).toEqual([
+      `autoloop-${runId}-planner`,
+      `autoloop-${runId}-coder`,
+      `autoloop-${runId}-reviewer`,
+    ]);
+    const coder = mockSessions[namesAfterSpawn.indexOf(`autoloop-${runId}-coder`)];
+    await mgr.autoloopChat(runId, 'pause-now');
+    expect(mgr.getAutoloop(runId)!.runner.state).toMatchObject({
+      status: 'paused',
+      status_reason: 'operator-hold',
+      pending_dispatch: null,
+    });
+    await mgr.autoloopChat(runId, 'U1');
+    await mgr.autoloopChat(runId, 'U2');
+    expect(textsIncluding(planner, 'U1')).toEqual([]);
+    expect(textsIncluding(planner, 'U2')).toEqual([]);
+
+    let releaseCoder!: (value: TurnResult) => void;
+    coder.sendImplementation = () =>
+      new Promise<TurnResult>((resolve) => {
+        releaseCoder = resolve;
+      });
+
+    let settled = false;
+    let resolved: Awaited<ReturnType<typeof mgr.autoloopResume>> | undefined;
+    const p = mgr.autoloopResume(runId).then((state) => {
+      resolved = state;
+      return state;
+    });
+    void p.finally(() => {
+      settled = true;
+    });
+    await flushUntil(() => coder.sendCalls.length === 1);
+    try {
+      await flushUntil(() => settled);
+      const live = mgr.getAutoloop(runId)!.runner.state;
+      expect(resolved).toBe(live);
+      expect(resolved).toMatchObject({
+        status: 'running',
+        status_reason: null,
+        pending_dispatch: null,
+      });
+      expect(coder.sendCalls).toHaveLength(1);
+      expect(
+        coder.sendCalls.filter((call) => messageText(call.message).includes('follow-up-while-resume-returns')),
+      ).toHaveLength(1);
+    } finally {
+      releaseCoder({ text: 'coder-ack', event: { type: 'result', result: 'ok' } });
+      await p;
+    }
+    await vi.waitFor(() => {
+      const delivered = planner.sendCalls.map((call) => messageText(call.message));
+      const u1 = delivered.flatMap((text, index) => (text.includes('U1') ? [index] : []));
+      const u2 = delivered.flatMap((text, index) => (text.includes('U2') ? [index] : []));
+      const acks = delivered.flatMap((text, index) =>
+        text.includes('directive_ack') || text.includes('[system] coder') ? [index] : [],
+      );
+      expect(u1).toHaveLength(1);
+      expect(u2).toHaveLength(1);
+      expect(u1[0]).toBeLessThan(u2[0]);
+      expect(acks).toHaveLength(1);
+      expect(acks[0]).toBeGreaterThan(u2[0]);
+    });
+    expect(coder.sendCalls).toHaveLength(1);
+    expect(createdConfigs.map((config) => config.name)).toEqual(namesAfterSpawn);
+    expect(mockSessions).toHaveLength(namesAfterSpawn.length);
   });
 });

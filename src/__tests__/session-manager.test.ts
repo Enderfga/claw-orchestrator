@@ -4497,12 +4497,15 @@ describe('SessionManager', () => {
         status_reason: null,
         pending_dispatch: null,
       });
-      const delivered = planner.sendCalls.map((call) => messageText(call.message));
-      const u1 = delivered.flatMap((text, index) => (text.includes('U1') ? [index] : []));
-      const u2 = delivered.flatMap((text, index) => (text.includes('U2') ? [index] : []));
-      expect(u1).toHaveLength(1);
-      expect(u2).toHaveLength(1);
-      expect(u1[0]).toBeLessThan(u2[0]);
+      // Parked delivery continues after the sync resume return (same as C2).
+      await vi.waitFor(() => {
+        const delivered = planner.sendCalls.map((call) => messageText(call.message));
+        const u1 = delivered.flatMap((text, index) => (text.includes('U1') ? [index] : []));
+        const u2 = delivered.flatMap((text, index) => (text.includes('U2') ? [index] : []));
+        expect(u1).toHaveLength(1);
+        expect(u2).toHaveLength(1);
+        expect(u1[0]).toBeLessThan(u2[0]);
+      });
       expect(createdConfigs.map((config) => config.name)).toEqual([`autoloop-${runId}-planner`]);
       expect(mockSessions).toHaveLength(1);
     });
@@ -4539,15 +4542,35 @@ describe('SessionManager', () => {
         false,
       );
 
-      const resumed = await mgr.autoloopResume(runId);
-      expect(resumed).toMatchObject({
-        status: 'planning',
-        status_reason: null,
-        pending_dispatch: null,
-      });
-      expect(planner.sendCalls.map((call) => messageText(call.message)).filter((text) => text.includes('U1'))).toEqual([
-        'U1',
-      ]);
+      // deliverToPlanner emits planner_reply (~1071-1073) only after the reply is
+      // parsed and its tool calls applied. A no-fenced-block reply returns no
+      // messages (~1055-1077), so handleOne (~464-472) records no agent_progress
+      // after the signal; last_activity_at is final once planner_reply fires.
+      const plannerReplies: Array<{ reply: unknown; sendCallsAtEvent: string[] }> = [];
+      const onPlannerReply = (...args: unknown[]) => {
+        plannerReplies.push({
+          reply: args[0],
+          sendCallsAtEvent: planner.sendCalls.map((call) => messageText(call.message)),
+        });
+      };
+      handle.dispatcher.on('planner_reply', onPlannerReply);
+      try {
+        const resumed = await mgr.autoloopResume(runId);
+        expect(resumed).toMatchObject({
+          status: 'planning',
+          status_reason: null,
+          pending_dispatch: null,
+        });
+        await vi.waitFor(() => {
+          expect(plannerReplies).toHaveLength(1);
+        });
+        expect(plannerReplies[0]!.sendCallsAtEvent.some((text) => text.includes('U1'))).toBe(true);
+        expect(
+          planner.sendCalls.map((call) => messageText(call.message)).filter((text) => text.includes('U1')),
+        ).toEqual(['U1']);
+      } finally {
+        handle.dispatcher.off('planner_reply', onPlannerReply);
+      }
 
       const renewedDeadline = handle.runner.state.last_activity_at + activityLeaseMs;
       // Synchronous move. advanceTo() awaits advanceTimersByTimeAsync, and the

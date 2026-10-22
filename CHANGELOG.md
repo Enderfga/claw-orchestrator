@@ -12,11 +12,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A live ordinary or activity-lease autoloop pause resumes in place.**
   `autoloopResume` with no timeout increase continues a paused live run whose
   `pending_dispatch` is null: status returns to `planning` or `running`, the
-  activity lease re-arms, and the original hard deadline stays put. Planner
-  chat accepted during the pause is delivered once, in order. A pending
-  send-timeout pause is still a no-op until an explicit timeout increase. The
-  dashboard Resume button is shown for every live paused run, and sends
-  timeout fields only when a dispatch is pending.
+  activity lease re-arms, and the original hard deadline stays put. The call
+  returns once that transition is done; Planner chat accepted during the pause
+  is then delivered once, in order. A pending send-timeout pause is still a
+  no-op until an explicit timeout increase. The dashboard Resume button is
+  shown for every live paused run, and sends timeout fields only when a
+  dispatch is pending.
 
 ## [7.12.1] - 2026-10-22
 

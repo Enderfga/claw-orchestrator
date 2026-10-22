@@ -4182,7 +4182,6 @@ export class SessionManager {
         // an explicit timeout increase names that dispatch.
         if (live.runner.state.status === 'paused' && live.runner.state.pending_dispatch === null) {
           live.runner.resumePaused();
-          await live.runner.parkedDelivery;
           this._autoloopPublishers.get(runId)?.();
         }
         return live.runner.state;
