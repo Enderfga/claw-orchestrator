@@ -437,31 +437,31 @@ async function fetchText(url: string): Promise<string | null> {
   }
 }
 
-/** Cells of each body row of the markdown table following `heading`. */
-function tableUnder(md: string, heading: string): string[][] {
+/** Header cells and body rows of the markdown table following `heading`. */
+function tableUnder(md: string, heading: string): { header: string[]; rows: string[][] } {
   const lines = md.split('\n');
   const start = lines.findIndex((l) => l.trim() === heading);
-  if (start < 0) return [];
+  const header: string[] = [];
   const rows: string[][] = [];
-  let sawHeader = false;
+  if (start < 0) return { header, rows };
   for (let i = start + 1; i < lines.length; i++) {
     const line = lines[i].trim();
     if (!line.startsWith('|')) {
-      if (sawHeader) break;
+      if (header.length) break;
       continue;
     }
     const cells = line
       .split('|')
       .slice(1, -1)
       .map((c) => c.trim());
-    if (!sawHeader) {
-      sawHeader = true;
+    if (!header.length) {
+      header.push(...cells);
       continue;
     }
     if (cells.every((c) => /^-+$/.test(c))) continue;
     rows.push(cells);
   }
-  return rows;
+  return { header, rows };
 }
 
 /** First dollar amount in a cell; null for a `-` placeholder. */
@@ -473,23 +473,66 @@ function money(cell: string): number | null {
 async function openaiPrices(): Promise<{ prices: PublishedPrice[]; note?: string }> {
   const md = await fetchText('https://developers.openai.com/api/docs/pricing.md');
   if (!md) return { prices: [], note: 'openai prices NOT verified — pricing table could not be fetched' };
-  // Standard tier, short-context columns: model | input | cached | cache write |
-  // output. OpenAI publishes four identically shaped tables per model (Standard,
-  // Batch, Flex, Fast); reading the wrong one is how o4-mini ended up in this
-  // repo at half price. The long-context columns that follow are a separate tier
-  // the registry does not model, as `src/models.ts` states at its GPT-5.5 entry.
+  // Standard tier, short-context columns, found by header name. OpenAI publishes
+  // four identically shaped tables per model (Standard, Batch, Flex, Fast);
+  // reading the wrong one is how o4-mini ended up in this repo at half price.
+  // It has also reordered the columns (output moved ahead of cached input),
+  // which a positional read turned into fourteen false drifts. The long-context
+  // columns are a separate tier the registry does not model, as `src/models.ts`
+  // states at its GPT-5.5 entry.
+  const { header, rows } = tableUnder(md, '### Standard pricing data');
+  const col = (re: RegExp) => header.findIndex((h) => re.test(h));
+  const iInput = col(/^(short context )?input$/i);
+  const iCached = col(/^(short context )?cached input$/i);
+  const iOutput = col(/^(short context )?output$/i);
+  if (iInput < 1 || iCached < 1 || iOutput < 1) {
+    return { prices: [], note: `openai Standard pricing columns not found — header is: ${header.join(' | ')}` };
+  }
   const prices: PublishedPrice[] = [];
-  for (const cells of tableUnder(md, '### Standard pricing data')) {
+  for (const cells of rows) {
     const id = cells[0].replace(/\s*\(.*$/, '').trim();
-    const input = money(cells[1]);
-    const cached = money(cells[2]);
-    const output = money(cells[4]);
+    const input = money(cells[iInput] ?? '');
+    const cached = money(cells[iCached] ?? '');
+    const output = money(cells[iOutput] ?? '');
     if (!id || input === null || cached === null || output === null) continue;
     prices.push({ id, input, cached, output });
   }
   return prices.length
     ? { prices }
     : { prices: [], note: 'openai Standard pricing table parsed empty — format changed?' };
+}
+
+async function xaiPrices(): Promise<{ prices: PublishedPrice[]; note?: string }> {
+  const md = await fetchText('https://docs.x.ai/docs/models.md');
+  if (!md) return { prices: [], note: 'xai prices NOT verified — pricing table could not be fetched' };
+  // One row per prompt-length tier ("< 200k prompt tokens" / "≥ 200k"). The
+  // registry carries the base tier, so the upper rows are skipped.
+  const { header, rows } = tableUnder(md, '### Text API Pricing');
+  const col = (re: RegExp) => header.findIndex((h) => re.test(h));
+  const iInput = col(/^input\b/i);
+  const iCached = col(/^cached input\b/i);
+  const iOutput = col(/^output\b/i);
+  if (iInput < 1 || iCached < 1 || iOutput < 1) {
+    return { prices: [], note: `xai pricing columns not found — header is: ${header.join(' | ')}` };
+  }
+  const prices: PublishedPrice[] = [];
+  for (const cells of rows) {
+    if (/≥|>=/.test(cells[0])) continue;
+    const id = cells[0].replace(/\s*\(.*$/, '').trim();
+    const input = money(cells[iInput] ?? '');
+    const cached = money(cells[iCached] ?? '');
+    const output = money(cells[iOutput] ?? '');
+    if (!id || input === null || cached === null || output === null) continue;
+    prices.push({ id, input, cached, output });
+  }
+  return prices.length ? { prices } : { prices: [], note: 'xai pricing table parsed empty — format changed?' };
+}
+
+/** What `grok models` lists as selectable for the logged-in account. */
+async function grokModelIds(): Promise<Set<string> | null> {
+  const r = await run('grok', ['models'], { timeoutMs: 60_000 });
+  const ids = new Set(r.out.match(/grok-[0-9][a-z0-9.-]*/g) ?? []);
+  return ids.size ? ids : null;
 }
 
 async function anthropicPrices(): Promise<{ prices: PublishedPrice[]; note?: string }> {
@@ -588,7 +631,7 @@ async function sweepRegistry(codexBin: string, claudeBin: string): Promise<Regis
 
   const notes: string[] = [];
   const published: PublishedPrice[] = [];
-  for (const src of [await openaiPrices(), await anthropicPrices()]) {
+  for (const src of [await openaiPrices(), await anthropicPrices(), await xaiPrices()]) {
     if (src.note) notes.push(src.note);
     published.push(...src.prices);
   }
@@ -622,10 +665,17 @@ async function sweepRegistry(codexBin: string, claudeBin: string): Promise<Regis
   if (!codexIds) notes.push(`missing-model check NOT run for codex — no model ids found in the \`${codexBin}\` binary`);
   if (!claudeIds)
     notes.push(`missing-model check NOT run for claude — no model ids found in the \`${claudeBin}\` binary`);
+  // grok's binary carries no model list: the account's models come from xAI at
+  // run time, which is how grok-4.7 became the default without this sweep
+  // noticing. `grok models` asks the same source the CLI does.
+  const grokIds = await grokModelIds();
+  if (!grokIds) notes.push('missing-model check NOT run for grok — `grok models` listed no model');
   const selectable = (p: PublishedPrice) =>
     p.id.startsWith('gpt-')
       ? !!codexIds?.has(p.id)
-      : p.id.startsWith('claude-') && !p.retired && !!claudeIds?.has(p.id);
+      : p.id.startsWith('grok-')
+        ? !!grokIds?.has(p.id)
+        : p.id.startsWith('claude-') && !p.retired && !!claudeIds?.has(p.id);
   const unregistered = published
     .filter((p) => selectable(p) && !registered(p.id))
     .map((p) => p.id)

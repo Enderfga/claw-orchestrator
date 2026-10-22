@@ -167,10 +167,10 @@ block, and the cancellation and permission limitations are in
 
 | Engine      | CLI        | Tested Version |
 | ----------- | ---------- | -------------- |
-| Claude Code | `claude`   | 2.1.302        |
+| Claude Code | `claude`   | 2.1.307        |
 | Codex       | `codex`    | 0.163.0        |
-| Antigravity | `agy`      | 1.4.0          |
-| Grok Build  | `grok`     | 1.0.62         |
+| Antigravity | `agy`      | 1.4.4          |
+| Grok Build  | `grok`     | 1.0.67         |
 | OpenCode    | `opencode` | 1.19.3         |
 | Custom CLI  | any        | —              |
 

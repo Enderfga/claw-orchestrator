@@ -76,12 +76,14 @@ function underTempDir(dir: string): boolean {
 export class PersistentGrokSession extends BaseOneShotSession {
   /** Grok's own session UUID, captured from turn 1 and replayed via `--resume`. */
   private grokSessionId?: string;
+  /** The model grok reports under `modelUsage`; it moves when grok's default does. */
+  private grokModel?: string;
 
   constructor(config: SessionConfig, grokBin?: string) {
     super(config, grokBin || process.env.GROK_BIN || 'grok', {
       enginePrefix: 'grok',
-      defaultModel: 'grok-4.6',
-      defaultModelDisplay: 'grok-4.6',
+      defaultModel: 'grok-4.7',
+      defaultModelDisplay: 'grok-4.7',
       supportsCachedTokens: true,
       // grok reports `total_tokens` as input + output + cache reads + cache
       // writes (30034 = 19393 + 17 + 10624 + 0 on a resumed turn), and its own
@@ -99,6 +101,11 @@ export class PersistentGrokSession extends BaseOneShotSession {
     if (config.resumeSessionId && !/^grok-\d+-/.test(config.resumeSessionId)) {
       this.grokSessionId = config.resumeSessionId.replace(/^grok-live-/, '');
     }
+  }
+
+  /** The configured model, else the one grok reported running. */
+  protected override _billedModel(): string | undefined {
+    return this.options.model || this.grokModel;
   }
 
   private _buildArgs(message: string, options: SessionSendOptions): string[] {
@@ -313,6 +320,8 @@ export class PersistentGrokSession extends BaseOneShotSession {
           // the cached reads are most of the context that has to fit.
           this._reportTurnInputTokens((usage.input_tokens ?? 0) + cacheRead + cacheWrite);
         }
+        const reported = parsed?.modelUsage && Object.keys(parsed.modelUsage)[0];
+        if (reported) this.grokModel = reported;
         // Engine-reported spend, not a registry lookup — see the file header.
         if (typeof parsed?.total_cost_usd === 'number' && Number.isFinite(parsed.total_cost_usd)) {
           this._stats.costUsd += parsed.total_cost_usd;

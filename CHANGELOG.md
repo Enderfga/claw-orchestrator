@@ -17,6 +17,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   send-timeout pause is still a no-op until an explicit timeout increase. The
   dashboard Resume button is shown for every live paused run, and sends
   timeout fields only when a dispatch is pending.
+
+## [7.12.1] - 2026-10-22
+
+### Fixed
+
+- **Grok Build sessions report the model grok ran.** grok 1.0.67 made `grok-4.7` its default
+  and only model. It is registered (same prices and 500K window as `grok-4.6`), the `grok` alias
+  points to it, and a session started without a `model` is labelled with the model grok reports
+  under `modelUsage` instead of a fixed default. Cost still comes from grok's `total_cost_usd`.
 - **Autoloop resume restores progress from a closed ledger.** A non-fresh
   `_bootAutoloop` reads the run ledger once before any Planner session or
   checkpoint publish and restores typed `iter` / `metric_history` from the
@@ -31,6 +40,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   prefix refuses with a fixed generic error before any new session or effect
   (ledger text is not echoed). Terminal plain `workflowResume` still does not
   restart a stopped autoloop.
+
+### Changed
+
+- Tested with Claude Code 2.1.307, Codex 0.163.0, agy 1.4.4, grok 1.0.67 and OpenCode 1.19.3.
 
 ## [7.12.0] - 2026-10-17
 
