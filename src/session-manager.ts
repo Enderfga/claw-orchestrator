@@ -134,7 +134,13 @@ import { CircuitBreaker } from './circuit-breaker.js';
 import { detectRepoLang } from './kernel/repo.js';
 import { RunKernel, runDir as kernelRunDir } from './kernel/engine.js';
 import { registerDefaultExecutors } from './kernel/nodes/index.js';
-import { autoloopStateFromRecord, makeAutoloopExecutor, type AutoloopHandle } from './kernel/nodes/autoloop.js';
+import {
+  autoloopStateFromRecord,
+  makeAutoloopExecutor,
+  type AutoloopHandle,
+  type AutoloopNodeData,
+} from './kernel/nodes/autoloop.js';
+import { formatAutoloopBackgroundErrorReason } from './autoloop/recovery.js';
 import { isValidRunId, loadRun, readNodeOutput, type RunSummary } from './kernel/store.js';
 import {
   LEGACY_NODE,
@@ -1719,7 +1725,7 @@ export class SessionManager {
       kernel.setExecutor(
         'autoloop',
         makeAutoloopExecutor({
-          boot: (config, secrets, { freshStart }) =>
+          boot: (config, secrets, { freshStart, previousData }) =>
             this._bootAutoloop({
               ...(config as Parameters<SessionManager['_bootAutoloop']>[0]),
               // Custom-engine configs never reach the spec, so they come from
@@ -1731,6 +1737,7 @@ export class SessionManager {
               // Always set (including false on resume) — omitting false left a
               // `_freshStart: true` from config/secrets intact.
               _freshStart: freshStart,
+              _previousNodeData: previousData,
             }),
           ready: (key, value) => {
             const deferred = this._autoloopReady.get(key);
@@ -1792,6 +1799,10 @@ export class SessionManager {
   }
 
   workflowCancel(runId: string): { cancelled: boolean } {
+    // Shared boundary: RunKernel.cancel calls abort?.() on every live handle.
+    // AutoloopHandle.abort arms markCancelledByKernel synchronously — no
+    // workflowCancel-specific arm (covers direct cancel, parent cascade, retire,
+    // delete, shutdown). Council/Fanout keep their own abort(); others omit it.
     return { cancelled: this.kernel.cancel(runId) };
   }
 
@@ -3400,7 +3411,7 @@ export class SessionManager {
   /** Latest role selection per run, published into the node payload. */
   private _autoloopSelection = new Map<string, unknown>();
   /** Per-run checkpoint refreshers, registered by the autoloop node executor. */
-  private _autoloopPublishers = new Map<string, () => void>();
+  private _autoloopPublishers = new Map<string, () => boolean>();
 
   async ultraplanStart(
     task: string,
@@ -3685,6 +3696,7 @@ export class SessionManager {
         on(event: string, fn: () => void): void;
         off(event: string, fn: () => void): void;
         stop(): void;
+        markCancelledByKernel?: () => void;
       };
       const done = (): boolean => runner.state.status === 'terminated' || runner.state.status === 'crashed';
       if (done()) return resolve();
@@ -3698,6 +3710,9 @@ export class SessionManager {
             // session names stay claimed, so the run cannot be restarted — the
             // failure looks like "session name already in use" a long way from
             // its cause.
+            // Also re-arm the late-settle guard (idempotent) for cancel paths that
+            // did not go through workflowCancel.
+            runner.markCancelledByKernel?.();
             runner.stop();
             void handle.dispatcher.shutdown('cancelled').catch(() => undefined);
           }
@@ -3738,11 +3753,14 @@ export class SessionManager {
     _commitTimeoutMigration?: () => void;
     /** Internal fresh-boot marker from kernel visits===1. Never stored. */
     _freshStart?: boolean;
+    /** Prior node checkpoint on non-fresh visits. Never stored as a boot field. */
+    _previousNodeData?: AutoloopNodeData;
   }): Promise<{
     runner: AutoloopRunner;
     dispatcher: ClaudeAgentDispatcher;
     ledgerDir: string;
     pushPolicy: PushPolicy;
+    abort: () => void;
   }> {
     const plannerEngine = validateAutoloopRole('planner', opts.plannerEngine, opts.plannerCustomEngine);
     const coderEngine = validateAutoloopRole('coder', opts.coderEngine, opts.coderCustomEngine);
@@ -3817,6 +3835,7 @@ export class SessionManager {
       workspace: opts.workspace,
       ledger_dir: ledgerDir,
       push_policy: pushPolicy,
+      persistCheckpoint: () => this._autoloopPublishers.get(runId)?.() ?? false,
       notifyUser: async (level: PushLevel, summary: string, detail, channel: PushChannel) => {
         const result = await notifyUserFallbackChain({
           level,
@@ -3844,13 +3863,17 @@ export class SessionManager {
     });
     // Background resume/deadline/stall paths emit 'error' after a void catch.
     // Without a listener, Node turns that into an unhandled rejection.
-    runner.on('error', () => {
-      this.logger.error?.(`[autoloop/${runId}] background runner task failed`);
+    runner.on('error', (err: unknown) => {
+      const reason = formatAutoloopBackgroundErrorReason(err);
+      this.logger.error?.(`[autoloop/${runId}] background runner task failed: ${reason}`);
     });
     runnerRef = runner;
     if (closedLedgerRestore) {
       runner.state.iter = closedLedgerRestore.iter;
       runner.state.metric_history = closedLedgerRestore.metric_history.slice();
+    }
+    if (opts._freshStart !== true && opts._previousNodeData?.recovery !== undefined) {
+      runner.applyRestoredRecovery(opts._previousNodeData.recovery, opts._previousNodeData.state);
     }
     try {
       await runner.start();
@@ -3871,7 +3894,16 @@ export class SessionManager {
       runner.stop();
       throw err;
     }
-    return { runner, dispatcher, ledgerDir, pushPolicy };
+    return {
+      runner,
+      dispatcher,
+      ledgerDir,
+      pushPolicy,
+      // RunKernel.cancel invokes abort?.() on live handles before waitForExit can poll.
+      abort: () => {
+        runner.markCancelledByKernel();
+      },
+    };
   }
 
   /**
@@ -4031,11 +4063,22 @@ export class SessionManager {
   }
 
   /**
-   * Inject a user chat message into a v2 run's Planner. Returns the Planner's
-   * natural-language reply.
+   * Synchronous acceptance of operator chat into the durable recovery ledger.
+   * Shared by HTTP and autoloopChat. Positive commit = ack; nothing delivered before it.
+   */
+  acceptAutoloopChat(runId: string, text: string): { message_id: string } {
+    const ctx = this._liveAutoloop(runId);
+    return ctx.runner.acceptChat(text);
+  }
+
+  /**
+   * Inject a user chat message into a v2 run's Planner. Accepts first, then
+   * delivers (or parks while paused). Returns the Planner's natural-language
+   * reply when delivered; resolves once parked while paused.
    */
   async autoloopChat(runId: string, text: string): Promise<{ reply: string }> {
     const ctx = this._liveAutoloop(runId);
+    const { message_id } = this.acceptAutoloopChat(runId, text);
     let reply = '';
     const onReply = (...args: unknown[]) => {
       const t = args[0];
@@ -4043,7 +4086,7 @@ export class SessionManager {
     };
     ctx.dispatcher.on('planner_reply', onReply);
     try {
-      await ctx.runner.send(AutoloopMsg.chat(ctx.runner.state.iter, { text }));
+      await ctx.runner.deliverAccepted(message_id);
     } finally {
       ctx.dispatcher.off('planner_reply', onReply);
     }
@@ -4163,9 +4206,20 @@ export class SessionManager {
       sendTimeoutMs?: number;
       /** Guards the exact I3 logical dispatch being advanced, when supplied. */
       pendingDispatchId?: string;
+      /** Targeted disposition of uncertain accepted chat (live paused only). */
+      inputDisposition?: {
+        ledgerId: string;
+        expectedRevision: number;
+        messageIds: string[];
+        resolution: 'abandon' | 'confirm_delivered';
+      };
     } = {},
   ): Promise<AutoloopState> {
     const hasTimeoutIncrease = opts.sendTimeoutMs !== undefined;
+    const hasDisposition = opts.inputDisposition !== undefined;
+    if (hasDisposition && (hasTimeoutIncrease || opts.pendingDispatchId !== undefined)) {
+      throw new Error('inputDisposition cannot be combined with sendTimeoutMs or pendingDispatchId');
+    }
     if (!hasTimeoutIncrease && opts.pendingDispatchId !== undefined) {
       throw new Error('pendingDispatchId requires a sendTimeoutMs increase');
     }
@@ -4181,11 +4235,28 @@ export class SessionManager {
       LEGACY_NODE,
     );
     if (live) {
+      if (hasDisposition) {
+        const d = opts.inputDisposition!;
+        const outcome = live.runner.disposeUncertainInput({
+          ledgerId: d.ledgerId,
+          expectedRevision: d.expectedRevision,
+          messageIds: d.messageIds,
+          resolution: d.resolution,
+        });
+        if (outcome === 'applied') {
+          live.runner.resumePaused();
+          this._autoloopPublishers.get(runId)?.();
+        }
+        return live.runner.state;
+      }
       if (!hasTimeoutIncrease) {
         // Ordinary and activity-lease pauses have no uncertain in-flight
         // dispatch. A pending send timeout stays the historical no-op until
         // an explicit timeout increase names that dispatch.
         if (live.runner.state.status === 'paused' && live.runner.state.pending_dispatch === null) {
+          if (live.runner.hasUncertainItems()) {
+            throw new Error('input_disposition_required');
+          }
           live.runner.resumePaused();
           this._autoloopPublishers.get(runId)?.();
         }
@@ -4228,6 +4299,9 @@ export class SessionManager {
 
     const record = loadRun(runId);
     if (!record || record.workflow !== 'autoloop') throw new Error(`Autoloop run '${runId}' not found`);
+    if (hasDisposition) {
+      throw new Error('input_disposition requires a live paused run; resume the stored run first');
+    }
     const config = (record.spec.nodes.find((n) => n.id === LEGACY_NODE) as { config?: Record<string, unknown> })
       ?.config;
     if (!config) throw new Error(`Autoloop run '${runId}' has no stored configuration to restart from`);

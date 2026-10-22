@@ -16,6 +16,7 @@ import { SessionManager } from './session-manager.js';
 import { sanitizeCwd, validateRegex } from './validation.js';
 import { resolveSecretRefs } from './kernel/secrets.js';
 import { validateAutoloopTimeoutConfig } from './autoloop/types.js';
+import { AutoloopInputPersistenceError, formatAutoloopBackgroundErrorReason } from './autoloop/recovery.js';
 import type { EffortLevel, EngineType } from './types.js';
 import { handleChatCompletion } from './openai-compat.js';
 import { getModelList } from './models.js';
@@ -50,6 +51,26 @@ function autoloopErrorStatus(error: unknown): number {
   if (/^pending dispatch\b/.test(message)) return 400;
   if (/^Autoloop run '.+' (?:has no pending dispatch|is not awaiting a recoverable send timeout)/.test(message)) {
     return 400;
+  }
+  if (/^input_disposition_required$/.test(message)) return 409;
+  if (/^input_disposition requires a live paused run/.test(message)) return 400;
+  if (/^inputDisposition cannot be combined/.test(message)) return 400;
+  // Malformed client shape for disposition — never 500 (F8).
+  if (/^input_disposition must be an object$/.test(message)) return 400;
+  if (/^input_disposition must have exactly /.test(message)) return 400;
+  if (/^input_disposition shape invalid$/.test(message)) return 400;
+  if (/^input_disposition message_ids must be string\[]$/.test(message)) return 400;
+  if (/^input_disposition resolution invalid$/.test(message)) return 400;
+  if (/^input_disposition expected_revision invalid$/.test(message)) return 400;
+  if (error instanceof AutoloopInputPersistenceError) {
+    if (error.code === 'bound_items' || error.code === 'bound_text') return 429;
+    if (error.code === 'malformed') return 400;
+    return 409;
+  }
+  if (/^autoloop input/.test(message)) {
+    if (/bound|8 MiB|item bound/.test(message)) return 429;
+    if (/malformed|text required|message_ids|invalid/.test(message)) return 400;
+    return 409;
   }
   return 500;
 }
@@ -1241,14 +1262,12 @@ export class EmbeddedServer {
 
       // ─── Autoloop — chat into the Planner ─────────────────────
       //
-      // POST /autoloop/<run_id>/chat  { text }  →  202 { ok, queued: true }
+      // POST /autoloop/<run_id>/chat  { text }  →  202 { ok, queued: true, message_id }
       //
-      // Fire-and-forget. The Planner's reply streams back as a planner_reply
-      // event on /autoloop/<id>/events (SSE). We DO NOT await it on this
-      // request because first-contact replies routinely exceed the
-      // Cloudflare Tunnel origin idle limit (~100s, returns 524). The MCP
-      // `autoloop_chat` tool path keeps the await-and-return-reply
-      // semantics — it runs in-process, not through Cloudflare.
+      // Accept synchronously (durable ack), then deliver in the background.
+      // We DO NOT await delivery because first-contact replies routinely exceed
+      // the Cloudflare Tunnel origin idle limit (~100s, returns 524). The MCP
+      // `autoloop_chat` tool path keeps the await-and-return-reply semantics.
       const v2ChatMatch = path.match(/^\/autoloop\/([^/]+)\/chat$/);
       if (v2ChatMatch) {
         const id = v2ChatMatch[1];
@@ -1257,12 +1276,7 @@ export class EmbeddedServer {
           json(400, { ok: false, error: 'text (non-empty string) required' });
           return;
         }
-        // Validate run exists synchronously so 404 surfaces cleanly. After
-        // this point we hand the message off to the runner and return.
         if (!this.manager.getAutoloop(id)) {
-          // Only a run the store still holds can be resumed; anything else —
-          // a mistyped id included — is simply not found. MCP and CLI callers
-          // use this endpoint too, so the hint names the API, not a button.
           let persisted = false;
           try {
             persisted = Boolean(this.manager.autoloopStatus(id));
@@ -1277,13 +1291,20 @@ export class EmbeddedServer {
           });
           return;
         }
-        this.manager.autoloopChat(id, text).catch((err) => {
-          // Late failures (planner errors, runner shutdown mid-dispatch) flow
-          // to SSE as planner_error events; this catch only exists to keep
-          // unhandled rejection from crashing the server.
-          console.warn(`[autoloop/${id}] chat dispatch failed: ${(err as Error).message}`);
-        });
-        json(202, { ok: true, queued: true });
+        let message_id: string;
+        try {
+          ({ message_id } = this.manager.acceptAutoloopChat(id, text));
+        } catch (err) {
+          json(autoloopErrorStatus(err), { ok: false, error: (err as Error).message });
+          return;
+        }
+        const live = this.manager.getAutoloop(id);
+        if (live) {
+          void live.runner.deliverAccepted(message_id).catch((err: unknown) => {
+            console.warn(`[autoloop/${id}] background runner task failed: ${formatAutoloopBackgroundErrorReason(err)}`);
+          });
+        }
+        json(202, { ok: true, queued: true, message_id });
         return;
       }
 
@@ -1373,6 +1394,46 @@ export class EmbeddedServer {
           const resumeOptions = refs as NonNullable<Parameters<SessionManager['autoloopResume']>[1]>;
           if (sendTimeoutMs !== undefined) resumeOptions.sendTimeoutMs = sendTimeoutMs;
           if (pendingDispatchId !== undefined) resumeOptions.pendingDispatchId = pendingDispatchId;
+          if (Object.prototype.hasOwnProperty.call(body, 'input_disposition')) {
+            const raw = body.input_disposition;
+            if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+              throw new Error('input_disposition must be an object');
+            }
+            const disp = raw as Record<string, unknown>;
+            const keys = Object.keys(disp).sort().join(',');
+            if (keys !== 'expected_revision,ledger_id,message_ids,resolution') {
+              throw new Error(
+                'input_disposition must have exactly ledger_id, expected_revision, message_ids, resolution',
+              );
+            }
+            if (typeof disp.ledger_id !== 'string' || disp.ledger_id.length === 0) {
+              throw new Error('input_disposition shape invalid');
+            }
+            if (
+              typeof disp.expected_revision !== 'number' ||
+              !Number.isSafeInteger(disp.expected_revision) ||
+              disp.expected_revision < 0
+            ) {
+              throw new Error('input_disposition expected_revision invalid');
+            }
+            if (
+              !Array.isArray(disp.message_ids) ||
+              disp.message_ids.length === 0 ||
+              disp.message_ids.some((x) => typeof x !== 'string' || x.length === 0) ||
+              new Set(disp.message_ids as string[]).size !== disp.message_ids.length
+            ) {
+              throw new Error('input_disposition message_ids must be string[]');
+            }
+            if (disp.resolution !== 'abandon' && disp.resolution !== 'confirm_delivered') {
+              throw new Error('input_disposition resolution invalid');
+            }
+            resumeOptions.inputDisposition = {
+              ledgerId: disp.ledger_id,
+              expectedRevision: disp.expected_revision,
+              messageIds: disp.message_ids as string[],
+              resolution: disp.resolution,
+            };
+          }
           const state = await this.manager.autoloopResume(id, resumeOptions);
           json(200, { ok: true, state });
         } catch (err) {

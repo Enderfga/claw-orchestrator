@@ -666,7 +666,9 @@ describe('Autoloop live pause resume regressions', () => {
         expect(errorLogs).toHaveLength(1);
       });
       expect(rejections).toEqual([]);
-      expect(errorLogs[0]).toBe(`[autoloop/${runId}] background runner task failed`);
+      expect(errorLogs[0]).toBe(
+        `[autoloop/${runId}] background runner task failed: dispatch depth exceeded 64 at iter 0 (next='chat' to 'planner') — likely message ping-pong; raise config.maxDispatchDepth for legitimately deep workflows`,
+      );
       await vi.waitFor(() => {
         for (let i = 1; i <= 65; i++) {
           expect(textsExactChat(planner, `U${i}`)).toEqual([`U${i}`]);

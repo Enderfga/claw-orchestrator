@@ -160,8 +160,11 @@ export interface NodeContext {
    * exists to remove. After a restart a run resumes; it does not reconnect.
    */
   setHandle(handle: unknown): void;
-  /** Checkpoint mode payload as the node runs, not only when it finishes. */
-  publish(data: unknown): void;
+  /**
+   * Checkpoint mode payload as the node runs, not only when it finishes.
+   * Returns true only when RunTxn.apply committed the staged snapshot passed in.
+   */
+  publish(data: unknown): boolean;
   /**
    * Record a child run started by this node, immediately.
    *
@@ -1176,13 +1179,12 @@ export class RunKernel extends EventEmitter {
         },
         runContract: txn.record.spec.contract,
         setHandle: (h) => handle.handles.set(spec.id, h),
-        publish: (data) => {
+        publish: (data) =>
           txn.apply((draft) => {
             const node = draft.nodes[spec.id];
             if (node) node.data = data;
             draft.updatedAt = new Date().toISOString();
-          });
-        },
+          }),
         secrets: handle.secrets,
         tag: handle.tag,
         setChild: (childRunId) => {

@@ -3,6 +3,7 @@
  */
 
 import type { AnyAutoloopMessage, PushChannel, PushLevel, SendTimeoutPayload } from './messages.js';
+import type { PendingInputStatus } from './recovery.js';
 
 export type AutoloopStatus = 'planning' | 'running' | 'paused' | 'terminated' | 'crashed';
 
@@ -26,6 +27,10 @@ export interface AutoloopState {
    * Optional for backward compatibility with state checkpointed before I3.
    */
   pending_dispatch?: SendTimeoutPayload | null;
+  /**
+   * Text-free durable accepted-chat obligations, only when recovery items exist.
+   */
+  pending_input?: PendingInputStatus;
   /**
    * Phase-error circuit breaker — incremented on every `phase_error` message,
    * cleared on each successful (non-error) `iter_done`. When it reaches
@@ -180,6 +185,11 @@ export interface AutoloopConfig extends AutoloopTimeoutConfig {
   run_id: string;
   workspace: string;
   ledger_dir: string;
+  /**
+   * Fenced checkpoint refresh resolved at call time. Returns true only when
+   * the staged node snapshot (including recovery) was committed. Absent = false.
+   */
+  persistCheckpoint?: () => boolean;
   /** Optional override; defaults to DEFAULT_PUSH_POLICY. */
   push_policy?: PushPolicy;
   /**

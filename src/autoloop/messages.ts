@@ -236,7 +236,11 @@ function envelope<T extends AutoloopMessageType>(
 }
 
 export const Msg = {
-  chat: (iter: number, payload: UserChatPayload) => envelope(iter, 'user', 'planner', 'chat', payload),
+  chat: (iter: number, payload: UserChatPayload, messageId?: string) => {
+    const env = envelope(iter, 'user', 'planner', 'chat', payload);
+    if (messageId) env.msg_id = messageId;
+    return env;
+  },
   directive: (iter: number, payload: DirectivePayload) => envelope(iter, 'planner', 'coder', 'directive', payload),
   directiveAck: (iter: number, payload: DirectiveAckPayload) =>
     envelope(iter, 'coder', 'planner', 'directive_ack', payload),

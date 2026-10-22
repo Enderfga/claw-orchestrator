@@ -2,7 +2,8 @@
  * Owner-process child for abrupt-loss autoloop tests.
  *
  * Env:
- *   AUTOLOOP_MODE        committed-iter | planner-only | closed-iterations
+ *   AUTOLOOP_MODE        committed-iter | planner-only | closed-iterations |
+ *                        paused-input | hung-planner-send
  *   AUTOLOOP_RUN_ID      kernel run id
  *   AUTOLOOP_WORKSPACE   git workspace shared with the parent
  *   CLAWO_WF_DIR         shared run store
@@ -14,6 +15,11 @@
  * closed-iterations closes N verdicts via the real runner/dispatcher, then
  * emits READY and hangs so the parent can SIGKILL an owner with a current
  * closed-ledger checkpoint.
+ * paused-input: Planner pause_loop, accept U1 then U2 while paused (public
+ * autoloopChat), emit READY only after both acceptances return, then hang.
+ * hung-planner-send: first Planner send never settles; emit READY only once
+ * that send has started AND the durable dispatched marker is committed, then
+ * hang (parent SIGKILL mid-send). Not the same as paused-input.
  */
 import { EventEmitter } from 'node:events';
 import * as fs from 'node:fs';
@@ -91,16 +97,29 @@ function parseIterDone(message: string | unknown[]): number | null {
   return m ? Number(m[1]) : null;
 }
 
+type OwnerBehavior = 'paused-input' | 'hung-planner-send' | null;
+
 class OwnerMockSession extends EventEmitter implements ISession {
   sessionId?: string;
   private readonly role: 'planner' | 'coder' | 'reviewer' | 'other';
   private readonly workspace: string;
   private readonly closeCount: number | null;
+  private readonly behavior: OwnerBehavior;
+  private readonly ownerCtx: { mgr: SessionManager; runId: string } | null;
+  private plannerReplies = 0;
 
-  constructor(config: SessionConfig, workspace: string, closeCount: number | null = null) {
+  constructor(
+    config: SessionConfig,
+    workspace: string,
+    closeCount: number | null = null,
+    behavior: OwnerBehavior = null,
+    ownerCtx: { mgr: SessionManager; runId: string } | null = null,
+  ) {
     super();
     this.workspace = workspace;
     this.closeCount = closeCount;
+    this.behavior = behavior;
+    this.ownerCtx = ownerCtx;
     const name = config.name ?? '';
     if (name.endsWith('-planner')) this.role = 'planner';
     else if (name.endsWith('-coder')) this.role = 'coder';
@@ -131,6 +150,28 @@ class OwnerMockSession extends EventEmitter implements ISession {
     message: string | unknown[],
     _options?: SessionSendOptions,
   ): Promise<TurnResult | { requestId: number; sent: boolean }> {
+    if (this.behavior === 'hung-planner-send' && this.role === 'planner') {
+      // markDispatched commits before deliver() awaits this send. Refuse READY
+      // unless the live runner already holds the uncertain/dispatched item.
+      const handle = this.ownerCtx?.mgr.getAutoloop(this.ownerCtx.runId);
+      if (!handle?.runner.hasUncertainItems()) {
+        process.stderr.write('hung-planner-send: READY refused — dispatched marker not committed\n');
+        process.exit(1);
+      }
+      process.stdout.write('READY\n');
+      await new Promise(() => undefined);
+      return { text: 'unreachable', event: { type: 'result', result: 'ok' } };
+    }
+    if (this.behavior === 'paused-input' && this.role === 'planner') {
+      this.plannerReplies += 1;
+      if (this.plannerReplies === 1) {
+        return {
+          text: fence('pause_loop', { reason: 'operator-hold' }),
+          event: { type: 'result', result: 'ok' },
+        };
+      }
+      return { text: 'ack', event: { type: 'result', result: 'ok' } };
+    }
     if (this.closeCount !== null) {
       if (this.role === 'planner') {
         const text = typeof message === 'string' ? message : JSON.stringify(message);
@@ -225,11 +266,18 @@ class OwnerMockSession extends EventEmitter implements ISession {
   }
 }
 
-function patchCreateSession(manager: SessionManager, workspace: string, closeCount: number | null = null): void {
+function patchCreateSession(
+  manager: SessionManager,
+  workspace: string,
+  closeCount: number | null = null,
+  behavior: OwnerBehavior = null,
+  runId: string | null = null,
+): void {
+  const ownerCtx = runId ? { mgr: manager, runId } : null;
   (manager as unknown as { _createSession: (engine: string, config: SessionConfig) => ISession })._createSession = (
     _engine: string,
     config: SessionConfig,
-  ): ISession => new OwnerMockSession(config, workspace, closeCount);
+  ): ISession => new OwnerMockSession(config, workspace, closeCount, behavior, ownerCtx);
 }
 
 async function main(): Promise<void> {
@@ -237,12 +285,19 @@ async function main(): Promise<void> {
   const runId = process.env.AUTOLOOP_RUN_ID;
   const workspace = process.env.AUTOLOOP_WORKSPACE;
   if (!runId || !workspace) throw new Error('AUTOLOOP_RUN_ID and AUTOLOOP_WORKSPACE are required');
-  if (mode !== 'committed-iter' && mode !== 'planner-only' && mode !== 'closed-iterations') {
+  if (
+    mode !== 'committed-iter' &&
+    mode !== 'planner-only' &&
+    mode !== 'closed-iterations' &&
+    mode !== 'paused-input' &&
+    mode !== 'hung-planner-send'
+  ) {
     throw new Error(`unknown AUTOLOOP_MODE ${String(mode)}`);
   }
 
   const closeCount =
     mode === 'closed-iterations' ? Math.max(1, Number(process.env.AUTOLOOP_CLOSE_COUNT ?? '2') || 2) : null;
+  const behavior: OwnerBehavior = mode === 'paused-input' || mode === 'hung-planner-send' ? mode : null;
 
   const mgr = new SessionManager({
     claudeBin: 'mock-claude',
@@ -250,7 +305,7 @@ async function main(): Promise<void> {
     sessionTtlMinutes: 120,
     defaultPermissionMode: 'acceptEdits',
   });
-  patchCreateSession(mgr, workspace, closeCount);
+  patchCreateSession(mgr, workspace, closeCount, behavior, runId);
 
   await mgr.autoloopStart({ runId, workspace });
   if (mode === 'planner-only') {
@@ -269,6 +324,26 @@ async function main(): Promise<void> {
       }
     }
     process.stdout.write('READY\n');
+    await new Promise(() => undefined);
+    return;
+  }
+  if (mode === 'paused-input') {
+    const handle = mgr.getAutoloop(runId);
+    if (!handle) throw new Error('paused-input: missing live handle after start');
+    await mgr.autoloopChat(runId, 'pause-trigger');
+    if (handle.runner.state.status !== 'paused') {
+      throw new Error(`paused-input: expected paused, got ${handle.runner.state.status}`);
+    }
+    // Acceptance = public autoloopChat resolved while paused (park returned).
+    await mgr.autoloopChat(runId, 'U1');
+    await mgr.autoloopChat(runId, 'U2');
+    process.stdout.write('READY\n');
+    await new Promise(() => undefined);
+    return;
+  }
+  if (mode === 'hung-planner-send') {
+    // Do not await: Planner send hangs; READY fires once that send has started.
+    void mgr.autoloopChat(runId, 'hanging-planner-send');
     await new Promise(() => undefined);
     return;
   }

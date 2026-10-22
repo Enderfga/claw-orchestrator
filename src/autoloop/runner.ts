@@ -11,7 +11,31 @@
  */
 
 import { EventEmitter } from 'node:events';
-import { type AnyAutoloopMessage, AutoloopRoutingError, Msg, validateMessage } from './messages.js';
+import {
+  type AnyAutoloopMessage,
+  AutoloopRoutingError,
+  Msg,
+  type SendTimeoutPayload,
+  validateMessage,
+} from './messages.js';
+import {
+  appendTombstone,
+  AutoloopInputPersistenceError,
+  cloneRecovery,
+  emptyRecovery,
+  GATE_STATUS_REASON,
+  isGenuinePendingDispatch,
+  MAX_RECOVERY_ITEMS,
+  MAX_RECOVERY_TEXT_BYTES,
+  messageIdInUse,
+  newMessageId,
+  projectPendingInput,
+  utf8ByteLength,
+  validateRecoveryField,
+  type AutoloopRecovery,
+  type RecoveryGateKind,
+  type RecoveryResolution,
+} from './recovery.js';
 import {
   DEFAULT_PUSH_POLICY,
   MAX_METRIC_HISTORY,
@@ -90,12 +114,26 @@ export class AutoloopRunner extends EventEmitter {
   private activityLeaseExpired = false;
   private terminationStarted = false;
   private terminationPromise: Promise<void> | null = null;
+  /**
+   * Kernel cancel won out-of-band (signal.aborted). Reuses the existing late-settle
+   * guard keyed on `terminationStarted` so a successful transport return cannot
+   * `completeAccepted` / enqueue follow-ups. Does not change `stop()` (timers only).
+   */
+  markCancelledByKernel(): void {
+    this.terminationStarted = true;
+  }
   /** Timeout outcomes explicitly advanced by an operator resume. Retained so a
    *  late/replayed result for the same logical dispatch cannot pause the run a
    *  second time after it has already been resolved. */
   private readonly resolvedTimedOutDispatches = new Set<string>();
   private readonly timeouts: ResolvedAutoloopTimeoutConfig;
   private readonly hardDeadlineAt: number;
+  /** Last committed recovery ledger (immutable adopt). Null = legacy/absent. */
+  private recovery: AutoloopRecovery | null = null;
+  /** Candidate during stage-commit-adopt; publish reads this when set. */
+  private stagingRecovery: AutoloopRecovery | null = null;
+  /** Accepted chat msg_ids currently in pausedBuffer (never evict these). */
+  private readonly acceptedParkedIds = new Set<string>();
 
   constructor(config: AutoloopConfig) {
     super();
@@ -245,6 +283,8 @@ export class AutoloopRunner extends EventEmitter {
     this.activityLeaseExpired = true;
     this.state.status = 'paused';
     this.state.status_reason = 'activity_lease_expired';
+    this.setGate('activity_lease');
+    this.syncPendingInputProjection();
     const event: AutoloopTimeoutEvent = {
       kind: 'activity_lease_expired',
       observed_at: now,
@@ -275,10 +315,13 @@ export class AutoloopRunner extends EventEmitter {
     this.terminationStarted = true;
     this.state.status = 'terminated';
     this.state.status_reason = reason;
+    // Nulling pending_dispatch must not erase ledger uncertainty: recovery is authority.
     this.state.pending_dispatch = null;
     this.queue.length = 0;
     this.pausedBuffer.length = 0;
+    this.acceptedParkedIds.clear();
     this.stop();
+    this.syncPendingInputProjection();
     this.emit('state', this.state);
     if (timeoutEvent) this.emit('timeout', timeoutEvent);
     this.terminationPromise = (async () => {
@@ -313,9 +356,21 @@ export class AutoloopRunner extends EventEmitter {
     await this.drain();
   }
 
-  /** External entry: user typed something to Planner. */
+  /** External entry: user typed something to Planner (legacy path without durable accept). */
   chat(text: string): Promise<void> {
     return this.send(Msg.chat(this.state.iter, { text }));
+  }
+
+  getCommittedRecovery(): AutoloopRecovery | null {
+    return this.recovery;
+  }
+
+  getPublishRecovery(): AutoloopRecovery | null {
+    return this.stagingRecovery ?? this.recovery;
+  }
+
+  hasUncertainItems(): boolean {
+    return Boolean(this.recovery?.items.some((it) => it.status === 'dispatched'));
   }
 
   /**
@@ -334,10 +389,17 @@ export class AutoloopRunner extends EventEmitter {
     ) {
       return false;
     }
+    if (this.hasUncertainItems()) {
+      return false;
+    }
     if (Date.now() >= this.hardDeadlineAt) {
       void this.expireHardDeadline().catch((err) => {
         this.emit('error', err);
       });
+      return false;
+    }
+    // Commit gate clear before adopting an active status (F3).
+    if (!this.setGate(null)) {
       return false;
     }
     this.activityLeaseExpired = false;
@@ -345,6 +407,8 @@ export class AutoloopRunner extends EventEmitter {
     this.state.status_reason = null;
     this.recordActivity('lifecycle_transition');
     this.restorePausedMessages();
+    this.enqueuePendingAcceptedChats();
+    this.syncPendingInputProjection();
     this.emit('state', this.state);
     void this.drain().catch((err) => {
       this.emit('error', err);
@@ -368,12 +432,18 @@ export class AutoloopRunner extends EventEmitter {
       return false;
     }
 
+    // Commit timeout resolution before clearing the live control identity (F3).
+    if (!this.resolveTimeoutLinkedItem(dispatchId)) {
+      return false;
+    }
     this.resolvedTimedOutDispatches.add(dispatchId);
     this.state.pending_dispatch = null;
     this.state.status = 'running';
     this.state.status_reason = null;
     this.recordActivity('lifecycle_transition');
     this.restorePausedMessages();
+    this.enqueuePendingAcceptedChats();
+    this.syncPendingInputProjection();
     this.emit('state', this.state);
     // This entry point is called outside the normal queue drain. Resume only
     // the messages parked *after* the timed-out dispatch; the timed-out message
@@ -387,7 +457,12 @@ export class AutoloopRunner extends EventEmitter {
     if (this.state.subagents_spawned) return;
     this.recordActivity('lifecycle_transition');
     this.state.subagents_spawned = true;
-    this.state.status = 'running';
+    // Never activate a held/uncertain reconstructed (paused) run; only explicit
+    // release does (F4). In-flight markDispatched during a live planning send
+    // is not a hold — spawn must still advance planning → running.
+    if (this.state.status !== 'paused') {
+      this.state.status = 'running';
+    }
     this.emit('state', this.state);
   }
 
@@ -420,6 +495,10 @@ export class AutoloopRunner extends EventEmitter {
     // processed (see events contract above). The terminate message itself still
     // runs because status only flips to 'terminated' while handling it.
     if (this.state.status === 'terminated' || this.state.status === 'crashed') return;
+    // Kernel cancel / terminate in flight: do not start further agent-bound work
+    // (including queued chats behind a late-settling send). Runner-targeted
+    // control messages may still run when terminate() itself set the flag.
+    if (this.terminationStarted && env.to !== 'runner') return;
     this.emit('message', env);
 
     // Runner is the target for a small set of messages — handle them inline.
@@ -440,16 +519,61 @@ export class AutoloopRunner extends EventEmitter {
     // Pause: park agent-bound messages until resume. Runner-bound (resume /
     // terminate) and user-bound (push) flow through above and are unaffected.
     if (this.state.status === 'paused') {
-      // Bound the buffer: a long pause + continuous policy pushes would
-      // otherwise grow it without limit and OOM the process.
+      // Bound the buffer: never evict an accepted chat; drop oldest untracked
+      // or refuse the incoming untracked message.
       if (this.pausedBuffer.length >= MAX_PAUSED_BUFFER) {
-        this.pausedBuffer.shift();
-        this.emit('error', new Error(`pausedBuffer exceeded ${MAX_PAUSED_BUFFER}; dropping oldest parked message`));
+        const dropIdx = this.pausedBuffer.findIndex((m) => !this.acceptedParkedIds.has(m.msg_id));
+        if (dropIdx >= 0) {
+          this.pausedBuffer.splice(dropIdx, 1);
+          this.emit('error', new Error(`pausedBuffer exceeded ${MAX_PAUSED_BUFFER}; dropping oldest parked message`));
+        } else if (!this.acceptedParkedIds.has(env.msg_id)) {
+          this.emit('error', new Error(`pausedBuffer exceeded ${MAX_PAUSED_BUFFER}; dropping oldest parked message`));
+          return;
+        }
       }
       this.pausedBuffer.push(env);
+      if (env.type === 'chat') this.acceptedParkedIds.add(env.msg_id);
       return;
     }
-    const replies = await this.config.dispatcher.deliver(env);
+    await this.deliverAgentBound(env);
+  }
+
+  private async deliverAgentBound(env: AnyAutoloopMessage): Promise<void> {
+    const isAcceptedChat = env.type === 'chat' && this.recovery?.items.some((it) => it.message_id === env.msg_id);
+    if (isAcceptedChat) {
+      if (!this.markDispatched(env.msg_id)) {
+        throw new AutoloopInputPersistenceError('commit_refused', 'autoloop input dispatch mark refused');
+      }
+    }
+    let replies: AnyAutoloopMessage[];
+    try {
+      replies = await this.config.dispatcher.deliver(env);
+    } catch (err) {
+      if (isAcceptedChat && !this.terminationStarted) {
+        this.markUncertainAfterThrow(env.msg_id);
+      }
+      throw err;
+    }
+    if (isAcceptedChat) {
+      // Late settle after soft-stop/hard-deadline: keep ledger obligation, do not
+      // fail the caller or enqueue follow-ups onto a terminated run.
+      if (this.terminationStarted || this.state.status === 'terminated' || this.state.status === 'crashed') {
+        return;
+      }
+      // F1: inspect replies BEFORE any completion. A send_timeout response is
+      // uncertain delivery, not successful consumption of the accepted chat.
+      const timeoutReply = replies.find((r) => r.type === 'send_timeout');
+      if (timeoutReply && timeoutReply.type === 'send_timeout') {
+        if (!this.attachDispatchId(env.msg_id, timeoutReply.payload.dispatch_id)) {
+          this.markUncertainAfterThrow(env.msg_id);
+          throw new AutoloopInputPersistenceError('commit_refused', 'autoloop input timeout linkage commit refused');
+        }
+      } else if (!this.completeAccepted(env.msg_id)) {
+        // Refused completion: leave uncertain, enqueue no replies, halt drain.
+        this.markUncertainAfterThrow(env.msg_id);
+        throw new AutoloopInputPersistenceError('commit_refused', 'autoloop input completion commit refused');
+      }
+    }
     for (const r of replies) {
       validateMessage(r);
       // A dispatcher-generated deadline record is bookkeeping, not agent
@@ -578,6 +702,8 @@ export class AutoloopRunner extends EventEmitter {
       case 'pause': {
         this.state.status = 'paused';
         this.state.status_reason = env.payload.reason;
+        this.setGate('operator_pause');
+        this.syncPendingInputProjection();
         this.emit('state', this.state);
         return;
       }
@@ -639,5 +765,431 @@ export class AutoloopRunner extends EventEmitter {
     if (!this.draining) {
       await this.drain();
     }
+  }
+
+  // ─── Durable accepted-chat recovery ────────────────────────────────────────
+
+  private syncPendingInputProjection(): void {
+    const pending = projectPendingInput(this.recovery);
+    if (pending) this.state.pending_input = pending;
+    else delete this.state.pending_input;
+  }
+
+  /**
+   * Refuse a revision bump that would leave Number.MAX_SAFE_INTEGER+1 (unsafe /
+   * unrestorable). Fail closed before publisher / adoption / dispatch.
+   */
+  private ensureRevisionBumpAllowed(revision: number): void {
+    if (!Number.isSafeInteger(revision) || revision < 0 || revision >= Number.MAX_SAFE_INTEGER) {
+      throw new AutoloopInputPersistenceError('commit_refused', 'autoloop input refused: revision exhausted');
+    }
+  }
+
+  private bumpRevision(candidate: AutoloopRecovery): void {
+    this.ensureRevisionBumpAllowed(candidate.revision);
+    candidate.revision += 1;
+  }
+
+  private persistCandidate(candidate: AutoloopRecovery): boolean {
+    // Belt-and-suspenders: never publish an unrestorable recovery record.
+    try {
+      validateRecoveryField(candidate);
+    } catch {
+      this.stagingRecovery = null;
+      this.syncPendingInputProjection();
+      return false;
+    }
+    this.stagingRecovery = candidate;
+    let ok = false;
+    try {
+      try {
+        ok = this.config.persistCheckpoint?.() ?? false;
+      } catch {
+        // Throwing publish must not claim adopt; surface a fixed refusal (F3).
+        ok = false;
+        this.stagingRecovery = null;
+        this.syncPendingInputProjection();
+        throw new AutoloopInputPersistenceError('commit_refused', 'autoloop input refused: commit blocked');
+      }
+      if (ok) {
+        this.recovery = candidate;
+      }
+    } finally {
+      // Never leave uncommitted staging visible to a later publish (F3).
+      this.stagingRecovery = null;
+    }
+    this.syncPendingInputProjection();
+    return ok;
+  }
+
+  /**
+   * Load validated recovery on non-fresh boot; apply restore precedence.
+   * When previousState carries a genuine pending_dispatch that matches a
+   * dispatched item's dispatch_id, restore that exact timeout identity (F2).
+   * Never fabricate pending_dispatch from a ledger dispatch_id alone.
+   */
+  applyRestoredRecovery(raw: unknown, previousState?: { pending_dispatch?: unknown } | null): void {
+    const recovery = validateRecoveryField(raw);
+    if (!recovery) return;
+    this.recovery = cloneRecovery(recovery);
+    const uncertain = recovery.items.some((it) => it.status === 'dispatched');
+    if (uncertain) {
+      this.state.status = 'paused';
+      this.state.status_reason = GATE_STATUS_REASON.input_uncertain;
+      this.recovery = { ...this.recovery!, gate: { kind: 'input_uncertain' } };
+    } else if (recovery.gate) {
+      this.state.status = 'paused';
+      this.state.status_reason = GATE_STATUS_REASON[recovery.gate.kind];
+    } else if (recovery.items.some((it) => it.status === 'pending')) {
+      this.state.status = 'paused';
+      this.state.status_reason = GATE_STATUS_REASON.recovered_input;
+      this.recovery = { ...this.recovery!, gate: { kind: 'recovered_input' } };
+    }
+
+    const stored = previousState?.pending_dispatch;
+    if (isGenuinePendingDispatch(stored)) {
+      const match = recovery.items.find(
+        (it) => it.status === 'dispatched' && it.dispatch_id === (stored as SendTimeoutPayload).dispatch_id,
+      );
+      if (match) {
+        const pending = stored as SendTimeoutPayload;
+        this.state.status = 'paused';
+        this.state.status_reason = `awaiting_resume:send_timeout:${pending.agent}:${pending.dispatch_id}`;
+        this.state.pending_dispatch = { ...pending };
+      }
+    }
+    this.syncPendingInputProjection();
+  }
+
+  /**
+   * Persist a typed pause / gate clear with a checked revision bump (F4).
+   * Returns false when the fenced commit refuses — caller must not adopt/release (F3).
+   */
+  private setGate(kind: RecoveryGateKind | null): boolean {
+    if (!this.recovery && kind === null) return true;
+    if (!this.config.persistCheckpoint) {
+      // No publisher: in-memory reason may still update for UX, but cannot claim durable clear.
+      if (kind === null) return false;
+      return false;
+    }
+    const candidate = this.recovery ? cloneRecovery(this.recovery) : emptyRecovery();
+    const prevKind = candidate.gate?.kind ?? null;
+    const nextKind = kind;
+    // Idempotent ordinary release (null→null) stays a no-op. A NEW pause with the
+    // same gate.kind MUST bump revision so earlier decision revisions go stale (P2).
+    if (prevKind === nextKind && this.recovery && kind === null) {
+      return true;
+    }
+    try {
+      this.ensureRevisionBumpAllowed(candidate.revision);
+    } catch {
+      return false;
+    }
+    candidate.gate = kind === null ? null : { kind };
+    this.bumpRevision(candidate);
+    return this.persistCandidate(candidate);
+  }
+
+  /**
+   * Synchronous acceptance: stage, fenced commit, adopt. Nothing queued before success.
+   */
+  acceptChat(text: string): { message_id: string } {
+    if (this.terminationStarted || this.state.status === 'terminated' || this.state.status === 'crashed') {
+      throw new AutoloopInputPersistenceError('terminating', 'autoloop input refused: run is terminating');
+    }
+    if (!this.config.persistCheckpoint) {
+      throw new AutoloopInputPersistenceError('no_publisher', 'autoloop input refused: publisher not bound');
+    }
+    if (typeof text !== 'string') {
+      throw new AutoloopInputPersistenceError('malformed', 'autoloop input refused: text required');
+    }
+    const textBytes = utf8ByteLength(text);
+    if (textBytes > MAX_RECOVERY_TEXT_BYTES) {
+      throw new AutoloopInputPersistenceError('bound_text', 'autoloop input refused: text exceeds 8 MiB');
+    }
+    const base = this.recovery ? cloneRecovery(this.recovery) : emptyRecovery();
+    if (base.items.length >= MAX_RECOVERY_ITEMS) {
+      throw new AutoloopInputPersistenceError('bound_items', 'autoloop input refused: item bound reached');
+    }
+    // Aggregate UTF-8 budget across ALL retained items (F5).
+    let aggregate = 0;
+    for (const it of base.items) aggregate += utf8ByteLength(it.text);
+    if (aggregate + textBytes > MAX_RECOVERY_TEXT_BYTES) {
+      throw new AutoloopInputPersistenceError('bound_text', 'autoloop input refused: text exceeds 8 MiB');
+    }
+    if (this.state.status === 'paused' && this.state.pending_dispatch === null && !base.gate) {
+      if (this.state.status_reason === GATE_STATUS_REASON.activity_lease) base.gate = { kind: 'activity_lease' };
+      else if (this.state.status_reason === GATE_STATUS_REASON.input_uncertain) base.gate = { kind: 'input_uncertain' };
+      else if (this.state.status_reason === GATE_STATUS_REASON.recovered_input) base.gate = { kind: 'recovered_input' };
+      else base.gate = { kind: 'operator_pause' };
+    }
+    let message_id = newMessageId();
+    for (let i = 0; i < 3 && messageIdInUse(base, message_id); i++) {
+      message_id = newMessageId();
+    }
+    if (messageIdInUse(base, message_id)) {
+      throw new AutoloopInputPersistenceError('commit_refused', 'autoloop input refused: message_id exhausted');
+    }
+    const now = new Date().toISOString();
+    base.items.push({
+      message_id,
+      iter: this.state.iter,
+      ts: now,
+      accepted_at: now,
+      text,
+      status: 'pending',
+    });
+    this.bumpRevision(base);
+    if (!this.persistCandidate(base)) {
+      throw new AutoloopInputPersistenceError('commit_refused', 'autoloop input refused: commit blocked');
+    }
+    return { message_id };
+  }
+
+  /** After accept: enqueue delivery or park while paused. */
+  async deliverAccepted(message_id: string): Promise<void> {
+    if (this.terminationStarted || this.state.status === 'terminated' || this.state.status === 'crashed') {
+      return;
+    }
+    const item = this.recovery?.items.find((it) => it.message_id === message_id);
+    if (!item || item.status !== 'pending') return;
+    const env = Msg.chat(item.iter, { text: item.text }, message_id);
+    if (this.state.status === 'paused') {
+      if (this.pausedBuffer.length >= MAX_PAUSED_BUFFER) {
+        const dropIdx = this.pausedBuffer.findIndex((m) => !this.acceptedParkedIds.has(m.msg_id));
+        if (dropIdx >= 0) this.pausedBuffer.splice(dropIdx, 1);
+      }
+      this.pausedBuffer.push(env);
+      this.acceptedParkedIds.add(message_id);
+      return;
+    }
+    this.queue.push(env);
+    await this.drain();
+  }
+
+  private enqueuePendingAcceptedChats(): void {
+    if (!this.recovery) return;
+    for (const item of this.recovery.items) {
+      if (item.status !== 'pending') continue;
+      if (this.queue.some((m) => m.msg_id === item.message_id)) continue;
+      if (this.pausedBuffer.some((m) => m.msg_id === item.message_id)) {
+        // Will be restored via restorePausedMessages.
+        continue;
+      }
+      this.queue.push(Msg.chat(item.iter, { text: item.text }, item.message_id));
+    }
+  }
+
+  private markDispatched(message_id: string): boolean {
+    if (!this.recovery) return false;
+    const candidate = cloneRecovery(this.recovery);
+    const item = candidate.items.find((it) => it.message_id === message_id);
+    if (!item || item.status !== 'pending') return false;
+    if (candidate.items[0]?.message_id !== message_id) return false;
+    try {
+      this.ensureRevisionBumpAllowed(candidate.revision);
+    } catch {
+      return false;
+    }
+    item.status = 'dispatched';
+    this.bumpRevision(candidate);
+    return this.persistCandidate(candidate);
+  }
+
+  private attachDispatchId(message_id: string, dispatch_id: string): boolean {
+    if (!this.recovery) return false;
+    const candidate = cloneRecovery(this.recovery);
+    const item = candidate.items.find((it) => it.message_id === message_id);
+    if (!item || item.status !== 'dispatched') return false;
+    try {
+      this.ensureRevisionBumpAllowed(candidate.revision);
+    } catch {
+      return false;
+    }
+    item.dispatch_id = dispatch_id;
+    this.bumpRevision(candidate);
+    return this.persistCandidate(candidate);
+  }
+
+  private completeAccepted(message_id: string): boolean {
+    if (!this.recovery) return false;
+    const candidate = cloneRecovery(this.recovery);
+    const idx = candidate.items.findIndex((it) => it.message_id === message_id);
+    if (idx < 0) return false;
+    try {
+      this.ensureRevisionBumpAllowed(candidate.revision);
+    } catch {
+      return false;
+    }
+    candidate.items.splice(idx, 1);
+    this.bumpRevision(candidate);
+    this.acceptedParkedIds.delete(message_id);
+    return this.persistCandidate(candidate);
+  }
+
+  private markUncertainAfterThrow(message_id: string): void {
+    if (!this.recovery) return;
+    const candidate = cloneRecovery(this.recovery);
+    const item = candidate.items.find((it) => it.message_id === message_id);
+    if (!item) return;
+    try {
+      this.ensureRevisionBumpAllowed(candidate.revision);
+    } catch {
+      return;
+    }
+    item.status = 'dispatched';
+    candidate.gate = { kind: 'input_uncertain' };
+    this.bumpRevision(candidate);
+    this.persistCandidate(candidate);
+    this.state.status = 'paused';
+    this.state.status_reason = GATE_STATUS_REASON.input_uncertain;
+    this.syncPendingInputProjection();
+    this.emit('state', this.state);
+  }
+
+  private resolveTimeoutLinkedItem(dispatchId: string): boolean {
+    // Legacy / non-accepted timeout: no ledger obligation — allow control clear (PR149).
+    if (!this.recovery) return true;
+    const candidate = cloneRecovery(this.recovery);
+    const idx = candidate.items.findIndex((it) => it.status === 'dispatched' && it.dispatch_id === dispatchId);
+    if (idx < 0) {
+      // Timeout not linked to an accepted chat: do not invent a tombstone.
+      return true;
+    }
+    const [removed] = candidate.items.splice(idx, 1);
+    if (!removed) return false;
+    try {
+      this.ensureRevisionBumpAllowed(candidate.revision);
+    } catch {
+      return false;
+    }
+    const decisionRevision = candidate.revision + 1;
+    candidate.resolved = appendTombstone(candidate.resolved, {
+      message_id: removed.message_id,
+      resolution: 'advanced_after_timeout',
+      revision: decisionRevision,
+      at: new Date().toISOString(),
+    });
+    candidate.revision = decisionRevision;
+    candidate.gate = null;
+    return this.persistCandidate(candidate);
+  }
+
+  /**
+   * Operator disposition of uncertain items. Returns 'idempotent' only for an
+   * exact prior decision (same ledger, decision revision, complete id batch,
+   * same resolution) — no union/subset of separate tombstones (F7).
+   * A genuine exact repeat is a public NO-OP even after the run has resumed:
+   * no second commit and no release.
+   */
+  disposeUncertainInput(opts: {
+    ledgerId: string;
+    expectedRevision: number;
+    messageIds: string[];
+    resolution: 'abandon' | 'confirm_delivered';
+  }): 'applied' | 'idempotent' {
+    if (!this.recovery) {
+      throw new AutoloopInputPersistenceError('malformed', 'autoloop input_disposition refused: no recovery ledger');
+    }
+    if (opts.resolution !== 'abandon' && opts.resolution !== 'confirm_delivered') {
+      throw new AutoloopInputPersistenceError('malformed', 'autoloop input_disposition refused: invalid resolution');
+    }
+    if (
+      typeof opts.expectedRevision !== 'number' ||
+      !Number.isSafeInteger(opts.expectedRevision) ||
+      opts.expectedRevision < 0
+    ) {
+      throw new AutoloopInputPersistenceError('malformed', 'autoloop input_disposition refused: invalid revision');
+    }
+    const idSet = new Set(opts.messageIds);
+    if (opts.messageIds.length === 0 || idSet.size !== opts.messageIds.length) {
+      throw new AutoloopInputPersistenceError('malformed', 'autoloop input_disposition refused: invalid message_ids');
+    }
+    for (const id of opts.messageIds) {
+      if (typeof id !== 'string' || id.length === 0) {
+        throw new AutoloopInputPersistenceError('malformed', 'autoloop input_disposition refused: invalid message_ids');
+      }
+    }
+
+    // Exact idempotent receipt (F7): tombstone.revision is request.expectedRevision+1.
+    // Retrying the IDENTICAL original body (ledger, pre-decision revision, singleton
+    // id set, resolution) is a no-op even after later pauses/work — no second commit,
+    // release, or send.
+    if (opts.ledgerId === this.recovery.ledger_id && opts.expectedRevision < Number.MAX_SAFE_INTEGER) {
+      const decisionRevision = opts.expectedRevision + 1;
+      const decisionTombs = this.recovery.resolved.filter(
+        (t) => t.revision === decisionRevision && t.resolution === opts.resolution,
+      );
+      const decisionIds = new Set(decisionTombs.map((t) => t.message_id));
+      if (
+        decisionTombs.length > 0 &&
+        decisionIds.size === idSet.size &&
+        [...idSet].every((id) => decisionIds.has(id))
+      ) {
+        return 'idempotent';
+      }
+    }
+
+    if (this.state.status !== 'paused') {
+      throw new AutoloopInputPersistenceError(
+        'commit_refused',
+        'autoloop input_disposition refused: run is not paused',
+      );
+    }
+
+    const uncertain = this.recovery.items.filter((it) => it.status === 'dispatched');
+
+    if (opts.ledgerId !== this.recovery.ledger_id) {
+      throw new AutoloopInputPersistenceError(
+        'commit_refused',
+        'autoloop input_disposition refused: ledger_id mismatch',
+      );
+    }
+    if (opts.expectedRevision !== this.recovery.revision) {
+      throw new AutoloopInputPersistenceError(
+        'commit_refused',
+        'autoloop input_disposition refused: revision mismatch',
+      );
+    }
+    if (uncertain.length === 0) {
+      throw new AutoloopInputPersistenceError(
+        'commit_refused',
+        'autoloop input_disposition refused: no uncertain items',
+      );
+    }
+    const uncertainIds = new Set(uncertain.map((it) => it.message_id));
+    if (uncertainIds.size !== idSet.size || [...idSet].some((id) => !uncertainIds.has(id))) {
+      throw new AutoloopInputPersistenceError(
+        'commit_refused',
+        'autoloop input_disposition refused: message_ids mismatch',
+      );
+    }
+    // Only a currently genuine matching pending_dispatch requires the timeout path (F2).
+    if (uncertain.some((it) => it.dispatch_id && this.state.pending_dispatch?.dispatch_id === it.dispatch_id)) {
+      throw new AutoloopInputPersistenceError(
+        'commit_refused',
+        'autoloop input_disposition refused: use exact timeout resume',
+      );
+    }
+
+    const candidate = cloneRecovery(this.recovery);
+    this.ensureRevisionBumpAllowed(candidate.revision);
+    const now = new Date().toISOString();
+    const decisionRevision = candidate.revision + 1;
+    candidate.items = candidate.items.filter((it) => it.status !== 'dispatched');
+    for (const id of opts.messageIds) {
+      candidate.resolved = appendTombstone(candidate.resolved, {
+        message_id: id,
+        resolution: opts.resolution as RecoveryResolution,
+        revision: decisionRevision,
+        at: now,
+      });
+    }
+    candidate.gate = null;
+    candidate.revision = decisionRevision;
+    if (!this.persistCandidate(candidate)) {
+      throw new AutoloopInputPersistenceError('commit_refused', 'autoloop input_disposition refused: commit blocked');
+    }
+    return 'applied';
   }
 }

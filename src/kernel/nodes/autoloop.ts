@@ -16,6 +16,7 @@
 import type { NodeContext, NodeResult } from '../engine.js';
 import type { AutoloopNode, NodeSpec, RunRecord } from '../types.js';
 import type { AutoloopState } from '../../autoloop/types.js';
+import { projectPendingInput, validateRecoveryField, type AutoloopRecovery } from '../../autoloop/recovery.js';
 
 /** Whatever SessionManager hands back from booting the loop. */
 export interface AutoloopHandle {
@@ -24,12 +25,22 @@ export interface AutoloopHandle {
     stop(): void;
     on(event: 'state', listener: () => void): unknown;
     off(event: 'state', listener: () => void): unknown;
+    getCommittedRecovery(): AutoloopRecovery | null;
+    getPublishRecovery(): AutoloopRecovery | null;
+    /** Optional: present on live AutoloopRunner; kernel cancel prefers handle.abort(). */
+    markCancelledByKernel?: () => void;
   };
   dispatcher: {
     sessionNames: { planner: string };
     shutdown(reason: string, opts?: { purge?: boolean }): Promise<void>;
   };
   ledgerDir: string;
+  /**
+   * Called synchronously by RunKernel.cancel via abort?.() on every live handle.
+   * Arms the runner late-settle guard so a transport return after cancel cannot
+   * completeAccepted. Council/Fanout use their own abort(); plain engines omit it.
+   */
+  abort?(): void;
 }
 
 export interface AutoloopNodeDeps {
@@ -37,7 +48,7 @@ export interface AutoloopNodeDeps {
   boot(
     config: Record<string, unknown>,
     secrets: Record<string, unknown>,
-    opts: { freshStart: boolean },
+    opts: { freshStart: boolean; previousData?: AutoloopNodeData },
   ): Promise<AutoloopHandle>;
   /**
    * Resolve/reject the deferred the caller is waiting on.
@@ -50,11 +61,10 @@ export interface AutoloopNodeDeps {
   /** Wait until the loop reaches a terminal status. */
   waitForExit(handle: AutoloopHandle, signal: { aborted: boolean }): Promise<void>;
   /**
-   * Hand back a way to refresh the checkpoint mid-run. The loop's role
-   * selection changes when `spawn_subagents` picks engines, and that has to
-   * reach the record — it used to be written to the registry file.
+   * Hand back a way to refresh the checkpoint mid-run. Returns the boolean
+   * RunTxn.apply already computes (true only when this snapshot committed).
    */
-  registerPublisher(runId: string, publish: () => void): void;
+  registerPublisher(runId: string, publish: () => boolean): void;
   unregisterPublisher(runId: string): void;
   /** Extra payload to publish alongside the state (currently the role selection). */
   extra(runId: string): Record<string, unknown>;
@@ -66,6 +76,22 @@ export interface AutoloopNodeData {
   plannerSession: string;
   /** Engines/models actually in use, as chosen by `spawn_subagents`. */
   roleSelection?: Record<string, unknown>;
+  /** Optional durable accepted-chat recovery ledger. */
+  recovery?: AutoloopRecovery;
+}
+
+function nodePayload(handle: AutoloopHandle, extra: Record<string, unknown>): AutoloopNodeData {
+  const recovery = handle.runner.getPublishRecovery();
+  const state = { ...handle.runner.state };
+  const pending = projectPendingInput(handle.runner.getCommittedRecovery());
+  if (pending) state.pending_input = pending;
+  else delete state.pending_input;
+  return {
+    state,
+    plannerSession: handle.dispatcher.sessionNames.planner,
+    ...extra,
+    ...(recovery ? { recovery } : {}),
+  };
 }
 
 export function makeAutoloopExecutor(deps: AutoloopNodeDeps) {
@@ -75,19 +101,23 @@ export function makeAutoloopExecutor(deps: AutoloopNodeDeps) {
     try {
       // Kernel commits visits += 1 before execute; first visit in the run is fresh.
       const freshStart = ctx.record.nodes[node.id]?.visits === 1;
-      handle = await deps.boot(spec.config, ctx.secrets, { freshStart });
+      const previousRaw = ctx.record.nodes[node.id]?.data;
+      let previousData: AutoloopNodeData | undefined;
+      if (!freshStart && previousRaw && typeof previousRaw === 'object') {
+        previousData = previousRaw as AutoloopNodeData;
+        // Validate recovery before any boot/session work.
+        if ('recovery' in previousData) {
+          validateRecoveryField(previousData.recovery);
+        }
+      }
+      handle = await deps.boot(spec.config, ctx.secrets, { freshStart, previousData });
     } catch (err) {
       deps.ready(ctx.tag ?? ctx.runId, err as Error);
       return { ok: false, error: (err as Error).message };
     }
 
     ctx.setHandle(handle);
-    const publish = (): void =>
-      ctx.publish({
-        state: handle.runner.state,
-        plannerSession: handle.dispatcher.sessionNames.planner,
-        ...deps.extra(ctx.runId),
-      });
+    const publish = (): boolean => ctx.publish(nodePayload(handle, deps.extra(ctx.runId)));
     deps.registerPublisher(ctx.runId, publish);
     publish();
     // The runner emits state after it writes pause fields (send timeout and
@@ -108,15 +138,12 @@ export function makeAutoloopExecutor(deps: AutoloopNodeDeps) {
     publish();
 
     const status = handle.runner.state.status;
+    const data = nodePayload(handle, deps.extra(ctx.runId));
     return {
       ok: status !== 'crashed',
       output: `autoloop ${status} at iter ${handle.runner.state.iter}`,
       error: status === 'crashed' ? (handle.runner.state.status_reason ?? 'autoloop crashed') : undefined,
-      data: {
-        state: handle.runner.state,
-        plannerSession: handle.dispatcher.sessionNames.planner,
-        ...deps.extra(ctx.runId),
-      },
+      data,
     };
   };
 }
@@ -133,7 +160,23 @@ export function autoloopStateFromRecord(record: RunRecord): AutoloopState | unde
   const data = record.nodes.main?.data as AutoloopNodeData | undefined;
   if (!data?.state) return undefined;
   const terminal = record.state === 'completed' || record.state === 'failed' || record.state === 'cancelled';
-  return terminal && data.state.status !== 'terminated' && data.state.status !== 'crashed'
-    ? { ...data.state, status: 'terminated', status_reason: data.state.status_reason ?? `run ${record.state}` }
-    : data.state;
+  const state =
+    terminal && data.state.status !== 'terminated' && data.state.status !== 'crashed'
+      ? {
+          ...data.state,
+          status: 'terminated' as const,
+          status_reason: data.state.status_reason ?? `run ${record.state}`,
+        }
+      : { ...data.state };
+  if (data.recovery) {
+    try {
+      const recovery = validateRecoveryField(data.recovery);
+      const pending = projectPendingInput(recovery);
+      if (pending) state.pending_input = pending;
+      else delete state.pending_input;
+    } catch {
+      // Stored projection stays as last published state fields.
+    }
+  }
+  return state;
 }
