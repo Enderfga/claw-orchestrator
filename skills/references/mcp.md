@@ -26,7 +26,7 @@ This document covers:
 
 ## How it works
 
-`clawo-mcp` is a thin stdio MCP server. It reuses the same tool definitions registered by the OpenClaw plugin entry point (`src/index.ts`), so there is exactly one source of truth and zero schema drift between the OpenClaw plugin form and the MCP server form.
+`clawo-mcp` is a thin stdio MCP server. `clawo-mcp-http` (`bin/mcp-http.ts`) is the same tool surface over streamable HTTP. It binds only to a Tailscale address (`CLAWO_MCP_HOST` in `100.64.0.0/10`), requires `CLAWO_MCP_TOKEN` (bearer, 32+ characters), and defaults `CLAWO_MCP_TOOLS` to the workflow/council allowlist. `*_start` still refuses when `resource-gate.sh` is overloaded. It reuses the same tool definitions registered by the OpenClaw plugin entry point (`src/index.ts`), so there is exactly one source of truth and zero schema drift between the OpenClaw plugin form and the MCP server form.
 
 Tools fall into a few groups:
 

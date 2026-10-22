@@ -8,6 +8,7 @@
   "bin": {
     "clawo": "./dist/bin/cli.js",
     "clawo-mcp": "./dist/bin/mcp-server.js",
+    "clawo-mcp-http": "./dist/bin/mcp-http.js",
     "clawo-acp": "./dist/bin/acp-server.js"
   },
   "openclaw": {
