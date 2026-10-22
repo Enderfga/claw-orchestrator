@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [7.12.1] - 2026-10-22
+
 ### Fixed
 
 - **Grok Build sessions report the model grok ran.** grok 1.0.67 made `grok-4.7` its default
