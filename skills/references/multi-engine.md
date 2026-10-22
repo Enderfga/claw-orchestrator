@@ -28,7 +28,7 @@ SessionManager
 
 ### Claude Code (`engine: 'claude'`)
 
-Default engine. Long-running subprocess with streaming JSON I/O. Tested with Claude Code CLI **2.1.302**.
+Default engine. Long-running subprocess with streaming JSON I/O. Tested with Claude Code CLI **2.1.307**.
 
 - Persistent multi-turn conversations
 - Real-time streaming (text, tool_use, tool_result, system events)
@@ -133,7 +133,7 @@ await manager.startSession({
 
 Wraps Google's **Antigravity CLI** (`agy`) — the successor to Gemini CLI (consumer
 Gemini CLI tiers stopped serving 2026-06-18). Each `send()` spawns a new process
-in print mode. Tested with `agy` **1.4.0**.
+in print mode. Tested with `agy` **1.4.4**.
 
 - One-shot execution per message (no persistent subprocess)
 - **Structured output and real usage** — `--output-format stream-json` emits an
@@ -218,12 +218,14 @@ await manager.startSession({
 ### Grok Build (`engine: 'grok'`)
 
 Wraps xAI's **Grok Build** CLI. Each `send()` spawns `grok -p <msg> --output-format json`, which
-prints a single JSON object and exits. Tested with `grok` **1.0.62**.
+prints a single JSON object and exits. Tested with `grok` **1.0.67**.
 
 - **Cost comes from the engine, not from the price table.** The result object carries
   `total_cost_usd`, and the wrapper writes it straight into the session's spend, so the run ledger
   and the `maxBudgetUsd` gate both read what xAI charged. Other engines multiply tokens by a rate in
-  `models.ts`. `grok-4.6` is still registered, for its context window and an indicative breakdown.
+  `models.ts`. `grok-4.7` (grok's default since 1.0.67) and `grok-4.6` are still registered, for
+  their context window and an indicative breakdown; with no `model` set, the session is labelled with
+  the model grok reports under `modelUsage`.
 - **Real conversation continuity**: the `sessionId` from turn 1 is replayed as `--resume <id>`.
   `--continue` is not used — it means "the most recent session for this cwd", which collides
   between concurrent sessions.
@@ -263,7 +265,7 @@ prints a single JSON object and exits. Tested with `grok` **1.0.62**.
 await manager.startSession({
   name: 'grok-task',
   engine: 'grok',
-  model: 'grok-4.6',
+  model: 'grok-4.7',
   cwd: '/project',
 });
 ```

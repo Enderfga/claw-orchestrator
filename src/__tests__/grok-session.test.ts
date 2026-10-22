@@ -149,10 +149,20 @@ describe('PersistentGrokSession — flags', () => {
     const stats = s.getStats();
     expect(stats.tokensIn).toBe(19_393);
     expect(stats.cachedTokens).toBe(230_590);
-    // 249,983 of grok-4.6's 500K window. `input_tokens` alone would say 4%.
+    // 249,983 of grok-4.7's 500K window. `input_tokens` alone would say 4%.
     expect(stats.contextPercent).toBe(50);
     // Spend still comes from the engine, untouched by the registry.
     expect(stats.costUsd).toBeCloseTo(0.0442, 10);
+  });
+
+  it('bills as the model grok reports when none was configured', async () => {
+    const s = new PersistentGrokSession({ name: 't', cwd: '/tmp', permissionMode: 'bypassPermissions' });
+    await s.start();
+    expect(s.getCost().model).toBe('grok-4.7');
+    const p = s.send('hi', { waitForComplete: true });
+    setTimeout(() => reply({ ...OK_RESULT, modelUsage: { 'grok-4.6': { modelCalls: 1, costUSD: 0.0125 } } }), 5);
+    await p;
+    expect(s.getCost().model).toBe('grok-4.6');
   });
 
   // grok 1.0.13 grew a programmatic surface for options this project already
