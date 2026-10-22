@@ -645,7 +645,11 @@ or smaller values are rejected, and there is deliberately no
 Each successful increase appends one migration row to `decisions.jsonl`; the
 original run spec, history, and prior audit bytes are not rewritten. The
 matching live awaiting-resume condition is advanced without replaying the
-timed-out logical dispatch.
+timed-out logical dispatch. A live ordinary or activity-lease pause
+(`pending_dispatch` null) resumes with no timeout fields: the call returns once
+the run is active again, the lease re-arms without moving the hard deadline,
+and Planner chat parked during the pause is then delivered once, in order. A
+no-option resume does not clear a pending send timeout.
 
 ### `autoloop_chat`
 

@@ -4435,4 +4435,253 @@ describe('SessionManager', () => {
       expect(createdConfigs.some((c) => c.name.endsWith('-coder'))).toBe(false);
     }, 90_000);
   });
+
+  describe('Autoloop live pause resume', () => {
+    const fence = (tool: string, args: Record<string, unknown>): string =>
+      `\`\`\`autoloop\n${JSON.stringify({ tool, args })}\n\`\`\``;
+
+    const workspaceFor = (runId: string): string => {
+      const workspace = path.join(TEST_WF_DIR, 'workspaces', runId);
+      fs.mkdirSync(workspace, { recursive: true });
+      return workspace;
+    };
+
+    const messageText = (message: string | unknown[]): string =>
+      typeof message === 'string' ? message : JSON.stringify(message);
+
+    const advanceTo = async (absoluteMs: number): Promise<void> => {
+      const delta = absoluteMs - Date.now();
+      if (delta > 0) await vi.advanceTimersByTimeAsync(delta);
+    };
+
+    it('R1 ordinary pause resumes parked planner input in order', async () => {
+      const runId = 'live-ordinary-pause-resume';
+      const workspace = workspaceFor(runId);
+      await mgr.autoloopStart({ runId, workspace });
+      const handle = mgr.getAutoloop(runId)!;
+      const planner = mockSessions[0];
+      let replies = 0;
+      planner.sendImplementation = async () => {
+        replies += 1;
+        if (replies === 1) {
+          return {
+            text: fence('pause_loop', { reason: 'operator-hold' }),
+            event: { type: 'result', result: 'ok' },
+          };
+        }
+        return { text: 'ack', event: { type: 'result', result: 'ok' } };
+      };
+
+      await mgr.autoloopChat(runId, 'pause-trigger');
+      expect(handle.runner.state).toMatchObject({
+        status: 'paused',
+        status_reason: 'operator-hold',
+        pending_dispatch: null,
+      });
+      const parkedAt = planner.sendCalls.length;
+
+      await mgr.autoloopChat(runId, 'U1');
+      await mgr.autoloopChat(runId, 'U2');
+      expect(planner.sendCalls).toHaveLength(parkedAt);
+      expect(planner.sendCalls.map((call) => messageText(call.message)).some((text) => text.includes('U1'))).toBe(
+        false,
+      );
+      expect(planner.sendCalls.map((call) => messageText(call.message)).some((text) => text.includes('U2'))).toBe(
+        false,
+      );
+
+      const resumed = await mgr.autoloopResume(runId);
+      expect(resumed).toBe(handle.runner.state);
+      expect(resumed).toMatchObject({
+        status: 'planning',
+        status_reason: null,
+        pending_dispatch: null,
+      });
+      // Parked delivery continues after the sync resume return (same as C2).
+      await vi.waitFor(() => {
+        const delivered = planner.sendCalls.map((call) => messageText(call.message));
+        const u1 = delivered.flatMap((text, index) => (text.includes('U1') ? [index] : []));
+        const u2 = delivered.flatMap((text, index) => (text.includes('U2') ? [index] : []));
+        expect(u1).toHaveLength(1);
+        expect(u2).toHaveLength(1);
+        expect(u1[0]).toBeLessThan(u2[0]);
+      });
+      expect(createdConfigs.map((config) => config.name)).toEqual([`autoloop-${runId}-planner`]);
+      expect(mockSessions).toHaveLength(1);
+    });
+
+    it('R2 activity expiry resumes, re-arms, and keeps the original hard deadline', async () => {
+      const runId = 'live-activity-lease-resume';
+      const workspace = workspaceFor(runId);
+      const activityLeaseMs = 60_000;
+      const hardTimeoutMs = 600_000;
+      await mgr.autoloopStart({
+        runId,
+        workspace,
+        activityLeaseMs,
+        autoloopHardTimeoutMs: hardTimeoutMs,
+      });
+      const handle = mgr.getAutoloop(runId)!;
+      const planner = mockSessions[0];
+      const startedAt = Date.parse(handle.runner.state.started_at);
+      const timeouts: string[] = [];
+      handle.runner.on('timeout', (event: { kind: string }) => {
+        timeouts.push(event.kind);
+      });
+
+      await advanceTo(handle.runner.state.last_activity_at + activityLeaseMs);
+      expect(handle.runner.state).toMatchObject({
+        status: 'paused',
+        status_reason: 'activity_lease_expired',
+        pending_dispatch: null,
+      });
+      expect(timeouts).toEqual(['activity_lease_expired']);
+
+      await mgr.autoloopChat(runId, 'U1');
+      expect(planner.sendCalls.map((call) => messageText(call.message)).some((text) => text.includes('U1'))).toBe(
+        false,
+      );
+
+      // deliverToPlanner emits planner_reply (~1071-1073) only after the reply is
+      // parsed and its tool calls applied. A no-fenced-block reply returns no
+      // messages (~1055-1077), so handleOne (~464-472) records no agent_progress
+      // after the signal; last_activity_at is final once planner_reply fires.
+      const plannerReplies: Array<{ reply: unknown; sendCallsAtEvent: string[] }> = [];
+      const onPlannerReply = (...args: unknown[]) => {
+        plannerReplies.push({
+          reply: args[0],
+          sendCallsAtEvent: planner.sendCalls.map((call) => messageText(call.message)),
+        });
+      };
+      handle.dispatcher.on('planner_reply', onPlannerReply);
+      try {
+        const resumed = await mgr.autoloopResume(runId);
+        expect(resumed).toMatchObject({
+          status: 'planning',
+          status_reason: null,
+          pending_dispatch: null,
+        });
+        await vi.waitFor(() => {
+          expect(plannerReplies).toHaveLength(1);
+        });
+        expect(plannerReplies[0]!.sendCallsAtEvent.some((text) => text.includes('U1'))).toBe(true);
+        expect(
+          planner.sendCalls.map((call) => messageText(call.message)).filter((text) => text.includes('U1')),
+        ).toEqual(['U1']);
+      } finally {
+        handle.dispatcher.off('planner_reply', onPlannerReply);
+      }
+
+      const renewedDeadline = handle.runner.state.last_activity_at + activityLeaseMs;
+      // Synchronous move. advanceTo() awaits advanceTimersByTimeAsync, and the
+      // parent beforeEach keeps shouldAdvanceTime on, so its real 20ms interval
+      // can tick the clock past this 1ms boundary before the assertion runs.
+      vi.advanceTimersByTime(renewedDeadline - 1 - Date.now());
+      expect(Date.now()).toBe(renewedDeadline - 1);
+      expect(handle.runner.state.status).toBe('planning');
+      expect(handle.runner.state.status_reason).toBeNull();
+      expect(timeouts).toEqual(['activity_lease_expired']);
+      vi.advanceTimersByTime(renewedDeadline - Date.now());
+      expect(Date.now()).toBe(renewedDeadline);
+      expect(handle.runner.state).toMatchObject({
+        status: 'paused',
+        status_reason: 'activity_lease_expired',
+      });
+      expect(timeouts).toEqual(['activity_lease_expired', 'activity_lease_expired']);
+
+      const second = await mgr.autoloopResume(runId);
+      expect(second).toMatchObject({ status: 'planning', status_reason: null, pending_dispatch: null });
+
+      await advanceTo(startedAt + hardTimeoutMs);
+      expect(handle.runner.state).toMatchObject({
+        status: 'terminated',
+        status_reason: 'hard_timeout_exceeded',
+      });
+      expect(createdConfigs.map((config) => config.name)).toEqual([`autoloop-${runId}-planner`]);
+    });
+
+    it('C1 an un-paused chat is delivered once and a chat after pause_loop is parked', async () => {
+      const runId = 'live-pause-fixture-control';
+      const workspace = workspaceFor(runId);
+      await mgr.autoloopStart({ runId, workspace });
+      const handle = mgr.getAutoloop(runId)!;
+      const planner = mockSessions[0];
+      planner.sendImplementation = async (message) => {
+        const text = messageText(message);
+        if (text.includes('pause-now')) {
+          return {
+            text: fence('pause_loop', { reason: 'operator-hold' }),
+            event: { type: 'result', result: 'ok' },
+          };
+        }
+        return { text: 'ack', event: { type: 'result', result: 'ok' } };
+      };
+
+      await mgr.autoloopChat(runId, 'live-once');
+      const live = planner.sendCalls
+        .map((call) => messageText(call.message))
+        .filter((text) => text.includes('live-once'));
+      expect(live).toEqual(['live-once']);
+
+      await mgr.autoloopChat(runId, 'pause-now');
+      expect(handle.runner.state).toMatchObject({
+        status: 'paused',
+        status_reason: 'operator-hold',
+        pending_dispatch: null,
+      });
+      const parkedAt = planner.sendCalls.length;
+      await mgr.autoloopChat(runId, 'parked-after');
+      expect(planner.sendCalls).toHaveLength(parkedAt);
+      expect(
+        planner.sendCalls.map((call) => messageText(call.message)).some((text) => text.includes('parked-after')),
+      ).toBe(false);
+    });
+
+    it('C2 pending-dispatch no-option resume keeps the pause and an exact-id increase delivers parked input once', async () => {
+      const runId = 'live-pending-dispatch-control';
+      const workspace = workspaceFor(runId);
+      await mgr.autoloopStart({ runId, workspace, sendTimeoutMs: 600_000 });
+      const handle = mgr.getAutoloop(runId)!;
+      const planner = mockSessions[0];
+      planner.sendImplementation = async () => {
+        planner.sendImplementation = undefined;
+        throw new Error('Timeout waiting for response');
+      };
+
+      await mgr.autoloopChat(runId, 'timed-out-turn');
+      expect(handle.runner.state.status).toBe('paused');
+      const pending = handle.runner.state.pending_dispatch;
+      expect(pending?.status).toBe('awaiting_resume');
+      expect(handle.runner.state.status_reason).toBe(`awaiting_resume:send_timeout:planner:${pending?.dispatch_id}`);
+      const sendsAtPause = planner.sendCalls.length;
+      expect(
+        planner.sendCalls.map((call) => messageText(call.message)).filter((text) => text.includes('timed-out-turn')),
+      ).toEqual(['timed-out-turn']);
+
+      await mgr.autoloopChat(runId, 'U1');
+      expect(planner.sendCalls).toHaveLength(sendsAtPause);
+
+      const before = handle.runner.state;
+      const observed = await mgr.autoloopResume(runId);
+      expect(observed).toBe(before);
+      expect(observed).toBe(handle.runner.state);
+      expect(observed).toMatchObject({ status: 'paused', pending_dispatch: pending });
+      expect(planner.sendCalls).toHaveLength(sendsAtPause);
+
+      const increased = await mgr.autoloopResume(runId, {
+        sendTimeoutMs: 700_000,
+        pendingDispatchId: pending!.dispatch_id,
+      });
+      expect(increased).toMatchObject({
+        status: 'running',
+        status_reason: null,
+        pending_dispatch: null,
+      });
+      await vi.waitFor(() => {
+        const delivered = planner.sendCalls.map((call) => messageText(call.message));
+        expect(delivered.filter((text) => text.includes('timed-out-turn'))).toEqual(['timed-out-turn']);
+        expect(delivered.filter((text) => text.includes('U1'))).toEqual(['U1']);
+      });
+    });
+  });
 });

@@ -319,6 +319,40 @@ export class AutoloopRunner extends EventEmitter {
   }
 
   /**
+   * Continue a live ordinary or activity-lease pause. A pending send-timeout
+   * dispatch is not this transition. The state write is synchronous; this
+   * method returns once the run is active again (or hard-deadline expiry has
+   * been started). Parked input is then delivered once, in order, by the
+   * background drain. The original hard deadline is not moved.
+   */
+  resumePaused(): boolean {
+    if (
+      this.state.status !== 'paused' ||
+      this.state.pending_dispatch !== null ||
+      this.terminationStarted ||
+      this.timeoutMonitoringStopped
+    ) {
+      return false;
+    }
+    if (Date.now() >= this.hardDeadlineAt) {
+      void this.expireHardDeadline().catch((err) => {
+        this.emit('error', err);
+      });
+      return false;
+    }
+    this.activityLeaseExpired = false;
+    this.state.status = this.state.subagents_spawned ? 'running' : 'planning';
+    this.state.status_reason = null;
+    this.recordActivity('lifecycle_transition');
+    this.restorePausedMessages();
+    this.emit('state', this.state);
+    void this.drain().catch((err) => {
+      this.emit('error', err);
+    });
+    return true;
+  }
+
+  /**
    * Advance one exact recoverable send-timeout pause without replaying the
    * logical dispatch that timed out. SessionManager validates and audits the
    * timeout increase before calling this synchronous transition.
@@ -548,16 +582,7 @@ export class AutoloopRunner extends EventEmitter {
         return;
       }
       case 'resume': {
-        if (this.state.status === 'paused') {
-          // I4 owns the explicit timeout-increase resume contract. Until that
-          // arrives, an ordinary resume envelope must not silently discard a
-          // pending send deadline and risk replaying its side effects.
-          if (this.state.pending_dispatch) return;
-          this.state.status = 'running';
-          this.state.status_reason = null;
-          this.restorePausedMessages();
-          this.emit('state', this.state);
-        }
+        this.resumePaused();
         return;
       }
       case 'terminate': {
