@@ -568,6 +568,31 @@ export class AutoloopRunner extends EventEmitter {
           this.markUncertainAfterThrow(env.msg_id);
           throw new AutoloopInputPersistenceError('commit_refused', 'autoloop input timeout linkage commit refused');
         }
+        // Soft-stop enqueues terminate while this send is in flight; drain is
+        // blocked on us. Queue may be [U2, terminate]. Returning early would
+        // let drain hit U2 next, trip markDispatched(items[0]), and leave
+        // terminate stuck after autoloopStop already returned true. Applying
+        // the recoverable pause would emit awaiting_resume before stop wins.
+        // Stop precedence: apply the queued terminate now (same clear-queue
+        // path as handleRunnerInbox) so no later accepted chat runs and no
+        // timeout hold is emitted.
+        const queuedTerminate = this.queue.find((m) => m.type === 'terminate');
+        if (queuedTerminate && queuedTerminate.type === 'terminate') {
+          await this.terminate(queuedTerminate.payload.reason);
+          return;
+        }
+        // H1: apply the existing send_timeout pause NOW, before any later
+        // queued accepted chat is drained. Pushing the timeout to the queue
+        // tail would let U2 run first, trip markDispatched(items[0]), and
+        // never reach the pause transition.
+        this.applySendTimeoutPause(timeoutReply.payload);
+        for (const r of replies) {
+          if (r.type === 'send_timeout') continue;
+          validateMessage(r);
+          this.recordActivity('agent_progress');
+          this.queue.push(r);
+        }
+        return;
       } else if (!this.completeAccepted(env.msg_id)) {
         // Refused completion: leave uncertain, enqueue no replies, halt drain.
         this.markUncertainAfterThrow(env.msg_id);
@@ -582,6 +607,29 @@ export class AutoloopRunner extends EventEmitter {
       if (r.type !== 'send_timeout') this.recordActivity('agent_progress');
       this.queue.push(r);
     }
+  }
+
+  /**
+   * Existing send_timeout transition (paused + exact status_reason +
+   * pending_dispatch). Shared by the runner-inbox handler and the accepted-chat
+   * synchronous path so a recoverable timeout cannot be overtaken by a later
+   * queued accepted chat.
+   */
+  private applySendTimeoutPause(pending: SendTimeoutPayload): void {
+    if (this.resolvedTimedOutDispatches.has(pending.dispatch_id)) return;
+    if (this.state.pending_dispatch?.dispatch_id === pending.dispatch_id) return;
+    // Awaiting an operator decision is a deliberate pause, not subsequent
+    // inactivity. Suspend only the renewable lease; the absolute hard
+    // deadline stays armed and remains terminal.
+    if (this.activityLeaseTimer) {
+      clearTimeout(this.activityLeaseTimer);
+      this.activityLeaseTimer = null;
+    }
+    this.state.status = 'paused';
+    this.state.status_reason = `awaiting_resume:send_timeout:${pending.agent}:${pending.dispatch_id}`;
+    this.state.pending_dispatch = { ...pending };
+    this.emit('state', this.state);
+    this.emit('send_timeout', this.state.pending_dispatch);
   }
 
   private async handleRunnerInbox(env: AnyAutoloopMessage): Promise<void> {
@@ -679,24 +727,10 @@ export class AutoloopRunner extends EventEmitter {
         return;
       }
       case 'send_timeout': {
-        const pending = env.payload;
-        if (this.resolvedTimedOutDispatches.has(pending.dispatch_id)) return;
-        // The dispatcher coalesces duplicate delivery, but the runner also
-        // guards its public inbox so replaying the same structured outcome
-        // cannot emit a second timeout event or mutate state twice.
-        if (this.state.pending_dispatch?.dispatch_id === pending.dispatch_id) return;
-        // Awaiting an operator decision is a deliberate pause, not subsequent
-        // inactivity. Suspend only the renewable lease; the absolute hard
-        // deadline stays armed and remains terminal.
-        if (this.activityLeaseTimer) {
-          clearTimeout(this.activityLeaseTimer);
-          this.activityLeaseTimer = null;
-        }
-        this.state.status = 'paused';
-        this.state.status_reason = `awaiting_resume:send_timeout:${pending.agent}:${pending.dispatch_id}`;
-        this.state.pending_dispatch = { ...pending };
-        this.emit('state', this.state);
-        this.emit('send_timeout', this.state.pending_dispatch);
+        // Non-accepted coder/reviewer timeout ordering unchanged: still arrives
+        // via the queue. Accepted-chat timeouts apply synchronously in
+        // deliverAgentBound before later queued accepted chats.
+        this.applySendTimeoutPause(env.payload);
         return;
       }
       case 'pause': {
@@ -964,6 +998,11 @@ export class AutoloopRunner extends EventEmitter {
       return;
     }
     this.queue.push(env);
+    // M1: renew activity only after a committed item is actually queued for
+    // delivery on the non-paused path. Same centralized recordActivity +
+    // qualified kind as legacy send(); guards (hard deadline, expired lease,
+    // monitoring stopped, terminating/terminated/crashed) stay unchanged.
+    this.recordActivity('queue_message_accepted');
     await this.drain();
   }
 

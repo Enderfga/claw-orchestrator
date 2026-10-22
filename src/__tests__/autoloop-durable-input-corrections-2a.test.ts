@@ -22,7 +22,7 @@ import {
 } from '../autoloop/recovery.js';
 import { Msg, type AnyAutoloopMessage, type SendTimeoutPayload } from '../autoloop/messages.js';
 import { AutoloopRunner } from '../autoloop/runner.js';
-import type { AgentDispatcher, AutoloopConfig } from '../autoloop/types.js';
+import type { AgentDispatcher, AutoloopConfig, AutoloopState } from '../autoloop/types.js';
 import { EmbeddedServer } from '../embedded-server.js';
 import type {
   CostBreakdown,
@@ -2669,5 +2669,778 @@ describe('2C P3 bounded ids + revision safe-integer', () => {
     ).toBe('applied');
     expect(posRunner.getCommittedRecovery()!.revision).toBe(maxRev);
     expect(posRunner.getCommittedRecovery()!.resolved.some((t) => t.message_id === posUncertain)).toBe(true);
+  });
+});
+
+describe('rev3 H1 queued-timeout + M1 activity renewal', () => {
+  const messageText = (message: string | unknown[]): string =>
+    typeof message === 'string' ? message : JSON.stringify(message);
+
+  /** User chat labels extracted from planner-bound physical sends (prompt includes system text). */
+  const plannerBoundChatTexts = (planner: MockSession): string[] => {
+    const out: string[] = [];
+    for (const call of planner.sendCalls) {
+      const t = messageText(call.message);
+      if (t.includes('U1')) out.push('U1');
+      else if (t.includes('U2')) out.push('U2');
+    }
+    return out;
+  };
+
+  const workspaceFor = (runId: string): string => {
+    const workspace = path.join(TEST_WF_DIR, 'workspaces', runId);
+    fs.mkdirSync(workspace, { recursive: true });
+    return workspace;
+  };
+
+  async function establishTimeoutHold(
+    mgr: InstanceType<typeof SessionManager>,
+    runId: string,
+    opts: { sendTimeoutMs?: number } = {},
+  ) {
+    const workspace = workspaceFor(runId);
+    await mgr.autoloopStart({ runId, workspace, sendTimeoutMs: opts.sendTimeoutMs ?? 600_000 });
+    const handle = mgr.getAutoloop(runId)!;
+    const planner = mockSessions[0]!;
+    let entered = false;
+    let releaseHold!: () => void;
+    const hold = new Promise<void>((resolve) => {
+      releaseHold = resolve;
+    });
+    const enteredP = new Promise<void>((resolve) => {
+      planner.sendImplementation = async (message) => {
+        const text = messageText(message);
+        if (text.includes('U1')) {
+          entered = true;
+          resolve();
+          await hold;
+          throw new Error('Timeout waiting for response');
+        }
+        return { text: 'ack', event: { type: 'result', result: 'ok' } };
+      };
+    });
+    const first = mgr.autoloopChat(runId, 'U1').catch((e) => e);
+    await enteredP;
+    expect(entered).toBe(true);
+    const u2Chat = mgr.autoloopChat(runId, 'U2');
+    await vi.waitFor(() => {
+      const snap = recoverySnapshot(runId);
+      expect(snap?.items.some((it) => it.text === 'U2')).toBe(true);
+    });
+    expect(plannerBoundChatTexts(planner)).toEqual(['U1']);
+    releaseHold();
+    const firstOutcome = await first;
+    return { workspace, handle, planner, firstOutcome, u2Chat, releaseHold };
+  }
+
+  it('H1_u1_timeout_with_queued_u2_pauses_exact_then_releases_u2_once', async () => {
+    const mgr = createManager();
+    const runId = 'rev3-h1-u1-u2';
+    try {
+      const { handle, planner, firstOutcome, u2Chat } = await establishTimeoutHold(mgr, runId);
+      // On the repaired path, deliverAccepted settles after applying send_timeout
+      // (dispatcher converts the recognized transport timeout). On v1 the drain
+      // may surface AutoloopInputPersistenceError when U2 races ahead — either
+      // way the contract below is paused + pending_dispatch, not the settle shape.
+      void firstOutcome;
+      expect(handle.runner.state.status).toBe('paused');
+      const dispatchId = handle.runner.state.pending_dispatch!.dispatch_id;
+      expect(handle.runner.state.status_reason).toMatch(/^awaiting_resume:send_timeout:planner:dispatch_[a-f0-9]{64}$/);
+      expect(dispatchId).toMatch(/^dispatch_[a-f0-9]{64}$/);
+      const recovery = handle.runner.getCommittedRecovery()!;
+      expect(recovery.items.find((it) => it.text === 'U1')?.dispatch_id).toBe(dispatchId);
+      const pending = handle.runner.state.pending_input!;
+      const u1Proj = pending.items.find(
+        (it) => recovery.items.find((r) => r.message_id === it.message_id)?.text === 'U1',
+      );
+      const u2Proj = pending.items.find(
+        (it) => recovery.items.find((r) => r.message_id === it.message_id)?.text === 'U2',
+      );
+      expect(u1Proj).toMatchObject({ status: 'uncertain', dispatch_id: dispatchId });
+      expect(u2Proj).toMatchObject({ status: 'pending' });
+      expect(handle.runner.state.status_reason).not.toMatch(/\bU[12]\b/);
+      const diskBeforeRefusals = JSON.stringify(loadRun(runId));
+      const revBeforeRefusals = recovery.revision;
+      await expect(mgr.autoloopResume(runId)).resolves.toBe(handle.runner.state);
+      expect(handle.runner.state.status).toBe('paused');
+      expect(plannerBoundChatTexts(planner)).toEqual(['U1']);
+      const u1Id = recovery.items.find((it) => it.text === 'U1')!.message_id;
+      await expect(
+        mgr.autoloopResume(runId, {
+          inputDisposition: {
+            ledgerId: pending.ledger_id,
+            expectedRevision: pending.revision,
+            messageIds: [u1Id],
+            resolution: 'abandon',
+          },
+        }),
+      ).rejects.toThrow();
+      await expect(
+        mgr.autoloopResume(runId, {
+          inputDisposition: {
+            ledgerId: pending.ledger_id,
+            expectedRevision: pending.revision,
+            messageIds: [u1Id, u2Proj!.message_id],
+            resolution: 'abandon',
+          },
+        }),
+      ).rejects.toThrow();
+      expect(JSON.stringify(loadRun(runId))).toBe(diskBeforeRefusals);
+      expect(handle.runner.getCommittedRecovery()!.revision).toBe(revBeforeRefusals);
+      const exactResume = { sendTimeoutMs: 700_000, pendingDispatchId: dispatchId };
+      await mgr.autoloopResume(runId, exactResume);
+      expect(
+        handle.runner.getCommittedRecovery()?.resolved.some((t) => t.resolution === 'advanced_after_timeout'),
+      ).toBe(true);
+      await u2Chat;
+      await vi.waitFor(() => {
+        expect(plannerBoundChatTexts(planner)).toEqual(['U1', 'U2']);
+      });
+      expect(plannerBoundChatTexts(planner).filter((t) => t === 'U1')).toHaveLength(1);
+      // Duplicate exact resume: existing public API refuses once pending_dispatch
+      // is cleared — no re-pause, no extra physical send (idempotent effects).
+      const sendsAfterExact = planner.sendCalls.length;
+      const statusAfterExact = handle.runner.state.status;
+      await expect(mgr.autoloopResume(runId, exactResume)).rejects.toThrow(/not awaiting a recoverable send timeout/);
+      expect(handle.runner.state.status).toBe(statusAfterExact);
+      expect(handle.runner.state.pending_dispatch).toBeNull();
+      expect(planner.sendCalls.length).toBe(sendsAfterExact);
+    } finally {
+      await mgr.shutdown().catch(() => undefined);
+    }
+  });
+
+  it('H1_u2_via_http_202_same_timeout_hold_then_exact_resume', async () => {
+    const mgr = createManager();
+    const runId = 'rev3-h1-http-u2';
+    const server = new EmbeddedServer(mgr, await freePort());
+    try {
+      const workspace = workspaceFor(runId);
+      await mgr.autoloopStart({ runId, workspace, sendTimeoutMs: 600_000 });
+      const handle = mgr.getAutoloop(runId)!;
+      const planner = mockSessions[0]!;
+      let releaseHold!: () => void;
+      const hold = new Promise<void>((resolve) => {
+        releaseHold = resolve;
+      });
+      const enteredP = new Promise<void>((resolve) => {
+        planner.sendImplementation = async (message) => {
+          if (messageText(message).includes('U1')) {
+            resolve();
+            await hold;
+            throw new Error('Timeout waiting for response');
+          }
+          return { text: 'ack', event: { type: 'result', result: 'ok' } };
+        };
+      });
+      const first = mgr.autoloopChat(runId, 'U1').catch((e) => e);
+      await enteredP;
+      const port = await server.start();
+      const token = fs.readFileSync(path.join(os.homedir(), '.openclaw', 'server-token'), 'utf-8').trim();
+      const u2Res = await fetch(`http://127.0.0.1:${port}/autoloop/${runId}/chat`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+        body: JSON.stringify({ text: 'U2' }),
+      });
+      expect(u2Res.status).toBe(202);
+      const u2Body = (await u2Res.json()) as { ok: boolean; queued: boolean; message_id: string };
+      expect(u2Body.queued).toBe(true);
+      expect(isPendingMessageId(u2Body.message_id)).toBe(true);
+      expect(plannerBoundChatTexts(planner)).toEqual(['U1']);
+      releaseHold();
+      await first;
+      const dispatchId = handle.runner.state.pending_dispatch!.dispatch_id;
+      await mgr.autoloopResume(runId, { sendTimeoutMs: 700_000, pendingDispatchId: dispatchId });
+      await vi.waitFor(() => {
+        expect(plannerBoundChatTexts(planner)).toEqual(['U1', 'U2']);
+      });
+    } finally {
+      await server.stop().catch(() => undefined);
+      await mgr.shutdown().catch(() => undefined);
+    }
+  });
+
+  it('H1_stop_during_timeout_hold_reconstructs_both_then_disposition_delivers_u2', async () => {
+    const mgr = createManager();
+    const runId = 'rev3-h1-stop';
+    try {
+      const workspace = workspaceFor(runId);
+      await mgr.autoloopStart({ runId, workspace, sendTimeoutMs: 600_000 });
+      const handle = mgr.getAutoloop(runId)!;
+      const planner = mockSessions[0]!;
+      let releaseHold!: () => void;
+      const hold = new Promise<void>((resolve) => {
+        releaseHold = resolve;
+      });
+      const enteredP = new Promise<void>((resolve) => {
+        planner.sendImplementation = async (message) => {
+          if (messageText(message).includes('U1')) {
+            resolve();
+            await hold;
+            throw new Error('Timeout waiting for response');
+          }
+          return { text: 'ack', event: { type: 'result', result: 'ok' } };
+        };
+      });
+      const first = mgr.autoloopChat(runId, 'U1').catch((e) => e);
+      await enteredP;
+      void mgr.autoloopChat(runId, 'U2');
+      await vi.waitFor(() => recoverySnapshot(runId)?.items.some((it) => it.text === 'U2'));
+      releaseHold();
+      await first;
+      expect(handle.runner.state.pending_dispatch).toBeTruthy();
+      expect(handle.runner.state.pending_input?.items.length).toBeGreaterThanOrEqual(2);
+      await mgr.autoloopStop(runId, 'stop');
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (mgr as any).kernel.wait(runId);
+      await mgr.shutdown();
+      mockSessions = [];
+      const mgr2 = createManager();
+      try {
+        await mgr2.autoloopResume(runId);
+        const h2 = mgr2.getAutoloop(runId)!;
+        expect(h2.runner.state.pending_dispatch).toBeNull();
+        expect(h2.runner.hasUncertainItems()).toBe(true);
+        const p2 = h2.runner.state.pending_input!;
+        const planner2 = mockSessions[0]!;
+        planner2.sendImplementation = async () => ({ text: 'ack', event: { type: 'result', result: 'ok' } });
+        const sendsBefore = planner2.sendCalls.length;
+        await mgr2.autoloopResume(runId, {
+          inputDisposition: {
+            ledgerId: p2.ledger_id,
+            expectedRevision: p2.revision,
+            messageIds: p2.items.filter((i) => i.status === 'uncertain').map((i) => i.message_id),
+            resolution: 'abandon',
+          },
+        });
+        await vi.waitFor(() => {
+          expect(plannerBoundChatTexts(planner2)).toEqual(['U2']);
+        });
+        expect(plannerBoundChatTexts(planner2).filter((t) => t === 'U1')).toHaveLength(0);
+        expect(planner2.sendCalls.length).toBeGreaterThan(sendsBefore);
+      } finally {
+        await mgr2.shutdown();
+      }
+    } finally {
+      await mgr.shutdown().catch(() => undefined);
+    }
+  });
+
+  it('H1_control_two_ordinary_chats_no_timeout_order_once_each', async () => {
+    const mgr = createManager();
+    const runId = 'rev3-h1-control';
+    try {
+      const workspace = workspaceFor(runId);
+      await mgr.autoloopStart({ runId, workspace, sendTimeoutMs: 600_000 });
+      const planner = mockSessions[0]!;
+      planner.sendImplementation = async () => ({ text: 'ack', event: { type: 'result', result: 'ok' } });
+      const a = mgr.autoloopChat(runId, 'U1');
+      const b = mgr.autoloopChat(runId, 'U2');
+      await Promise.all([a, b]);
+      expect(plannerBoundChatTexts(planner)).toEqual(['U1', 'U2']);
+    } finally {
+      await mgr.shutdown().catch(() => undefined);
+    }
+  });
+
+  const mentionsDispatchMarkRefused = (err: unknown): boolean => {
+    if (err instanceof AutoloopInputPersistenceError) {
+      return err.message.includes('dispatch mark refused');
+    }
+    if (err instanceof Error) return err.message.includes('dispatch mark refused');
+    return String(err).includes('dispatch mark refused');
+  };
+
+  it('H1_queued_stop_with_u2_then_u1_timeout_terminates_no_dispatch_refused', async () => {
+    const mgr = createManager();
+    const runId = 'rev3-h1-queued-stop-mgr';
+    const server = new EmbeddedServer(mgr, await freePort());
+    try {
+      const workspace = workspaceFor(runId);
+      await mgr.autoloopStart({ runId, workspace, sendTimeoutMs: 7_200_000 });
+      const handle = mgr.getAutoloop(runId)!;
+      const planner = mockSessions[0]!;
+      const sendTimeoutEvents: unknown[] = [];
+      const stateEvents: AutoloopState[] = [];
+      const errorEvents: unknown[] = [];
+      handle.runner.on('send_timeout', (e) => sendTimeoutEvents.push(e));
+      handle.runner.on('state', (s) => stateEvents.push(structuredClone(s)));
+      handle.runner.on('error', (e) => errorEvents.push(e));
+      await server.start();
+
+      let entered = false;
+      let releaseHold!: () => void;
+      const hold = new Promise<void>((resolve) => {
+        releaseHold = resolve;
+      });
+      const enteredP = new Promise<void>((resolve) => {
+        planner.sendImplementation = async (message) => {
+          const text = messageText(message);
+          if (text.includes('U1')) {
+            entered = true;
+            resolve();
+            await hold;
+            throw new Error('Timeout waiting for response');
+          }
+          return { text: 'ack', event: { type: 'result', result: 'ok' } };
+        };
+      });
+
+      const first = mgr.autoloopChat(runId, 'U1').catch((e) => e);
+      await enteredP;
+      expect(entered).toBe(true);
+      const u1Id = recoverySnapshot(runId)!.items.find((it) => it.text === 'U1')!.message_id;
+      const u2 = mgr.autoloopChat(runId, 'U2').catch((e) => e);
+      await vi.waitFor(() => {
+        const snap = recoverySnapshot(runId);
+        expect(snap?.items.some((it) => it.text === 'U2')).toBe(true);
+      });
+      const u2Id = recoverySnapshot(runId)!.items.find((it) => it.text === 'U2')!.message_id;
+      expect(plannerBoundChatTexts(planner)).toEqual(['U1']);
+
+      const stopReason = 'operator-stop-queued-u2';
+      await mgr.autoloopStop(runId, stopReason);
+
+      releaseHold();
+      const firstOutcome = await first;
+      void u2.catch(() => undefined);
+
+      expect(handle.runner.state.status).toBe('terminated');
+      expect(handle.runner.state.status_reason).toBe(stopReason);
+      expect(handle.runner.state.pending_dispatch).toBeNull();
+      expect(sendTimeoutEvents).toHaveLength(0);
+      expect(stateEvents.some((s) => /awaiting_resume/.test(s.status_reason ?? ''))).toBe(false);
+      expect(plannerBoundChatTexts(planner)).toEqual(['U1']);
+      expect(mentionsDispatchMarkRefused(firstOutcome)).toBe(false);
+      expect(errorEvents.some((e) => mentionsDispatchMarkRefused(e))).toBe(false);
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (mgr as any).kernel.wait(runId);
+
+      // Decisive stored soft-stop endpoint (after settle + kernel.wait).
+      const finalRec = loadRun(runId)!;
+      expect(finalRec.state).toBe('completed');
+      expect(finalRec.nodes.main?.state).toBe('succeeded');
+      const finalData = finalRec.nodes.main?.data as {
+        recovery?: unknown;
+        state?: { status?: string; status_reason?: string | null; pending_dispatch?: unknown };
+      };
+      expect(finalData.state?.status).toBe('terminated');
+      expect(finalData.state?.status_reason).toBe(stopReason);
+      expect(finalData.state?.pending_dispatch).toBeNull();
+      const finalRecovery = validateRecoveryField(finalData.recovery)!;
+      const u1Final = finalRecovery.items.find((it) => it.message_id === u1Id);
+      const u2Final = finalRecovery.items.find((it) => it.message_id === u2Id);
+      expect(u1Final).toMatchObject({ message_id: u1Id, text: 'U1', status: 'dispatched' });
+      expect(u1Final!.dispatch_id).toMatch(/^dispatch_[a-f0-9]{64}$/);
+      expect(u2Final).toMatchObject({ message_id: u2Id, text: 'U2', status: 'pending' });
+
+      await mgr.shutdown();
+      mockSessions = [];
+      const mgr2 = createManager();
+      try {
+        await mgr2.autoloopResume(runId);
+        const h2 = mgr2.getAutoloop(runId)!;
+        expect(h2.runner.state.pending_dispatch).toBeNull();
+        expect(h2.runner.hasUncertainItems()).toBe(true);
+        const p2 = h2.runner.state.pending_input!;
+        const planner2 = mockSessions[0]!;
+        planner2.sendImplementation = async () => ({ text: 'ack', event: { type: 'result', result: 'ok' } });
+        await mgr2.autoloopResume(runId, {
+          inputDisposition: {
+            ledgerId: p2.ledger_id,
+            expectedRevision: p2.revision,
+            messageIds: [u1Id],
+            resolution: 'abandon',
+          },
+        });
+        await vi.waitFor(() => {
+          expect(plannerBoundChatTexts(planner2)).toEqual(['U2']);
+        });
+        expect(plannerBoundChatTexts(planner2).filter((t) => t === 'U2')).toHaveLength(1);
+      } finally {
+        await mgr2.shutdown().catch(() => undefined);
+      }
+    } finally {
+      await server.stop().catch(() => undefined);
+      await mgr.shutdown().catch(() => undefined);
+    }
+  }, 30_000);
+
+  it('H1_queued_stop_u2_via_http_202_same_terminal_contract', async () => {
+    const mgr = createManager();
+    const runId = 'rev3-h1-queued-stop-http';
+    const server = new EmbeddedServer(mgr, await freePort());
+    try {
+      const workspace = workspaceFor(runId);
+      await mgr.autoloopStart({ runId, workspace, sendTimeoutMs: 7_200_000 });
+      const handle = mgr.getAutoloop(runId)!;
+      const planner = mockSessions[0]!;
+      const sendTimeoutEvents: unknown[] = [];
+      const stateEvents: AutoloopState[] = [];
+      const errorEvents: unknown[] = [];
+      handle.runner.on('send_timeout', (e) => sendTimeoutEvents.push(e));
+      handle.runner.on('state', (s) => stateEvents.push(structuredClone(s)));
+      handle.runner.on('error', (e) => errorEvents.push(e));
+
+      let releaseHold!: () => void;
+      const hold = new Promise<void>((resolve) => {
+        releaseHold = resolve;
+      });
+      const enteredP = new Promise<void>((resolve) => {
+        planner.sendImplementation = async (message) => {
+          if (messageText(message).includes('U1')) {
+            resolve();
+            await hold;
+            throw new Error('Timeout waiting for response');
+          }
+          return { text: 'ack', event: { type: 'result', result: 'ok' } };
+        };
+      });
+
+      const first = mgr.autoloopChat(runId, 'U1').catch((e) => e);
+      await enteredP;
+      const u1Id = recoverySnapshot(runId)!.items.find((it) => it.text === 'U1')!.message_id;
+      const port = await server.start();
+      const token = fs.readFileSync(path.join(os.homedir(), '.openclaw', 'server-token'), 'utf-8').trim();
+      const u2Res = await fetch(`http://127.0.0.1:${port}/autoloop/${runId}/chat`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+        body: JSON.stringify({ text: 'U2' }),
+      });
+      expect(u2Res.status).toBe(202);
+      const u2Body = (await u2Res.json()) as { message_id: string };
+      const u2Id = u2Body.message_id;
+      expect(isPendingMessageId(u2Id)).toBe(true);
+      await vi.waitFor(() => {
+        const snap = recoverySnapshot(runId);
+        expect(snap?.items.some((it) => it.message_id === u2Id)).toBe(true);
+      });
+      expect(plannerBoundChatTexts(planner)).toEqual(['U1']);
+
+      const stopReason = 'operator-stop-queued-u2';
+      await mgr.autoloopStop(runId, stopReason);
+
+      releaseHold();
+      const firstOutcome = await first;
+
+      expect(handle.runner.state.status).toBe('terminated');
+      expect(handle.runner.state.status_reason).toBe(stopReason);
+      expect(handle.runner.state.pending_dispatch).toBeNull();
+      expect(sendTimeoutEvents).toHaveLength(0);
+      expect(stateEvents.some((s) => /awaiting_resume/.test(s.status_reason ?? ''))).toBe(false);
+      expect(plannerBoundChatTexts(planner)).toEqual(['U1']);
+      expect(mentionsDispatchMarkRefused(firstOutcome)).toBe(false);
+      expect(errorEvents.some((e) => mentionsDispatchMarkRefused(e))).toBe(false);
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (mgr as any).kernel.wait(runId);
+
+      // Decisive stored soft-stop endpoint (after settle + kernel.wait).
+      const finalRec = loadRun(runId)!;
+      expect(finalRec.state).toBe('completed');
+      expect(finalRec.nodes.main?.state).toBe('succeeded');
+      const finalData = finalRec.nodes.main?.data as {
+        recovery?: unknown;
+        state?: { status?: string; status_reason?: string | null; pending_dispatch?: unknown };
+      };
+      expect(finalData.state?.status).toBe('terminated');
+      expect(finalData.state?.status_reason).toBe(stopReason);
+      expect(finalData.state?.pending_dispatch).toBeNull();
+      const finalRecovery = validateRecoveryField(finalData.recovery)!;
+      const u1Final = finalRecovery.items.find((it) => it.message_id === u1Id);
+      const u2Final = finalRecovery.items.find((it) => it.message_id === u2Id);
+      expect(u1Final).toMatchObject({ message_id: u1Id, text: 'U1', status: 'dispatched' });
+      expect(u1Final!.dispatch_id).toMatch(/^dispatch_[a-f0-9]{64}$/);
+      expect(u2Final).toMatchObject({ message_id: u2Id, text: 'U2', status: 'pending' });
+
+      await mgr.shutdown();
+      mockSessions = [];
+      const mgr2 = createManager();
+      try {
+        await mgr2.autoloopResume(runId);
+        const h2 = mgr2.getAutoloop(runId)!;
+        expect(h2.runner.state.pending_dispatch).toBeNull();
+        expect(h2.runner.hasUncertainItems()).toBe(true);
+        const p2 = h2.runner.state.pending_input!;
+        const planner2 = mockSessions[0]!;
+        planner2.sendImplementation = async () => ({ text: 'ack', event: { type: 'result', result: 'ok' } });
+        await mgr2.autoloopResume(runId, {
+          inputDisposition: {
+            ledgerId: p2.ledger_id,
+            expectedRevision: p2.revision,
+            messageIds: [u1Id],
+            resolution: 'abandon',
+          },
+        });
+        await vi.waitFor(() => {
+          expect(plannerBoundChatTexts(planner2)).toEqual(['U2']);
+        });
+        expect(plannerBoundChatTexts(planner2).filter((t) => t === 'U2')).toHaveLength(1);
+      } finally {
+        await mgr2.shutdown().catch(() => undefined);
+      }
+    } finally {
+      await server.stop().catch(() => undefined);
+      await mgr.shutdown().catch(() => undefined);
+    }
+  }, 30_000);
+
+  it('M1_successful_accept_renews_last_activity_manager_and_http', async () => {
+    const mgr = createManager();
+    const runId = 'rev3-m1-renew';
+    const server = new EmbeddedServer(mgr, await freePort());
+    const realNow = Date.now;
+    try {
+      const workspace = workspaceFor(runId);
+      await mgr.autoloopStart({ runId, workspace, activityLeaseMs: 60_000, autoloopHardTimeoutMs: 600_000 });
+      const handle = mgr.getAutoloop(runId)!;
+      const before = handle.runner.state.last_activity_at;
+      mockSessions[0]!.sendImplementation = async () => ({ text: 'ack', event: { type: 'result', result: 'ok' } });
+      Date.now = () => before + 5000;
+      await mgr.autoloopChat(runId, 'renew-mgr');
+      expect(handle.runner.state.last_activity_at).toBe(before + 5000);
+      Date.now = () => before + 9000;
+      const port = await server.start();
+      const token = fs.readFileSync(path.join(os.homedir(), '.openclaw', 'server-token'), 'utf-8').trim();
+      const res = await fetch(`http://127.0.0.1:${port}/autoloop/${runId}/chat`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+        body: JSON.stringify({ text: 'renew-http' }),
+      });
+      expect(res.status).toBe(202);
+      await vi.waitFor(() => {
+        expect(handle.runner.state.last_activity_at).toBe(before + 9000);
+      });
+    } finally {
+      Date.now = realNow;
+      await server.stop().catch(() => undefined);
+      await mgr.shutdown().catch(() => undefined);
+    }
+  });
+
+  it('M1_regular_chats_keep_lease_alive_hard_deadline_unchanged', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: false });
+    vi.setSystemTime(new Date('2026-02-01T00:00:00Z'));
+    const mgr = createManager();
+    const runId = 'rev3-m1-lease-hard';
+    const advanceTo = async (absoluteMs: number): Promise<void> => {
+      const delta = absoluteMs - Date.now();
+      if (delta > 0) await vi.advanceTimersByTimeAsync(delta);
+    };
+    try {
+      const workspace = workspaceFor(runId);
+      const activityLeaseMs = 60_000;
+      const autoloopHardTimeoutMs = 600_000;
+      await mgr.autoloopStart({ runId, workspace, activityLeaseMs, autoloopHardTimeoutMs });
+      const handle = mgr.getAutoloop(runId)!;
+      const planner = mockSessions[0]!;
+      planner.sendImplementation = async () => ({ text: 'ack', event: { type: 'result', result: 'ok' } });
+      const startedAt = Date.parse(handle.runner.state.started_at);
+      const hardAt = startedAt + autoloopHardTimeoutMs;
+      for (let i = 0; i < 4; i++) {
+        const nextAt = handle.runner.state.last_activity_at + 55_000;
+        vi.setSystemTime(new Date(nextAt));
+        await advanceTo(nextAt);
+        const chatP = mgr.autoloopChat(runId, `keepalive-${i}`);
+        await advanceTo(nextAt + 1);
+        await chatP;
+      }
+      expect(handle.runner.state.status_reason).not.toBe('activity_lease_expired');
+      expect(handle.runner.state.status).not.toBe('paused');
+      await advanceTo(hardAt);
+      await vi.runOnlyPendingTimersAsync();
+      expect(handle.runner.state).toMatchObject({
+        status: 'terminated',
+        status_reason: 'hard_timeout_exceeded',
+      });
+    } finally {
+      vi.useRealTimers();
+      await mgr.shutdown().catch(() => undefined);
+      mockSessions = [];
+    }
+  }, 30_000);
+
+  it('M1_neg_409_stolen_fence_no_renewal', async () => {
+    const realNow = Date.now;
+    const mgr = createManager();
+    const runId = 'rev3-m1-neg-409';
+    try {
+      const workspace = workspaceFor(runId);
+      await mgr.autoloopStart({ runId, workspace });
+      const handle = mgr.getAutoloop(runId)!;
+      const before = handle.runner.state.last_activity_at;
+      Date.now = () => before + 12_000;
+      stealLease(runId);
+      expect(() => mgr.acceptAutoloopChat(runId, 'stolen')).toThrow(AutoloopInputPersistenceError);
+      expect(handle.runner.state.last_activity_at).toBe(before);
+    } finally {
+      Date.now = realNow;
+      await mgr.shutdown().catch(() => undefined);
+    }
+  });
+
+  it('M1_neg_paused_http_202_parks_no_renewal', async () => {
+    const realNow = Date.now;
+    const mgr = createManager();
+    const runId = 'rev3-m1-neg-pause-http';
+    const server = new EmbeddedServer(mgr, await freePort());
+    try {
+      const workspace = workspaceFor(runId);
+      await mgr.autoloopStart({ runId, workspace });
+      const handle = mgr.getAutoloop(runId)!;
+      mockSessions[0]!.sendImplementation = async () => ({
+        text: fence('pause_loop', { reason: 'operator-hold' }),
+        event: { type: 'result', result: 'ok' },
+      });
+      await mgr.autoloopChat(runId, 'pause-trigger');
+      expect(handle.runner.state.status).toBe('paused');
+      const before = handle.runner.state.last_activity_at;
+      Date.now = () => before + 15_000;
+      const port = await server.start();
+      const token = fs.readFileSync(path.join(os.homedir(), '.openclaw', 'server-token'), 'utf-8').trim();
+      const res = await fetch(`http://127.0.0.1:${port}/autoloop/${runId}/chat`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+        body: JSON.stringify({ text: 'parked-while-paused' }),
+      });
+      expect(res.status).toBe(202);
+      const body = (await res.json()) as { message_id: string };
+      const parked = handle.runner.state.pending_input!.items.find((i) => i.message_id === body.message_id);
+      expect(parked?.status).toBe('pending');
+      expect(handle.runner.state.last_activity_at).toBe(before);
+    } finally {
+      Date.now = realNow;
+      await server.stop().catch(() => undefined);
+      await mgr.shutdown().catch(() => undefined);
+    }
+  });
+
+  it('M1_neg_expired_lease_http_202_parks_no_renewal', async () => {
+    // Real lease expiry under fake timers, then public autoloopChat (deliverAccepted
+    // park path). HTTP 202 is covered by the paused negative; mixing EmbeddedServer
+    // with fake timers hangs the listen/fetch path.
+    vi.useFakeTimers({ shouldAdvanceTime: false });
+    vi.setSystemTime(new Date('2026-04-01T00:00:00Z'));
+    const mgr = createManager();
+    const runId = 'rev3-m1-neg-lease-chat';
+    try {
+      const workspace = workspaceFor(runId);
+      await mgr.autoloopStart({ runId, workspace, activityLeaseMs: 60_000, autoloopHardTimeoutMs: 600_000 });
+      const handle = mgr.getAutoloop(runId)!;
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(handle.runner.state.status_reason).toBe('activity_lease_expired');
+      expect(handle.runner.state.status).toBe('paused');
+      const before = handle.runner.state.last_activity_at;
+      vi.setSystemTime(new Date(before + 25_000));
+      await mgr.autoloopChat(runId, 'after-lease-expired');
+      const parked = handle.runner.state.pending_input!.items.find((i) => {
+        const rec = handle.runner.getCommittedRecovery()?.items.find((r) => r.message_id === i.message_id);
+        return rec?.text === 'after-lease-expired';
+      });
+      expect(parked?.status).toBe('pending');
+      expect(handle.runner.state.last_activity_at).toBe(before);
+      expect(handle.runner.state.status_reason).toBe('activity_lease_expired');
+    } finally {
+      vi.useRealTimers();
+      void mgr.shutdown().catch(() => undefined);
+    }
+  }, 30_000);
+
+  it('M1_neg_429_oversized_http_no_renewal', async () => {
+    // Real HTTP 429: EmbeddedServer MAX_BODY_SIZE is 5 MiB, so fill ~5 MiB via
+    // acceptAutoloopChat while paused, then HTTP POST ~4 MiB to trip aggregate 8 MiB.
+    const realNow = Date.now;
+    const mgr = createManager();
+    const runId = 'rev3-m1-neg-429';
+    const server = new EmbeddedServer(mgr, await freePort());
+    try {
+      const workspace = workspaceFor(runId);
+      await mgr.autoloopStart({ runId, workspace });
+      const handle = mgr.getAutoloop(runId)!;
+      mockSessions[0]!.sendImplementation = async () => ({
+        text: fence('pause_loop', { reason: 'bound-setup' }),
+        event: { type: 'result', result: 'ok' },
+      });
+      await mgr.autoloopChat(runId, 'pause-for-bound');
+      expect(handle.runner.state.status).toBe('paused');
+      mgr.acceptAutoloopChat(runId, 'a'.repeat(5 * 1024 * 1024));
+      const before = handle.runner.state.last_activity_at;
+      const ledgerBefore = JSON.stringify(loadRun(runId));
+      Date.now = () => before + 18_000;
+      const port = await server.start();
+      const token = fs.readFileSync(path.join(os.homedir(), '.openclaw', 'server-token'), 'utf-8').trim();
+      const res = await fetch(`http://127.0.0.1:${port}/autoloop/${runId}/chat`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+        body: JSON.stringify({ text: 'b'.repeat(4 * 1024 * 1024) }),
+      });
+      expect(res.status).toBe(429);
+      expect(handle.runner.state.last_activity_at).toBe(before);
+      expect(JSON.stringify(loadRun(runId))).toBe(ledgerBefore);
+    } finally {
+      Date.now = realNow;
+      await server.stop().catch(() => undefined);
+      await mgr.shutdown().catch(() => undefined);
+    }
+  }, 60_000);
+
+  it('M1_neg_timeout_bookkeeping_no_renewal', async () => {
+    const realNow = Date.now;
+    const mgr = createManager();
+    const runId = 'rev3-m1-neg-timeout';
+    try {
+      const workspace = workspaceFor(runId);
+      await mgr.autoloopStart({ runId, workspace, sendTimeoutMs: 600_000 });
+      const handle = mgr.getAutoloop(runId)!;
+      const planner = mockSessions[0]!;
+      let releaseHold!: () => void;
+      const hold = new Promise<void>((resolve) => {
+        releaseHold = resolve;
+      });
+      let activityBeforeTimeout!: number;
+      planner.sendImplementation = async (message) => {
+        if (messageText(message).includes('U1')) {
+          activityBeforeTimeout = handle.runner.state.last_activity_at;
+          Date.now = () => activityBeforeTimeout + 30_000;
+          await hold;
+          throw new Error('Timeout waiting for response');
+        }
+        return { text: 'ack', event: { type: 'result', result: 'ok' } };
+      };
+      const first = mgr.autoloopChat(runId, 'U1').catch((e) => e);
+      await vi.waitFor(() => planner.sendCalls.length >= 1);
+      releaseHold();
+      await first;
+      expect(handle.runner.state.last_activity_at).toBe(activityBeforeTimeout);
+    } finally {
+      Date.now = realNow;
+      await mgr.shutdown().catch(() => undefined);
+    }
+  });
+
+  it('M1_neg_terminating_deliverAccepted_supplemental_guard_only', async () => {
+    // Reachability: acceptChat refuses when terminated (runner.ts:925-927); public HTTP
+    // cannot accept-then-deliver after stop because accept throws. The accept→deliverAccepted
+    // window while terminating is not a public crash workflow — supplemental guard-only.
+    const realNow = Date.now;
+    const mgr = createManager();
+    const runId = 'rev3-m1-neg-term-deliver';
+    try {
+      const workspace = workspaceFor(runId);
+      await mgr.autoloopStart({ runId, workspace });
+      const live = mgr.getAutoloop(runId)!;
+      const { message_id } = mgr.acceptAutoloopChat(runId, 'pre-stop-accepted');
+      await mgr.autoloopStop(runId, 'operator-stop-guard');
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (mgr as any).kernel.wait(runId);
+      const beforeDeliver = live.runner.state.last_activity_at;
+      Date.now = () => beforeDeliver + 22_000;
+      await live.runner.deliverAccepted(message_id);
+      expect(live.runner.state.last_activity_at).toBe(beforeDeliver);
+    } finally {
+      Date.now = realNow;
+      await mgr.shutdown().catch(() => undefined);
+    }
   });
 });
