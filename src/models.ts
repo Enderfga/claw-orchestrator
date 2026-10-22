@@ -491,13 +491,21 @@ const MODELS: ModelDef[] = [
   // a non-issue — $2/$0.50/$6 below a 200K prompt and $4/$1/$12 at or above it,
   // charged across the whole request. We register the base tier, as with every
   // other long-context tier in this file; the engine bills the right one itself.
-  // Verified against docs.x.ai/docs/models and grok 1.0.5 (`grok models`).
+  // Verified against docs.x.ai/docs/models.md and `grok models`: 1.0.67 made
+  // grok-4.7 the default and only selectable model, at grok-4.6's prices.
+  {
+    id: 'grok-4.7',
+    engine: 'grok',
+    provider: 'xai',
+    pricing: { input: 2, output: 6, cached: 0.5 },
+    aliases: ['grok'],
+    contextWindow: 500_000,
+  },
   {
     id: 'grok-4.6',
     engine: 'grok',
     provider: 'xai',
     pricing: { input: 2, output: 6, cached: 0.5 },
-    aliases: ['grok'],
     contextWindow: 500_000,
   },
 
