@@ -1340,11 +1340,11 @@ describe('Autoloop pending chat — manager and HTTP', () => {
       expect(physicalSends.some((s) => s.role.endsWith('-planner') && s.text.includes('iter 0 done'))).toBe(true);
       expect(sent(latestPlanner(), 'U1')).toEqual(['U1']);
     });
-    const plannerTexts = physicalSends.filter((s) => s.role.endsWith('-planner')).map((s) => s.text);
-    const doneIdx = plannerTexts.findIndex((t) => t.includes('iter 0 done'));
-    const u1Idx = plannerTexts.findIndex((t) => t === 'U1');
-    expect(doneIdx).toBeGreaterThanOrEqual(0);
-    expect(u1Idx).toBeGreaterThan(doneIdx);
+    // No cross-role ordering guarantee (review_request is queued, not awaited).
+    // Assert each delivery once, chats in accepted order, no INFLIGHT replay.
+    const plannerDone = physicalSends.filter((s) => s.role.endsWith('-planner') && s.text.includes('iter 0 done'));
+    expect(plannerDone).toHaveLength(1);
+    expect(sent(latestPlanner(), 'U1')).toEqual(['U1']);
     expect(sent(latestPlanner(), 'INFLIGHT')).toEqual([]);
     expect(fileNoticeTimestamps(workspace, runId)).toHaveLength(1);
   }, 60_000);
@@ -1384,6 +1384,167 @@ describe('Autoloop pending chat — manager and HTTP', () => {
     expect(fileNoticeTimestamps(workspace, runId)).toHaveLength(1);
     expect(plannerWithPending.length).toBeLessThanOrEqual(1);
     expect(sent(latestPlanner(), 'INFLIGHT')).toEqual([]);
+  }, 60_000);
+
+  /**
+   * Held Reviewer recovery: resume must resolve and the exit watcher must install
+   * before the physical Reviewer turn settles; cancel must stop sessions promptly.
+   */
+  async function resumeWithHeldReviewer(
+    runId: string,
+    opts: { unwritableHistory: boolean },
+  ): Promise<{
+    resumeSettled: () => boolean;
+    exitWatcherInstalled: () => boolean;
+    reviewEntered: Promise<void>;
+    releaseReview: () => void;
+    stops: Array<{ role: string }>;
+    resumed: Promise<unknown>;
+  }> {
+    mockSessions = [];
+    createdConfigs = [];
+    mgr = createManager();
+    const stops: Array<{ role: string }> = [];
+    let exitWatcherInstalled = false;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const originalWait = (mgr as any)._awaitAutoloopExit.bind(mgr);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (mgr as any)._awaitAutoloopExit = (...args: unknown[]) => {
+      exitWatcherInstalled = true;
+      return originalWait(...args);
+    };
+
+    let releaseReview!: () => void;
+    const held = new Promise<void>((r) => {
+      releaseReview = r;
+    });
+    let enterReview!: () => void;
+    const reviewEntered = new Promise<void>((r) => {
+      enterReview = r;
+    });
+
+    const origCreate = (mgr as unknown as { _createSession: (e: string, c: SessionConfig) => ISession })._createSession;
+    (mgr as unknown as { _createSession: (e: string, c: SessionConfig) => ISession })._createSession = (
+      engine,
+      config,
+    ) => {
+      const session = origCreate.call(mgr, engine, config) as MockSession;
+      const innerStop = session.stop.bind(session);
+      session.stop = () => {
+        stops.push({ role: config.name ?? 'unknown' });
+        innerStop();
+      };
+      const innerSend = session.send.bind(session);
+      session.send = async (message, options) => {
+        if (config.name?.endsWith('-reviewer')) {
+          enterReview();
+          await held;
+          return {
+            text: fence('review_complete', {
+              decision: 'hold',
+              metric: null,
+              audit_notes: 'c9 held-reviewer fixture',
+            }),
+            event: { type: 'result', result: 'ok' },
+          };
+        }
+        return innerSend(message, options);
+      };
+      return session;
+    };
+
+    if (!opts.unwritableHistory) {
+      fs.rmSync(chatFile(workspaceFor(runId), runId), { recursive: true, force: true });
+    }
+
+    let resumeSettled = false;
+    const resumed = mgr.autoloopResume(runId).finally(() => {
+      resumeSettled = true;
+    });
+    return {
+      resumeSettled: () => resumeSettled,
+      exitWatcherInstalled: () => exitWatcherInstalled,
+      reviewEntered,
+      releaseReview: () => releaseReview(),
+      stops,
+      resumed,
+    };
+  }
+
+  it('C9: held Reviewer recovery with writable history — resume is prompt and cancel stops sessions', async () => {
+    const runId = 'c9-held-reviewer-writable';
+    await terminateWithUnrecordedNotice(runId);
+    const held = await resumeWithHeldReviewer(runId, { unwritableHistory: false });
+
+    await held.reviewEntered;
+    await new Promise<void>((r) => setImmediate(r));
+    // Resume and the exit watcher must not wait for the Reviewer transport.
+    await vi.waitFor(() => {
+      expect(held.resumeSettled()).toBe(true);
+      expect(held.exitWatcherInstalled()).toBe(true);
+    });
+    const state = await held.resumed;
+    expect(state).toMatchObject({ unconfirmed_chat: { count: 1, history_pending: false } });
+    expect((state as { status: string }).status).not.toBe('paused');
+
+    expect(kernelOf(mgr).cancel(runId)).toBe(true);
+    let kernelSettled = false;
+    const waited = kernelOf(mgr)
+      .wait(runId)
+      .then(() => {
+        kernelSettled = true;
+      });
+    // Two normal 1s cancellation polls (same bound as the Reviewer probe).
+    await new Promise<void>((r) => setTimeout(r, 2200));
+    expect(kernelSettled).toBe(true);
+    expect(held.stops.some((s) => s.role.endsWith('-planner'))).toBe(true);
+    expect(held.stops.some((s) => s.role.endsWith('-reviewer'))).toBe(true);
+
+    // Late settle: no further agent handoff after cancel.
+    const sendsBefore = mockSessions.reduce((n, s) => n + s.sendCalls.length, 0);
+    held.releaseReview();
+    await waited;
+    await new Promise<void>((r) => setImmediate(r));
+    const sendsAfter = mockSessions.reduce((n, s) => n + s.sendCalls.length, 0);
+    expect(sendsAfter).toBe(sendsBefore);
+  }, 60_000);
+
+  it('C9: held Reviewer recovery with notice pause — resume is prompt and cancel stops sessions', async () => {
+    const runId = 'c9-held-reviewer-paused';
+    await terminateWithUnrecordedNotice(runId);
+    const held = await resumeWithHeldReviewer(runId, { unwritableHistory: true });
+
+    await held.reviewEntered;
+    await new Promise<void>((r) => setImmediate(r));
+    await vi.waitFor(() => {
+      expect(held.resumeSettled()).toBe(true);
+      expect(held.exitWatcherInstalled()).toBe(true);
+    });
+    const state = await held.resumed;
+    expect(state).toMatchObject({
+      status: 'paused',
+      status_reason: CHAT_NOTICE_PENDING,
+      unconfirmed_chat: { count: 1, history_pending: true },
+    });
+
+    expect(kernelOf(mgr).cancel(runId)).toBe(true);
+    let kernelSettled = false;
+    const waited = kernelOf(mgr)
+      .wait(runId)
+      .then(() => {
+        kernelSettled = true;
+      });
+    await new Promise<void>((r) => setTimeout(r, 2200));
+    expect(kernelSettled).toBe(true);
+    expect(held.stops.some((s) => s.role.endsWith('-planner'))).toBe(true);
+    expect(held.stops.some((s) => s.role.endsWith('-reviewer'))).toBe(true);
+
+    const sendsBefore = mockSessions.reduce((n, s) => n + s.sendCalls.length, 0);
+    held.releaseReview();
+    await waited;
+    await new Promise<void>((r) => setImmediate(r));
+    const sendsAfter = mockSessions.reduce((n, s) => n + s.sendCalls.length, 0);
+    expect(sendsAfter).toBe(sendsBefore);
   }, 60_000);
 
   it('C9: malformed stored chat fields are refused with the fixed error before any session starts', async () => {

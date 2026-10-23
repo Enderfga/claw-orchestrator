@@ -3944,21 +3944,21 @@ export class SessionManager {
     // park until the notice is recorded; live spawn_subagents stays unchanged.
     runner.markSubagentsSpawned({ preservePause: true });
     runner.state.iter = n;
-    // Await the Reviewer handoff so any Planner-bound follow-up parks before
-    // releaseRestoredInput queues restored pending chat (stable FIFO).
-    try {
-      await runner.send(
+    // Queue only — never await the physical Reviewer turn. Readiness and the
+    // cancellation observer must install before any model transport settles.
+    void runner
+      .send(
         AutoloopMsg.reviewRequest(n, {
           iter: n,
           ledger_path: ledgerDir,
           prior_metrics: runner.state.metric_history.slice(-10),
         }),
-      );
-    } catch (err: unknown) {
-      this.logger.warn?.(
-        `[autoloop/${runId}] recovered review_request failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
+      )
+      .catch((err: unknown) => {
+        this.logger.warn?.(
+          `[autoloop/${runId}] recovered review_request failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
   }
 
   /**
