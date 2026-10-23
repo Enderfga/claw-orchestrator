@@ -3940,21 +3940,25 @@ export class SessionManager {
 
     this.logger.info?.(`[autoloop/${runId}] recovering committed iter ${n} into Reviewer`);
     await dispatcher.ensureReviewerForCommittedRecovery();
-    runner.markSubagentsSpawned();
+    // Keep a reconciled chat_notice_pending pause so Planner-bound follow-ups
+    // park until the notice is recorded; live spawn_subagents stays unchanged.
+    runner.markSubagentsSpawned({ preservePause: true });
     runner.state.iter = n;
-    void runner
-      .send(
+    // Await the Reviewer handoff so any Planner-bound follow-up parks before
+    // releaseRestoredInput queues restored pending chat (stable FIFO).
+    try {
+      await runner.send(
         AutoloopMsg.reviewRequest(n, {
           iter: n,
           ledger_path: ledgerDir,
           prior_metrics: runner.state.metric_history.slice(-10),
         }),
-      )
-      .catch((err: unknown) => {
-        this.logger.warn?.(
-          `[autoloop/${runId}] recovered review_request failed: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      });
+      );
+    } catch (err: unknown) {
+      this.logger.warn?.(
+        `[autoloop/${runId}] recovered review_request failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   /**

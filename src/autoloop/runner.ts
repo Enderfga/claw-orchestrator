@@ -543,12 +543,19 @@ export class AutoloopRunner extends EventEmitter {
     return true;
   }
 
-  /** Mark subagents spawned (called by S3's spawn_subagents tool handler). */
-  markSubagentsSpawned(): void {
+  /**
+   * Mark subagents spawned (called by S3's spawn_subagents tool handler).
+   * Recovery may pass `{ preservePause: true }` so a reconciled
+   * `chat_notice_pending` pause is not cleared — Planner-bound follow-ups then
+   * park until ordinary resume retries the notice.
+   */
+  markSubagentsSpawned(opts?: { preservePause?: boolean }): void {
     if (this.state.subagents_spawned) return;
     this.recordActivity('lifecycle_transition');
     this.state.subagents_spawned = true;
-    this.state.status = 'running';
+    if (!(opts?.preservePause === true && this.state.status === 'paused')) {
+      this.state.status = 'running';
+    }
     this.emit('state', this.state);
   }
 
@@ -602,9 +609,14 @@ export class AutoloopRunner extends EventEmitter {
     // short-circuited at the top of handleOne.)
     // Pause: park agent-bound messages until resume. Runner-bound (resume /
     // terminate) and user-bound (push) flow through above and are unaffected.
+    // Exception: during a reconciled chat_notice_pending pause, Reviewer-bound
+    // recovery may still deliver; Planner/Coder follow-ups park until the notice
+    // is recorded and ordinary resume drains them.
     if (this.state.status === 'paused') {
-      this.park(env);
-      return;
+      if (!(this.state.status_reason === CHAT_NOTICE_PENDING && env.to === 'reviewer')) {
+        this.park(env);
+        return;
+      }
     }
     const tracked = env.type === 'chat' && this.committedInput.pendingChat.some((e) => e.msg_id === env.msg_id);
     if (tracked) {

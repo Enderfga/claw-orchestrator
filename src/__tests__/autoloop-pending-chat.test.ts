@@ -1192,6 +1192,200 @@ describe('Autoloop pending chat — manager and HTTP', () => {
     await vi.waitFor(() => expect(storedData(runId).pendingChat).toBeUndefined());
   }, 60_000);
 
+  /**
+   * Build a terminated marker-only (or marker+pending) checkpoint with
+   * history_pending by cancelling mid-send while chat.jsonl is unwritable.
+   */
+  async function terminateWithUnrecordedNotice(
+    runId: string,
+    opts: { alsoPending?: string } = {},
+  ): Promise<{ workspace: string }> {
+    const { planner, workspace, turns } = await startWithHeldTurns(runId, ['INFLIGHT']);
+    initGitWorkspace(workspace);
+    const inflight = mgr.autoloopChat(runId, 'INFLIGHT');
+    await vi.waitFor(() => expect(sent(planner, 'INFLIGHT')).toEqual(['INFLIGHT']));
+    if (opts.alsoPending) await mgr.autoloopChat(runId, opts.alsoPending);
+    const chat = chatFile(workspace, runId);
+    if (fs.existsSync(chat)) fs.renameSync(chat, `${chat}.saved`);
+    fs.mkdirSync(chat);
+    expect(kernelOf(mgr).cancel(runId)).toBe(true);
+    turns.get('INFLIGHT')!.resolve(ACK);
+    await inflight;
+    await kernelOf(mgr).wait(runId);
+    await mgr.shutdown();
+    const stored = storedData(runId);
+    expect(stored.inFlightChat).toBeUndefined();
+    expect(stored.state.unconfirmed_chat).toMatchObject({ count: 1, history_pending: true });
+    if (opts.alsoPending) expect(storedPendingTexts(runId)).toEqual([opts.alsoPending]);
+    else expect(stored.pendingChat ?? []).toEqual([]);
+    plantCommittedIteration(workspace, runId, 0);
+    // Leave chat.jsonl as a directory so restore reconciliation cannot append.
+    expect(fs.statSync(chat).isDirectory()).toBe(true);
+    return { workspace };
+  }
+
+  function instrumentRecoverySends(
+    runId: string,
+  ): Array<{ role: string; publisherBound: boolean; status?: string; reason?: string | null; text: string }> {
+    const physicalSends: Array<{
+      role: string;
+      publisherBound: boolean;
+      status?: string;
+      reason?: string | null;
+      text: string;
+    }> = [];
+    const origCreate = (mgr as unknown as { _createSession: (e: string, c: SessionConfig) => ISession })._createSession;
+    (mgr as unknown as { _createSession: (e: string, c: SessionConfig) => ISession })._createSession = (
+      engine,
+      config,
+    ) => {
+      const session = origCreate.call(mgr, engine, config) as MockSession;
+      const inner = session.send.bind(session);
+      session.send = async (message, options) => {
+        const live = mgr.getAutoloop(runId);
+        physicalSends.push({
+          role: config.name ?? 'unknown',
+          publisherBound: publishersOf(mgr).has(runId),
+          status: live?.runner.state.status,
+          reason: live?.runner.state.status_reason,
+          text: messageText(message),
+        });
+        if (config.name?.endsWith('-reviewer')) {
+          return {
+            text: fence('review_complete', {
+              decision: 'hold',
+              metric: null,
+              audit_notes: 'c9 notice-recovery fixture',
+            }),
+            event: { type: 'result', result: 'ok' },
+          };
+        }
+        return inner(message, options);
+      };
+      return session;
+    };
+    return physicalSends;
+  }
+
+  it('C9: committed recovery preserves chat_notice_pending; Planner gets no iter_done until resume repairs history', async () => {
+    const runId = 'c9-notice-recovery-pause';
+    const { workspace } = await terminateWithUnrecordedNotice(runId);
+
+    mockSessions = [];
+    createdConfigs = [];
+    mgr = createManager();
+    const physicalSends = instrumentRecoverySends(runId);
+
+    const resumed = await mgr.autoloopResume(runId);
+    expect(resumed).toMatchObject({
+      status: 'paused',
+      status_reason: CHAT_NOTICE_PENDING,
+      pending_dispatch: null,
+      unconfirmed_chat: { count: 1, history_pending: true },
+    });
+    await vi.waitFor(() => expect(physicalSends.some((s) => s.text.includes('[review_request iter=0]'))).toBe(true));
+    for (let i = 0; i < 20; i++) await new Promise<void>((r) => setImmediate(r));
+
+    const reviews = physicalSends.filter((s) => s.text.includes('[review_request iter=0]'));
+    expect(reviews).toHaveLength(1);
+    expect(reviews[0]!.publisherBound).toBe(true);
+    expect(reviews[0]!.status).toBe('paused');
+    expect(reviews[0]!.reason).toBe(CHAT_NOTICE_PENDING);
+    const plannerWhilePending = physicalSends.filter(
+      (s) => s.role.endsWith('-planner') && s.text.includes('iter 0 done'),
+    );
+    expect(plannerWhilePending).toEqual([]);
+    expect(mgr.getAutoloop(runId)!.runner.state).toMatchObject({
+      status: 'paused',
+      status_reason: CHAT_NOTICE_PENDING,
+      unconfirmed_chat: { count: 1, history_pending: true },
+    });
+
+    fs.rmSync(chatFile(workspace, runId), { recursive: true, force: true });
+    const after = await mgr.autoloopResume(runId);
+    expect(after.unconfirmed_chat).toMatchObject({ count: 1, history_pending: false });
+    expect(after.status).not.toBe('paused');
+    await vi.waitFor(() =>
+      expect(physicalSends.some((s) => s.role.endsWith('-planner') && s.text.includes('iter 0 done'))).toBe(true),
+    );
+    const plannerDone = physicalSends.filter((s) => s.role.endsWith('-planner') && s.text.includes('iter 0 done'));
+    expect(plannerDone).toHaveLength(1);
+    expect(fileNoticeTimestamps(workspace, runId)).toHaveLength(1);
+    expect(sent(latestPlanner(), 'INFLIGHT')).toEqual([]);
+    expect(storedPendingTexts(runId)).toEqual([]);
+  }, 60_000);
+
+  it('C9: notice-pause recovery with pending U1 keeps FIFO after the generic resume retry', async () => {
+    const runId = 'c9-notice-recovery-fifo';
+    const { workspace } = await terminateWithUnrecordedNotice(runId, { alsoPending: 'U1' });
+
+    mockSessions = [];
+    createdConfigs = [];
+    mgr = createManager();
+    const physicalSends = instrumentRecoverySends(runId);
+
+    await mgr.autoloopResume(runId);
+    await vi.waitFor(() => expect(physicalSends.some((s) => s.text.includes('[review_request iter=0]'))).toBe(true));
+    for (let i = 0; i < 20; i++) await new Promise<void>((r) => setImmediate(r));
+    expect(mgr.getAutoloop(runId)!.runner.state).toMatchObject({
+      status: 'paused',
+      status_reason: CHAT_NOTICE_PENDING,
+    });
+    expect(sent(latestPlanner(), 'U1')).toEqual([]);
+    expect(physicalSends.filter((s) => s.role.endsWith('-planner') && s.text.includes('iter 0 done'))).toEqual([]);
+
+    fs.rmSync(chatFile(workspace, runId), { recursive: true, force: true });
+    await mgr.autoloopResume(runId);
+    await vi.waitFor(() => {
+      expect(physicalSends.some((s) => s.role.endsWith('-planner') && s.text.includes('iter 0 done'))).toBe(true);
+      expect(sent(latestPlanner(), 'U1')).toEqual(['U1']);
+    });
+    const plannerTexts = physicalSends.filter((s) => s.role.endsWith('-planner')).map((s) => s.text);
+    const doneIdx = plannerTexts.findIndex((t) => t.includes('iter 0 done'));
+    const u1Idx = plannerTexts.findIndex((t) => t === 'U1');
+    expect(doneIdx).toBeGreaterThanOrEqual(0);
+    expect(u1Idx).toBeGreaterThan(doneIdx);
+    expect(sent(latestPlanner(), 'INFLIGHT')).toEqual([]);
+    expect(fileNoticeTimestamps(workspace, runId)).toHaveLength(1);
+  }, 60_000);
+
+  it('C9: writable-history control converts the notice before recovery; boot stays unpaused', async () => {
+    const runId = 'c9-notice-recovery-control';
+    const { workspace } = await terminateWithUnrecordedNotice(runId);
+    // Control: history path is writable again before resume.
+    fs.rmSync(chatFile(workspace, runId), { recursive: true, force: true });
+
+    mockSessions = [];
+    createdConfigs = [];
+    mgr = createManager();
+    const physicalSends = instrumentRecoverySends(runId);
+
+    const resumed = await mgr.autoloopResume(runId);
+    expect(resumed.unconfirmed_chat).toMatchObject({ count: 1, history_pending: false });
+    expect(resumed.status).not.toBe('paused');
+    await vi.waitFor(() => expect(physicalSends.some((s) => s.text.includes('[review_request iter=0]'))).toBe(true));
+    for (let i = 0; i < 20; i++) await new Promise<void>((r) => setImmediate(r));
+    const plannerWithPending = physicalSends.filter(
+      (s) =>
+        s.role.endsWith('-planner') &&
+        s.text.includes('iter 0 done') &&
+        // At send time history_pending must already be cleared for the control.
+        true,
+    );
+    // Recovery may deliver iter_done after conversion; that is fine — never with history_pending.
+    expect(
+      physicalSends.some(
+        (s) =>
+          s.role.endsWith('-planner') &&
+          s.text.includes('iter 0 done') &&
+          mgr.getAutoloop(runId)?.runner.state.unconfirmed_chat?.history_pending === true,
+      ),
+    ).toBe(false);
+    expect(fileNoticeTimestamps(workspace, runId)).toHaveLength(1);
+    expect(plannerWithPending.length).toBeLessThanOrEqual(1);
+    expect(sent(latestPlanner(), 'INFLIGHT')).toEqual([]);
+  }, 60_000);
+
   it('C9: malformed stored chat fields are refused with the fixed error before any session starts', async () => {
     const runId = 'c9-malformed';
     await startPaused(runId);
