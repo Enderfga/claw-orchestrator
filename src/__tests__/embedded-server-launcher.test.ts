@@ -394,19 +394,20 @@ describe('POST /autoloop/:id/chat', () => {
     await manager.shutdown();
   });
 
-  it('returns 202 immediately (fire-and-forget) and dispatches autoloopChat in the background', async () => {
+  it('returns 202 immediately (fire-and-forget) after accepting and sends in the background', async () => {
+    // Delivery may take a long time — simulate by never resolving within
+    // the test window. The handler must NOT await it.
+    const slow = new Promise<void>(() => {
+      /* never resolves */
+    });
+    const send = vi.fn().mockReturnValue(slow);
     // Pretend the run is alive in memory so the handler clears its 404 gate.
-    const deliverAccepted = vi.fn().mockReturnValue(
-      new Promise<void>(() => {
-        /* never resolves — delivery must not block 202 */
-      }),
-    );
     vi.spyOn(manager, 'getAutoloop').mockReturnValue({
-      runner: { deliverAccepted } as never,
+      runner: { send } as never,
       dispatcher: {} as never,
     });
-    // Acceptance is synchronous; 202 is returned only after it commits.
-    const accept = vi.spyOn(manager, 'acceptAutoloopChat').mockReturnValue({ message_id: 'msg-hello-1' });
+    const env = { msg_id: 'm_accepted', type: 'chat' } as never;
+    const spy = vi.spyOn(manager, 'acceptAutoloopChat').mockReturnValue(env);
 
     const r = await fetch(`http://127.0.0.1:${port}/autoloop/run-xyz/chat`, {
       method: 'POST',
@@ -414,12 +415,10 @@ describe('POST /autoloop/:id/chat', () => {
       body: JSON.stringify({ text: 'hello' }),
     });
     expect(r.status).toBe(202);
-    const j = (await r.json()) as { ok: boolean; queued: boolean; message_id: string };
-    expect(j.ok).toBe(true);
-    expect(j.queued).toBe(true);
-    expect(j.message_id).toBe('msg-hello-1');
-    expect(accept).toHaveBeenCalledWith('run-xyz', 'hello');
-    expect(deliverAccepted).toHaveBeenCalledWith('msg-hello-1');
+    const j = (await r.json()) as { ok: boolean; queued: boolean };
+    expect(j).toEqual({ ok: true, queued: true });
+    expect(spy).toHaveBeenCalledWith('run-xyz', 'hello');
+    expect(send).toHaveBeenCalledWith(env);
   });
 
   it('returns 400 when text is missing or empty', async () => {

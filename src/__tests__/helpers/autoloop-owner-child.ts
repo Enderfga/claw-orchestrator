@@ -18,8 +18,9 @@
  * paused-input: Planner pause_loop, accept U1 then U2 while paused (public
  * autoloopChat), emit READY only after both acceptances return, then hang.
  * hung-planner-send: first Planner send never settles; emit READY only once
- * that send has started AND the durable dispatched marker is committed, then
- * hang (parent SIGKILL mid-send). Not the same as paused-input.
+ * that send has started AND the store shows inFlightChat for this run (candidate
+ * checkpoint field), then hang (parent SIGKILL mid-send). Not the same as
+ * paused-input. Uses loadRun only — no runner-private recovery APIs.
  */
 import { EventEmitter } from 'node:events';
 import * as fs from 'node:fs';
@@ -33,6 +34,7 @@ import type {
   TurnResult,
 } from '../../types.js';
 import { SessionManager } from '../../session-manager.js';
+import { loadRun } from '../../kernel/store.js';
 
 export const AUTOLOOP_PROOF_RELPATH = 'committed-proof.txt';
 export const AUTOLOOP_PROOF_BYTES = 'committed-coder-bytes\n';
@@ -151,11 +153,26 @@ class OwnerMockSession extends EventEmitter implements ISession {
     _options?: SessionSendOptions,
   ): Promise<TurnResult | { requestId: number; sent: boolean }> {
     if (this.behavior === 'hung-planner-send' && this.role === 'planner') {
-      // markDispatched commits before deliver() awaits this send. Refuse READY
-      // unless the live runner already holds the uncertain/dispatched item.
-      const handle = this.ownerCtx?.mgr.getAutoloop(this.ownerCtx.runId);
-      if (!handle?.runner.hasUncertainItems()) {
-        process.stderr.write('hung-planner-send: READY refused — dispatched marker not committed\n');
+      // Handoff commits inFlightChat before deliver() awaits this send. Poll the
+      // store (public loadRun) until the marker is visible, then READY.
+      const runId = this.ownerCtx?.runId;
+      if (!runId) {
+        process.stderr.write('hung-planner-send: READY refused — missing runId\n');
+        process.exit(1);
+      }
+      const deadline = Date.now() + 10_000;
+      let marked = false;
+      while (Date.now() < deadline) {
+        const rec = loadRun(runId);
+        const data = rec?.nodes?.main?.data as { inFlightChat?: { msg_id?: string } | null } | undefined;
+        if (data?.inFlightChat && typeof data.inFlightChat.msg_id === 'string') {
+          marked = true;
+          break;
+        }
+        await new Promise<void>((r) => setImmediate(r));
+      }
+      if (!marked) {
+        process.stderr.write('hung-planner-send: READY refused — inFlightChat not in store\n');
         process.exit(1);
       }
       process.stdout.write('READY\n');

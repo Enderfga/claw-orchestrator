@@ -3,7 +3,6 @@
  */
 
 import type { AnyAutoloopMessage, PushChannel, PushLevel, SendTimeoutPayload } from './messages.js';
-import type { PendingInputStatus } from './recovery.js';
 
 export type AutoloopStatus = 'planning' | 'running' | 'paused' | 'terminated' | 'crashed';
 
@@ -28,9 +27,10 @@ export interface AutoloopState {
    */
   pending_dispatch?: SendTimeoutPayload | null;
   /**
-   * Text-free durable accepted-chat obligations, only when recovery items exist.
+   * Accepted chat whose delivery could not be confirmed when the run stopped.
+   * Present only once that has happened; never carries message text.
    */
-  pending_input?: PendingInputStatus;
+  unconfirmed_chat?: { count: number; last_at: string; history_pending: boolean };
   /**
    * Phase-error circuit breaker — incremented on every `phase_error` message,
    * cleared on each successful (non-error) `iter_done`. When it reaches
@@ -179,6 +179,8 @@ export interface AgentDispatcher {
   init?(state: AutoloopState): Promise<void>;
   /** Called on terminate — agent must release sessions cleanly. */
   shutdown?(reason: string): Promise<void>;
+  /** Durably append the fixed unconfirmed-chat notice to the chat history. */
+  appendUnconfirmedChatNotice?(ts: string): boolean;
 }
 
 export interface AutoloopConfig extends AutoloopTimeoutConfig {
@@ -186,8 +188,9 @@ export interface AutoloopConfig extends AutoloopTimeoutConfig {
   workspace: string;
   ledger_dir: string;
   /**
-   * Fenced checkpoint refresh resolved at call time. Returns true only when
-   * the staged node snapshot (including recovery) was committed. Absent = false.
+   * Commit the node checkpoint, including the runner's staged chat snapshot.
+   * True only when that snapshot was committed. Absent means chat cannot be
+   * accepted durably.
    */
   persistCheckpoint?: () => boolean;
   /** Optional override; defaults to DEFAULT_PUSH_POLICY. */

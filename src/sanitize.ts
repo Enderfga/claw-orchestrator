@@ -35,6 +35,34 @@ export function sanitizeSecrets(text: string): string {
   return result;
 }
 
+/** Printable ASCII plus the em dash, 1–300 characters, one line. */
+const BOUNDED_REASON = /^[\x20-\x7E\u2014]{1,300}$/;
+
+/**
+ * A short, single-line reason for a log line, or `unknown error`.
+ *
+ * Reads only a string `err` or the data-descriptor `message` of an object: no
+ * getter, `toString` or class name is invoked. A Proxy's descriptor trap can
+ * still run. Text outside the allowed form is replaced, never truncated, and
+ * known secret shapes are redacted.
+ */
+export function boundedErrorReason(err: unknown): string {
+  let text: unknown;
+  try {
+    if (typeof err === 'string') {
+      text = err;
+    } else if ((typeof err === 'object' && err !== null) || typeof err === 'function') {
+      const descriptor = Object.getOwnPropertyDescriptor(err, 'message');
+      if (descriptor && 'value' in descriptor) text = descriptor.value;
+    }
+  } catch {
+    return 'unknown error';
+  }
+  if (typeof text !== 'string' || !BOUNDED_REASON.test(text)) return 'unknown error';
+  const redacted = sanitizeSecrets(text);
+  return BOUNDED_REASON.test(redacted) ? redacted : 'unknown error';
+}
+
 export interface SanitizerOptions {
   extraPatterns?: string[];
   label?: string;

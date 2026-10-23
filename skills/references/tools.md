@@ -649,26 +649,24 @@ timed-out logical dispatch. A live ordinary or activity-lease pause
 (`pending_dispatch` null) resumes with no timeout fields: the call returns once
 the run is active again, the lease re-arms without moving the hard deadline,
 and Planner chat parked during the pause is then delivered once, in order. A
-no-option resume does not clear a pending send timeout. Uncertain accepted chat
-requires `input_disposition` `{ ledger_id, expected_revision, message_ids,
-resolution }` (`abandon` | `confirm_delivered`); both mean do not send again.
-Repeating the identical original body is an idempotent no-op (tombstone
-revision `expected_revision+1`). Do not combine disposition with timeout
-fields. Generic resume while uncertain returns `409 input_disposition_required`.
+no-option resume does not clear a pending send timeout.
 
 ### `autoloop_chat`
 
-Send a message into the Planner conversation. Acceptance is committed to the
-durable recovery ledger before delivery; while paused the call resolves once
-the chat is parked. HTTP `POST /autoloop/<id>/chat` returns
-`202 { ok, queued: true, message_id }` after the same commit, then delivers in
-the background. Refusals use fixed text (409 state / 429 bounds). See
-[autoloop.md](./autoloop.md) for gates, uncertain disposition, and rollback.
+Send a message into the Planner conversation.
 
 | Parameter | Type   | Required |
 | --------- | ------ | -------- |
 | `run_id`  | string | yes      |
 | `text`    | string | yes      |
+
+The message is accepted only once it is stored in the run checkpoint; otherwise
+the call fails with `autoloop chat could not be persisted` (or a stopping,
+restoring or limit error) and nothing is sent. Accepted chat survives
+`autoloop_stop` and owner loss and is delivered once, in order, after a resume.
+A message that was mid-delivery when the run stopped is not resent; it is
+reported through `unconfirmed_chat` in `autoloop_status` and one notice in chat
+history.
 
 ### `autoloop_status`
 

@@ -162,7 +162,7 @@ export interface NodeContext {
   setHandle(handle: unknown): void;
   /**
    * Checkpoint mode payload as the node runs, not only when it finishes.
-   * Returns true only when RunTxn.apply committed the staged snapshot passed in.
+   * True only when the payload was committed.
    */
   publish(data: unknown): boolean;
   /**

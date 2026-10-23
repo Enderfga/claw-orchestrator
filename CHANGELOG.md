@@ -9,25 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Accepted Autoloop chat is durable across stop, cancel, and reconstruction.**
-  Operator chat is fenced into the autoloop node checkpoint before ack; HTTP
-  `POST /autoloop/<id>/chat` returns `202 { ok, queued: true, message_id }` only
-  after that commit. Pending input releases once, in order, on resume. Uncertain
-  input requires an exact `input_disposition` (or the exact timeout resume) and
-  is never auto-replayed. A dispatcher `send_timeout` keeps the item dispatched
-  with its real `dispatch_<sha256hex64>` id (never treated as completion).
-  Genuine `pending_dispatch` restores with the ledger; disposition applies when
-  that control was cleared. Gate/timeout/disposition adopt only after a
-  successful fenced commit; a new pause (including same gate kind) bumps
-  revision while null→null release stays a no-op; ledger mutations refuse to
-  cross `Number.MAX_SAFE_INTEGER`. Envelope `m_*` message ids are checked as
-  bounded lexical forms (base36 segments with an optional signed counter
-  segment), not as exact numeric Date.now()/counter values. Identical original
-  disposition bodies are idempotent no-ops keyed by
-  tombstone revision `expectedRevision+1`. Aggregate retained text is capped at
-  8 MiB UTF-8; background runner failures log one bounded rebuilt reason.
-  Live ordinary / activity-lease pauses resume in place without a timeout
-  increase; a pending send-timeout pause still needs an explicit increase.
+- **A live ordinary or activity-lease autoloop pause resumes in place.**
+  `autoloopResume` with no timeout increase continues a paused live run whose
+  `pending_dispatch` is null: status returns to `planning` or `running`, the
+  activity lease re-arms, and the original hard deadline stays put. The call
+  returns once that transition is done; Planner chat accepted during the pause
+  is then delivered once, in order. A pending send-timeout pause is still a
+  no-op until an explicit timeout increase. The dashboard Resume button is
+  shown for every live paused run, and sends timeout fields only when a
+  dispatch is pending. A background runner task failure after that return is
+  logged once through the SessionManager logger instead of becoming an
+  unhandled rejection.
+- **Accepted autoloop chat survives stop and owner loss.** Chat is accepted
+  only once it is in the run checkpoint, and pending chat is delivered once, in
+  order, after a resume. A message that was mid-delivery when the run stopped
+  is not resent; `unconfirmed_chat` in the status and one chat-history notice
+  report it.
 
 ## [7.12.1] - 2026-10-22
 
