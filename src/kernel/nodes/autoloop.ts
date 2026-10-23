@@ -50,6 +50,13 @@ export interface AutoloopHandle {
   ledgerDir: string;
   /** Called synchronously by `RunKernel.cancel`. */
   abort?(): void;
+  /**
+   * After the initial publish and notice reconciliation, before `ready`.
+   * SessionManager uses this for committed-iteration recovery so it cannot
+   * send before the publisher gate. Failure rejects the start the same way
+   * a refused initial publish does.
+   */
+  afterPublishReconcile?(): Promise<void>;
 }
 
 export interface AutoloopNodeDeps {
@@ -202,6 +209,16 @@ export function makeAutoloopExecutor(deps: AutoloopNodeDeps) {
     // can read it while this process still owns the live handle.
     handle.runner.on('state', publish);
     handle.runner.reconcileRestoredInput?.();
+    try {
+      await handle.afterPublishReconcile?.();
+    } catch (err) {
+      handle.runner.off('state', publish);
+      deps.unregisterPublisher(ctx.runId);
+      handle.runner.stop();
+      await handle.dispatcher.shutdown('start-failed').catch(() => undefined);
+      deps.ready(readyKey, err as Error);
+      return { ok: false, error: (err as Error).message };
+    }
     deps.ready(readyKey, {
       plannerSession: handle.dispatcher.sessionNames.planner,
       state: handle.runner.state,

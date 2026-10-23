@@ -3754,6 +3754,7 @@ export class SessionManager {
     ledgerDir: string;
     pushPolicy: PushPolicy;
     abort: () => void;
+    afterPublishReconcile: () => Promise<void>;
   }> {
     const plannerEngine = validateAutoloopRole('planner', opts.plannerEngine, opts.plannerCustomEngine);
     const coderEngine = validateAutoloopRole('coder', opts.coderEngine, opts.coderCustomEngine);
@@ -3875,7 +3876,6 @@ export class SessionManager {
       // this inside the startup try makes an append failure follow the same
       // cleanup path as any other failed resume.
       opts._commitTimeoutMigration?.();
-      await this._recoverCommittedCoderIteration(opts.workspace, ledgerDir, runId, runner, dispatcher);
     } catch (err) {
       try {
         await dispatcher.shutdown('start-failed', {
@@ -3887,7 +3887,18 @@ export class SessionManager {
       runner.stop();
       throw err;
     }
-    return { runner, dispatcher, ledgerDir, pushPolicy, abort: () => runner.markCancelledByKernel() };
+    // Committed-iteration recovery runs after publisher registration, the
+    // initial-publish check and notice reconciliation (see afterPublishReconcile
+    // in makeAutoloopExecutor) — never inside boot before that gate.
+    return {
+      runner,
+      dispatcher,
+      ledgerDir,
+      pushPolicy,
+      abort: () => runner.markCancelledByKernel(),
+      afterPublishReconcile: () =>
+        this._recoverCommittedCoderIteration(opts.workspace, ledgerDir, runId, runner, dispatcher),
+    };
   }
 
   /**

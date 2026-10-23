@@ -332,6 +332,23 @@ function initGitWorkspace(workspace: string): void {
   execFileSync('git', ['commit', '-m', 'init'], { cwd: workspace });
 }
 
+/** Open committed-iteration ledger + HEAD subject that trigger recovery. */
+function plantCommittedIteration(workspace: string, runId: string, iter = 0): void {
+  const iterDir = path.join(workspace, 'tasks', runId, 'iter', String(iter));
+  fs.mkdirSync(iterDir, { recursive: true });
+  fs.writeFileSync(path.join(iterDir, 'directive.json'), JSON.stringify({ schema_version: 1, iter, goal: 'c9' }));
+  fs.writeFileSync(
+    path.join(iterDir, 'eval_output.json'),
+    JSON.stringify({ schema_version: 1, iter, eval_output: {} }),
+  );
+  fs.writeFileSync(path.join(iterDir, 'coder_summary.txt'), 'c9 committed summary\n');
+  fs.writeFileSync(path.join(iterDir, 'diff.patch'), '');
+  if (!fs.existsSync(path.join(workspace, '.git'))) initGitWorkspace(workspace);
+  execFileSync('git', ['commit', '--allow-empty', '-m', `autoloop/iter-${iter}: c9 recovery fixture`], {
+    cwd: workspace,
+  });
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const kernelOf = (mgr: Manager): any => (mgr as any).kernel;
 const publishersOf = (mgr: Manager): Map<string, () => boolean> =>
@@ -425,6 +442,54 @@ describe('Autoloop pending chat — runner level', () => {
     await vi.waitFor(() => expect(appended).toHaveLength(3));
     expect(appended[2]).toBe(pendingAt);
     expect(runner.state.unconfirmed_chat).toEqual({ count: 3, last_at: pendingAt, history_pending: false });
+  });
+
+  it('count overflow: conversion at MAX_SAFE_INTEGER is refused; checkpoint stays restorable; no resend', () => {
+    let disk: ReturnType<AutoloopRunner['checkpointInput']> | undefined;
+    const { runner, appended, delivered } = makeRunner({
+      persist: () => {
+        disk = structuredClone(runner.checkpointInput());
+        return true;
+      },
+    });
+    const lastAt = '2026-10-23T00:00:00.000Z';
+    const validated = validateStoredInput({
+      pendingChat: [{ msg_id: 'm_pending', iter: 0, ts: lastAt, text: 'KEEP' }],
+      inFlightChat: { msg_id: 'm_inflight', handed_at: lastAt },
+      state: { unconfirmed_chat: { count: Number.MAX_SAFE_INTEGER, last_at: lastAt, history_pending: false } },
+    });
+    runner.loadRestoredInput(validated);
+    // Starting snapshot is valid.
+    expect(() =>
+      validateStoredInput({ ...validated, state: { unconfirmed_chat: validated.unconfirmed } }),
+    ).not.toThrow();
+    runner.reconcileRestoredInput();
+    // Conversion refused: no commit of an unsafe count, marker and pending text kept.
+    expect(disk).toBeUndefined();
+    const snap = runner.checkpointInput();
+    expect(snap.inFlightChat).toEqual({ msg_id: 'm_inflight', handed_at: lastAt });
+    expect(snap.unconfirmed).toEqual({
+      count: Number.MAX_SAFE_INTEGER,
+      last_at: lastAt,
+      history_pending: false,
+    });
+    expect(snap.pendingChat.map((e) => e.text)).toEqual(['KEEP']);
+    expect(Number.isSafeInteger(snap.unconfirmed!.count)).toBe(true);
+    expect(appended).toEqual([]);
+    expect(deliveredChatTexts(delivered)).toEqual([]);
+    // The unchanged checkpoint remains accepted by the restore validator.
+    expect(
+      validateStoredInput({
+        pendingChat: snap.pendingChat,
+        inFlightChat: snap.inFlightChat,
+        state: { unconfirmed_chat: snap.unconfirmed },
+      }).pendingChat.map((e) => e.text),
+    ).toEqual(['KEEP']);
+    // Release must not hand over pending chat while the marker is unresolved.
+    runner.releaseRestoredInput();
+    expect(deliveredChatTexts(delivered)).toEqual([]);
+    expect(runner.state).toMatchObject({ status: 'paused', status_reason: CHAT_NOTICE_PENDING });
+    runner.stop();
   });
 
   it('C12: accept refuses past 1,000 entries without evicting accepted chat', () => {
@@ -1035,6 +1100,97 @@ describe('Autoloop pending chat — manager and HTTP', () => {
     await vi.waitFor(() => expect(storedData(runId).pendingChat).toBeUndefined());
     expect(sent(planner, 'U1')).toEqual(['U1']);
   }, 30_000);
+
+  it('C9: refused publisher with open committed-iteration artifacts sends nothing and keeps U1 pending', async () => {
+    const runId = 'c9-committed-refused';
+    const { workspace } = await startPaused(runId);
+    initGitWorkspace(workspace);
+    await mgr.autoloopChat(runId, 'U1');
+    await mgr.autoloopStop(runId, 'c9-stop');
+    await kernelOf(mgr).wait(runId);
+    await mgr.shutdown();
+    plantCommittedIteration(workspace, runId, 0);
+
+    mockSessions = [];
+    createdConfigs = [];
+    const physicalSends: Array<{ role: string; publisherBound: boolean; text: string }> = [];
+    mgr = createManager();
+    onCreateSession = (config) => {
+      if (config.name?.endsWith('-planner')) supersedeLease(runId);
+    };
+    // Capture every role send and whether the publisher was already bound.
+    const origCreate = (mgr as unknown as { _createSession: (e: string, c: SessionConfig) => ISession })._createSession;
+    (mgr as unknown as { _createSession: (e: string, c: SessionConfig) => ISession })._createSession = (
+      engine,
+      config,
+    ) => {
+      onCreateSession?.(config);
+      const session = origCreate.call(mgr, engine, config) as MockSession;
+      const inner = session.send.bind(session);
+      session.send = async (message, options) => {
+        physicalSends.push({
+          role: config.name ?? 'unknown',
+          publisherBound: publishersOf(mgr).has(runId),
+          text: messageText(message),
+        });
+        return inner(message, options);
+      };
+      return session;
+    };
+
+    await expect(mgr.autoloopResume(runId)).rejects.toThrow(AUTOLOOP_RESTORE_UNPERSISTED);
+    onCreateSession = null;
+    // Drain any fire-and-forget work that must not exist.
+    for (let i = 0; i < 20; i++) await new Promise<void>((r) => setImmediate(r));
+    expect(physicalSends).toEqual([]);
+    expect(mgr.getAutoloop(runId)).toBeUndefined();
+    expect(storedPendingTexts(runId)).toEqual(['U1']);
+  }, 60_000);
+
+  it('C9: successful resume runs committed-iteration recovery once after the publisher binds, then delivers U1', async () => {
+    const runId = 'c9-committed-success';
+    const { workspace } = await startPaused(runId);
+    initGitWorkspace(workspace);
+    await mgr.autoloopChat(runId, 'U1');
+    await mgr.autoloopStop(runId, 'c9-stop');
+    await kernelOf(mgr).wait(runId);
+    await mgr.shutdown();
+    plantCommittedIteration(workspace, runId, 0);
+
+    mockSessions = [];
+    createdConfigs = [];
+    const physicalSends: Array<{ role: string; publisherBound: boolean; text: string }> = [];
+    mgr = createManager();
+    const origCreate = (mgr as unknown as { _createSession: (e: string, c: SessionConfig) => ISession })._createSession;
+    (mgr as unknown as { _createSession: (e: string, c: SessionConfig) => ISession })._createSession = (
+      engine,
+      config,
+    ) => {
+      const session = origCreate.call(mgr, engine, config) as MockSession;
+      const inner = session.send.bind(session);
+      session.send = async (message, options) => {
+        physicalSends.push({
+          role: config.name ?? 'unknown',
+          publisherBound: publishersOf(mgr).has(runId),
+          text: messageText(message),
+        });
+        return inner(message, options);
+      };
+      return session;
+    };
+
+    await mgr.autoloopResume(runId);
+    await vi.waitFor(() => {
+      expect(physicalSends.some((s) => s.text.includes('[review_request iter=0]'))).toBe(true);
+      expect(sent(latestPlanner(), 'U1')).toEqual(['U1']);
+    });
+    const reviews = physicalSends.filter((s) => s.text.includes('[review_request iter=0]'));
+    expect(reviews).toHaveLength(1);
+    expect(reviews[0]!.publisherBound).toBe(true);
+    expect(reviews[0]!.role.endsWith('-reviewer')).toBe(true);
+    expect(sent(latestPlanner(), 'U1')).toEqual(['U1']);
+    await vi.waitFor(() => expect(storedData(runId).pendingChat).toBeUndefined());
+  }, 60_000);
 
   it('C9: malformed stored chat fields are refused with the fixed error before any session starts', async () => {
     const runId = 'c9-malformed';

@@ -884,13 +884,17 @@ export class AutoloopRunner extends EventEmitter {
       const input = this.committedInput;
       const prev = input.unconfirmed;
       if (input.inFlightChat && !prev?.history_pending) {
+        const prevCount = prev?.count ?? 0;
+        // Same as timestamp exhaustion: refuse before commit so the marker and
+        // visible obligation stay, and the checkpoint remains restorable.
+        if (prevCount >= Number.MAX_SAFE_INTEGER) return;
         const prevMillis = prev ? Date.parse(prev.last_at) : Number.NEGATIVE_INFINITY;
         const at = Math.max(Date.now(), prevMillis + 1);
         if (!Number.isFinite(at) || Math.abs(at) > MAX_DATE_MS) return;
         const converted: AutoloopInputSnapshot = {
           pendingChat: input.pendingChat,
           inFlightChat: null,
-          unconfirmed: { count: (prev?.count ?? 0) + 1, last_at: new Date(at).toISOString(), history_pending: true },
+          unconfirmed: { count: prevCount + 1, last_at: new Date(at).toISOString(), history_pending: true },
         };
         if (!this.commitInput(converted)) return;
       }
