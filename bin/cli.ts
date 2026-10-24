@@ -69,6 +69,16 @@ async function api(path: string, method = 'GET', body?: unknown): Promise<Record
 
 // ─── CLI ─────────────────────────────────────────────────────────────────────
 
+/**
+ * Print an API failure the same way every command does, and exit non-zero so a
+ * script can tell: a command that could not reach the server used to exit 0.
+ */
+function fail(r: unknown): void {
+  const error = r && typeof r === 'object' && 'error' in r ? (r as { error?: unknown }).error : r;
+  console.error(`Failed: ${String(error)}`);
+  process.exitCode = 1;
+}
+
 const program = new Command();
 program.name('clawo').description('Claw Orchestrator CLI').version(getCliVersion());
 
@@ -157,12 +167,12 @@ program
 program
   .command('session-start [name]')
   .description(
-    'Start a persistent coding session (Claude Code, Codex, Antigravity, Grok Build, OpenCode, or a custom engine preset)',
+    'Start a persistent coding session (Claude Code, Codex, Antigravity, Grok Build, OpenCode, an ACP agent, or a custom engine preset)',
   )
   .option('-d, --cwd <dir>', 'Working directory')
   .option(
     '-e, --engine <engine>',
-    'Engine: claude (default), codex, codex-app, gemini, agy, cursor, grok, opencode, or custom',
+    'Engine: claude (default), codex, codex-app, gemini, agy, cursor, grok, opencode, acp, or custom',
   )
   .option('-m, --model <model>', 'Model to use')
   .option('--permission-mode <mode>', 'Permission mode', 'acceptEdits')
@@ -192,6 +202,7 @@ program
     '--custom-engine <preset>',
     'With -e custom: the id of a bundled engine preset (see `clawo engines`). Inline configs are not accepted here — that is what presets are for',
   )
+  .option('--acp-agent <preset>', 'With -e acp: the id of a bundled ACP agent preset (see `clawo engines`)')
   .action(async (name, opts) => {
     const body: Record<string, unknown> = { name: name || `session-${Date.now()}` };
     if (opts.cwd) body.cwd = opts.cwd;
@@ -200,6 +211,7 @@ program
     // this command reaches the session through the same HTTP surface that
     // refuses those — see `clawo engines` for what is available.
     if (opts.customEngine) body.customEngine = opts.customEngine;
+    if (opts.acpAgent) body.acpAgent = opts.acpAgent;
     if (opts.model) body.model = opts.model;
     if (opts.permissionMode) body.permissionMode = opts.permissionMode;
     if (opts.effort) body.effort = opts.effort;
@@ -269,18 +281,25 @@ program
     const result = await api('/session/start', 'POST', body);
     if (result.ok) {
       console.log(`Session '${body.name}' started!`);
-      if (result.claudeSessionId) console.log(`Claude Session ID: ${result.claudeSessionId}`);
-    } else console.error(`Failed: ${result.error}`);
+      if (result.claudeSessionId) console.log(`Engine session ID: ${result.claudeSessionId}`);
+    } else fail(result.error);
   });
 
 program
-  .command('session-send <name> <message>')
+  .command('session-send <name> [message]')
   .description('Send a message to a session')
+  .option('--message-file <file>', 'Read the message from a file (for long or dash-leading text)')
   .option('--effort <level>', 'Effort level')
   .option('--plan', 'Plan mode')
   .option('-t, --timeout <ms>', 'Timeout', '300000')
   .option('-s, --stream', 'Collect streaming chunks and include in output')
-  .action(async (name, message, opts) => {
+  .option('--json', 'Print the whole result as JSON')
+  .action(async (name, messageArg, opts) => {
+    const message = opts.messageFile ? fs.readFileSync(opts.messageFile, 'utf-8') : messageArg;
+    if (!message) {
+      fail('give a message, or --message-file');
+      return;
+    }
     const result = await api('/session/send', 'POST', {
       name,
       message,
@@ -289,12 +308,15 @@ program
       timeout: parseInt(opts.timeout),
       stream: opts.stream || undefined,
     });
-    if (result.ok) {
+    if (opts.json) {
+      console.log(JSON.stringify(result));
+      if (!result.ok) process.exitCode = 1;
+    } else if (result.ok) {
       console.log(result.output);
       if (opts.stream && Array.isArray(result.chunks) && result.chunks.length > 0) {
         console.log(`\n[${result.chunks.length} streaming chunks collected]`);
       }
-    } else console.error(`Failed: ${result.error}`);
+    } else fail(result.error);
   });
 
 program
@@ -303,7 +325,7 @@ program
   .action(async (name) => {
     const r = await api('/session/stop', 'POST', { name });
     if (r.ok) console.log(`Session '${name}' stopped.`);
-    else console.error(`Failed: ${r.error}`);
+    else fail(r.error);
   });
 
 program
@@ -312,7 +334,7 @@ program
   .action(async () => {
     const r = await api('/session/list');
     if (!r.ok) {
-      console.error(`Failed: ${r.error}`);
+      fail(r.error);
       return;
     }
     const sessions = r.sessions as Array<{ name: string; model?: string; cwd: string }>;
@@ -326,10 +348,16 @@ program
 program
   .command('session-status <name>')
   .description('Get session status')
-  .action(async (name) => {
+  .option('--json', 'Print the whole status as JSON')
+  .action(async (name, opts) => {
     const r = await api('/session/status', 'POST', { name });
+    if (opts.json) {
+      console.log(JSON.stringify(r));
+      if (!r.ok) process.exitCode = 1;
+      return;
+    }
     if (!r.ok) {
-      console.error(`Failed: ${r.error}`);
+      fail(r.error);
       return;
     }
     const s = r.stats as Record<string, unknown>;
@@ -338,11 +366,6 @@ program
     console.log(`  Tokens: ${s.tokensIn} in / ${s.tokensOut} out`);
     console.log(`  Uptime: ${s.uptime}s`);
   });
-
-/** Print an API failure the same way every command does. */
-function fail(r: { error?: string }): void {
-  console.error(`Failed: ${r.error}`);
-}
 
 program
   .command('engines')
@@ -370,7 +393,11 @@ program
         `    verified by ${p.provenance.maintainer} against ${p.provenance.verifiedAgainst} on ${p.provenance.verifiedOn}`,
       );
       if (p.provenance.smokeUrl) console.log(`    smoke: ${p.provenance.smokeUrl}`);
-      console.log(`    use:   clawo session-start my-session -e custom --custom-engine ${p.id}`);
+      console.log(
+        p.acp
+          ? `    use:   clawo session-start my-session -e acp --acp-agent ${p.id}`
+          : `    use:   clawo session-start my-session -e custom --custom-engine ${p.id}`,
+      );
       console.log('');
     }
   });
@@ -395,7 +422,7 @@ program
     if (opts.refuted) params.set('verified', 'false');
     const r = await api(`/runs?${params.toString()}`);
     if (!r.ok) {
-      console.error(`Failed: ${r.error}`);
+      fail(r.error);
       return;
     }
     if (opts.json) {
@@ -413,7 +440,7 @@ program
   .action(async (name, pattern, opts) => {
     const r = await api('/session/grep', 'POST', { name, pattern, limit: parseInt(opts.limit) });
     if (!r.ok) {
-      console.error(`Failed: ${r.error}`);
+      fail(r.error);
       return;
     }
     console.log(`Found ${r.count} match(es)`);
@@ -427,7 +454,7 @@ program
   .action(async (name, opts) => {
     const r = await api('/session/compact', 'POST', { name, summary: opts.summary });
     if (r.ok) console.log('Compacted.');
-    else console.error(`Failed: ${r.error}`);
+    else fail(r.error);
   });
 
 // Agent management
@@ -439,7 +466,7 @@ program
     const q = opts.cwd ? `?cwd=${encodeURIComponent(opts.cwd)}` : '';
     const r = await api(`/agents${q}`);
     if (!r.ok) {
-      console.error(`Failed: ${r.error}`);
+      fail(r.error);
       return;
     }
     const agents = r.agents as Array<{ name: string; description: string }>;
@@ -464,7 +491,7 @@ program
       prompt: opts.prompt,
     });
     if (r.ok) console.log(`Agent '${name}' created at: ${r.path}`);
-    else console.error(`Failed: ${r.error}`);
+    else fail(r.error);
   });
 
 // Skills
@@ -476,7 +503,7 @@ program
     const q = opts.cwd ? `?cwd=${encodeURIComponent(opts.cwd)}` : '';
     const r = await api(`/skills${q}`);
     if (!r.ok) {
-      console.error(`Failed: ${r.error}`);
+      fail(r.error);
       return;
     }
     const skills = r.skills as Array<{ name: string; description: string }>;
@@ -503,7 +530,7 @@ program
       trigger: opts.trigger,
     });
     if (r.ok) console.log(`Skill '${name}' created at: ${r.path}`);
-    else console.error(`Failed: ${r.error}`);
+    else fail(r.error);
   });
 
 // Rules
@@ -515,7 +542,7 @@ program
     const q = opts.cwd ? `?cwd=${encodeURIComponent(opts.cwd)}` : '';
     const r = await api(`/rules${q}`);
     if (!r.ok) {
-      console.error(`Failed: ${r.error}`);
+      fail(r.error);
       return;
     }
     const rules = r.rules as Array<{ name: string; description: string; paths: string; condition: string }>;
@@ -550,7 +577,7 @@ program
       condition: opts.condition,
     });
     if (r.ok) console.log(`Rule '${name}' created at: ${r.path}`);
-    else console.error(`Failed: ${r.error}`);
+    else fail(r.error);
   });
 
 // Agent teams
@@ -560,7 +587,7 @@ program
   .action(async (name) => {
     const r = await api('/session/team-list', 'POST', { name });
     if (r.ok) console.log(r.response || 'No team info');
-    else console.error(`Failed: ${r.error}`);
+    else fail(r.error);
   });
 
 program
@@ -569,7 +596,7 @@ program
   .action(async (name, teammate, message) => {
     const r = await api('/session/team-send', 'POST', { name, teammate, message });
     if (r.ok) console.log(r.output || 'Sent');
-    else console.error(`Failed: ${r.error}`);
+    else fail(r.error);
   });
 
 // ─── workflow / verify ──────────────────────────────────────────────────────

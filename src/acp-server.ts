@@ -194,6 +194,7 @@ const ENGINE_LABELS: Record<string, string> = {
   cursor: 'Cursor',
   opencode: 'OpenCode',
   custom: 'Custom',
+  acp: 'ACP agent',
 };
 
 /**
@@ -207,9 +208,10 @@ const ENGINE_LABELS: Record<string, string> = {
  * `opencode` is absent for a different reason: its models are open-ended
  * `provider/model` strings passed straight through, so there is nothing in the
  * registry to enumerate. An opencode session is reachable by naming the model
- * at session start, just not by picking it from this list.
+ * at session start, just not by picking it from this list. `acp` is hidden for
+ * the same reason: an ACP agent picks its own model.
  */
-const HIDDEN_ENGINES = new Set<string>(['gemini', 'cursor']);
+const HIDDEN_ENGINES = new Set<string>(['gemini', 'cursor', 'acp']);
 
 /**
  * The cross-engine model selector, grouped by engine.

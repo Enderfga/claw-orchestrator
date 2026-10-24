@@ -316,6 +316,26 @@ await manager.startSession({
 });
 ```
 
+### ACP agents (`engine: 'acp'`)
+
+Drives any agent that serves the [Agent Client Protocol](https://agentclientprotocol.com) on stdio, with no per-agent code. Run through it so far: Kimi Code 2.3.1 (`kimi acp`), DeepSeek's dsh 0.2.1-rc.2 (`dsh --profile acp`) and OpenCode 1.19.4 (`opencode acp`). This is the client side of the protocol; [acp.md](./acp.md) is the other side, where the orchestrator is the agent.
+
+- `acpAgent` names the agent: a bundled preset id (`kimi-code`, `dsh`; `clawo engines` lists them), or, from a local caller only, an inline `{ name, command, commandEnv?, args?, env?, contextWindow?, pricing? }`. Over HTTP, which includes the `clawo` CLI, only a preset id is accepted, as for `customEngine`.
+- One agent process per session; each send is one `session/prompt` on one ACP session, so the conversation carries over between sends. `initialize` advertises no `fs` or `terminal` capability: the agent reads, writes and runs commands with its own tools.
+- A turn succeeds when the agent ends it with `stopReason: "end_turn"`; any other stop reason (`refusal`, `max_tokens`, `cancelled`, …) fails it. A turn that runs past its timeout is cancelled with `session/cancel`. An agent that exits mid-turn fails the turn and the session.
+- `session/request_permission` is answered at once from `permissionMode`: `bypassPermissions`, `acceptEdits`, `auto` and `dontAsk` pick an allow option, the others a reject option. Nothing waits on a person.
+- Resume: the agent's session id is the resume id (`stats.acpSessionId`). A resumed session reattaches it with `session/resume`, or `session/load` when that is all the agent offers; an agent with neither fails the start rather than opening a new conversation.
+- Usage and cost are whatever the agent reports (`PromptResponse.usage`, `usage_update`). With `pricing` set and no reported cost, the cost is estimated from the reported tokens. Kimi Code 2.3.1 and dsh 0.2.1-rc.2 report neither, so their sessions show 0 tokens and $0. OpenCode reports tokens.
+- The model and credentials are the agent's own configuration, set in its environment:
+  - Kimi Code: `KIMI_MODEL_NAME`, `KIMI_MODEL_API_KEY`, `KIMI_MODEL_BASE_URL`, `KIMI_MODEL_MAX_CONTEXT_SIZE`, `KIMI_MODEL_CAPABILITIES`, or a `kimi` login. `KIMI_BIN` overrides the command.
+  - dsh: `DEEPSEEK_API_KEY` (and `DEEPSEEK_BASE_URL`); its profile chooses the model. `DSH_BIN` overrides the command.
+- `launcher` applies as for every engine.
+
+```bash
+clawo session-start kimi -e acp --acp-agent kimi-code --permission-mode bypassPermissions -d ./project
+clawo session-send kimi "Fix the failing test in tests/test_io.py"
+```
+
 ### Community engine presets
 
 `customEngine` accepts either an inline `CustomEngineConfig` or the id of a preset

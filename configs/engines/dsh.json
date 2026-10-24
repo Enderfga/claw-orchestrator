@@ -1,0 +1,17 @@
+{
+  "id": "dsh",
+  "tier": "community",
+  "description": "DeepSeek Harness (`dsh`), served over the Agent Client Protocol (`dsh --profile acp`). Start with engine 'acp'.",
+  "provenance": {
+    "maintainer": "Enderfga",
+    "verifiedAgainst": "0.2.1-rc.2",
+    "verifiedOn": "2026-10-24",
+    "sourceUrl": "https://www.npmjs.com/package/@deepseek-ai/dsh"
+  },
+  "acp": {
+    "name": "dsh",
+    "command": "dsh",
+    "commandEnv": "DSH_BIN",
+    "args": ["--profile", "acp"]
+  }
+}

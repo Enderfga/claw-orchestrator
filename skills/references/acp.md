@@ -8,6 +8,10 @@ spawns an arbitrary command as a subagent.
 The model selector spans several engines, and session modes select the
 orchestration shape: a single agent, a council, a planning pass, or a review.
 
+The other direction, the orchestrator as an ACP **client** driving an agent such
+as `kimi acp` or `dsh --profile acp`, is the `acp` engine: see
+[multi-engine.md](./multi-engine.md#acp-agents-engine-acp).
+
 ```bash
 clawo acp          # or the dedicated binary:
 clawo-acp

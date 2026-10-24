@@ -101,7 +101,7 @@ const result = await manager.sendMessage('fix-tests', 'Fix the failing tests');
 | Capability                  | What it does                                                                                                                                                                                                                                                                                                                                                                                                                              | Reference                                                  |
 | --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
 | **Persistent Sessions**     | Long-lived coding agents kept alive across requests, with full context, tool, model, and worktree control.                                                                                                                                                                                                                                                                                                                                | [`sessions.md`](./skills/references/sessions.md)           |
-| **Multi-Engine Runtime**    | One interface over Claude Code, Codex, Antigravity (agy), Grok Build, OpenCode, and arbitrary custom CLIs.                                                                                                                                                                                                                                                                                                                                | [`multi-engine.md`](./skills/references/multi-engine.md)   |
+| **Multi-Engine Runtime**    | One interface over Claude Code, Codex, Antigravity (agy), Grok Build, OpenCode, any Agent Client Protocol agent (Kimi Code, dsh), and arbitrary custom CLIs.                                                                                                                                                                                                                                                                              | [`multi-engine.md`](./skills/references/multi-engine.md)   |
 | **Session Handoff**         | Move a live conversation to another engine or model — a stuck Claude session into Codex, an expensive model into a cheaper one. The new session picks up where the old one stopped, in the same workspace; the old one keeps running.                                                                                                                                                                                                     | [`sessions.md`](./skills/references/sessions.md)           |
 | **Multi-Agent Council**     | Parallel agents in isolated git worktrees, voting on consensus until they agree.                                                                                                                                                                                                                                                                                                                                                          | [`council.md`](./skills/references/council.md)             |
 | **Fan-out**                 | Run one task across N engine/model agents in parallel and collect their answers, with an optional synthesis pass — the cross-engine best-of-N / diverse-perspective primitive (no rounds or worktrees).                                                                                                                                                                                                                                   | [`tools.md`](./skills/references/tools.md)                 |
@@ -167,16 +167,17 @@ block, and the cancellation and permission limitations are in
 
 ## Engine Compatibility
 
-| Engine      | CLI        | Tested Version |
-| ----------- | ---------- | -------------- |
-| Claude Code | `claude`   | 2.1.307        |
-| Codex       | `codex`    | 0.164.0        |
-| Antigravity | `agy`      | 1.4.4          |
-| Grok Build  | `grok`     | 1.0.67         |
-| OpenCode    | `opencode` | 1.19.3         |
-| Custom CLI  | any        | —              |
+| Engine      | CLI        | Tested Version                  |
+| ----------- | ---------- | ------------------------------- |
+| Claude Code | `claude`   | 2.1.310                         |
+| Codex       | `codex`    | 0.164.0                         |
+| Antigravity | `agy`      | 1.4.6                           |
+| Grok Build  | `grok`     | 1.0.70                          |
+| OpenCode    | `opencode` | 1.19.4                          |
+| ACP agent   | any        | Kimi Code 2.3.1, dsh 0.2.1-rc.2 |
+| Custom CLI  | any        | —                               |
 
-Any coding CLI that runs as a subprocess can be wired up as a custom engine — see [`multi-engine.md`](./skills/references/multi-engine.md#custom-engine-engine-custom).
+An agent that serves the Agent Client Protocol on stdio runs as `engine: 'acp'` — see [`multi-engine.md`](./skills/references/multi-engine.md#acp-agents-engine-acp). Any other coding CLI that runs as a subprocess can be wired up as a custom engine — see [`multi-engine.md`](./skills/references/multi-engine.md#custom-engine-engine-custom).
 
 ---
 

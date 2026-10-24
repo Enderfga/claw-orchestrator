@@ -47,3 +47,23 @@ Contribution steps, the smoke script, and the full field reference are in
 
 `engine.bin` must be a command name, not an absolute path — one machine's layout
 is not a preset. Use `binEnv` so people who installed it elsewhere can point at it.
+
+## ACP agents
+
+A preset can name an agent that serves the Agent Client Protocol on stdio instead
+of a `CustomEngineConfig`: it carries `acp` in place of `engine`, and is started
+with `engine: "acp"` (`clawo session-start <name> -e acp --acp-agent <id>`). No
+protocol mapping is needed, since every ACP agent speaks the same protocol.
+
+```json
+{
+  "id": "kimi-code",
+  "tier": "community",
+  "description": "…",
+  "provenance": { "maintainer": "…", "verifiedAgainst": "2.3.1", "verifiedOn": "2026-10-24" },
+  "acp": { "name": "kimi-code", "command": "kimi", "commandEnv": "KIMI_BIN", "args": ["acp"] }
+}
+```
+
+`acp.command` follows the same rule as `engine.bin`: a command name, with
+`commandEnv` for an install elsewhere.

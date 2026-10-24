@@ -187,6 +187,7 @@ import { PersistentGrokSession } from './persistent-grok-session.js';
 import { PersistentOpencodeSession } from './persistent-opencode-session.js';
 import { PersistentAgySession } from './persistent-agy-session.js';
 import { PersistentCustomSession } from './persistent-custom-session.js';
+import { PersistentAcpSession } from './persistent-acp-session.js';
 import { resolveCustomEngine } from './engine-presets.js';
 import {
   type SessionConfig,
@@ -3123,6 +3124,10 @@ export class SessionManager {
     if (engine === 'codex-app') {
       return (session as { codexThreadId?: string }).codexThreadId;
     }
+    // Likewise an ACP session's `sessionId` is ours; the agent resumes its own.
+    if (engine === 'acp') {
+      return (session as { agentSessionId?: string }).agentSessionId;
+    }
     return session.sessionId;
   }
 
@@ -3131,6 +3136,7 @@ export class SessionManager {
     if (engine === 'codex') return id && !/^codex-\d+-/.test(id) ? id : undefined;
     if (engine === 'grok') return id && !/^grok-\d+-/.test(id) ? id : undefined;
     if (engine === 'codex-app') return id && !id.startsWith('codex-app-') ? id : undefined;
+    if (engine === 'acp') return id && !id.startsWith('acp-') ? id : undefined;
     return id;
   }
 
@@ -3172,6 +3178,8 @@ export class SessionManager {
       case 'custom':
         if (!config.customEngine) throw new Error('customEngine config is required for engine type "custom"');
         return new PersistentCustomSession(config);
+      case 'acp':
+        return new PersistentAcpSession(config);
       case 'claude':
       default:
         return new PersistentClaudeSession(config, this.pluginConfig.claudeBin);

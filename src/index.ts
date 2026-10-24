@@ -114,6 +114,25 @@ function normalizeToolResult(result: unknown): AgentToolResult {
   };
 }
 
+const ACP_AGENT_SCHEMA = {
+  description:
+    'The ACP agent (required when engine is "acp"): the id of a bundled preset (`clawo engines`), or, from a local caller only, an inline config.',
+  oneOf: [
+    { type: 'string', description: 'Preset id, e.g. "kimi-code"' },
+    {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Display name' },
+        command: { type: 'string', description: 'Command that serves ACP on stdio' },
+        commandEnv: { type: 'string', description: 'Env var that overrides command' },
+        args: { type: 'array', items: { type: 'string' }, description: 'Arguments, e.g. ["acp"]' },
+        env: { type: 'object', additionalProperties: { type: 'string' } },
+      },
+      required: ['name', 'command'],
+    },
+  ],
+};
+
 const CUSTOM_ENGINE_SCHEMA = {
   type: 'object',
   description: 'Custom engine config (required when the corresponding engine is "custom").',
@@ -262,7 +281,7 @@ const plugin = {
     registerTool({
       name: 'session_start',
       description:
-        'Start a persistent coding session. Engines: claude (default) for the Claude Code CLI, codex for the OpenAI Codex CLI, agy for the Google Antigravity CLI, grok for the xAI Grok Build CLI, opencode for the sst/opencode CLI, or custom for any user-configured coding agent CLI.',
+        'Start a persistent coding session. Engines: claude (default) for the Claude Code CLI, codex for the OpenAI Codex CLI, agy for the Google Antigravity CLI, grok for the xAI Grok Build CLI, opencode for the sst/opencode CLI, acp for any Agent Client Protocol agent (Kimi Code, dsh, OpenCode, Claude Code via an ACP adapter), or custom for any user-configured coding agent CLI.',
       parameters: {
         type: 'object',
         properties: {
@@ -272,7 +291,7 @@ const plugin = {
             type: 'string',
             enum: ENGINE_TYPES,
             description:
-              'Engine to use (default: claude). codex = `codex exec` per send (no /goal). codex-app = long-running `codex app-server` with /goal support. agy = Google Antigravity CLI (Gemini CLI successor; plain-text output, tokens estimated, conversation resume handled automatically). opencode = sst/opencode CLI (provider-agnostic; pass model as `provider/model`). Use "custom" with customEngine config for any CLI.',
+              'Engine to use (default: claude). codex = `codex exec` per send (no /goal). codex-app = long-running `codex app-server` with /goal support. agy = Google Antigravity CLI (Gemini CLI successor; plain-text output, tokens estimated, conversation resume handled automatically). opencode = sst/opencode CLI (provider-agnostic; pass model as `provider/model`). acp = any Agent Client Protocol agent, chosen with acpAgent. Use "custom" with customEngine config for any CLI.',
           },
           model: { type: 'string', description: 'Model to use (opus, sonnet, haiku, gpt-5.5, agy-pro, etc.)' },
           permissionMode: {
@@ -425,6 +444,7 @@ const plugin = {
               'AWS Bedrock service tier (sets ANTHROPIC_BEDROCK_SERVICE_TIER). Only effective when routing through Bedrock.',
           },
           customEngine: CUSTOM_ENGINE_SCHEMA,
+          acpAgent: ACP_AGENT_SCHEMA,
           resumeSessionId: {
             type: 'string',
             description:

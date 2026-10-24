@@ -34,7 +34,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import type { CustomEngineConfig } from './types.js';
+import type { AcpAgentConfig, CustomEngineConfig } from './types.js';
 
 /** Who attests that a preset works, against what, and when. */
 export interface EnginePresetProvenance {
@@ -56,8 +56,10 @@ export interface EnginePreset {
   tier: 'community';
   description: string;
   provenance: EnginePresetProvenance;
-  /** The custom-engine configuration this preset expands to. */
-  engine: CustomEngineConfig;
+  /** The custom-engine configuration this preset expands to (`engine: 'custom'`). */
+  engine?: CustomEngineConfig;
+  /** Or: the ACP agent this preset starts (`engine: 'acp'`). Exactly one of the two. */
+  acp?: AcpAgentConfig;
 }
 
 const ID_RE = /^[a-z0-9][a-z0-9-]{1,38}[a-z0-9]$/;
@@ -98,12 +100,28 @@ export function validatePreset(raw: unknown, source: string): EnginePreset {
     fail('`provenance.verifiedOn` must be an ISO date (YYYY-MM-DD)');
   }
 
+  if ((p.engine === undefined) === (p.acp === undefined)) fail('exactly one of `engine` and `acp` is required');
+
+  // An absolute path is one machine's layout, not a preset. `binEnv` /
+  // `commandEnv` is how a preset stays portable across the people who install
+  // the engine elsewhere.
+  if (p.acp !== undefined) {
+    const acp = p.acp as Record<string, unknown>;
+    if (!acp || typeof acp !== 'object') fail('`acp` must be an object');
+    if (typeof acp.name !== 'string' || !acp.name.trim()) fail('`acp.name` is required');
+    if (typeof acp.command !== 'string' || !acp.command.trim()) fail('`acp.command` is required');
+    if (path.isAbsolute(acp.command as string))
+      fail('`acp.command` must be a command name, not an absolute path — use `commandEnv`');
+    if (acp.args !== undefined && (!Array.isArray(acp.args) || acp.args.some((a) => typeof a !== 'string'))) {
+      fail('`acp.args` must be an array of strings');
+    }
+    return p as unknown as EnginePreset;
+  }
+
   const eng = p.engine as Record<string, unknown> | undefined;
-  if (!eng || typeof eng !== 'object') fail('`engine` is required');
+  if (!eng || typeof eng !== 'object') fail('`engine` must be an object');
   if (typeof eng!.name !== 'string' || !eng!.name.trim()) fail('`engine.name` is required');
   if (typeof eng!.bin !== 'string' || !eng!.bin.trim()) fail('`engine.bin` is required');
-  // An absolute path is one machine's layout, not a preset. `binEnv` is how a
-  // preset stays portable across the people who install the engine elsewhere.
   if (path.isAbsolute(eng!.bin as string))
     fail('`engine.bin` must be a command name, not an absolute path — use `binEnv`');
   if (!eng!.args || typeof eng!.args !== 'object') fail('`engine.args` is required (may be empty)');
@@ -156,12 +174,24 @@ export function listEnginePresets(): EnginePreset[] {
  */
 export function resolveCustomEngine(value: CustomEngineConfig | string | undefined): CustomEngineConfig | undefined {
   if (value === undefined || typeof value === 'object') return value;
-  const preset = loadEnginePresets().get(value);
+  const preset = findPreset(value);
+  if (!preset.engine) throw new Error(`Engine preset '${value}' is an ACP agent: start it with engine 'acp'.`);
+  return preset.engine;
+}
+
+/** Expand an `acpAgent` given as a preset name, like resolveCustomEngine. */
+export function resolveAcpAgent(value: AcpAgentConfig | string | undefined): AcpAgentConfig | undefined {
+  if (value === undefined || typeof value === 'object') return value;
+  const preset = findPreset(value);
+  if (!preset.acp) throw new Error(`Engine preset '${value}' is a custom engine: start it with engine 'custom'.`);
+  return preset.acp;
+}
+
+function findPreset(id: string): EnginePreset {
+  const preset = loadEnginePresets().get(id);
   if (!preset) {
     const known = [...loadEnginePresets().keys()];
-    throw new Error(
-      `Unknown engine preset '${value}'. Bundled presets: ${known.length ? known.join(', ') : '(none)'}.`,
-    );
+    throw new Error(`Unknown engine preset '${id}'. Bundled presets: ${known.length ? known.join(', ') : '(none)'}.`);
   }
-  return preset.engine;
+  return preset;
 }

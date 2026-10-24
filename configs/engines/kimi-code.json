@@ -1,0 +1,17 @@
+{
+  "id": "kimi-code",
+  "tier": "community",
+  "description": "Moonshot AI's Kimi Code CLI, served over the Agent Client Protocol (`kimi acp`). Start with engine 'acp'.",
+  "provenance": {
+    "maintainer": "Enderfga",
+    "verifiedAgainst": "2.3.1",
+    "verifiedOn": "2026-10-24",
+    "sourceUrl": "https://www.kimi.com/code/docs/en/kimi-code-cli/reference/kimi-acp"
+  },
+  "acp": {
+    "name": "kimi-code",
+    "command": "kimi",
+    "commandEnv": "KIMI_BIN",
+    "args": ["acp"]
+  }
+}

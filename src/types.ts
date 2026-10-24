@@ -53,6 +53,7 @@ export const ENGINE_TYPES = [
   'grok',
   'opencode',
   'custom',
+  'acp',
 ] as const;
 export type EngineType = (typeof ENGINE_TYPES)[number];
 
@@ -114,6 +115,7 @@ export function engineHasNativeConversation(
     case 'opencode':
     case 'cursor':
     case 'grok':
+    case 'acp':
       return true;
     case 'custom':
       // A persistent custom engine is a long-running stdin/stdout process, so it
@@ -244,6 +246,29 @@ export interface CustomEngineConfig {
    * Applied as global replacements with '***'.
    */
   sanitizePatterns?: string[];
+}
+
+// ─── ACP Agent Config ───────────────────────────────────────────────────────
+//
+// An agent that speaks the Agent Client Protocol on stdio (`kimi acp`,
+// `opencode acp`, a Claude Code ACP adapter, …). The protocol is the same for
+// all of them, so the config only says how to start the process.
+
+export interface AcpAgentConfig {
+  /** Display name (logs, session ids). */
+  name: string;
+  /** Command name or path that serves ACP on stdio, e.g. 'kimi'. */
+  command: string;
+  /** Environment variable that overrides `command` at runtime, e.g. 'KIMI_BIN'. */
+  commandEnv?: string;
+  /** Arguments after the command, e.g. ['acp']. */
+  args?: string[];
+  /** Extra environment for the process. */
+  env?: Record<string, string>;
+  /** Context window in tokens, when the agent does not report one. */
+  contextWindow?: number;
+  /** Price per million tokens, used only when the agent reports no cost. */
+  pricing?: { input: number; output: number; cached?: number };
 }
 
 // ─── Session Config ──────────────────────────────────────────────────────────
@@ -468,6 +493,12 @@ export interface SessionConfig {
    * `src/engine-presets.ts` for what a preset promises and what it does not.
    */
   customEngine?: CustomEngineConfig | string;
+  /**
+   * The agent to run — required when engine is 'acp'. An inline config, or the
+   * id of a bundled preset from `configs/engines/` (the only form accepted over
+   * HTTP, as for `customEngine`).
+   */
+  acpAgent?: AcpAgentConfig | string;
 }
 
 // ─── Session Stats ───────────────────────────────────────────────────────────
@@ -543,6 +574,8 @@ export interface SessionStats {
   opencodeSessionId?: string;
   /** Grok Build session ID captured from the turn's JSON result. Reused via `--resume` for multi-turn context. */
   grokSessionId?: string;
+  /** ACP session id from `session/new`; a later session loads it with `session/load` or `session/resume`. */
+  acpSessionId?: string;
   /**
    * True when the most recent turn's token counts came from estimateTokens()
    * because the engine reported no usage. Cost derived from those counts is an

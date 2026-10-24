@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [7.14.0] - 2026-10-25
+
+### Added
+
+- **`acp` engine: any Agent Client Protocol agent as a session.** `engine: "acp"` with
+  `acpAgent` (a preset id, or an inline `{ name, command, args, env }` from a local caller)
+  starts the agent on stdio and runs each send as one `session/prompt` on one ACP session.
+  Permission requests are answered from `permissionMode`; the agent's session id is the
+  resume id (`session/resume` or `session/load`); a stop reason other than `end_turn` fails
+  the turn. Bundled presets `kimi-code` (`kimi acp`, Kimi Code 2.3.1) and `dsh`
+  (`dsh --profile acp`, dsh 0.2.1-rc.2). Over HTTP, including the CLI, only a preset id is
+  accepted. `clawo session-start -e acp --acp-agent <id>`.
+- **`clawo session-send --json` / `--message-file` and `clawo session-status --json`,** so a
+  script can drive a session: the whole result or status as one JSON line, and a message read
+  from a file.
+
+### Fixed
+
+- **CLI commands that fail exit with status 1.** A command whose request failed, including
+  one that could not reach the server, printed `Failed: …` and still exited 0.
+
+### Changed
+
+- Tested with Claude Code 2.1.310, Antigravity 1.4.6, Grok Build 1.0.70 and OpenCode 1.19.4.
+
 ## [7.13.0] - 2026-10-24
 
 ### Added

@@ -73,7 +73,9 @@ function autoloopErrorStatus(error: unknown): number {
 // so `/session/start` handed the object straight to `startSession()`, which
 // dispatches it to `PersistentCustomSession` and spawns `bin`. A per-route
 // guard is only ever as good as the memory of whoever adds the next route.
-const CUSTOM_ENGINE_KEY = /custom_?engines?$/i;
+// `acpAgent` is the same thing for the `acp` engine: an inline config names the
+// command to run.
+const CUSTOM_ENGINE_KEY = /(custom_?engines?|acp_?agents?)$/i;
 const MAX_SCAN_DEPTH = 12;
 
 /**
@@ -123,8 +125,13 @@ function findCustomEngineKey(value: unknown, depth = 0, trail = ''): string | nu
  */
 function isInlineCustomEngine(value: unknown): boolean {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
-  const cfg = value as { bin?: unknown; binEnv?: unknown };
-  return typeof cfg.bin === 'string' || typeof cfg.binEnv === 'string';
+  const cfg = value as { bin?: unknown; binEnv?: unknown; command?: unknown; commandEnv?: unknown };
+  return (
+    typeof cfg.bin === 'string' ||
+    typeof cfg.binEnv === 'string' ||
+    typeof cfg.command === 'string' ||
+    typeof cfg.commandEnv === 'string'
+  );
 }
 
 function rejectCustomEngineOverHttp(body: unknown): string | null {
