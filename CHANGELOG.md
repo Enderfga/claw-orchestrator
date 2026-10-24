@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`fanout_start` agents declare `permissionMode` and `sandboxMode`.** Same enums as
+  `session_start`. `permissionMode` uses each engine's own permission handling as in
+  `session_start`; workers that must not write should set `sandboxMode` to `read-only`.
+  Per-engine sandbox behavior matches `session_start`. Synthesis is unchanged and is
+  not constrained by these worker fields.
+
 ## [7.15.0] - 2026-10-26
 
 ### Added
