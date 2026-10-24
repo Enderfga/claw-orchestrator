@@ -1617,10 +1617,12 @@ describe('Autoloop pending chat — manager and HTTP', () => {
     handle.runner.emit('error', new Error('Planner exited with code 1'));
     handle.runner.emit('error', new Error('\u001b[31mred\u001b[0m'));
     handle.runner.emit('error', 'token=abc Bearer secret.value');
+    handle.runner.emit('error', new Error('会话 planner 不存在\nBearer abc.def'));
     expect(errors).toEqual([
       `[autoloop/${runId}] background runner task failed: Planner exited with code 1`,
       `[autoloop/${runId}] background runner task failed: unknown error`,
       `[autoloop/${runId}] background runner task failed: token=abc Bearer ***`,
+      `[autoloop/${runId}] background runner task failed: 会话 planner 不存在 Bearer ***`,
     ]);
 
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -1629,7 +1631,7 @@ describe('Autoloop pending chat — manager and HTTP', () => {
       rejections.push(reason);
     };
     process.on('unhandledRejection', onUnhandled);
-    const send = vi.spyOn(handle.runner, 'send').mockRejectedValue(new Error('line one\nline two'));
+    const send = vi.spyOn(handle.runner, 'send').mockRejectedValue(new Error('line one\nBearer abc.def'));
     try {
       await withServer(mgr, async (port, token) => {
         const r = await fetch(`http://127.0.0.1:${port}/autoloop/${runId}/chat`, {
@@ -1642,11 +1644,13 @@ describe('Autoloop pending chat — manager and HTTP', () => {
         await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(1));
         await vi.waitFor(() =>
           expect(warn.mock.calls.filter((c) => String(c[0]).includes('chat dispatch failed'))).toEqual([
-            [`[autoloop/${runId}] chat dispatch failed: unknown error`],
+            [`[autoloop/${runId}] chat dispatch failed: line one Bearer ***`],
           ]),
         );
       });
       expect(rejections).toEqual([]);
+      expect(errors.join('\n')).not.toContain('abc.def');
+      expect(warn.mock.calls.map(String).join('\n')).not.toContain('abc.def');
     } finally {
       process.off('unhandledRejection', onUnhandled);
       warn.mockRestore();
@@ -1837,79 +1841,55 @@ describe('boundedErrorReason (C13)', () => {
   const depth =
     "dispatch depth exceeded 64 at iter 0 (next='chat' to 'planner') — likely message ping-pong; raise config.maxDispatchDepth for legitimately deep workflows";
 
-  it('passes the unchanged depth message and an ordinary engine reason', () => {
-    expect(boundedErrorReason(new Error(depth))).toBe(depth);
-    expect(boundedErrorReason(new Error('Planner exited with code 1'))).toBe('Planner exited with code 1');
-    expect(boundedErrorReason('plain string reason')).toBe('plain string reason');
+  it('keeps useful multi-line, long and non-ASCII reasons (RED on fd73ed2)', () => {
+    expect(boundedErrorReason(new Error('Command failed: codex exec\nerror: rate limited'))).toBe(
+      'Command failed: codex exec error: rate limited',
+    );
+    expect(boundedErrorReason(new Error('x'.repeat(301)))).toBe('x'.repeat(300));
+    expect(boundedErrorReason(new Error('会话 planner 不存在'))).toBe('会话 planner 不存在');
+    expect(boundedErrorReason(new Error('café'))).toBe('café');
+    expect(boundedErrorReason(new Error('emoji 🙂'))).toBe('emoji 🙂');
+    expect(boundedErrorReason(new Error('two\nlines'))).toBe('two lines');
+    expect(boundedErrorReason(new Error('tab\there'))).toBe('tab here');
+    expect(boundedErrorReason(new Error('x'.repeat(299) + '🙂'))).toBe('x'.repeat(299));
+    expect(boundedErrorReason(new Error('x'.repeat(290) + ' sk-ant-abcdefghijklmnop'))).toBe(
+      'x'.repeat(290) + ' sk-***',
+    );
+    expect(boundedErrorReason(new Error('auth failed\nBearer abc.def'))).toBe('auth failed Bearer ***');
+    // Deliberate contract change: non-Error values go through String(err).
+    expect(boundedErrorReason(42)).toBe('42');
   });
 
-  it('rejects invalid text outright instead of truncating it', () => {
-    for (const bad of [
-      '',
-      'bell\u0007',
-      'two\nlines',
-      'tab\there',
-      '\u001b[31mred\u001b[0m',
-      'x'.repeat(301),
-      'café',
-      'emoji 🙂',
-      'zero\u200bwidth',
-    ]) {
+  it('keeps ordinary controls and rejects control/format/empty text', () => {
+    expect(boundedErrorReason(new Error('spawn codex ENOENT'))).toBe('spawn codex ENOENT');
+    expect(boundedErrorReason(new Error(depth))).toBe(depth);
+    expect(boundedErrorReason(new Error('x'.repeat(300)))).toBe('x'.repeat(300));
+    for (const bad of ['bell\u0007', '\u001b[31mred\u001b[0m', 'zero\u200bwidth', '', ' \t\n ']) {
       expect(boundedErrorReason(new Error(bad))).toBe('unknown error');
     }
-    expect(boundedErrorReason(new Error('x'.repeat(300)))).toBe('x'.repeat(300));
-  });
-
-  it('redacts secret shapes and re-validates the result', () => {
+    expect(boundedErrorReason(new Error())).toBe('unknown error');
     expect(boundedErrorReason(new Error('auth failed: Bearer abc.def-ghi'))).toBe('auth failed: Bearer ***');
     expect(boundedErrorReason(new Error('key sk-ant-abcdefghijklmnop rejected'))).toBe('key sk-*** rejected');
     expect(boundedErrorReason(new Error('ANTHROPIC_API_KEY=abcdef missing'))).toBe('ANTHROPIC_API_KEY=*** missing');
-  });
-
-  it('never calls getters, toString or class names, and survives hostile objects', () => {
-    let touched = 0;
-    const getter = Object.defineProperty({}, 'message', {
-      get() {
-        touched++;
-        return 'from getter';
-      },
-    });
-    expect(boundedErrorReason(getter)).toBe('unknown error');
-    const stringy = {
-      toString() {
-        touched++;
-        return 'from toString';
-      },
-    };
-    expect(boundedErrorReason(stringy)).toBe('unknown error');
     class Leaky extends Error {
       override name = 'Bearer leaked-name';
     }
     expect(boundedErrorReason(new Leaky('ok reason'))).toBe('ok reason');
-    expect(touched).toBe(0);
-
-    const throwingProxy = new Proxy(
-      {},
-      {
-        getOwnPropertyDescriptor() {
-          throw new Error('trap');
+    expect(boundedErrorReason(Object.create(null))).toBe('unknown error');
+    expect(
+      boundedErrorReason({
+        toString() {
+          throw new Error('toString boom');
         },
+      }),
+    ).toBe('unknown error');
+    const throwingMessage = new Error('safe');
+    Object.defineProperty(throwingMessage, 'message', {
+      get() {
+        throw new Error('getter boom');
       },
-    );
-    expect(boundedErrorReason(throwingProxy)).toBe('unknown error');
-    const controlProxy = new Proxy(
-      {},
-      {
-        getOwnPropertyDescriptor: () => ({ value: 'evil\nline', configurable: true, enumerable: true, writable: true }),
-      },
-    );
-    expect(boundedErrorReason(controlProxy)).toBe('unknown error');
-  });
-
-  it('maps non-Error values to unknown error', () => {
-    for (const value of [undefined, null, 42, true, Symbol('s'), { message: 7 }, new Error(), () => 'fn']) {
-      expect(boundedErrorReason(value)).toBe('unknown error');
-    }
+    });
+    expect(boundedErrorReason(throwingMessage)).toBe('unknown error');
   });
 });
 

@@ -35,32 +35,28 @@ export function sanitizeSecrets(text: string): string {
   return result;
 }
 
-/** Printable ASCII plus the em dash, 1–300 characters, one line. */
-const BOUNDED_REASON = /^[\x20-\x7E\u2014]{1,300}$/;
-
 /**
  * A short, single-line reason for a log line, or `unknown error`.
  *
- * Reads only a string `err` or the data-descriptor `message` of an object: no
- * getter, `toString` or class name is invoked. A Proxy's descriptor trap can
- * still run. Text outside the allowed form is replaced, never truncated, and
- * known secret shapes are redacted.
+ * Source is `err instanceof Error ? err.message : String(err)`; a throw during
+ * that conversion returns `unknown error`. Whitespace runs become one space,
+ * then trim; known secret shapes are redacted; the result is capped at 300
+ * UTF-16 units (a trailing high surrogate is dropped). Empty output, or any
+ * Unicode Cc/Cf code point, becomes `unknown error`.
  */
 export function boundedErrorReason(err: unknown): string {
-  let text: unknown;
+  let text: string;
   try {
-    if (typeof err === 'string') {
-      text = err;
-    } else if ((typeof err === 'object' && err !== null) || typeof err === 'function') {
-      const descriptor = Object.getOwnPropertyDescriptor(err, 'message');
-      if (descriptor && 'value' in descriptor) text = descriptor.value;
-    }
+    text = err instanceof Error ? err.message : String(err);
   } catch {
     return 'unknown error';
   }
-  if (typeof text !== 'string' || !BOUNDED_REASON.test(text)) return 'unknown error';
-  const redacted = sanitizeSecrets(text);
-  return BOUNDED_REASON.test(redacted) ? redacted : 'unknown error';
+  text = text.replace(/\s+/g, ' ').trim();
+  text = sanitizeSecrets(text);
+  text = text.slice(0, 300);
+  if (/[\uD800-\uDBFF]$/.test(text)) text = text.slice(0, -1);
+  if (!text || /[\p{Cc}\p{Cf}]/u.test(text)) return 'unknown error';
+  return text;
 }
 
 export interface SanitizerOptions {
