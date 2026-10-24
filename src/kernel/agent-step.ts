@@ -17,6 +17,7 @@
 
 import type { Logger } from '../logger.js';
 import type { SendOptions, SendResult, SessionConfig, SessionInfo, SessionStats } from '../types.js';
+import type { GoalSession } from './nodes/goal.js';
 
 /** Structural SessionManager surface. Declared once here; the four private copies are gone. */
 export interface SessionManagerLike {
@@ -25,6 +26,8 @@ export interface SessionManagerLike {
   stopSession(name: string): Promise<void>;
   /** Optional so lightweight fakes stay valid; success falls back to throw/no-throw without it. */
   getStatus?(name: string): SessionInfo & { stats: SessionStats };
+  /** The live `codex-app` session behind `name`, for the `goal` node. */
+  codexGoalSession?(name: string): GoalSession | undefined;
 }
 
 export interface AgentStepArgs {

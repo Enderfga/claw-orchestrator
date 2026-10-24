@@ -297,38 +297,37 @@ Returns `{ ok, stdout, stderr }`.
 
 ### `codex_goal_set`
 
-Set a long-horizon objective. Sends `/goal <objective>` via the app-server. **Requires `engine: "codex-app"`.**
+Set a long-horizon objective (`thread/goal/set`). Codex then works turn after turn on its own until the goal leaves `active`. **Requires `engine: "codex-app"`.**
 
-| Parameter   | Type   | Required |
-| ----------- | ------ | -------- |
-| `name`      | string | yes      |
-| `objective` | string | yes      |
-| `timeout`   | number |          |
+| Parameter     | Type   | Required | Notes                                                            |
+| ------------- | ------ | -------- | ---------------------------------------------------------------- |
+| `name`        | string | yes      |                                                                  |
+| `objective`   | string | yes      |                                                                  |
+| `tokenBudget` | number |          | Tokens the goal may spend; it stops as `budgetLimited` past this |
 
-Returns `{ ok, text, goal }` where `goal` is `{ objective, status: "active"|"paused"|"budgetLimited"|"complete", tokensUsed, timeUsedSeconds, tokenBudget?, ... }` or `null`.
+Returns `{ ok, goal }` where `goal` is `{ objective, status, tokenBudget, tokensUsed, timeUsedSeconds, ... }`. `status` is one of `active`, `paused`, `blocked`, `usageLimited`, `budgetLimited`, `complete`.
 
 ### `codex_goal_get`
 
-Read the cached goal state. Pure read — does not send a turn.
+Ask the app-server for the goal (`thread/goal/get`). Sends no turn.
 
 | Parameter | Type   | Required |
 | --------- | ------ | -------- |
 | `name`    | string | yes      |
 
-Returns `{ ok, goal }` (`null` if no goal active).
+Returns `{ ok, goal }` (`null` if the thread has no goal).
 
 ### `codex_goal_pause` / `codex_goal_resume` / `codex_goal_clear`
 
-Send `/goal pause`, `/goal resume`, or `/goal clear` respectively. Requires `engine: "codex-app"`.
+Pause (`status: "paused"`), resume (`status: "active"`, also for a goal stopped by a usage limit) or remove (`thread/goal/clear`) the goal. Requires `engine: "codex-app"`.
 
 | Parameter | Type   | Required |
 | --------- | ------ | -------- |
 | `name`    | string | yes      |
-| `timeout` | number |          |
 
-Returns `{ ok, text, goal }`.
+Returns `{ ok, goal }` (`null` after `clear`).
 
-> **Stability note:** Codex's `goals` feature is experimental upstream. The wrapper only formats the `/goal` slash text, so upstream changes affect that text, not the protocol.
+For a goal that has to run unattended for hours, judged by checks the agent did not write, use the `goal` workflow (`workflow_start` with `template: "goal"`, or `clawo goal`) instead of these tools; see [workflow.md](./workflow.md#goal).
 
 ### Codex app-server RPCs
 

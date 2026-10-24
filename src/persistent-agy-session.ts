@@ -271,6 +271,7 @@ export class PersistentAgySession extends BaseOneShotSession {
 
       const startedAt = Date.now();
       const proc = spawnEngine(this.engineBin, args, {
+        launcher: this.options.launcher,
         cwd: this.options.cwd,
         env: { ...process.env },
         stdio: ['ignore', 'pipe', 'pipe'],

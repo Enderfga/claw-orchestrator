@@ -424,6 +424,12 @@ export interface SessionConfig {
    */
   sandboxMode?: 'read-only' | 'workspace-write' | 'danger-full-access';
   /**
+   * Argv prefix the engine binary runs under, e.g. a sandbox wrapper:
+   * `['/opt/task/sandbox.sh', 'task', '0 1']`. Set by the caller that owns the
+   * session; never taken from an agent.
+   */
+  launcher?: string[];
+  /**
    * Codex only. Named config profile from `~/.codex/config.toml`, passed as
    * `codex exec --profile <name>`. Bundles model + reasoning effort + approval +
    * permissions on the Codex side.

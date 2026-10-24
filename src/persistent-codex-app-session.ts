@@ -11,15 +11,18 @@
  * we lift it per-session via `--enable goals` rather than touching global
  * config.
  *
- * Protocol notes (verified against codex-cli 0.128.0):
+ * Protocol notes (verified against codex-cli 0.164.0):
  *   - Frames are line-delimited JSON-RPC 2.0 messages over stdio.
- *   - Lifecycle: `initialize` → `thread/start` → `turn/start` (per send).
- *   - Goal lifecycle is **observation-only** for clients: there are no
- *     `thread/goal/*` request RPCs. Goal mutation is driven by sending the
- *     slash-commands `/goal <obj>` / `/goal pause` / `/goal resume` /
- *     `/goal clear` as plain user text via `turn/start`; the server-side
- *     parser interprets them and emits `thread/goal/updated` /
- *     `thread/goal/cleared` notifications.
+ *   - Lifecycle: `initialize` → `thread/start` (or `thread/resume`) →
+ *     `turn/start` (per send).
+ *   - Goals are typed RPCs: `thread/goal/set` (objective, status, tokenBudget),
+ *     `thread/goal/get`, `thread/goal/clear`. Setting an objective starts the
+ *     server's own turn loop, which runs until the goal leaves `active`; each
+ *     change arrives as `thread/goal/updated`. A thread resumed with an active
+ *     goal continues on its own.
+ *   - `error` notifications carry `{ error: { message, codexErrorInfo },
+ *     willRetry }`; `codexErrorInfo` names the failure (`serverOverloaded`,
+ *     `usageLimitExceeded`, …) so callers need not match message text.
  */
 
 import { ChildProcess } from 'node:child_process';
@@ -50,17 +53,34 @@ import { SESSION_EVENT, MAX_HISTORY_ITEMS, DEFAULT_HISTORY_LIMIT } from './const
 // generated bindings under `src/generated/codex-app/`.
 
 type SandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access';
-type ThreadGoalStatus = 'active' | 'paused' | 'budgetLimited' | 'complete';
+export type ThreadGoalStatus = 'active' | 'paused' | 'blocked' | 'usageLimited' | 'budgetLimited' | 'complete';
 
-interface ThreadGoal {
+export interface ThreadGoal {
   threadId: string;
   objective: string;
   status: ThreadGoalStatus;
+  tokenBudget: number | null;
+  tokensUsed: number;
+  timeUsedSeconds: number;
   createdAt: number;
   updatedAt: number;
-  timeUsedSeconds: number;
-  tokensUsed: number;
-  tokenBudget?: number | null;
+}
+
+/** The last `error` notification, with the server's own classification. */
+export interface CodexAppError {
+  message: string;
+  /** `codexErrorInfo` as a name: a string variant, or the key of an object variant. */
+  code: string | null;
+  /** True when the server itself will retry the request. */
+  willRetry: boolean;
+  at: string;
+}
+
+/** Name of a `CodexErrorInfo` value: `'serverOverloaded'`, or `'httpConnectionFailed'` for `{ httpConnectionFailed: … }`. */
+function errorInfoName(info: unknown): string | null {
+  if (typeof info === 'string') return info;
+  if (info && typeof info === 'object') return Object.keys(info)[0] ?? null;
+  return null;
 }
 
 interface ThreadGoalUpdatedNotification {
@@ -136,6 +156,7 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
   private _instructionsPending = false;
   private currentTurnId?: string;
   private currentGoal: ThreadGoal | null = null;
+  private _lastError: CodexAppError | null = null;
 
   // Per-turn buffers (reset at each send)
   private turnAssistantText = '';
@@ -195,6 +216,14 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
   get codexThreadId(): string | undefined {
     return this.threadId;
   }
+  /** The most recent `error` notification, or null. */
+  get lastError(): CodexAppError | null {
+    return this._lastError;
+  }
+  /** True while a turn is in flight on this thread, including the goal loop's own turns. */
+  get turnActive(): boolean {
+    return this.currentTurnId !== undefined;
+  }
 
   // ── Lifecycle ──────────────────────────────────────────────────────────
 
@@ -206,6 +235,7 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
 
     const args = ['app-server', '--listen', 'stdio://', '--enable', 'goals'];
     this.proc = spawnEngine(this.codexBin, args, {
+      launcher: this.options.launcher,
       cwd: this.options.cwd,
       env: { ...process.env },
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -245,6 +275,11 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
       cwd: this.options.cwd,
       model: this.options.model,
       sandbox: (this.options.sandboxMode || 'workspace-write') as SandboxMode,
+      // Nothing here can answer an approval prompt, so none may be asked: with
+      // the server's default (the user's config, often `on-request`) a command
+      // that wanted approval left the turn waiting forever. The sandbox mode is
+      // the boundary instead.
+      approvalPolicy: 'never',
     };
     // When resuming a known thread, use `thread/resume` (loads prior turns)
     // instead of `thread/start` (which opens a fresh thread). A stale/unknown
@@ -325,7 +360,7 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
     if (instructions) text = `${instructions}\n\n---\n\n${text}`;
 
     if (!options.waitForComplete) {
-      this._fireAndForgetTurn(text).catch((err) => this.emit(SESSION_EVENT.ERROR, err));
+      this._fireAndForgetTurn(text).catch((err) => this._emitError(err as Error));
       return { requestId: this._nextRpcId, sent: true };
     }
 
@@ -405,12 +440,17 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
     });
   }
 
+  private _reply(id: number | string, error: { code: number; message: string }): void {
+    if (!this.proc?.stdin?.writable) return;
+    this.proc.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, error }) + '\n');
+  }
+
   private _handleLine(line: string): void {
     const trimmed = line.trim();
     if (!trimmed) return;
     let msg: {
       jsonrpc?: string;
-      id?: number;
+      id?: number | string | null;
       method?: string;
       params?: unknown;
       result?: unknown;
@@ -435,6 +475,15 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
       } else {
         pending.resolve(msg.result);
       }
+      return;
+    }
+
+    // Request from the server (has method and id): approvals, user input,
+    // client-side tool calls. None is supported here, and an unanswered request
+    // blocks the turn that sent it, so each gets an error reply at once.
+    if (msg.method && msg.id !== undefined && msg.id !== null) {
+      this.emit(SESSION_EVENT.LOG, `[codex-app] declined server request ${msg.method}`);
+      this._reply(msg.id, { code: -32601, message: `${msg.method} is not supported by this client` });
       return;
     }
 
@@ -559,8 +608,16 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
         break;
       }
       case 'error': {
-        const p = params as { message?: string };
-        this.emit(SESSION_EVENT.ERROR, new Error(p.message ?? 'codex app-server error'));
+        const p = params as { error?: { message?: string; codexErrorInfo?: unknown }; willRetry?: boolean };
+        const message = p.error?.message ?? 'codex app-server error';
+        this._lastError = {
+          message,
+          code: errorInfoName(p.error?.codexErrorInfo),
+          willRetry: p.willRetry === true,
+          at: new Date().toISOString(),
+        };
+        this.emit('codex:error', this._lastError);
+        this._emitError(new Error(message));
         break;
       }
       default:
@@ -637,20 +694,42 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
     };
   }
 
-  // ── Public goal helpers (used by codex_goal_* tools) ───────────────────
+  // ── Goals (`thread/goal/*`) ────────────────────────────────────────────
 
   /**
-   * Send a `/goal <args>` slash command as a regular user turn. The
-   * server-side parser handles the actual goal mutation and emits a
-   * `thread/goal/updated` or `thread/goal/cleared` notification.
-   *
-   * Awaits the resulting turn, then returns the cached goal state at
-   * turn-end (which reflects the post-mutation state in the common case).
+   * Set, update or resume the thread's goal (`thread/goal/set`). An objective
+   * starts the server's turn loop; `status: 'active'` resumes a paused or
+   * stopped one, `'paused'` pauses it. Fields left out keep their value.
    */
-  async sendGoalCommand(slashArgs: string, timeoutMs = 120_000): Promise<{ text: string; goal: ThreadGoal | null }> {
-    const text = `/goal${slashArgs.length > 0 ? ' ' + slashArgs : ''}`;
-    const result = (await this.send(text, { waitForComplete: true, timeout: timeoutMs })) as TurnResult;
-    return { text: result.text, goal: this.currentGoal };
+  async setGoal(p: {
+    objective?: string;
+    status?: 'active' | 'paused';
+    tokenBudget?: number | null;
+  }): Promise<ThreadGoal> {
+    if (!this.threadId) throw new Error('No thread id');
+    const params: Record<string, unknown> = { threadId: this.threadId, origin: 'user' };
+    if (p.objective !== undefined) params.objective = p.objective;
+    if (p.status !== undefined) params.status = p.status;
+    if (p.tokenBudget !== undefined) params.tokenBudget = p.tokenBudget;
+    const resp = (await this._request('thread/goal/set', params)) as { goal?: ThreadGoal };
+    if (!resp?.goal) throw new Error('thread/goal/set returned no goal');
+    this.currentGoal = resp.goal;
+    return resp.goal;
+  }
+
+  /** The thread's goal as the server holds it now (`thread/goal/get`), or null. */
+  async getGoal(): Promise<ThreadGoal | null> {
+    if (!this.threadId) throw new Error('No thread id');
+    const resp = (await this._request('thread/goal/get', { threadId: this.threadId })) as { goal?: ThreadGoal | null };
+    this.currentGoal = resp?.goal ?? null;
+    return this.currentGoal;
+  }
+
+  /** Remove the thread's goal (`thread/goal/clear`). */
+  async clearGoal(): Promise<void> {
+    if (!this.threadId) throw new Error('No thread id');
+    await this._request('thread/goal/clear', { threadId: this.threadId, origin: 'user' });
+    this.currentGoal = null;
   }
 
   // ── App-server v2 RPCs (Codex 0.137) ───────────────────────────────────
@@ -673,12 +752,14 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
   }
 
   /**
-   * Add input to the in-flight turn without restarting it (`turn/steer`). When
-   * no turn is in flight, falls back to a normal turn so the message is not lost.
+   * Add input to the in-flight turn without restarting it (`turn/steer`). That
+   * includes a turn the goal loop started, which no `send()` is waiting on.
+   * When no turn is in flight, falls back to a normal turn so the message is
+   * not lost.
    */
   async steer(text: string): Promise<{ steered: boolean; turnId?: string; text?: string }> {
     if (!this.threadId) throw new Error('No thread id');
-    if (this._isBusy && this.currentTurnId) {
+    if (this.currentTurnId) {
       const resp = (await this._request('turn/steer', {
         threadId: this.threadId,
         expectedTurnId: this.currentTurnId,
@@ -727,6 +808,18 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
   }
 
   // ── Helpers ────────────────────────────────────────────────────────────
+
+  /**
+   * Report an error to whoever listens. An `error` notification is news about
+   * the thread — the server often retries on its own, and a failed turn is
+   * already reported by `turn/completed` — so it must not reach Node's
+   * unhandled-`'error'` rule, which throws: with no listener attached, one
+   * overloaded-endpoint notice took the whole server down.
+   */
+  private _emitError(err: Error): void {
+    if (this.listenerCount(SESSION_EVENT.ERROR) > 0) this.emit(SESSION_EVENT.ERROR, err);
+    else this.emit(SESSION_EVENT.LOG, `[codex-app] ${err.message}`);
+  }
 
   private _addHistory(entry: { time: string; type: string; event: unknown }): void {
     this._history.push(entry);

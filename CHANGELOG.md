@@ -7,7 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [7.13.0] - 2026-10-24
+
+### Added
+
+- **`goal` workflow node, `goal` template and `clawo goal`.** A Codex `/goal` on one
+  `codex-app` thread, run unattended until the goal finishes, then judged by the run's
+  contract. The thread id is checkpointed: a resumed run, or an app-server that exits
+  mid-goal, reattaches the same thread, and a resume that lands on another thread fails
+  instead of starting over. A usage-limited, paused or stalled goal is set back to active
+  after a backoff, at most `capacityRetry.max` times. A red verdict sends a new objective,
+  led by the failing checks, to the same thread. `workflow_steer` text goes into the
+  running turn. Progress (status, tokens, time, resumes, spend) is in the node's checkpoint
+  and in `clawo workflow show`. An objective over Codex's 4,000-character limit fails
+  before a session opens.
+- **`launcher` on a session:** an argv prefix the engine runs under, for every engine, so a
+  caller can put the agent inside its own sandbox.
+
+### Changed
+
+- **`codex_goal_*` use the app-server's goal RPCs** (`thread/goal/set` / `get` / `clear`)
+  instead of sending `/goal …` as chat text. They return `{ ok, goal }` and no longer take
+  `timeout`; `codex_goal_set` takes `tokenBudget`. Goal status covers all six states
+  (`active`, `paused`, `blocked`, `usageLimited`, `budgetLimited`, `complete`).
+- Tested with Codex 0.164.0.
+
 ### Fixed
+
+- **A `codex-app` session resumes its own thread.** The id stored for a model switch or a
+  restart was the session's label, so `thread/resume` failed and a new thread was opened.
+- **A `codex-app` thread never waits on an approval prompt.** Threads open with
+  `approvalPolicy: "never"`, and a server request the session cannot answer gets an error
+  reply instead of blocking its turn.
+- **An app-server `error` notification no longer stops the server.** It was emitted as an
+  unhandled `'error'` event; it is now recorded on the session (`lastError`, with the
+  server's error code) and logged.
 
 - **A live ordinary or activity-lease autoloop pause resumes in place.**
   `autoloopResume` with no timeout increase continues a paused live run whose
@@ -19,16 +53,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shown for every live paused run, and sends timeout fields only when a
   dispatch is pending. A background runner task failure after that return is
   logged once through the SessionManager logger instead of becoming an
-  unhandled rejection.
+  unhandled rejection. Thanks to @ajmtrz (#149).
 - **Accepted autoloop chat survives stop and owner loss.** Chat is accepted
   only once it is in the run checkpoint, and pending chat is delivered once, in
   order, after a resume. A message that was mid-delivery when the run stopped
   is not resent; `unconfirmed_chat` in the status and one chat-history notice
-  report it.
-- **Autoloop background and chat-dispatch error logs keep useful multi-line,
-  long and non-ASCII reasons.** Whitespace is collapsed, secrets are redacted,
-  the line is capped at 300 UTF-16 units, and control or format characters
-  still become `unknown error`.
+  report it. Thanks to @ajmtrz (#153).
 
 ## [7.12.1] - 2026-10-22
 

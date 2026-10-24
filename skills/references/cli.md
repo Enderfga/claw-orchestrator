@@ -238,6 +238,37 @@ engine may appear more than once. With `--wait` the run is followed to the end
 and every answer is printed, followed by the synthesis when `--synthesize` was
 given. Checks run after the fan-out, as for `solve`.
 
+## `clawo goal`
+
+Run a Codex `/goal` on one `codex-app` thread, then have the runtime check the
+result: goal → verify → repair on the same thread. See [workflow.md](./workflow.md#goal).
+
+```bash
+clawo goal "<objective>" | --objective-file <file>
+           [--check "<command>"]... [--contract <file>] [--check-timeout <minutes>]
+           [--launcher <arg>]... [--model <model>] [--effort <level>] [--sandbox <mode>] [--thread <id>]
+           [--token-budget N] [--goal-timeout <minutes>] [--max-repairs N]
+           [--cwd <dir>] [--wait] [--json]
+```
+
+| Option             | Default           | Notes                                                                                                               |
+| ------------------ | ----------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `--objective-file` | —                 | Read the objective from a file instead of the argument. Codex accepts at most 4,000 characters                      |
+| `-c, --check`      | —                 | A command check, repeatable, run after the goal. Split on whitespace; quote-needing commands go in `--contract`     |
+| `--check-timeout`  | 10                | Minutes for each `--check`. The verifier's node timeout is sized from the checks                                    |
+| `--launcher`       | —                 | Run codex under this command, one argv element per flag: `--launcher ./sandbox.sh --launcher task --launcher "0 1"` |
+| `-m, --model`      | codex's own       | Codex model                                                                                                         |
+| `--sandbox`        | `workspace-write` | Codex's own sandbox mode. With an outer sandbox as the boundary, `danger-full-access`                               |
+| `--thread`         | —                 | Start on this existing codex thread: its goal is replaced, its history kept                                         |
+| `--token-budget`   | —                 | The goal stops as `budgetLimited` past this                                                                         |
+| `--goal-timeout`   | none              | Wall-clock minutes for one goal pass                                                                                |
+| `--max-repairs`    | `1`               | Times a red verdict sends the goal back to the same thread                                                          |
+| `-w, --wait`       | off               | Follow the run; exit `0` only if it completes                                                                       |
+
+`clawo workflow show <runId>` prints the goal's status, tokens, time, resume
+attempts and thread id while it runs; `clawo workflow steer <runId> "<text>"`
+goes into the running turn.
+
 ## `clawo workflow`
 
 ```bash
@@ -245,7 +276,7 @@ clawo workflow list [--state <s>] [--workflow <name>] [--limit N] [--json]
 clawo workflow show <runId> [--json]
 clawo workflow resume <runId>          # re-attach to a run whose process died
 clawo workflow cancel <runId>
-clawo workflow steer <runId> "<text>"  # queue a correction for the next agent node
+clawo workflow steer <runId> "<text>"  # a correction for the next agent node, or into a running goal
 clawo workflow approve <runId> [reject]
 ```
 

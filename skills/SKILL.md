@@ -1,6 +1,6 @@
 ---
 name: claw-orchestrator
-description: Manage persistent coding sessions across Claude Code, Codex, Antigravity (agy), Grok Build, and OpenCode engines. Use when orchestrating multi-engine coding agents, starting/sending/stopping sessions, running multi-agent council collaborations, cross-session messaging, ultraplan deep planning, ultrareview parallel code review, autoloop autonomous workspace iteration, ultraapp building deployable web apps from a structured Q&A interview, switching models/tools at runtime, exposing the orchestrator's 78 tools as an MCP server to Hermes Agent / Claude Desktop / Cursor / Cline / Continue / Zed / Windsurf / Goose, or running as an Agent Client Protocol (ACP) agent that Zed / JetBrains / Neovim / Emacs / VS Code / dsh can drive directly. Triggers on "start a session", "send to session", "run council", "ultraplan", "ultrareview", "autoloop", "ultraapp", "Forge tab", "build a web app", "one-click app", "AppSpec", "autonomous iteration", "iterate until goal", "auto research", "switch model", "hand off a session", "session handoff", "switch engine", "continue on codex", "continue on claude", "move this session to another engine", "multi-agent coding", "coding session", "session inbox", "grok session", "grok build", "opencode", "mcp server", "clawo-mcp", "hermes mcp", "model context protocol", "ultracode", "dynamic workflow", "fanout", "fan-out", "best-of-N", "steer turn", "interrupt turn", "fork thread", "rollback turns", "acp", "agent client protocol", "clawo acp", "zed agent", "jetbrains agent", "external agent", "dsh subagent", "deepseek harness", "clawo runs", "run ledger", "session cost", "coding-agent token usage", "spend cap", "budget limit", "maxBudgetUsd", "durable workflow", "resume a run", "verify a coding run", "acceptance contract", "evidence bundle", "did the agent's tests actually pass", "protected tests", "agent edited the tests", "human gate", "repair loop", "clawo workflow", "clawo verify", "clawo solve", "clawo fanout", "fix and verify", "solve from the terminal".
+description: Manage persistent coding sessions across Claude Code, Codex, Antigravity (agy), Grok Build, and OpenCode engines. Use when orchestrating multi-engine coding agents, starting/sending/stopping sessions, running multi-agent council collaborations, cross-session messaging, ultraplan deep planning, ultrareview parallel code review, autoloop autonomous workspace iteration, ultraapp building deployable web apps from a structured Q&A interview, switching models/tools at runtime, exposing the orchestrator's 78 tools as an MCP server to Hermes Agent / Claude Desktop / Cursor / Cline / Continue / Zed / Windsurf / Goose, or running as an Agent Client Protocol (ACP) agent that Zed / JetBrains / Neovim / Emacs / VS Code / dsh can drive directly. Triggers on "start a session", "send to session", "run council", "ultraplan", "ultrareview", "autoloop", "ultraapp", "Forge tab", "build a web app", "one-click app", "AppSpec", "autonomous iteration", "iterate until goal", "auto research", "switch model", "hand off a session", "session handoff", "switch engine", "continue on codex", "continue on claude", "move this session to another engine", "multi-agent coding", "coding session", "session inbox", "grok session", "grok build", "opencode", "mcp server", "clawo-mcp", "hermes mcp", "model context protocol", "ultracode", "dynamic workflow", "fanout", "fan-out", "best-of-N", "steer turn", "interrupt turn", "fork thread", "rollback turns", "acp", "agent client protocol", "clawo acp", "zed agent", "jetbrains agent", "external agent", "dsh subagent", "deepseek harness", "clawo runs", "run ledger", "session cost", "coding-agent token usage", "spend cap", "budget limit", "maxBudgetUsd", "durable workflow", "resume a run", "verify a coding run", "acceptance contract", "evidence bundle", "did the agent's tests actually pass", "protected tests", "agent edited the tests", "human gate", "repair loop", "clawo workflow", "clawo verify", "clawo solve", "clawo fanout", "fix and verify", "solve from the terminal", "codex goal", "/goal", "clawo goal", "long-horizon goal", "unattended codex run", "goal node", "run codex in a sandbox", "launcher".
 metadata:
   {
     'openclaw':
@@ -213,15 +213,18 @@ For setup, the dsh YAML block, and the cancellation/permission limits: see [refe
 
 ## Durable workflows
 
-`workflow_start` runs a declarative graph of `agent` / `fanout` / `council` / `verifier` /
-`human_gate` / `router` / `subflow` / `autoloop` / `ultraapp_synth` /
+`workflow_start` runs a declarative graph of `agent` / `fanout` / `council` / `goal` /
+`verifier` / `human_gate` / `router` / `subflow` / `autoloop` / `ultraapp_synth` /
 `ultraapp_deploy` nodes. Every state transition is checkpointed to
 `~/.claw-orchestrator/wf/<runId>/`, so a run survives a process restart and `workflow_resume`
 picks it up at the node boundary — nodes already succeeded are not re-run, and the one that
 was in flight is retried because a half-finished node left no result to trust.
 
-Three built-in templates: `solve` (triage → implement → verify → repair-until-green →
-review), `council`, and `fanout`. Retry, per-node timeout, cancel, steer, human gates, and
+Four built-in templates: `solve` (triage → implement → verify → repair-until-green →
+review), `council`, `fanout`, and `goal` (a Codex `/goal` on one `codex-app` thread, run
+unattended for as long as it takes — reattached on resume, resumed after usage limits and
+stalls within a bound, optionally under a sandbox `launcher` — then verify → repair on the
+same thread; `clawo goal` from the terminal). Retry, per-node timeout, cancel, steer, human gates, and
 bounded loops come from the kernel rather than from each mode's own state machine.
 
 For node shapes, routing conditions, and the control surfaces:

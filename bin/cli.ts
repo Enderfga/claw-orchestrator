@@ -617,8 +617,18 @@ program
       const run = r.run as Record<string, unknown>;
       console.log(`${String(run.runId)}  ${String(run.workflow)}  ${String(run.state)} / ${String(run.outcome)}`);
       if (run.error) console.log(`error: ${String(run.error)}`);
-      for (const node of Object.values(run.nodes as Record<string, Record<string, string>>)) {
-        console.log(`  ${String(node.id).padEnd(18)} ${String(node.kind).padEnd(11)} ${node.state}`);
+      for (const node of Object.values(run.nodes as Record<string, Record<string, unknown>>)) {
+        console.log(`  ${String(node.id).padEnd(18)} ${String(node.kind).padEnd(11)} ${String(node.state)}`);
+        // A goal runs for hours; its checkpoint is the only progress there is.
+        const g = node.kind === 'goal' ? (node.data as Record<string, unknown> | undefined) : undefined;
+        if (g) {
+          const err = g.lastError as { code?: string; message?: string } | undefined;
+          console.log(
+            `    goal ${String(g.status)}  ${String(g.tokensUsed)} tokens  ${String(g.timeUsedSeconds)}s  ` +
+              `resumes ${String(g.resumes)}  thread ${String(g.threadId)}` +
+              (err ? `\n    last error: ${err.code ?? err.message}` : ''),
+          );
+        }
       }
       return;
     }
@@ -704,19 +714,23 @@ function collect(value: string, previous: string[]): string[] {
  * `--check "node --test"` → a command check. Split on whitespace and run as
  * argv, never through a shell; anything that needs quoting goes in `--contract`.
  */
-function buildContract(checks: string[], contractFile: string | undefined): Record<string, unknown> | undefined {
+function buildContract(
+  checks: string[],
+  contractFile: string | undefined,
+  timeoutMs?: number,
+): Record<string, unknown> | undefined {
   if (contractFile) {
     const raw = JSON.parse(fs.readFileSync(contractFile, 'utf-8')) as Record<string, unknown>;
     if (!checks.length) return raw;
-    return { ...raw, checks: [...((raw.checks as unknown[]) ?? []), ...checksFromFlags(checks)] };
+    return { ...raw, checks: [...((raw.checks as unknown[]) ?? []), ...checksFromFlags(checks, timeoutMs)] };
   }
-  return checks.length ? { checks: checksFromFlags(checks) } : undefined;
+  return checks.length ? { checks: checksFromFlags(checks, timeoutMs) } : undefined;
 }
 
-function checksFromFlags(checks: string[]): Array<Record<string, unknown>> {
+function checksFromFlags(checks: string[], timeoutMs?: number): Array<Record<string, unknown>> {
   return checks.map((c, i) => {
     const [cmd, ...args] = c.trim().split(/\s+/);
-    return { id: `check-${i + 1}`, type: 'command', cmd, args };
+    return { id: `check-${i + 1}`, type: 'command', cmd, args, ...(timeoutMs ? { timeoutMs } : {}) };
   });
 }
 
@@ -937,6 +951,66 @@ program
     const s = await api(`/workflow/${encodeURIComponent(runId)}/state`);
     const node = (s.run as { nodes?: Record<string, { output?: string }> } | undefined)?.nodes?.fanout;
     if (node?.output) console.log(`\n${node.output}`);
+  });
+
+program
+  .command('goal')
+  .description('Run a Codex /goal on one codex-app thread, then have the runtime check it: goal → verify → repair')
+  .argument('[objective]', 'What Codex should achieve (or use --objective-file)')
+  .option('--objective-file <file>', 'Read the objective from a file')
+  .option('-m, --model <model>', "Codex model (default: codex's own)")
+  .option('--effort <level>', 'Reasoning effort')
+  .option('--sandbox <mode>', "Codex's own sandbox: read-only | workspace-write | danger-full-access")
+  .option(
+    '--launcher <arg>',
+    'Run codex under this command, one argv element per flag, e.g. --launcher ./sandbox.sh --launcher task --launcher "0 1"',
+    collect,
+    [],
+  )
+  .option('--thread <id>', 'Start on this existing codex thread: its goal is replaced, its history kept')
+  .option('--token-budget <n>', 'Tokens the goal may spend before it stops as budgetLimited')
+  .option('--goal-timeout <minutes>', 'Wall-clock budget for one goal pass (default: none)')
+  .option('-c, --check <command>', 'Acceptance check the runtime runs after the goal (repeatable)', collect, [])
+  .option('--check-timeout <minutes>', 'Timeout for each --check (default 10)')
+  .option('--contract <file>', 'Acceptance contract JSON file (merged with --check)')
+  .option('--max-repairs <n>', 'Times a red verdict sends the goal back to the same thread', '1')
+  .option('--cwd <dir>', 'Project directory', process.cwd())
+  .option('-w, --wait', 'Follow the run until it ends; exit 1 unless it completes')
+  .option('--json', 'Machine-readable output')
+  .action(async (objectiveArg: string | undefined, opts) => {
+    const { goalWorkflow } = await import('../src/kernel/templates/index.js');
+    const { GOAL_OBJECTIVE_MAX_CHARS } = await import('../src/kernel/nodes/goal.js');
+    const objective = opts.objectiveFile ? fs.readFileSync(opts.objectiveFile, 'utf-8').trim() : objectiveArg?.trim();
+    if (!objective) {
+      console.error('Error: give an objective, or --objective-file');
+      process.exitCode = 1;
+      return;
+    }
+    if ([...objective].length > GOAL_OBJECTIVE_MAX_CHARS) {
+      console.error(
+        `Error: the objective is ${[...objective].length} characters; Codex accepts at most ${GOAL_OBJECTIVE_MAX_CHARS}. ` +
+          'Put the full brief in a file in the working directory and name that file in the objective.',
+      );
+      process.exitCode = 1;
+      return;
+    }
+    const minutes = (v: string | undefined) => (v ? Math.max(1, parseFloat(v)) * 60_000 : undefined);
+    const cwd = path.resolve(opts.cwd);
+    const contract = buildContract(opts.check, opts.contract, minutes(opts.checkTimeout));
+    const spec = goalWorkflow({
+      task: objective,
+      cwd,
+      contract: contract as never,
+      model: opts.model,
+      effort: opts.effort,
+      sandboxMode: opts.sandbox,
+      launcher: opts.launcher.length ? opts.launcher : undefined,
+      threadId: opts.thread,
+      tokenBudget: opts.tokenBudget ? parseInt(opts.tokenBudget, 10) : undefined,
+      goalTimeoutMs: minutes(opts.goalTimeout),
+      maxRepairs: Math.max(0, parseInt(opts.maxRepairs, 10) || 0),
+    });
+    await startWorkflow(spec, cwd, contract, opts);
   });
 
 program.parse();

@@ -1432,6 +1432,21 @@ describe('SessionManager', () => {
       expect(createdConfigs[1].resumeSessionId).toBe('11111111-2222-3333-4444-555555555555');
       expect(createdConfigs[1].resumeSessionId).not.toMatch(/^mock-session-/);
     });
+
+    // A codex-app session's `sessionId` is our own label. `thread/resume` needs
+    // the app-server's thread id; handed the label it failed and the session
+    // quietly opened a brand-new thread.
+    it('uses the codex-app thread id, not the session label, when switching models', async () => {
+      await mgr.startSession({ name: 'cxapp-switch', cwd: '/tmp', engine: 'codex-app', model: 'gpt-6.1-sol' });
+      const mock = lastMock() as MockSession & { codexThreadId?: string };
+      mock.codexThreadId = '019c6dcb-93ad-7dc1-b531-418d213b8761';
+      mock.setBusy(false);
+
+      await mgr.sendMessage('cxapp-switch', 'hello');
+      await mgr.switchModel('cxapp-switch', 'gpt-6-luna');
+
+      expect(createdConfigs[1].resumeSessionId).toBe('019c6dcb-93ad-7dc1-b531-418d213b8761');
+    });
   });
 
   // ─── updateTools ────────────────────────────────────────────────────

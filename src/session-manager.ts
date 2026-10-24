@@ -180,7 +180,8 @@ import {
 } from './handoff.js';
 import { PersistentGeminiSession } from './persistent-gemini-session.js';
 import { PersistentCodexSession } from './persistent-codex-session.js';
-import { PersistentCodexAppServerSession } from './persistent-codex-app-session.js';
+import { PersistentCodexAppServerSession, type ThreadGoal } from './persistent-codex-app-session.js';
+import type { GoalSession } from './kernel/nodes/goal.js';
 import { PersistentCursorSession } from './persistent-cursor-session.js';
 import { PersistentGrokSession } from './persistent-grok-session.js';
 import { PersistentOpencodeSession } from './persistent-opencode-session.js';
@@ -316,6 +317,9 @@ type CodexAppSession = ISession & {
     cursor?: string;
     limit?: number;
   }) => Promise<{ data: unknown[]; nextCursor: string | null }>;
+  setGoal: PersistentCodexAppServerSession['setGoal'];
+  getGoal: PersistentCodexAppServerSession['getGoal'];
+  clearGoal: PersistentCodexAppServerSession['clearGoal'];
 };
 
 // ─── Cross-process visibility ───────────────────────────────────────────────
@@ -2351,56 +2355,42 @@ export class SessionManager {
     this._savePersisted();
   }
 
-  // ─── Codex /goal helpers (codex-app engine only) ─────────────────────
+  // ─── Codex goals (codex-app engine only) ─────────────────────────────
 
-  /**
-   * Send a `/goal <args>` slash command to a `codex-app` session. Used by
-   * the `codex_goal_*` tools. The server-side parser interprets the slash
-   * command and emits goal-related notifications which the session class
-   * caches.
-   *
-   * Errors clearly when called against a non-`codex-app` session — those
-   * sessions cannot interpret `/goal` (the `codex exec` path has no slash
-   * command surface).
-   */
-  async codexGoalCommand(
-    name: string,
-    slashArgs: string,
-    timeoutMs?: number,
-  ): Promise<{ ok: true; text: string; goal: unknown }> {
-    const managed = this.sessions.get(name);
-    if (!managed) throw new Error(`Session not found: ${name}`);
-    const session = managed.session as ISession & {
-      sendGoalCommand?: (args: string, timeoutMs?: number) => Promise<{ text: string; goal: unknown }>;
-    };
-    if (typeof session.sendGoalCommand !== 'function') {
-      const engine = managed.config.engine || 'claude';
-      throw new Error(
-        `Session "${name}" uses engine "${engine}" which does not support /goal. ` +
-          `Start a session with engine: "codex-app" to use the goal tools.`,
-      );
-    }
-    const result = await session.sendGoalCommand(slashArgs, timeoutMs);
-    return { ok: true, text: result.text, goal: result.goal };
+  /** The live `codex-app` session behind `name`, for the kernel's `goal` node. */
+  codexGoalSession(name: string): GoalSession | undefined {
+    const session = this.sessions.get(name)?.session;
+    return session instanceof PersistentCodexAppServerSession ? session : undefined;
   }
 
   /**
-   * Read the cached goal state from a `codex-app` session without sending
-   * any command. Returns null if no goal is set or the session has not yet
-   * received a `thread/goal/updated` notification.
+   * Act on a `codex-app` session's goal through the app-server's
+   * `thread/goal/*` RPCs. Used by the `codex_goal_*` tools; `get` asks the
+   * server rather than a cache.
+   *
+   * Errors clearly when called against a non-`codex-app` session — `codex
+   * exec` has no goal surface.
    */
-  codexGoalGet(name: string): { ok: true; goal: unknown } {
-    const managed = this.sessions.get(name);
-    if (!managed) throw new Error(`Session not found: ${name}`);
-    const session = managed.session as ISession & { goal?: unknown };
-    if (!('goal' in session)) {
-      const engine = managed.config.engine || 'claude';
-      throw new Error(
-        `Session "${name}" uses engine "${engine}" which does not track goal state. ` +
-          `Start a session with engine: "codex-app" to use the goal tools.`,
-      );
+  async codexGoal(
+    name: string,
+    op:
+      | { action: 'set'; objective: string; tokenBudget?: number | null }
+      | { action: 'pause' | 'resume' | 'clear' | 'get' },
+  ): Promise<{ ok: true; goal: ThreadGoal | null }> {
+    const session = this._getCodexAppSession(name, '/goal');
+    switch (op.action) {
+      case 'set':
+        return { ok: true, goal: await session.setGoal({ objective: op.objective, tokenBudget: op.tokenBudget }) };
+      case 'pause':
+        return { ok: true, goal: await session.setGoal({ status: 'paused' }) };
+      case 'resume':
+        return { ok: true, goal: await session.setGoal({ status: 'active' }) };
+      case 'clear':
+        await session.clearGoal();
+        return { ok: true, goal: null };
+      case 'get':
+        return { ok: true, goal: await session.getGoal() };
     }
-    return { ok: true, goal: session.goal ?? null };
   }
 
   // ─── Codex app-server v2 RPCs (codex-app engine only, Codex 0.137) ────────
@@ -3127,6 +3117,12 @@ export class SessionManager {
     if (engine === 'codex') {
       return (session as { threadId?: string }).threadId;
     }
+    // `sessionId` on a codex-app session is a label of ours; `thread/resume`
+    // needs the app-server's own thread id, and silently opened a new thread
+    // when handed the label.
+    if (engine === 'codex-app') {
+      return (session as { codexThreadId?: string }).codexThreadId;
+    }
     return session.sessionId;
   }
 
@@ -3134,6 +3130,7 @@ export class SessionManager {
     if (engine === 'agy') return isAgyConversationId(id) ? id : undefined;
     if (engine === 'codex') return id && !/^codex-\d+-/.test(id) ? id : undefined;
     if (engine === 'grok') return id && !/^grok-\d+-/.test(id) ? id : undefined;
+    if (engine === 'codex-app') return id && !id.startsWith('codex-app-') ? id : undefined;
     return id;
   }
 

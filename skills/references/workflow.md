@@ -46,7 +46,9 @@ its choice is not recorded. A run parked at a `human_gate` parks there again.
 Steers survive a restart. They are logged when they arrive and recorded as
 consumed when the node that took them finishes, so on resume every steer no
 finished node consumed is queued again — including one a node was holding when
-it died, which goes to that node's retry.
+it died, which goes to that node's retry. A `goal` node delivers steers into
+the running turn as they arrive, so one delivered before a crash is delivered
+again after the resume.
 
 **This makes node execution at-least-once, not exactly-once.** There is no
 idempotency key and no side-effect commit marker, so a node that wrote files and
@@ -136,17 +138,18 @@ is unrecoverable and reads back as "not found".
 
 ## Node kinds
 
-| Kind         | Does                                                                                      |
-| ------------ | ----------------------------------------------------------------------------------------- |
-| `agent`      | One session, one turn                                                                     |
-| `fanout`     | N agents in parallel, optional synthesis                                                  |
-| `council`    | The existing council engine, votes recorded as advisory                                   |
-| `verifier`   | Runs an acceptance contract, writes evidence — see [`verification.md`](./verification.md) |
-| `human_gate` | Parks the run until a person answers                                                      |
-| `router`     | Picks the next node from declarative conditions; a backwards route is the loop            |
-| `subflow`    | Runs another workflow as a step and adopts its verdict                                    |
+| Kind         | Does                                                                                                                                                                                                                                                                |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `agent`      | One session, one turn                                                                                                                                                                                                                                               |
+| `fanout`     | N agents in parallel, optional synthesis                                                                                                                                                                                                                            |
+| `council`    | The existing council engine, votes recorded as advisory                                                                                                                                                                                                             |
+| `verifier`   | Runs an acceptance contract, writes evidence — see [`verification.md`](./verification.md)                                                                                                                                                                           |
+| `human_gate` | Parks the run until a person answers                                                                                                                                                                                                                                |
+| `router`     | Picks the next node from declarative conditions; a backwards route is the loop                                                                                                                                                                                      |
+| `subflow`    | Runs another workflow as a step and adopts its verdict                                                                                                                                                                                                              |
 | `autoloop`   | A long-lived Planner / Coder / Reviewer loop; its executor is injected. On the node's first visit (`visits === 1`) the shared fresh-start boundary applies (dirty-worktree refusal + run-local `tasks/<config.runId>/.gitignore`); resume and later visits skip it. |
-| `ultraapp_*` | UltraApp's synth and deploy stages; their executors are injected too                      |
+| `goal`       | A Codex `/goal` on one `codex-app` thread, run until the goal finishes — see [below](#goal)                                                                                                                                                                         |
+| `ultraapp_*` | UltraApp's synth and deploy stages; their executors are injected too                                                                                                                                                                                                |
 
 Every node takes `retry: { max, backoffMs }`, `timeoutMs`, and
 `onFailure: 'fail' | 'continue'`.
@@ -258,8 +261,78 @@ test suite would double the most expensive part of the run to learn nothing new.
 - **`council`** — one council node, plus the implicit verifier when a contract is
   declared.
 - **`fanout`** — one fan-out node.
+- **`goal`** — a `goal` node → verify → repair on the same thread; `task` is the
+  objective. See [below](#goal).
 
 These are ordinary specs, not privileged paths.
+
+## Goal
+
+A `goal` node runs one Codex `/goal` on one `codex-app` thread. Codex's
+app-server runs the goal itself: `thread/goal/set` starts its turn loop, which
+keeps going until the goal is `complete`, out of budget, `blocked`, or stopped
+by a usage limit. The node adds what an unattended run needs around that loop.
+
+```jsonc
+{
+  "id": "goal",
+  "kind": "goal",
+  "objective": "Reach the goal described in GOAL.md …",
+  "cwd": "/work/task/ws",
+  "model": "gpt-6.1-sol", // optional; codex's own default otherwise
+  "launcher": ["/work/goal/sandbox/sandbox.sh", "task", "0 1"], // optional argv prefix
+  "threadId": "019c…", // optional: start on this existing thread, replacing its goal
+  "tokenBudget": 50000000, // optional; the goal ends as budgetLimited past it
+  "capacityRetry": { "max": 20, "backoffMs": 60000 }, // default
+  "stallMs": 300000, // default 5 min
+  "timeoutMs": 86400000, // optional wall-clock budget; no default
+}
+```
+
+- **The objective fits Codex's limit.** Codex accepts at most 4,000 characters;
+  a longer objective fails the node before a session opens. Put a long brief in
+  a file in the working directory and name the file in the objective.
+- **The thread is checkpointed.** Node data holds `threadId`, `status`,
+  `tokensUsed`, `timeUsedSeconds`, `resumes`, `lastError`, the agent's last reply
+  (`lastMessage`, at most 4,000 characters) and the thread's spend
+  (`costUsd`), updated as the goal moves (progress at most every 10 s, status
+  changes at once). `workflow_status` and `clawo workflow show` read it while the
+  goal runs.
+- **Resume reattaches, it does not restart.** A resumed run hands the stored
+  thread id to `thread/resume`; a goal that had not finished continues where it
+  was. If the resume lands on a different thread the node fails rather than
+  starting the objective over. An app-server that exits mid-goal is reopened on
+  the same thread the same way.
+- **Stalls are resumed within a bound.** A goal that is `usageLimited` or
+  `paused`, or `active` with no turn running and either no news for `stallMs` or
+  an error the server will not retry (`serverOverloaded`, `usageLimitExceeded`,
+  `rateLimitExceeded`, a dropped connection), is set back to `active` after a
+  backoff that starts at `capacityRetry.backoffMs` and doubles to at most 15 min.
+  Every attempt counts before it is made, reopening a dead app-server included;
+  past `capacityRetry.max` the node fails.
+- **Repair on the same thread.** Revisited after a red verifier, the node clears
+  the finished goal and sets a new objective on the same thread: the failing
+  checks first (as diagnostic data, like an agent node's repair brief), then the
+  original objective. The agent keeps its context. The original objective is
+  always kept whole; when both do not fit in 4,000 characters the checks are cut
+  (the full output stays in the run's evidence). A first goal that was never set
+  left nothing on its thread, so its revisit starts a new one.
+- **Steering is live.** `workflow_steer` text goes into the running turn through
+  `turn/steer`; with no turn running it waits for the next one. Text queued
+  before the goal is set is put in front of the objective.
+- **No approval prompts.** Nothing can answer one, so the thread runs with
+  `approvalPolicy: "never"` and any request the server sends anyway (approval,
+  user input) is answered with an error at once; the sandbox mode is the
+  boundary.
+- **Ends.** `complete` succeeds. `budgetLimited` and `blocked` fail with the
+  reason. Cancel interrupts the running turn and pauses the goal. Like
+  `autoloop`, the node has no default timeout.
+
+The `goal` template wraps this in `goal → verify → repair-gate`. The goal node
+continues on failure, so a goal that ran out of budget is still judged. The
+verifier's node timeout is sized from the contract (each check's timeout, at
+least 30 min), so a judge that takes hours is not cut off at the 30-minute node
+default. `maxRepairs` defaults to 1.
 
 ## The verifier is a terminal barrier
 
@@ -299,7 +372,7 @@ success.
 
 | Action        | Tool               | HTTP                              | CLI                                    |
 | ------------- | ------------------ | --------------------------------- | -------------------------------------- |
-| Start         | `workflow_start`   | `POST /workflow/new`              | —                                      |
+| Start         | `workflow_start`   | `POST /workflow/new`              | `clawo solve` / `fanout` / `goal`      |
 | Poll          | `workflow_status`  | `GET /workflow/<id>/state`        | `clawo workflow show <id>`             |
 | List          | `workflow_list`    | `GET /workflow/list`              | `clawo workflow list`                  |
 | Resume        | `workflow_resume`  | `POST /workflow/<id>/resume`      | `clawo workflow resume <id>`           |
@@ -309,7 +382,8 @@ success.
 | Evidence      | —                  | `GET /workflow/<id>/evidence`     | `clawo verify <id>`                    |
 | Live events   | —                  | `GET /workflow/<id>/events` (SSE) | —                                      |
 
-Steer text is **prepended** to the next agent node's prompt: an instruction that
+In a running `goal` node, steer text goes into the current turn (`turn/steer`).
+Otherwise, steer text is **prepended** to the next agent node's prompt: an instruction that
 arrives while the previous node was running is a correction, and corrections
 belong before the task.
 

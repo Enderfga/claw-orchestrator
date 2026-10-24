@@ -137,14 +137,28 @@ export function killEngineTree(child: ChildProcess): void {
 /**
  * Streaming spawn for engine CLIs. Same signature and return type as
  * `node:child_process` spawn, so call sites change by one import line.
+ *
+ * `launcher` is an argv prefix the engine runs under — `['sandbox.sh', 'task',
+ * '0 1']` spawns `sandbox.sh task '0 1' codex app-server …`. It is the
+ * caller's own command, at the trust level of a contract's command check. An
+ * empty or absent launcher spawns the engine directly.
  */
-export function spawnEngine(bin: string, args: string[], options: SpawnOptions): ChildProcess {
-  const cwd = typeof options.cwd === 'string' ? options.cwd : undefined;
+export function spawnEngine(
+  bin: string,
+  args: string[],
+  options: SpawnOptions & { launcher?: readonly string[] },
+): ChildProcess {
+  const { launcher, ...spawnOptions } = options;
+  const cwd = typeof spawnOptions.cwd === 'string' ? spawnOptions.cwd : undefined;
   // `cwd` moves the process but leaves the inherited PWD naming the parent's
   // directory, and some engines trust PWD: opencode resolves its project from
   // it, so a session started by a server ran in the server's directory.
-  const env = cwd ? { ...(options.env ?? process.env), PWD: resolvePath(cwd) } : (options.env ?? process.env);
-  return crossSpawn(bin, prepareArgs(bin, args, env, cwd), { ...options, env });
+  const env = cwd ? { ...(spawnOptions.env ?? process.env), PWD: resolvePath(cwd) } : (spawnOptions.env ?? process.env);
+  if (launcher && launcher.length > 0) {
+    const [head, ...rest] = launcher;
+    return crossSpawn(head, [...rest, bin, ...args], { ...spawnOptions, env });
+  }
+  return crossSpawn(bin, prepareArgs(bin, args, env, cwd), { ...spawnOptions, env });
 }
 
 export interface ExecEngineOptions {

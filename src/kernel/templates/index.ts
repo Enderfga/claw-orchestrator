@@ -7,8 +7,13 @@
  * caller's task, agents, and cwd.
  */
 
-import type { AcceptanceContract } from '../../verify/contract.js';
-import type { CouncilNode, FanoutAgentSpec, FanoutNode, NodeSpec, WorkflowSpec } from '../types.js';
+import {
+  DEFAULT_CHECK_TIMEOUT_MS,
+  DEFAULT_HTTP_TIMEOUT_MS,
+  DEFAULT_SCREENSHOT_TIMEOUT_MS,
+  type AcceptanceContract,
+} from '../../verify/contract.js';
+import type { CouncilNode, FanoutAgentSpec, FanoutNode, GoalNode, NodeSpec, WorkflowSpec } from '../types.js';
 import { DEFAULT_AGENT_TIMEOUT_MS as FANOUT_AGENT_TIMEOUT_MS } from '../../fanout.js';
 import {
   DEFAULT_AGENT_TIMEOUT_MS as COUNCIL_AGENT_TIMEOUT_MS,
@@ -236,6 +241,101 @@ export function solveWorkflow(args: SolveArgs): WorkflowSpec {
   };
 }
 
+export interface GoalArgs extends CommonArgs {
+  /** Model for the `codex-app` thread; omitted means codex's own default. */
+  model?: string;
+  effort?: string;
+  sandboxMode?: GoalNode['sandboxMode'];
+  /** Argv prefix codex runs under, e.g. a sandbox wrapper. */
+  launcher?: string[];
+  /** Start on this existing codex-app thread (its goal is replaced). */
+  threadId?: string;
+  tokenBudget?: number;
+  /** Wall-clock budget for one goal pass. Omitted means none. */
+  goalTimeoutMs?: number;
+  /** How many times a red verifier may send the goal back. Default 1. */
+  maxRepairs?: number;
+}
+
+/**
+ * A Codex `/goal` judged by checks it did not write: goal → verify → repair.
+ *
+ * The goal runs on one `codex-app` thread until Codex calls it complete. That
+ * is the agent's opinion; the verifier's contract is the verdict. On red, the
+ * router sends control back to the same thread with the failing checks while
+ * repair budget remains.
+ */
+export function goalWorkflow(args: GoalArgs): WorkflowSpec {
+  const maxRepairs = args.maxRepairs ?? 1;
+  const goal: GoalNode = {
+    id: 'goal',
+    kind: 'goal',
+    objective: args.task,
+    cwd: args.cwd,
+    model: args.model,
+    effort: args.effort,
+    sandboxMode: args.sandboxMode,
+    launcher: args.launcher,
+    threadId: args.threadId,
+    tokenBudget: args.tokenBudget,
+    timeoutMs: args.goalTimeoutMs,
+    // A goal that ends out of budget or blocked still goes to the verifier, so
+    // the verdict says what state the tree was left in.
+    onFailure: 'continue',
+  };
+  return {
+    name: 'goal',
+    cwd: args.cwd,
+    contract: args.contract,
+    maxNodeVisits: maxRepairs + 3,
+    nodes: [
+      goal,
+      {
+        id: 'verify',
+        kind: 'verifier',
+        contract: 'run',
+        cwd: args.cwd,
+        onFailure: 'continue',
+        // A judge that times a training run takes hours; the kernel's 30-minute
+        // node default would cut the verdict off. Sized from the checks.
+        timeoutMs: contractBudget(args.contract),
+      },
+      {
+        id: 'repair-gate',
+        kind: 'router',
+        routes: [
+          {
+            when: {
+              type: 'and',
+              all: [
+                { type: 'node_failed', node: 'verify' },
+                { type: 'visits_lt', node: 'goal', n: maxRepairs + 1 },
+              ],
+            },
+            to: 'goal',
+          },
+        ],
+      },
+    ],
+  };
+}
+
+/** Every check run once, in turn, at its own timeout, plus a margin for evidence. */
+function contractBudget(contract: AcceptanceContract | undefined): number {
+  const checks = contract?.checks ?? [];
+  const sum = checks.reduce((total, c) => {
+    const spec = ('spec' in c ? c.spec : c) as { type?: string; timeoutMs?: number };
+    const fallback =
+      spec.type === 'http'
+        ? DEFAULT_HTTP_TIMEOUT_MS
+        : spec.type === 'screenshot'
+          ? DEFAULT_SCREENSHOT_TIMEOUT_MS
+          : DEFAULT_CHECK_TIMEOUT_MS;
+    return total + (spec.timeoutMs && spec.timeoutMs > 0 ? spec.timeoutMs : fallback);
+  }, 0);
+  return Math.max(30 * 60_000, sum * ((contract?.fixOnFailureRounds ?? 0) + 1) + 5 * 60_000);
+}
+
 // ─── Legacy mode workflows ──────────────────────────────────────────────────
 //
 // The `council_*`, `fanout_*`, `ultraplan_*` and `ultrareview_*` tools keep
@@ -375,9 +475,9 @@ export function legacyUltraplanWorkflow(args: LegacyUltraplanArgs): WorkflowSpec
   };
 }
 
-export type TemplateName = 'council' | 'fanout' | 'solve';
+export type TemplateName = 'council' | 'fanout' | 'solve' | 'goal';
 
-export const TEMPLATE_NAMES: readonly TemplateName[] = ['council', 'fanout', 'solve'];
+export const TEMPLATE_NAMES: readonly TemplateName[] = ['council', 'fanout', 'solve', 'goal'];
 
 export interface UltraappArgs {
   /** UltraApp's own run id, which its store is keyed by. */

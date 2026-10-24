@@ -152,6 +152,7 @@ export class PersistentCursorSession extends BaseOneShotSession {
       let gotUsageFromEvents = false;
 
       const proc = spawnEngine(this.engineBin, args, {
+        launcher: this.options.launcher,
         cwd: spawnCwd,
         env: { ...process.env },
         stdio: ['pipe', 'pipe', 'pipe'],

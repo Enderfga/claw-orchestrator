@@ -49,6 +49,7 @@ clawo runs --since 1h   # every turn on every engine: model, tokens, cost, verdi
 | Switch engines mid-task          | `session_handoff` replays a live conversation onto another engine in the same workspace. → [sessions](./skills/references/sessions.md)                                                                                                                                                                                        |
 | Know what it cost                | A durable per-turn ledger across engines (`clawo runs`) and a `maxBudgetUsd` cap the runtime enforces on every engine. → [observability](./skills/references/observability.md)                                                                                                                                                |
 | Runs that survive a crash        | Durable workflows: every transition is checkpointed; resume, retry, timeout, cancel and steer come from the kernel. → [workflow](./skills/references/workflow.md)                                                                                                                                                             |
+| Leave Codex on a goal for hours  | `clawo goal` runs a Codex `/goal` on one thread until it finishes, reattaches it after a crash, resumes it after usage limits within a bound, optionally inside your own sandbox, then judges it with your checks. → [workflow](./skills/references/workflow.md#goal)                                                         |
 | Call it from your own tools      | An MCP server (`clawo-mcp`), an ACP agent (`clawo acp`) for Zed, JetBrains and other ACP editors, an OpenAI-compatible endpoint, a TypeScript SDK, and the CLI. → [integrations](#integrations)                                                                                                                               |
 
 **How it relates to other tools.** claude-squad, Conductor and Vibe Kanban are interfaces for running agents side by side in worktrees; Claude Code subagents and Codex's parallel attempts stay within one vendor. Claw Orchestrator is a headless runtime: several vendors behind one API, durable workflows, and a verification step the agents cannot edit. They can be used together.
@@ -71,6 +72,7 @@ The server writes an access token to `~/.openclaw/server-token`; the CLI reads i
 ```bash
 clawo solve "Fix the failing tests" --engine claude --check "npm test" --wait
 clawo fanout "How would you speed up this test suite?" --engines claude,codex,grok --synthesize --wait
+clawo goal --objective-file GOAL.md --check "npm run bench:check" --check-timeout 120 --wait
 clawo workflow list
 ```
 
@@ -168,7 +170,7 @@ block, and the cancellation and permission limitations are in
 | Engine      | CLI        | Tested Version |
 | ----------- | ---------- | -------------- |
 | Claude Code | `claude`   | 2.1.307        |
-| Codex       | `codex`    | 0.163.0        |
+| Codex       | `codex`    | 0.164.0        |
 | Antigravity | `agy`      | 1.4.4          |
 | Grok Build  | `grok`     | 1.0.67         |
 | OpenCode    | `opencode` | 1.19.3         |

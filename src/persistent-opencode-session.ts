@@ -265,6 +265,7 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
       let readOnlyAgentMissing = false;
 
       const proc = spawnEngine(this.engineBin, args, {
+        launcher: this.options.launcher,
         cwd: this.options.cwd,
         env: readOnly ? { ...process.env, OPENCODE_CONFIG_CONTENT: READ_ONLY_AGENT_CONFIG } : { ...process.env },
         stdio: ['pipe', 'pipe', 'pipe'],

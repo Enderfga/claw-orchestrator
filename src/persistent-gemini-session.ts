@@ -123,6 +123,7 @@ export class PersistentGeminiSession extends BaseOneShotSession {
       let gotUsageFromEvents = false;
 
       const proc = spawnEngine(this.engineBin, args, {
+        launcher: this.options.launcher,
         cwd: this.options.cwd,
         env: { ...process.env },
         stdio: ['pipe', 'pipe', 'pipe'],

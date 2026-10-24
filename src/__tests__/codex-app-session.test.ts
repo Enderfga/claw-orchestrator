@@ -447,3 +447,146 @@ describe('PersistentCodexAppServerSession — appendSystemPrompt', () => {
     expect(turnTexts(proc)).toEqual(['continue']);
   });
 });
+
+// Goals moved from `/goal …` chat text to typed RPCs. These pin the request
+// shapes against `codex app-server generate-ts` (0.164) and the two behaviours
+// the goal node leans on: a structured error, and a steer into a turn the goal
+// loop started.
+describe('PersistentCodexAppServerSession — goals', () => {
+  beforeEach(() => mockSpawn.mockReset());
+
+  const GOAL = {
+    threadId: 't1',
+    objective: 'ship it',
+    status: 'active',
+    tokenBudget: 5000,
+    tokensUsed: 0,
+    timeUsedSeconds: 0,
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  const push = (proc: ReturnType<typeof createMockProc>, method: string, params: unknown) =>
+    proc.stdout.push(JSON.stringify({ jsonrpc: '2.0', method, params }) + '\n');
+
+  it('setGoal() sends thread/goal/set with origin "user" and only the fields given', async () => {
+    const proc = createMockProc(defaultResponder((m) => (m.method === 'thread/goal/set' ? { goal: GOAL } : undefined)));
+    const session = await startSession(proc);
+    const goal = await session.setGoal({ objective: 'ship it', tokenBudget: 5000 });
+    expect(goal.status).toBe('active');
+    expect(session.goal?.objective).toBe('ship it');
+    await session.setGoal({ status: 'paused' });
+    const sets = proc.written.filter((m) => m.method === 'thread/goal/set').map((m) => m.params);
+    expect(sets).toEqual([
+      { threadId: 't1', origin: 'user', objective: 'ship it', tokenBudget: 5000 },
+      { threadId: 't1', origin: 'user', status: 'paused' },
+    ]);
+    // Nothing went out as chat text.
+    expect(proc.written.some((m) => m.method === 'turn/start')).toBe(false);
+  });
+
+  it('getGoal() asks the server, and clearGoal() sends thread/goal/clear', async () => {
+    const proc = createMockProc(
+      defaultResponder((m) =>
+        m.method === 'thread/goal/get' ? { goal: { ...GOAL, status: 'complete', tokensUsed: 42 } } : undefined,
+      ),
+    );
+    const session = await startSession(proc);
+    expect((await session.getGoal())?.tokensUsed).toBe(42);
+    await session.clearGoal();
+    expect(session.goal).toBeNull();
+    expect(proc.written.find((m) => m.method === 'thread/goal/clear')?.params).toEqual({
+      threadId: 't1',
+      origin: 'user',
+    });
+  });
+
+  it('records a structured error and does not throw without an error listener', async () => {
+    const proc = createMockProc(defaultResponder());
+    const session = await startSession(proc);
+    const seen: unknown[] = [];
+    session.on('codex:error', (e) => seen.push(e));
+    // Before the fix this emitted Node's 'error' event with no listener, which throws.
+    push(proc, 'error', {
+      error: { message: 'Selected model is at capacity', codexErrorInfo: 'serverOverloaded' },
+      willRetry: false,
+      threadId: 't1',
+      turnId: 'x',
+    });
+    push(proc, 'error', {
+      error: { message: 'stream dropped', codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: 502 } } },
+      willRetry: true,
+      threadId: 't1',
+      turnId: 'x',
+    });
+    await new Promise((r) => setTimeout(r, 5));
+    expect(seen).toHaveLength(2);
+    expect(session.lastError).toMatchObject({ code: 'responseStreamDisconnected', willRetry: true });
+    expect(seen[0]).toMatchObject({
+      message: 'Selected model is at capacity',
+      code: 'serverOverloaded',
+      willRetry: false,
+    });
+  });
+
+  it('steer() goes into a turn the goal loop started, which no send() is waiting on', async () => {
+    const proc = createMockProc(defaultResponder((m) => (m.method === 'turn/steer' ? { turnId: 'g1' } : undefined)));
+    const session = await startSession(proc);
+    push(proc, 'turn/started', { threadId: 't1', turn: { id: 'g1' } });
+    await new Promise((r) => setTimeout(r, 5));
+    expect(session.turnActive).toBe(true);
+    const r = await session.steer('log this round in WORK_LOG.md');
+    expect(r.steered).toBe(true);
+    expect(proc.written.find((m) => m.method === 'turn/steer')?.params).toMatchObject({
+      threadId: 't1',
+      expectedTurnId: 'g1',
+    });
+    push(proc, 'turn/completed', { threadId: 't1', turn: { id: 'g1', status: 'completed' } });
+    await new Promise((r) => setTimeout(r, 5));
+    expect(session.turnActive).toBe(false);
+  });
+});
+
+// An unattended thread cannot stop for a person. Both halves are needed: the
+// policy keeps the server from asking, and a request that comes anyway is
+// answered, because an unanswered one blocks its turn for good.
+describe('PersistentCodexAppServerSession — no approval prompts', () => {
+  beforeEach(() => mockSpawn.mockReset());
+
+  it('opens and resumes threads with approvalPolicy "never"', async () => {
+    const proc = createMockProc(defaultResponder());
+    await startSession(proc);
+    expect(proc.written.find((m) => m.method === 'thread/start')?.params).toMatchObject({ approvalPolicy: 'never' });
+
+    const resumed = createMockProc(
+      defaultResponder((m) => (m.method === 'thread/resume' ? { thread: { id: 't7' } } : undefined)),
+    );
+    mockSpawn.mockReturnValue(resumed);
+    await new PersistentCodexAppServerSession({
+      name: 'r',
+      cwd: '/tmp',
+      engine: 'codex-app',
+      resumeSessionId: 't7',
+    }).start();
+    expect(resumed.written.find((m) => m.method === 'thread/resume')?.params).toMatchObject({
+      approvalPolicy: 'never',
+    });
+  });
+
+  it('answers a server request it cannot handle instead of leaving the turn waiting', async () => {
+    const proc = createMockProc(defaultResponder());
+    await startSession(proc);
+    proc.stdout.push(
+      JSON.stringify({
+        jsonrpc: '2.0',
+        id: 'srv-1',
+        method: 'item/commandExecution/requestApproval',
+        params: { threadId: 't1', turnId: 'x', itemId: 'i', command: 'rm -rf /' },
+      }) + '\n',
+    );
+    await new Promise((r) => setTimeout(r, 5));
+    const reply = proc.written.find((m) => (m as { id?: unknown }).id === 'srv-1') as
+      | { error?: { message?: string } }
+      | undefined;
+    expect(reply?.error?.message).toContain('not supported');
+  });
+});

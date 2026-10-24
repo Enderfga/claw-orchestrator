@@ -24,7 +24,13 @@ import {
   type CustomEngineConfig,
 } from './types.js';
 import type { FanoutConfig } from './fanout.js';
-import { councilWorkflow, fanoutWorkflow, solveWorkflow, type SolveArgs } from './kernel/templates/index.js';
+import {
+  councilWorkflow,
+  fanoutWorkflow,
+  goalWorkflow,
+  solveWorkflow,
+  type SolveArgs,
+} from './kernel/templates/index.js';
 import { readEvents as readKernelEvents } from './kernel/store.js';
 import { resolveSecretRefs } from './kernel/secrets.js';
 import type { RunState, WorkflowSpec } from './kernel/types.js';
@@ -945,18 +951,18 @@ const plugin = {
       },
     });
 
-    // ─── Tools: codex_goal_* (Codex 0.128 /goal slash commands) ────────
+    // ─── Tools: codex_goal_* (codex-app thread/goal/* RPCs) ─────────────
     //
-    // Goal mutation in Codex's v2 protocol is **server-side**: clients drive
-    // it by sending the `/goal <args>` slash text via `turn/start`. These
-    // tools are convenience wrappers around that pattern, scoped to sessions
-    // started with engine: "codex-app". Calls against any other engine
-    // surface a clear error rather than silently no-op'ing.
+    // Thin wrappers over the app-server's typed goal RPCs, scoped to sessions
+    // started with engine: "codex-app". Calls against any other engine surface
+    // a clear error rather than silently no-op'ing.
+
+    const GOAL_SHAPE =
+      'Returns { ok, goal } where goal is { objective, status: "active"|"paused"|"blocked"|"usageLimited"|"budgetLimited"|"complete", tokenBudget, tokensUsed, timeUsedSeconds, ... } or null.';
 
     registerTool({
       name: 'codex_goal_set',
-      description:
-        'Set a long-horizon objective on a codex-app session. Sends `/goal <objective>` via the app-server slash command. Requires engine: "codex-app".',
+      description: `Set a long-horizon objective on a codex-app session (thread/goal/set). Codex then works turn after turn on its own until the goal leaves "active". Requires engine: "codex-app". ${GOAL_SHAPE}`,
       parameters: {
         type: 'object',
         properties: {
@@ -965,80 +971,41 @@ const plugin = {
             type: 'string',
             description: 'The objective text. Codex will pursue this across turns until achieved, paused, or cleared.',
           },
-          timeout: { type: 'number', description: 'Timeout in ms for the resulting turn (default 120000).' },
+          tokenBudget: {
+            type: 'number',
+            description: 'Optional token budget; the goal stops as "budgetLimited" once it is spent.',
+          },
         },
         required: ['name', 'objective'],
       },
       execute: async (_id, args) => {
-        return await getManager().codexGoalCommand(
-          args.name as string,
-          args.objective as string,
-          args.timeout as number | undefined,
-        );
+        return await getManager().codexGoal(args.name as string, {
+          action: 'set',
+          objective: args.objective as string,
+          tokenBudget: args.tokenBudget as number | undefined,
+        });
       },
     });
 
-    registerTool({
-      name: 'codex_goal_get',
-      description:
-        'Read the cached goal state on a codex-app session (objective, status, tokensUsed, timeUsedSeconds, tokenBudget). Returns null if no goal is active. Pure read — does not send any turn.',
-      parameters: {
-        type: 'object',
-        properties: { name: { type: 'string', description: 'Session name (must be a codex-app session).' } },
-        required: ['name'],
-      },
-      execute: async (_id, args) => {
-        return getManager().codexGoalGet(args.name as string);
-      },
-    });
-
-    registerTool({
-      name: 'codex_goal_pause',
-      description: 'Pause goal pursuit on a codex-app session. Sends `/goal pause`.',
-      parameters: {
-        type: 'object',
-        properties: {
-          name: { type: 'string', description: 'Session name.' },
-          timeout: { type: 'number', description: 'Timeout in ms (default 120000).' },
+    for (const [action, description] of [
+      ['get', 'Read the goal of a codex-app session from the app-server (thread/goal/get). Sends no turn.'],
+      ['pause', 'Pause goal pursuit on a codex-app session (thread/goal/set status "paused").'],
+      ['resume', 'Resume a paused or stopped goal on a codex-app session (thread/goal/set status "active").'],
+      ['clear', 'Remove the goal from a codex-app session (thread/goal/clear).'],
+    ] as const) {
+      registerTool({
+        name: `codex_goal_${action}`,
+        description: `${description} ${GOAL_SHAPE}`,
+        parameters: {
+          type: 'object',
+          properties: { name: { type: 'string', description: 'Session name (must be a codex-app session).' } },
+          required: ['name'],
         },
-        required: ['name'],
-      },
-      execute: async (_id, args) => {
-        return await getManager().codexGoalCommand(args.name as string, 'pause', args.timeout as number | undefined);
-      },
-    });
-
-    registerTool({
-      name: 'codex_goal_resume',
-      description: 'Resume a paused goal on a codex-app session. Sends `/goal resume`.',
-      parameters: {
-        type: 'object',
-        properties: {
-          name: { type: 'string', description: 'Session name.' },
-          timeout: { type: 'number', description: 'Timeout in ms (default 120000).' },
+        execute: async (_id, args) => {
+          return await getManager().codexGoal(args.name as string, { action });
         },
-        required: ['name'],
-      },
-      execute: async (_id, args) => {
-        return await getManager().codexGoalCommand(args.name as string, 'resume', args.timeout as number | undefined);
-      },
-    });
-
-    registerTool({
-      name: 'codex_goal_clear',
-      description: 'Clear the active goal on a codex-app session. Sends `/goal clear`.',
-      parameters: {
-        type: 'object',
-        properties: {
-          name: { type: 'string', description: 'Session name.' },
-          timeout: { type: 'number', description: 'Timeout in ms (default 120000).' },
-        },
-        required: ['name'],
-      },
-      execute: async (_id, args) => {
-        return await getManager().codexGoalCommand(args.name as string, 'clear', args.timeout as number | undefined);
-      },
-    });
+      });
+    }
 
     // ─── Codex app-server v2 RPC tools (codex-app engine, Codex 0.137) ────
 
@@ -1252,7 +1219,7 @@ const plugin = {
     registerTool({
       name: 'workflow_start',
       description:
-        "Start a durable workflow run. Nodes: agent | fanout | council | verifier | human_gate | router | subflow. Every state transition is checkpointed to disk, so a run survives a process restart and can be resumed. When a contract is supplied the run cannot reach `completed` unless the runtime's own checks pass — without one it completes as `unverified`, which means nothing checked it. Runs in background; poll with workflow_status.",
+        "Start a durable workflow run. Nodes: agent | fanout | council | goal | verifier | human_gate | router | subflow. Every state transition is checkpointed to disk, so a run survives a process restart and can be resumed. When a contract is supplied the run cannot reach `completed` unless the runtime's own checks pass — without one it completes as `unverified`, which means nothing checked it. Runs in background; poll with workflow_status.",
       parameters: {
         type: 'object',
         properties: {
@@ -1263,9 +1230,9 @@ const plugin = {
           },
           template: {
             type: 'string',
-            enum: ['solve', 'council', 'fanout'],
+            enum: ['solve', 'council', 'fanout', 'goal'],
             description:
-              'Build a built-in workflow instead of supplying `spec`. `solve` = triage → implement → verify → repair-until-green → review.',
+              'Build a built-in workflow instead of supplying `spec`. `solve` = triage → implement → verify → repair-until-green → review. `goal` = a Codex /goal on one codex-app thread (`task` is the objective) → verify → repair on the same thread.',
           },
           task: { type: 'string', description: 'Task text, when using `template`.' },
           agents: {
@@ -1310,7 +1277,18 @@ const plugin = {
             },
           },
           humanGate: { type: 'boolean', description: '`solve` only: park for approval before writing anything.' },
-          maxRepairs: { type: 'number', description: '`solve` only: repair attempts allowed (default 3).' },
+          maxRepairs: {
+            type: 'number',
+            description: '`solve` / `goal`: repair attempts allowed (default 3 for solve, 1 for goal).',
+          },
+          model: { type: 'string', description: "`goal` only: Codex model (default: codex's own)." },
+          tokenBudget: { type: 'number', description: '`goal` only: tokens the goal may spend.' },
+          launcher: {
+            type: 'array',
+            items: { type: 'string' },
+            description:
+              '`goal` only: argv prefix codex runs under, e.g. a sandbox wrapper. It runs with your authority, like a contract command check.',
+          },
           cwd: { type: 'string', description: 'Working directory for the run.' },
           runId: { type: 'string', description: 'Explicit run id (defaults to a generated one).' },
           contract: {
@@ -1399,6 +1377,16 @@ const plugin = {
             spec = councilWorkflow({ task, cwd, agents });
           } else if (template === 'fanout') {
             spec = fanoutWorkflow({ task, cwd, agents, synthesize: agents.length >= 2 });
+          } else if (template === 'goal') {
+            spec = goalWorkflow({
+              task,
+              cwd,
+              contract: args.contract as never,
+              model: args.model as string | undefined,
+              tokenBudget: args.tokenBudget as number | undefined,
+              launcher: args.launcher as string[] | undefined,
+              maxRepairs: args.maxRepairs as number | undefined,
+            });
           } else {
             spec = solveWorkflow({
               task,

@@ -233,6 +233,7 @@ export class PersistentCustomSession extends EventEmitter implements ISession {
     };
 
     this.proc = spawnEngine(this.engineBin, args, {
+      launcher: this.options.launcher,
       cwd: this.options.cwd,
       env: spawnEnv,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -497,6 +498,7 @@ export class PersistentCustomSession extends EventEmitter implements ISession {
       let gotUsageFromEvents = false;
 
       const proc = spawnEngine(this.engineBin, args, {
+        launcher: this.options.launcher,
         cwd: this.options.cwd,
         env: spawnEnv,
         stdio: ['pipe', 'pipe', 'pipe'],

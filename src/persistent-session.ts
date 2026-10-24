@@ -416,6 +416,7 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
     // A new process answers none of the old one's messages.
     this._unanswered.clear();
     this.proc = spawnEngine(resolvedBin, args, {
+      launcher: this.options.launcher,
       cwd: this.options.cwd,
       env: spawnEnv,
       stdio: ['pipe', 'pipe', 'pipe'],

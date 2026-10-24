@@ -226,6 +226,7 @@ export class PersistentGrokSession extends BaseOneShotSession {
       let settled = false;
 
       const proc = spawnEngine(this.engineBin, args, {
+        launcher: this.options.launcher,
         cwd: this.options.cwd,
         env: { ...process.env },
         stdio: ['pipe', 'pipe', 'pipe'],

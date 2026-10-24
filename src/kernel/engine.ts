@@ -1130,10 +1130,11 @@ export class RunKernel extends EventEmitter {
   private async _runWithRetry(handle: RunHandle, spec: NodeSpec): Promise<NodeResult> {
     const txn = handle.txn;
     const maxAttempts = (spec.retry?.max ?? 0) + 1;
-    // Autoloops own their long-lived timeout policy. An explicit node timeout is
-    // still honoured, but the kernel's generic 30-minute default must not end a
-    // healthy loop merely because it is still running.
-    const timeoutMs = spec.timeoutMs ?? (spec.kind === 'autoloop' ? undefined : this.nodeTimeoutMs);
+    // Autoloops and goals own their long-lived timeout policy. An explicit node
+    // timeout is still honoured, but the kernel's generic 30-minute default must
+    // not end a healthy loop merely because it is still running.
+    const timeoutMs =
+      spec.timeoutMs ?? (spec.kind === 'autoloop' || spec.kind === 'goal' ? undefined : this.nodeTimeoutMs);
     let last: NodeResult = { ok: false, error: 'not attempted' };
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -1244,6 +1245,7 @@ export class RunKernel extends EventEmitter {
     'council',
     'subflow',
     'autoloop',
+    'goal',
     'ultraapp_synth',
     'ultraapp_deploy',
   ];

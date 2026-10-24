@@ -47,6 +47,7 @@ export type NodeKind =
   | 'router'
   | 'subflow'
   | 'autoloop'
+  | 'goal'
   | 'ultraapp_synth'
   | 'ultraapp_deploy';
 
@@ -189,6 +190,43 @@ export interface AutoloopNode extends NodeBase {
 }
 
 /**
+ * A Codex `/goal`: one `codex-app` thread working on one objective, turn after
+ * turn on its own, until the goal leaves `active`.
+ *
+ * The thread id is checkpointed on the node, so a resumed run reattaches the
+ * same thread rather than starting the objective over. A revisit after a red
+ * verifier sets a new objective on that thread, prefixed with the failing
+ * checks. Like `autoloop`, it has no default node timeout; `timeoutMs` is the
+ * wall-clock budget.
+ */
+export interface GoalNode extends NodeBase {
+  kind: 'goal';
+  objective: string;
+  cwd?: string;
+  model?: string;
+  effort?: string;
+  sandboxMode?: 'read-only' | 'workspace-write' | 'danger-full-access';
+  /** Argv prefix codex runs under, e.g. a sandbox wrapper. Caller-authored. */
+  launcher?: string[];
+  /**
+   * Start on this existing codex-app thread instead of a new one: its goal is
+   * replaced by `objective`, and the agent keeps the thread's history. Used
+   * once; a resumed run follows the thread id it checkpointed.
+   */
+  threadId?: string;
+  /** Tokens the goal may spend; it ends as `budgetLimited` past this. */
+  tokenBudget?: number;
+  /**
+   * Resuming a goal that stopped on a usage limit, an overloaded endpoint or a
+   * stall. `max` counts attempts, made or not; past it the node fails. Default
+   * 20 attempts, backoff from 60 s doubling to at most 15 min.
+   */
+  capacityRetry?: { max: number; backoffMs?: number };
+  /** An active goal with no turn and no notification for this long is resumed. Default 5 min. */
+  stallMs?: number;
+}
+
+/**
  * UltraApp's two expensive stages.
  *
  * They are their own kinds for the same reason `autoloop` is: the engine behind
@@ -229,6 +267,7 @@ export type NodeSpec =
   | RouterNode
   | SubflowNode
   | AutoloopNode
+  | GoalNode
   | UltraappSynthNode
   | UltraappDeployNode;
 
