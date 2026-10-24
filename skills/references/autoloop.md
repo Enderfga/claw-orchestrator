@@ -499,12 +499,20 @@ retried, and there is no message outbox. A gap or malformed closed tail after a
 valid prefix refuses the resume with a fixed generic error before any new
 session or effect; ledger text is never echoed into the error.
 
+**Accepted chat survives stop and owner loss.** `autoloop_chat` and `POST
+/autoloop/:id/chat` accept a message only once it is in the run's checkpoint;
+otherwise they fail (`autoloop chat could not be persisted`, or a stopping,
+restoring or limit error) and nothing is sent. Up to 1,000 entries and 8 MiB
+can be pending. Chat that was not yet handed to the Planner is delivered once,
+in order, after a resume. Chat that was being delivered when the run stopped is
+not resent: the status gains `unconfirmed_chat` (`count`, `last_at`,
+`history_pending`) and chat history gets one system notice asking to re-send it
+if needed. No further chat is handed over until that notice is recorded; if it
+cannot be written the run pauses with `chat_notice_pending`, and a plain resume
+retries it.
+
 ## Known limitations
 
-- **Stopping a paused run drops parked input.** `autoloopStop` / terminate clears
-  the paused buffer, and a later resume from the stored record boots a fresh
-  loop without that input or the paused gate. Stopping a paused run loses
-  accepted Planner chat.
 - **`webchat` channel is a no-op.** No webchat session id is carried at the run
   level, so `channel: 'webchat'` always returns `channel_used: 'none'`. Use
   `auto` / `wechat` / `email`.

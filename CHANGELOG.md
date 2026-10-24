@@ -20,6 +20,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dispatch is pending. A background runner task failure after that return is
   logged once through the SessionManager logger instead of becoming an
   unhandled rejection.
+- **Accepted autoloop chat survives stop and owner loss.** Chat is accepted
+  only once it is in the run checkpoint, and pending chat is delivered once, in
+  order, after a resume. A message that was mid-delivery when the run stopped
+  is not resent; `unconfirmed_chat` in the status and one chat-history notice
+  report it.
+- **Autoloop background and chat-dispatch error logs keep useful multi-line,
+  long and non-ASCII reasons.** Whitespace is collapsed, secrets are redacted,
+  the line is capped at 300 UTF-16 units, and control or format characters
+  still become `unknown error`.
 
 ## [7.12.1] - 2026-10-22
 

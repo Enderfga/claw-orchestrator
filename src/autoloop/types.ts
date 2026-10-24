@@ -27,6 +27,11 @@ export interface AutoloopState {
    */
   pending_dispatch?: SendTimeoutPayload | null;
   /**
+   * Accepted chat whose delivery could not be confirmed when the run stopped.
+   * Present only once that has happened; never carries message text.
+   */
+  unconfirmed_chat?: { count: number; last_at: string; history_pending: boolean };
+  /**
    * Phase-error circuit breaker — incremented on every `phase_error` message,
    * cleared on each successful (non-error) `iter_done`. When it reaches
    * `AutoloopConfig.phaseErrorCircuit`, the runner auto-terminates.
@@ -174,12 +179,20 @@ export interface AgentDispatcher {
   init?(state: AutoloopState): Promise<void>;
   /** Called on terminate — agent must release sessions cleanly. */
   shutdown?(reason: string): Promise<void>;
+  /** Durably append the fixed unconfirmed-chat notice to the chat history. */
+  appendUnconfirmedChatNotice?(ts: string): boolean;
 }
 
 export interface AutoloopConfig extends AutoloopTimeoutConfig {
   run_id: string;
   workspace: string;
   ledger_dir: string;
+  /**
+   * Commit the node checkpoint, including the runner's staged chat snapshot.
+   * True only when that snapshot was committed. Absent means chat cannot be
+   * accepted durably.
+   */
+  persistCheckpoint?: () => boolean;
   /** Optional override; defaults to DEFAULT_PUSH_POLICY. */
   push_policy?: PushPolicy;
   /**

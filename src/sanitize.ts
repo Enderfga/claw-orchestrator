@@ -35,6 +35,30 @@ export function sanitizeSecrets(text: string): string {
   return result;
 }
 
+/**
+ * A short, single-line reason for a log line, or `unknown error`.
+ *
+ * Source is `err instanceof Error ? String(err.message) : String(err)`; a throw
+ * during that conversion returns `unknown error`. Whitespace runs become one
+ * space, then trim; known secret shapes are redacted; the result is capped at
+ * 300 UTF-16 units (a trailing high surrogate is dropped). Empty output, or
+ * any Unicode Cc/Cf code point, becomes `unknown error`.
+ */
+export function boundedErrorReason(err: unknown): string {
+  let text: string;
+  try {
+    text = err instanceof Error ? String(err.message) : String(err);
+  } catch {
+    return 'unknown error';
+  }
+  text = text.replace(/\s+/g, ' ').trim();
+  text = sanitizeSecrets(text);
+  text = text.slice(0, 300);
+  if (/[\uD800-\uDBFF]$/.test(text)) text = text.slice(0, -1);
+  if (!text || /[\p{Cc}\p{Cf}]/u.test(text)) return 'unknown error';
+  return text;
+}
+
 export interface SanitizerOptions {
   extraPatterns?: string[];
   label?: string;

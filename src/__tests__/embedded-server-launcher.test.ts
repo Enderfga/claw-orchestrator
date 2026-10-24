@@ -394,18 +394,20 @@ describe('POST /autoloop/:id/chat', () => {
     await manager.shutdown();
   });
 
-  it('returns 202 immediately (fire-and-forget) and dispatches autoloopChat in the background', async () => {
-    // Pretend the run is alive in memory so the handler clears its 404 gate.
-    vi.spyOn(manager, 'getAutoloop').mockReturnValue({
-      runner: {} as never,
-      dispatcher: {} as never,
-    });
-    // autoloopChat may take a long time — simulate by never resolving within
+  it('returns 202 immediately (fire-and-forget) after accepting and sends in the background', async () => {
+    // Delivery may take a long time — simulate by never resolving within
     // the test window. The handler must NOT await it.
-    const slow = new Promise<{ reply: string }>(() => {
+    const slow = new Promise<void>(() => {
       /* never resolves */
     });
-    const spy = vi.spyOn(manager, 'autoloopChat').mockReturnValue(slow);
+    const send = vi.fn().mockReturnValue(slow);
+    // Pretend the run is alive in memory so the handler clears its 404 gate.
+    vi.spyOn(manager, 'getAutoloop').mockReturnValue({
+      runner: { send } as never,
+      dispatcher: {} as never,
+    });
+    const env = { msg_id: 'm_accepted', type: 'chat' } as never;
+    const spy = vi.spyOn(manager, 'acceptAutoloopChat').mockReturnValue(env);
 
     const r = await fetch(`http://127.0.0.1:${port}/autoloop/run-xyz/chat`, {
       method: 'POST',
@@ -414,9 +416,9 @@ describe('POST /autoloop/:id/chat', () => {
     });
     expect(r.status).toBe(202);
     const j = (await r.json()) as { ok: boolean; queued: boolean };
-    expect(j.ok).toBe(true);
-    expect(j.queued).toBe(true);
+    expect(j).toEqual({ ok: true, queued: true });
     expect(spy).toHaveBeenCalledWith('run-xyz', 'hello');
+    expect(send).toHaveBeenCalledWith(env);
   });
 
   it('returns 400 when text is missing or empty', async () => {

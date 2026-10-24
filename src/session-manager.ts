@@ -220,7 +220,8 @@ import { resolveAlias, isClaudeModel, lookupModel } from './models.js';
 import { isAgyConversationId } from './agy-conversation.js';
 import { Council } from './council.js';
 import { Fanout, type FanoutConfig, type FanoutSession, type FanoutAgentSpec } from './fanout.js';
-import { AutoloopRunner } from './autoloop/runner.js';
+import { AutoloopRunner, type AutoloopInputSnapshot } from './autoloop/runner.js';
+import { boundedErrorReason } from './sanitize.js';
 import { ClaudeAgentDispatcher, type ClaudeAgentDispatcherConfig } from './autoloop/dispatcher.js';
 import type { AutoloopState, PushPolicy } from './autoloop/types.js';
 import {
@@ -229,7 +230,13 @@ import {
   MAX_METRIC_HISTORY,
   validateAutoloopTimeoutConfig,
 } from './autoloop/types.js';
-import { Msg as AutoloopMsg, type PushChannel, type PushLevel, type SendTimeoutPayload } from './autoloop/messages.js';
+import {
+  Msg as AutoloopMsg,
+  type AnyAutoloopMessage,
+  type PushChannel,
+  type PushLevel,
+  type SendTimeoutPayload,
+} from './autoloop/messages.js';
 import { appendPushLog, notifyUserFallbackChain } from './autoloop/notify.js';
 import { UltraappManager } from './ultraapp/manager.js';
 import { UltraappStore, defaultStoreRoot } from './ultraapp/store.js';
@@ -1719,7 +1726,7 @@ export class SessionManager {
       kernel.setExecutor(
         'autoloop',
         makeAutoloopExecutor({
-          boot: (config, secrets, { freshStart }) =>
+          boot: (config, secrets, { freshStart, restoredInput }) =>
             this._bootAutoloop({
               ...(config as Parameters<SessionManager['_bootAutoloop']>[0]),
               // Custom-engine configs never reach the spec, so they come from
@@ -1731,6 +1738,7 @@ export class SessionManager {
               // Always set (including false on resume) — omitting false left a
               // `_freshStart: true` from config/secrets intact.
               _freshStart: freshStart,
+              _restoredInput: restoredInput,
             }),
           ready: (key, value) => {
             const deferred = this._autoloopReady.get(key);
@@ -3400,7 +3408,7 @@ export class SessionManager {
   /** Latest role selection per run, published into the node payload. */
   private _autoloopSelection = new Map<string, unknown>();
   /** Per-run checkpoint refreshers, registered by the autoloop node executor. */
-  private _autoloopPublishers = new Map<string, () => void>();
+  private _autoloopPublishers = new Map<string, () => boolean>();
 
   async ultraplanStart(
     task: string,
@@ -3738,11 +3746,15 @@ export class SessionManager {
     _commitTimeoutMigration?: () => void;
     /** Internal fresh-boot marker from kernel visits===1. Never stored. */
     _freshStart?: boolean;
+    /** Validated accepted-chat fields from the stored checkpoint. Never stored as config. */
+    _restoredInput?: AutoloopInputSnapshot;
   }): Promise<{
     runner: AutoloopRunner;
     dispatcher: ClaudeAgentDispatcher;
     ledgerDir: string;
     pushPolicy: PushPolicy;
+    abort: () => void;
+    afterPublishReconcile: () => Promise<void>;
   }> {
     const plannerEngine = validateAutoloopRole('planner', opts.plannerEngine, opts.plannerCustomEngine);
     const coderEngine = validateAutoloopRole('coder', opts.coderEngine, opts.coderCustomEngine);
@@ -3816,6 +3828,10 @@ export class SessionManager {
       run_id: opts.runId,
       workspace: opts.workspace,
       ledger_dir: ledgerDir,
+      persistCheckpoint: () => {
+        const publish = this._autoloopPublishers.get(runId);
+        return publish ? publish() : false;
+      },
       push_policy: pushPolicy,
       notifyUser: async (level: PushLevel, summary: string, detail, channel: PushChannel) => {
         const result = await notifyUserFallbackChain({
@@ -3844,14 +3860,15 @@ export class SessionManager {
     });
     // Background resume/deadline/stall paths emit 'error' after a void catch.
     // Without a listener, Node turns that into an unhandled rejection.
-    runner.on('error', () => {
-      this.logger.error?.(`[autoloop/${runId}] background runner task failed`);
+    runner.on('error', (err: unknown) => {
+      this.logger.error?.(`[autoloop/${runId}] background runner task failed: ${boundedErrorReason(err)}`);
     });
     runnerRef = runner;
     if (closedLedgerRestore) {
       runner.state.iter = closedLedgerRestore.iter;
       runner.state.metric_history = closedLedgerRestore.metric_history.slice();
     }
+    if (opts._restoredInput) runner.loadRestoredInput(opts._restoredInput);
     try {
       await runner.start();
       // A reconstructed migration becomes externally visible only after its
@@ -3859,7 +3876,6 @@ export class SessionManager {
       // this inside the startup try makes an append failure follow the same
       // cleanup path as any other failed resume.
       opts._commitTimeoutMigration?.();
-      await this._recoverCommittedCoderIteration(opts.workspace, ledgerDir, runId, runner, dispatcher);
     } catch (err) {
       try {
         await dispatcher.shutdown('start-failed', {
@@ -3871,7 +3887,18 @@ export class SessionManager {
       runner.stop();
       throw err;
     }
-    return { runner, dispatcher, ledgerDir, pushPolicy };
+    // Committed-iteration recovery runs after publisher registration, the
+    // initial-publish check and notice reconciliation (see afterPublishReconcile
+    // in makeAutoloopExecutor) — never inside boot before that gate.
+    return {
+      runner,
+      dispatcher,
+      ledgerDir,
+      pushPolicy,
+      abort: () => runner.markCancelledByKernel(),
+      afterPublishReconcile: () =>
+        this._recoverCommittedCoderIteration(opts.workspace, ledgerDir, runId, runner, dispatcher),
+    };
   }
 
   /**
@@ -3913,8 +3940,12 @@ export class SessionManager {
 
     this.logger.info?.(`[autoloop/${runId}] recovering committed iter ${n} into Reviewer`);
     await dispatcher.ensureReviewerForCommittedRecovery();
-    runner.markSubagentsSpawned();
+    // Keep a reconciled chat_notice_pending pause so Planner-bound follow-ups
+    // park until the notice is recorded; live spawn_subagents stays unchanged.
+    runner.markSubagentsSpawned({ preservePause: true });
     runner.state.iter = n;
+    // Queue only — never await the physical Reviewer turn. Readiness and the
+    // cancellation observer must install before any model transport settles.
     void runner
       .send(
         AutoloopMsg.reviewRequest(n, {
@@ -4031,11 +4062,21 @@ export class SessionManager {
   }
 
   /**
+   * Durably accept a chat message for a live run's Planner and return the
+   * envelope to deliver. Throws, with nothing accepted, when the run cannot
+   * checkpoint it. Internal: callers pass the result to `runner.send`.
+   */
+  acceptAutoloopChat(runId: string, text: string): AnyAutoloopMessage {
+    return this._liveAutoloop(runId).runner.acceptChat(text);
+  }
+
+  /**
    * Inject a user chat message into a v2 run's Planner. Returns the Planner's
    * natural-language reply.
    */
   async autoloopChat(runId: string, text: string): Promise<{ reply: string }> {
     const ctx = this._liveAutoloop(runId);
+    const env = this.acceptAutoloopChat(runId, text);
     let reply = '';
     const onReply = (...args: unknown[]) => {
       const t = args[0];
@@ -4043,7 +4084,7 @@ export class SessionManager {
     };
     ctx.dispatcher.on('planner_reply', onReply);
     try {
-      await ctx.runner.send(AutoloopMsg.chat(ctx.runner.state.iter, { text }));
+      await ctx.runner.send(env);
     } finally {
       ctx.dispatcher.off('planner_reply', onReply);
     }

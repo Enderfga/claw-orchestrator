@@ -16,6 +16,8 @@ import { SessionManager } from './session-manager.js';
 import { sanitizeCwd, validateRegex } from './validation.js';
 import { resolveSecretRefs } from './kernel/secrets.js';
 import { validateAutoloopTimeoutConfig } from './autoloop/types.js';
+import { isUnconfirmedChatNotice } from './autoloop/dispatcher.js';
+import { boundedErrorReason } from './sanitize.js';
 import type { EffortLevel, EngineType } from './types.js';
 import { handleChatCompletion } from './openai-compat.js';
 import { getModelList } from './models.js';
@@ -1130,14 +1132,23 @@ export class EmbeddedServer {
         const pathMod = await import('node:path');
         const file = pathMod.join(status.ledger_dir, 'chat.jsonl');
         const lines: unknown[] = [];
+        // One notice may be appended more than once; its timestamp is its identity.
+        const noticeTimestamps = new Set<string>();
         if (fsMod.existsSync(file)) {
           for (const line of fsMod.readFileSync(file, 'utf-8').split('\n')) {
             if (!line.trim()) continue;
+            let entry: unknown;
             try {
-              lines.push(JSON.parse(line));
+              entry = JSON.parse(line);
             } catch {
               /* skip malformed line */
+              continue;
             }
+            if (isUnconfirmedChatNotice(entry)) {
+              if (noticeTimestamps.has(entry.ts)) continue;
+              noticeTimestamps.add(entry.ts);
+            }
+            lines.push(entry);
           }
         }
         json(200, { ok: true, entries: lines });
@@ -1259,7 +1270,8 @@ export class EmbeddedServer {
         }
         // Validate run exists synchronously so 404 surfaces cleanly. After
         // this point we hand the message off to the runner and return.
-        if (!this.manager.getAutoloop(id)) {
+        const live = this.manager.getAutoloop(id);
+        if (!live) {
           // Only a run the store still holds can be resumed; anything else —
           // a mistyped id included — is simply not found. MCP and CLI callers
           // use this endpoint too, so the hint names the API, not a button.
@@ -1277,13 +1289,22 @@ export class EmbeddedServer {
           });
           return;
         }
-        this.manager.autoloopChat(id, text).catch((err) => {
+        // 202 means the chat is in the run checkpoint, not that the Planner
+        // has it: acceptance is synchronous, delivery is not.
+        let env: ReturnType<SessionManager['acceptAutoloopChat']>;
+        try {
+          env = this.manager.acceptAutoloopChat(id, text);
+        } catch (err) {
+          json(autoloopErrorStatus(err), { ok: false, error: (err as Error).message });
+          return;
+        }
+        json(202, { ok: true, queued: true });
+        void live.runner.send(env).catch((err: unknown) => {
           // Late failures (planner errors, runner shutdown mid-dispatch) flow
           // to SSE as planner_error events; this catch only exists to keep
           // unhandled rejection from crashing the server.
-          console.warn(`[autoloop/${id}] chat dispatch failed: ${(err as Error).message}`);
+          console.warn(`[autoloop/${id}] chat dispatch failed: ${boundedErrorReason(err)}`);
         });
-        json(202, { ok: true, queued: true });
         return;
       }
 

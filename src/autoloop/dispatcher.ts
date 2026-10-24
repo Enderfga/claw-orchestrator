@@ -81,6 +81,23 @@ const REVIEWER_SANDBOX_PERSIST = new Set(['reviewer_memory.md', 'reviewer_log.js
  */
 const UNSILENCEABLE_POLICY_KEYS = new Set(['on_phase_error', 'on_decision_needed']);
 
+/** The fixed chat-history entry for accepted chat whose delivery was not confirmed. */
+export const NOTICE_TEXT =
+  'A message that was being delivered when the run stopped may not have reached the Planner. It was not resent automatically; re-send it if needed.';
+
+/**
+ * True for an unconfirmed-chat notice entry with a canonical ISO timestamp.
+ * The timestamp is the notice's identity: one obligation may be appended more
+ * than once, and readers keep the first entry per timestamp.
+ */
+export function isUnconfirmedChatNotice(entry: unknown): entry is { who: 'system'; text: string; ts: string } {
+  if (!entry || typeof entry !== 'object') return false;
+  const e = entry as { who?: unknown; text?: unknown; ts?: unknown };
+  if (e.who !== 'system' || e.text !== NOTICE_TEXT || typeof e.ts !== 'string') return false;
+  const ms = Date.parse(e.ts);
+  return Number.isFinite(ms) && new Date(ms).toISOString() === e.ts;
+}
+
 export interface ClaudeAgentDispatcherConfig {
   manager: SessionManager;
   runId: string;
@@ -756,6 +773,43 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
       fs.appendFileSync(path.join(this.ledgerDir, 'chat.jsonl'), JSON.stringify(entry) + '\n');
     } catch (err) {
       this.logger.warn?.(`[autoloop] chat.jsonl append failed: ${(err as Error).message}`);
+    }
+  }
+
+  /**
+   * Append the unconfirmed-chat notice with timestamp `ts` and fsync it. A
+   * torn last line is isolated with a newline rather than rewritten. Returns
+   * false on any I/O failure so the caller keeps its obligation and retries
+   * with the same timestamp.
+   */
+  appendUnconfirmedChatNotice(ts: string): boolean {
+    let fd: number | undefined;
+    try {
+      fs.mkdirSync(this.ledgerDir, { recursive: true });
+      fd = fs.openSync(path.join(this.ledgerDir, 'chat.jsonl'), 'a+');
+      const size = fs.fstatSync(fd).size;
+      let prefix = '';
+      if (size > 0) {
+        const last = Buffer.alloc(1);
+        fs.readSync(fd, last, 0, 1, size - 1);
+        if (last[0] !== 0x0a) prefix = '\n';
+      }
+      const bytes = Buffer.from(prefix + JSON.stringify({ who: 'system', text: NOTICE_TEXT, ts }) + '\n', 'utf8');
+      let written = 0;
+      while (written < bytes.length) written += fs.writeSync(fd, bytes, written, bytes.length - written);
+      fs.fsyncSync(fd);
+      return true;
+    } catch {
+      this.logger.warn?.('[autoloop] unconfirmed-chat notice append failed');
+      return false;
+    } finally {
+      if (fd !== undefined) {
+        try {
+          fs.closeSync(fd);
+        } catch {
+          // Closing cannot change the outcome reported above.
+        }
+      }
     }
   }
 

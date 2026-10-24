@@ -660,6 +660,14 @@ Send a message into the Planner conversation.
 | `run_id`  | string | yes      |
 | `text`    | string | yes      |
 
+The message is accepted only once it is stored in the run checkpoint; otherwise
+the call fails with `autoloop chat could not be persisted` (or a stopping,
+restoring or limit error) and nothing is sent. Accepted chat survives
+`autoloop_stop` and owner loss and is delivered once, in order, after a resume.
+A message that was mid-delivery when the run stopped is not resent; it is
+reported through `unconfirmed_chat` in `autoloop_status` and one notice in chat
+history.
+
 ### `autoloop_status`
 
 Get the current state and push log.

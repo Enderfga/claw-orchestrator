@@ -11,7 +11,13 @@
  */
 
 import { EventEmitter } from 'node:events';
-import { type AnyAutoloopMessage, AutoloopRoutingError, Msg, validateMessage } from './messages.js';
+import {
+  type AnyAutoloopMessage,
+  AutoloopRoutingError,
+  Msg,
+  type SendTimeoutPayload,
+  validateMessage,
+} from './messages.js';
 import {
   DEFAULT_PUSH_POLICY,
   MAX_METRIC_HISTORY,
@@ -23,8 +29,72 @@ import {
 
 const MAX_DISPATCH_DEPTH = 64;
 /** Cap on agent-bound messages parked during a pause, to bound memory if an
- *  operator pauses while policy pushes keep arriving. Oldest are dropped. */
+ *  operator pauses while policy pushes keep arriving. Oldest untracked
+ *  messages are dropped; accepted chat is never evicted. */
 const MAX_PAUSED_BUFFER = 1000;
+/** Most accepted chat entries that may wait for handoff at once. */
+export const MAX_PENDING_CHAT = 1000;
+/** Most UTF-8 bytes of accepted chat text that may wait for handoff at once. */
+export const MAX_PENDING_CHAT_BYTES = 8 * 1024 * 1024;
+export const CHAT_PERSIST_ERROR = 'autoloop chat could not be persisted';
+export const CHAT_STOPPING_ERROR = 'autoloop run is stopping; chat was not accepted';
+export const CHAT_RESTORING_ERROR = 'autoloop run is still restoring; chat was not accepted';
+export const CHAT_LIMIT_ERROR = 'autoloop chat refused: too much chat is already pending';
+/** Ordinary-pause reason while an unconfirmed-chat notice could not be recorded. */
+export const CHAT_NOTICE_PENDING = 'chat_notice_pending';
+const MAX_DATE_MS = 8.64e15;
+
+/** Chat accepted into the checkpoint but not yet handed to the dispatcher. */
+export interface PendingChatEntry {
+  msg_id: string;
+  iter: number;
+  ts: string;
+  text: string;
+}
+
+/** The one accepted chat whose physical send may have started. */
+export interface InFlightChat {
+  msg_id: string;
+  handed_at: string;
+}
+
+export type UnconfirmedChatStatus = NonNullable<AutoloopState['unconfirmed_chat']>;
+
+/** Accepted-chat fields carried by the node checkpoint. Always replaced, never mutated. */
+export interface AutoloopInputSnapshot {
+  readonly pendingChat: readonly PendingChatEntry[];
+  readonly inFlightChat: InFlightChat | null;
+  readonly unconfirmed?: UnconfirmedChatStatus;
+}
+
+const EMPTY_INPUT: AutoloopInputSnapshot = Object.freeze({ pendingChat: Object.freeze([]), inFlightChat: null });
+
+function freezeInput(input: AutoloopInputSnapshot): AutoloopInputSnapshot {
+  return Object.freeze({
+    pendingChat: Object.freeze(input.pendingChat.map((e) => (Object.isFrozen(e) ? e : Object.freeze({ ...e })))),
+    inFlightChat: input.inFlightChat ? Object.freeze({ ...input.inFlightChat }) : null,
+    ...(input.unconfirmed ? { unconfirmed: Object.freeze({ ...input.unconfirmed }) } : {}),
+  });
+}
+
+/** Total UTF-8 bytes of pending chat text. */
+export function pendingChatBytes(entries: readonly PendingChatEntry[]): number {
+  let total = 0;
+  for (const e of entries) total += Buffer.byteLength(e.text, 'utf8');
+  return total;
+}
+
+function chatEnvelope(entry: PendingChatEntry): AnyAutoloopMessage {
+  return {
+    msg_id: entry.msg_id,
+    iter: entry.iter,
+    from: 'user',
+    to: 'planner',
+    type: 'chat',
+    ts: entry.ts,
+    payload: { text: entry.text },
+  };
+}
 const DEFAULT_PHASE_ERROR_CIRCUIT = 3;
 const DEFAULT_STALL_MS = 30 * 60_000;
 const DEFAULT_STALL_CHECK_MS = 30_000;
@@ -96,6 +166,14 @@ export class AutoloopRunner extends EventEmitter {
   private readonly resolvedTimedOutDispatches = new Set<string>();
   private readonly timeouts: ResolvedAutoloopTimeoutConfig;
   private readonly hardDeadlineAt: number;
+  /** Last accepted-chat snapshot the checkpoint confirmed. */
+  private committedInput: AutoloopInputSnapshot = EMPTY_INPUT;
+  /** Candidate visible to the checkpoint only during its own commit call. */
+  private stagedInput: AutoloopInputSnapshot | null = null;
+  /** 'loaded' refuses accept until reconcile; 'reconciled' waits for release. */
+  private restorePhase: 'none' | 'loaded' | 'reconciled' = 'none';
+  /** Restored pending chat ids, released in this order once the run is ready. */
+  private restoredChatIds: string[] = [];
 
   constructor(config: AutoloopConfig) {
     super();
@@ -279,6 +357,9 @@ export class AutoloopRunner extends EventEmitter {
     this.queue.length = 0;
     this.pausedBuffer.length = 0;
     this.stop();
+    // Pending chat stays in the checkpoint for the next resume; only the
+    // in-flight marker becomes a notice.
+    this.convertUnconfirmedChat();
     this.emit('state', this.state);
     if (timeoutEvent) this.emit('timeout', timeoutEvent);
     this.terminationPromise = (async () => {
@@ -319,6 +400,82 @@ export class AutoloopRunner extends EventEmitter {
   }
 
   /**
+   * Durably accept operator chat. Returns the envelope to hand to `send` once
+   * the checkpoint holding it has committed; throws without side effects
+   * otherwise.
+   */
+  acceptChat(text: string): AnyAutoloopMessage {
+    if (this.terminationStarted || this.state.status === 'terminated' || this.state.status === 'crashed') {
+      throw new Error(CHAT_STOPPING_ERROR);
+    }
+    if (!this.config.persistCheckpoint) throw new Error(CHAT_PERSIST_ERROR);
+    if (this.restorePhase === 'loaded') throw new Error(CHAT_RESTORING_ERROR);
+    const env = Msg.chat(this.state.iter, { text });
+    const pendingChat = [...this.committedInput.pendingChat, { msg_id: env.msg_id, iter: env.iter, ts: env.ts, text }];
+    if (pendingChat.length > MAX_PENDING_CHAT || pendingChatBytes(pendingChat) > MAX_PENDING_CHAT_BYTES) {
+      throw new Error(CHAT_LIMIT_ERROR);
+    }
+    if (!this.commitInput({ ...this.committedInput, pendingChat })) throw new Error(CHAT_PERSIST_ERROR);
+    return env;
+  }
+
+  /** The accepted-chat snapshot the next checkpoint should carry. */
+  checkpointInput(): AutoloopInputSnapshot {
+    return this.stagedInput ?? this.committedInput;
+  }
+
+  /**
+   * Kernel cancel won out-of-band. No further agent-bound work starts, a late
+   * settle neither clears the marker nor enqueues follow-ups, and an in-flight
+   * marker becomes a notice now: `terminate` would return early from here on.
+   */
+  markCancelledByKernel(): void {
+    this.terminationStarted = true;
+    this.convertUnconfirmedChat();
+  }
+
+  /**
+   * Load the accepted-chat snapshot restored from the checkpoint. Boot-time
+   * only: nothing is converted, queued or sent until reconcile and release.
+   */
+  loadRestoredInput(input: AutoloopInputSnapshot): void {
+    this.committedInput = freezeInput(input);
+    this.adoptUnconfirmed(this.committedInput);
+    this.restoredChatIds = this.committedInput.pendingChat.map((e) => e.msg_id);
+    this.restorePhase = 'loaded';
+  }
+
+  /** Record a restored in-flight marker as a notice; pause visibly if that fails. */
+  reconcileRestoredInput(): void {
+    if (this.restorePhase !== 'loaded') return;
+    this.restorePhase = 'reconciled';
+    if (this.terminationStarted || this.state.status === 'terminated' || this.state.status === 'crashed') return;
+    this.convertUnconfirmedChat();
+    if (!this.inputResolved()) this.enterNoticePause();
+  }
+
+  /** Queue (or park, while paused) restored pending chat in its original order. */
+  releaseRestoredInput(): void {
+    if (this.restorePhase === 'loaded') return;
+    this.restorePhase = 'none';
+    const ids = this.restoredChatIds;
+    this.restoredChatIds = [];
+    if (this.terminationStarted || this.state.status === 'terminated' || this.state.status === 'crashed') return;
+    const pending = new Map(this.committedInput.pendingChat.map((e) => [e.msg_id, e]));
+    const envs = ids.flatMap((id) => {
+      const entry = pending.get(id);
+      return entry ? [chatEnvelope(entry)] : [];
+    });
+    if (envs.length === 0) return;
+    if (this.state.status === 'paused') {
+      for (const env of envs) this.park(env);
+      return;
+    }
+    this.queue.push(...envs);
+    void this.drain().catch((err) => this.emit('error', err));
+  }
+
+  /**
    * Continue a live ordinary or activity-lease pause. A pending send-timeout
    * dispatch is not this transition. The state write is synchronous; this
    * method returns once the run is active again (or hard-deadline expiry has
@@ -340,6 +497,10 @@ export class AutoloopRunner extends EventEmitter {
       });
       return false;
     }
+    // Parked chat must not be handed over while an earlier unconfirmed chat
+    // still lacks its notice.
+    this.convertUnconfirmedChat();
+    if (!this.inputResolved()) return false;
     this.activityLeaseExpired = false;
     this.state.status = this.state.subagents_spawned ? 'running' : 'planning';
     this.state.status_reason = null;
@@ -382,12 +543,19 @@ export class AutoloopRunner extends EventEmitter {
     return true;
   }
 
-  /** Mark subagents spawned (called by S3's spawn_subagents tool handler). */
-  markSubagentsSpawned(): void {
+  /**
+   * Mark subagents spawned (called by S3's spawn_subagents tool handler).
+   * Recovery may pass `{ preservePause: true }` so a reconciled
+   * `chat_notice_pending` pause is not cleared — Planner-bound follow-ups then
+   * park until ordinary resume retries the notice.
+   */
+  markSubagentsSpawned(opts?: { preservePause?: boolean }): void {
     if (this.state.subagents_spawned) return;
     this.recordActivity('lifecycle_transition');
     this.state.subagents_spawned = true;
-    this.state.status = 'running';
+    if (!(opts?.preservePause === true && this.state.status === 'paused')) {
+      this.state.status = 'running';
+    }
     this.emit('state', this.state);
   }
 
@@ -420,6 +588,8 @@ export class AutoloopRunner extends EventEmitter {
     // processed (see events contract above). The terminate message itself still
     // runs because status only flips to 'terminated' while handling it.
     if (this.state.status === 'terminated' || this.state.status === 'crashed') return;
+    // After a kernel cancel nothing agent- or user-bound is handled.
+    if (this.terminationStarted && env.to !== 'runner') return;
     this.emit('message', env);
 
     // Runner is the target for a small set of messages — handle them inline.
@@ -439,17 +609,60 @@ export class AutoloopRunner extends EventEmitter {
     // short-circuited at the top of handleOne.)
     // Pause: park agent-bound messages until resume. Runner-bound (resume /
     // terminate) and user-bound (push) flow through above and are unaffected.
+    // Exception: during a reconciled chat_notice_pending pause, Reviewer-bound
+    // recovery may still deliver; Planner/Coder follow-ups park until the notice
+    // is recorded and ordinary resume drains them.
     if (this.state.status === 'paused') {
-      // Bound the buffer: a long pause + continuous policy pushes would
-      // otherwise grow it without limit and OOM the process.
-      if (this.pausedBuffer.length >= MAX_PAUSED_BUFFER) {
-        this.pausedBuffer.shift();
-        this.emit('error', new Error(`pausedBuffer exceeded ${MAX_PAUSED_BUFFER}; dropping oldest parked message`));
+      if (!(this.state.status_reason === CHAT_NOTICE_PENDING && env.to === 'reviewer')) {
+        this.park(env);
+        return;
       }
-      this.pausedBuffer.push(env);
-      return;
     }
-    const replies = await this.config.dispatcher.deliver(env);
+    const tracked = env.type === 'chat' && this.committedInput.pendingChat.some((e) => e.msg_id === env.msg_id);
+    if (tracked) {
+      if (!this.inputResolved()) {
+        this.convertUnconfirmedChat();
+        if (!this.inputResolved()) {
+          this.enterNoticePause();
+          this.park(env);
+          return;
+        }
+      }
+      const handoff: AutoloopInputSnapshot = {
+        ...this.committedInput,
+        pendingChat: this.committedInput.pendingChat.filter((e) => e.msg_id !== env.msg_id),
+        inFlightChat: { msg_id: env.msg_id, handed_at: new Date().toISOString() },
+      };
+      if (!this.commitInput(handoff)) {
+        // Nothing was handed over: keep the chat first in line and stop here.
+        this.queue.unshift(env);
+        throw new Error(CHAT_PERSIST_ERROR);
+      }
+    }
+    let replies: AnyAutoloopMessage[];
+    try {
+      replies = await this.config.dispatcher.deliver(env);
+    } catch (err) {
+      // A throw does not prove the send never happened; never resend it.
+      if (tracked) this.convertUnconfirmedChat();
+      throw err;
+    }
+    if (tracked) {
+      if (this.terminationStarted) return;
+      const timeout = replies.find((r) => r.type === 'send_timeout');
+      if (timeout?.type === 'send_timeout') {
+        const queuedTerminate = this.queue.find((m) => m.type === 'terminate');
+        if (queuedTerminate?.type === 'terminate') {
+          await this.terminate(queuedTerminate.payload.reason);
+          return;
+        }
+        // Pause before anything queued behind this chat is handed over.
+        this.applySendTimeout(timeout.payload);
+      } else if (this.committedInput.inFlightChat?.msg_id === env.msg_id) {
+        // A refused clear leaves the marker; it later becomes a conservative notice.
+        this.commitInput({ ...this.committedInput, inFlightChat: null });
+      }
+    }
     for (const r of replies) {
       validateMessage(r);
       // A dispatcher-generated deadline record is bookkeeping, not agent
@@ -555,24 +768,7 @@ export class AutoloopRunner extends EventEmitter {
         return;
       }
       case 'send_timeout': {
-        const pending = env.payload;
-        if (this.resolvedTimedOutDispatches.has(pending.dispatch_id)) return;
-        // The dispatcher coalesces duplicate delivery, but the runner also
-        // guards its public inbox so replaying the same structured outcome
-        // cannot emit a second timeout event or mutate state twice.
-        if (this.state.pending_dispatch?.dispatch_id === pending.dispatch_id) return;
-        // Awaiting an operator decision is a deliberate pause, not subsequent
-        // inactivity. Suspend only the renewable lease; the absolute hard
-        // deadline stays armed and remains terminal.
-        if (this.activityLeaseTimer) {
-          clearTimeout(this.activityLeaseTimer);
-          this.activityLeaseTimer = null;
-        }
-        this.state.status = 'paused';
-        this.state.status_reason = `awaiting_resume:send_timeout:${pending.agent}:${pending.dispatch_id}`;
-        this.state.pending_dispatch = { ...pending };
-        this.emit('state', this.state);
-        this.emit('send_timeout', this.state.pending_dispatch);
+        this.applySendTimeout(env.payload);
         return;
       }
       case 'pause': {
@@ -595,11 +791,135 @@ export class AutoloopRunner extends EventEmitter {
     }
   }
 
+  private applySendTimeout(pending: SendTimeoutPayload): void {
+    if (this.resolvedTimedOutDispatches.has(pending.dispatch_id)) return;
+    // The dispatcher coalesces duplicate delivery, but the runner also
+    // guards its public inbox so replaying the same structured outcome
+    // cannot emit a second timeout event or mutate state twice.
+    if (this.state.pending_dispatch?.dispatch_id === pending.dispatch_id) return;
+    // Awaiting an operator decision is a deliberate pause, not subsequent
+    // inactivity. Suspend only the renewable lease; the absolute hard
+    // deadline stays armed and remains terminal.
+    if (this.activityLeaseTimer) {
+      clearTimeout(this.activityLeaseTimer);
+      this.activityLeaseTimer = null;
+    }
+    this.state.status = 'paused';
+    this.state.status_reason = `awaiting_resume:send_timeout:${pending.agent}:${pending.dispatch_id}`;
+    this.state.pending_dispatch = { ...pending };
+    this.emit('state', this.state);
+    this.emit('send_timeout', this.state.pending_dispatch);
+  }
+
   /** Restore parked agent-bound messages at the queue head in arrival order. */
   private restorePausedMessages(): void {
     while (this.pausedBuffer.length > 0) {
       const item = this.pausedBuffer.pop();
       if (item) this.queue.unshift(item);
+    }
+  }
+
+  /**
+   * Park an agent-bound message during a pause. When the buffer is full the
+   * oldest message that is not accepted chat is evicted; accepted chat is
+   * never dropped.
+   */
+  private park(env: AnyAutoloopMessage): void {
+    if (this.pausedBuffer.length >= MAX_PAUSED_BUFFER) {
+      const accepted = new Set(this.committedInput.pendingChat.map((e) => e.msg_id));
+      const evict = this.pausedBuffer.findIndex((m) => !accepted.has(m.msg_id));
+      if (evict >= 0) {
+        this.pausedBuffer.splice(evict, 1);
+        this.emit('error', new Error(`pausedBuffer exceeded ${MAX_PAUSED_BUFFER}; dropping oldest parked message`));
+      } else {
+        // The acceptance bound equals the buffer bound, so a full buffer of
+        // accepted chat leaves no room for another accepted entry.
+        if (accepted.has(env.msg_id)) {
+          throw new AutoloopRoutingError('pausedBuffer full of accepted chat while parking accepted chat', env);
+        }
+        this.emit('error', new Error('pausedBuffer full of accepted chat; dropping incoming parked message'));
+        return;
+      }
+    }
+    this.pausedBuffer.push(env);
+  }
+
+  // ─── Accepted-chat checkpoint ──────────────────────────────────────────────
+
+  /**
+   * Stage one complete replacement snapshot, commit it through the node
+   * checkpoint and adopt it only when that commit succeeded.
+   */
+  private commitInput(next: AutoloopInputSnapshot): boolean {
+    const staged = freezeInput(next);
+    this.stagedInput = staged;
+    let committed = false;
+    try {
+      committed = this.config.persistCheckpoint?.() === true;
+    } catch {
+      committed = false;
+    } finally {
+      this.stagedInput = null;
+    }
+    if (committed) {
+      this.committedInput = staged;
+      this.adoptUnconfirmed(staged);
+    }
+    return committed;
+  }
+
+  private adoptUnconfirmed(input: AutoloopInputSnapshot): void {
+    if (input.unconfirmed) this.state.unconfirmed_chat = input.unconfirmed;
+    else delete this.state.unconfirmed_chat;
+  }
+
+  /** True when no in-flight marker or unrecorded notice is outstanding. */
+  private inputResolved(): boolean {
+    return !this.committedInput.inFlightChat && !this.committedInput.unconfirmed?.history_pending;
+  }
+
+  private enterNoticePause(): void {
+    this.state.status = 'paused';
+    this.state.status_reason = CHAT_NOTICE_PENDING;
+    this.state.pending_dispatch = null;
+    this.emit('state', this.state);
+  }
+
+  /**
+   * Turn the in-flight marker into one logical notice: commit the obligation
+   * with its timestamp, append the history line, then clear `history_pending`.
+   * Any refusal keeps the obligation for the next attempt, which reuses the
+   * same timestamp.
+   */
+  private convertUnconfirmedChat(): void {
+    for (let step = 0; step < 2 && !this.inputResolved(); step++) {
+      const input = this.committedInput;
+      const prev = input.unconfirmed;
+      if (input.inFlightChat && !prev?.history_pending) {
+        const prevCount = prev?.count ?? 0;
+        // Same as timestamp exhaustion: refuse before commit so the marker and
+        // visible obligation stay, and the checkpoint remains restorable.
+        if (prevCount >= Number.MAX_SAFE_INTEGER) return;
+        const prevMillis = prev ? Date.parse(prev.last_at) : Number.NEGATIVE_INFINITY;
+        const at = Math.max(Date.now(), prevMillis + 1);
+        if (!Number.isFinite(at) || Math.abs(at) > MAX_DATE_MS) return;
+        const converted: AutoloopInputSnapshot = {
+          pendingChat: input.pendingChat,
+          inFlightChat: null,
+          unconfirmed: { count: prevCount + 1, last_at: new Date(at).toISOString(), history_pending: true },
+        };
+        if (!this.commitInput(converted)) return;
+      }
+      const pending = this.committedInput.unconfirmed;
+      if (!pending?.history_pending) continue;
+      let appended = false;
+      try {
+        appended = this.config.dispatcher.appendUnconfirmedChatNotice?.(pending.last_at) === true;
+      } catch {
+        appended = false;
+      }
+      if (!appended) return;
+      if (!this.commitInput({ ...this.committedInput, unconfirmed: { ...pending, history_pending: false } })) return;
     }
   }
 
