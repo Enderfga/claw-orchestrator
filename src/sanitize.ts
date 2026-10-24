@@ -38,16 +38,16 @@ export function sanitizeSecrets(text: string): string {
 /**
  * A short, single-line reason for a log line, or `unknown error`.
  *
- * Source is `err instanceof Error ? err.message : String(err)`; a throw during
- * that conversion returns `unknown error`. Whitespace runs become one space,
- * then trim; known secret shapes are redacted; the result is capped at 300
- * UTF-16 units (a trailing high surrogate is dropped). Empty output, or any
- * Unicode Cc/Cf code point, becomes `unknown error`.
+ * Source is `err instanceof Error ? String(err.message) : String(err)`; a throw
+ * during that conversion returns `unknown error`. Whitespace runs become one
+ * space, then trim; known secret shapes are redacted; the result is capped at
+ * 300 UTF-16 units (a trailing high surrogate is dropped). Empty output, or
+ * any Unicode Cc/Cf code point, becomes `unknown error`.
  */
 export function boundedErrorReason(err: unknown): string {
   let text: string;
   try {
-    text = err instanceof Error ? err.message : String(err);
+    text = err instanceof Error ? String(err.message) : String(err);
   } catch {
     return 'unknown error';
   }

@@ -1601,8 +1601,8 @@ describe('Autoloop pending chat — manager and HTTP', () => {
     expect(fileEntries(workspace, runId).some((e) => e.text === NOTICE_TEXT)).toBe(false);
   });
 
-  it('C13: one bounded log event per background error, and a handled HTTP send rejection', async () => {
-    const runId = 'c13-logging';
+  it('C13: background-runner sink logs bounded multi-line Unicode with Bearer redacted', async () => {
+    const runId = 'c13-bg-sink';
     const errors: string[] = [];
     const logger: Logger = {
       debug: () => {},
@@ -1624,7 +1624,22 @@ describe('Autoloop pending chat — manager and HTTP', () => {
       `[autoloop/${runId}] background runner task failed: token=abc Bearer ***`,
       `[autoloop/${runId}] background runner task failed: 会话 planner 不存在 Bearer ***`,
     ]);
+    expect(errors.join('\n')).not.toContain('abc.def');
+  });
 
+  it('C13: HTTP chat-route sink warns bounded multi-line with Bearer redacted', async () => {
+    const runId = 'c13-http-sink';
+    const errors: string[] = [];
+    const logger: Logger = {
+      debug: () => {},
+      info: () => {},
+      warn: () => {},
+      error: (msg: string) => errors.push(msg),
+    };
+    await mgr.shutdown();
+    mgr = createManager(logger);
+    await mgr.autoloopStart({ runId, workspace: workspaceFor(runId) });
+    const handle = mgr.getAutoloop(runId)!;
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const rejections: unknown[] = [];
     const onUnhandled = (reason: unknown): void => {
@@ -1841,41 +1856,90 @@ describe('boundedErrorReason (C13)', () => {
   const depth =
     "dispatch depth exceeded 64 at iter 0 (next='chat' to 'planner') — likely message ping-pong; raise config.maxDispatchDepth for legitimately deep workflows";
 
-  it('keeps useful multi-line, long and non-ASCII reasons (RED on fd73ed2)', () => {
-    expect(boundedErrorReason(new Error('Command failed: codex exec\nerror: rate limited'))).toBe(
-      'Command failed: codex exec error: rate limited',
-    );
-    expect(boundedErrorReason(new Error('x'.repeat(301)))).toBe('x'.repeat(300));
-    expect(boundedErrorReason(new Error('会话 planner 不存在'))).toBe('会话 planner 不存在');
-    expect(boundedErrorReason(new Error('café'))).toBe('café');
-    expect(boundedErrorReason(new Error('emoji 🙂'))).toBe('emoji 🙂');
-    expect(boundedErrorReason(new Error('two\nlines'))).toBe('two lines');
-    expect(boundedErrorReason(new Error('tab\there'))).toBe('tab here');
-    expect(boundedErrorReason(new Error('x'.repeat(299) + '🙂'))).toBe('x'.repeat(299));
-    expect(boundedErrorReason(new Error('x'.repeat(290) + ' sk-ant-abcdefghijklmnop'))).toBe(
-      'x'.repeat(290) + ' sk-***',
-    );
-    expect(boundedErrorReason(new Error('auth failed\nBearer abc.def'))).toBe('auth failed Bearer ***');
-    // Deliberate contract change: non-Error values go through String(err).
-    expect(boundedErrorReason(42)).toBe('42');
+  function withMessage(value: unknown): Error {
+    const err = new Error('tmp');
+    Object.defineProperty(err, 'message', { value, configurable: true, writable: true });
+    return err;
+  }
+
+  // Descriptor / getter-not-invoked / Proxy cases deleted (superseded contract; inverse oracles).
+
+  it.each([
+    {
+      name: 'multi-line',
+      input: new Error('Command failed: codex exec\nerror: rate limited'),
+      expected: 'Command failed: codex exec error: rate limited',
+    },
+    { name: 'over-300', input: new Error('x'.repeat(301)), expected: 'x'.repeat(300) },
+    { name: 'CJK', input: new Error('会话 planner 不存在'), expected: '会话 planner 不存在' },
+    { name: 'accented', input: new Error('café'), expected: 'café' },
+    { name: 'emoji', input: new Error('emoji 🙂'), expected: 'emoji 🙂' },
+    { name: 'newline', input: new Error('two\nlines'), expected: 'two lines' },
+    { name: 'tab', input: new Error('tab\there'), expected: 'tab here' },
+    { name: 'surrogate cut', input: new Error('x'.repeat(299) + '🙂'), expected: 'x'.repeat(299) },
+    {
+      name: 'redact before truncate',
+      input: new Error('x'.repeat(290) + ' sk-ant-abcdefghijklmnop'),
+      expected: 'x'.repeat(290) + ' sk-***',
+    },
+    {
+      name: 'multi-line secret',
+      input: new Error('auth failed\nBearer abc.def'),
+      expected: 'auth failed Bearer ***',
+    },
+    { name: 'non-Error', input: 42, expected: '42' },
+    { name: 'non-string message number', input: withMessage(7), expected: '7' },
+    {
+      name: 'non-string message undefined',
+      input: withMessage(undefined),
+      expected: 'undefined',
+      // fd73ed2 probe recorded unknown error; candidate expects String(undefined).
+    },
+  ] as const)('RED $name', ({ input, expected }) => {
+    expect(boundedErrorReason(input)).toBe(expected);
   });
 
-  it('keeps ordinary controls and rejects control/format/empty text', () => {
-    expect(boundedErrorReason(new Error('spawn codex ENOENT'))).toBe('spawn codex ENOENT');
-    expect(boundedErrorReason(new Error(depth))).toBe(depth);
-    expect(boundedErrorReason(new Error('x'.repeat(300)))).toBe('x'.repeat(300));
-    for (const bad of ['bell\u0007', '\u001b[31mred\u001b[0m', 'zero\u200bwidth', '', ' \t\n ']) {
-      expect(boundedErrorReason(new Error(bad))).toBe('unknown error');
-    }
-    expect(boundedErrorReason(new Error())).toBe('unknown error');
-    expect(boundedErrorReason(new Error('auth failed: Bearer abc.def-ghi'))).toBe('auth failed: Bearer ***');
-    expect(boundedErrorReason(new Error('key sk-ant-abcdefghijklmnop rejected'))).toBe('key sk-*** rejected');
-    expect(boundedErrorReason(new Error('ANTHROPIC_API_KEY=abcdef missing'))).toBe('ANTHROPIC_API_KEY=*** missing');
+  it.each([
+    { name: 'spawn ENOENT', input: new Error('spawn codex ENOENT'), expected: 'spawn codex ENOENT' },
+    { name: 'depth message', input: new Error(depth), expected: depth },
+    { name: 'exact-300', input: new Error('x'.repeat(300)), expected: 'x'.repeat(300) },
+    { name: 'bell', input: new Error('bell\u0007'), expected: 'unknown error' },
+    { name: 'ansi', input: new Error('\u001b[31mred\u001b[0m'), expected: 'unknown error' },
+    { name: 'zero-width', input: new Error('zero\u200bwidth'), expected: 'unknown error' },
+    { name: 'empty string', input: new Error(''), expected: 'unknown error' },
+    { name: 'whitespace only', input: new Error(' \t\n '), expected: 'unknown error' },
+    { name: 'new Error()', input: new Error(), expected: 'unknown error' },
+    {
+      name: 'Bearer redaction',
+      input: new Error('auth failed: Bearer abc.def-ghi'),
+      expected: 'auth failed: Bearer ***',
+    },
+    {
+      name: 'sk- redaction',
+      input: new Error('key sk-ant-abcdefghijklmnop rejected'),
+      expected: 'key sk-*** rejected',
+    },
+    {
+      name: '*_KEY= redaction',
+      input: new Error('ANTHROPIC_API_KEY=abcdef missing'),
+      expected: 'ANTHROPIC_API_KEY=*** missing',
+    },
+  ] as const)('control $name', ({ input, expected }) => {
+    expect(boundedErrorReason(input)).toBe(expected);
+  });
+
+  it('control Error subclass secret name', () => {
     class Leaky extends Error {
       override name = 'Bearer leaked-name';
     }
     expect(boundedErrorReason(new Leaky('ok reason'))).toBe('ok reason');
+  });
+
+  it('control Object.create(null)', () => {
     expect(boundedErrorReason(Object.create(null))).toBe('unknown error');
+  });
+
+  it('control throwing toString', () => {
     expect(
       boundedErrorReason({
         toString() {
@@ -1883,6 +1947,9 @@ describe('boundedErrorReason (C13)', () => {
         },
       }),
     ).toBe('unknown error');
+  });
+
+  it('control Error message getter throws', () => {
     const throwingMessage = new Error('safe');
     Object.defineProperty(throwingMessage, 'message', {
       get() {
