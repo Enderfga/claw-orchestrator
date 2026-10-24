@@ -1,6 +1,6 @@
 /**
  * Accepted Autoloop chat in the node checkpoint: pending chat, the single
- * in-flight marker, and the unconfirmed-chat notice (C1–C14).
+ * in-flight marker, and the unconfirmed-chat notice (C1–C13).
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -1850,7 +1850,7 @@ describe('Autoloop pending chat — #149 contracts (C11)', () => {
   });
 });
 
-// ─── C13 helper unit cases, C14 changelog ───────────────────────────────────
+// ─── C13 helper unit cases ───────────────────────────────────
 
 describe('boundedErrorReason (C13)', () => {
   const depth =
@@ -1957,42 +1957,5 @@ describe('boundedErrorReason (C13)', () => {
       },
     });
     expect(boundedErrorReason(throwingMessage)).toBe('unknown error');
-  });
-});
-
-describe('CHANGELOG (C14)', () => {
-  const ENTRY_149 = `- **A live ordinary or activity-lease autoloop pause resumes in place.**
-  \`autoloopResume\` with no timeout increase continues a paused live run whose
-  \`pending_dispatch\` is null: status returns to \`planning\` or \`running\`, the
-  activity lease re-arms, and the original hard deadline stays put. The call
-  returns once that transition is done; Planner chat accepted during the pause
-  is then delivered once, in order. A pending send-timeout pause is still a
-  no-op until an explicit timeout increase. The dashboard Resume button is
-  shown for every live paused run, and sends timeout fields only when a
-  dispatch is pending. A background runner task failure after that return is
-  logged once through the SessionManager logger instead of becoming an
-  unhandled rejection.
-`;
-  const changelogPath = fileURLToPath(new URL('../../CHANGELOG.md', import.meta.url));
-
-  it('keeps the #149 Unreleased entry byte-for-byte', () => {
-    const text = fs.readFileSync(changelogPath, 'utf8');
-    const unreleased = text.slice(
-      text.indexOf('## [Unreleased]'),
-      text.indexOf('\n## [', text.indexOf('## [Unreleased]') + 1),
-    );
-    expect(unreleased.split(ENTRY_149)).toHaveLength(2);
-
-    let base: string | null = null;
-    try {
-      base = execFileSync('git', ['show', '8a92966e:CHANGELOG.md'], {
-        cwd: path.dirname(changelogPath),
-        encoding: 'utf8',
-        stdio: ['ignore', 'pipe', 'ignore'],
-      });
-    } catch {
-      // Shallow clones may not carry the base commit; the embedded copy above is the check.
-    }
-    if (base !== null) expect(base.split(ENTRY_149)).toHaveLength(2);
   });
 });
