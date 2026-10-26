@@ -390,8 +390,9 @@ resume/recovery repeats the same message construction.
 
 ### `fanout_status`
 
-Poll a fan-out by `id`. Returns `{ ok, id, status, results: [{ agent, engine, model, ok, output, error?, durationMs }], synthesis?, error? }`.
-`status` is `running`, `done`, `error` or `aborted`.
+Poll a fan-out by `id`. Returns `{ ok, id, status, results: [{ agent, engine, model, ok, output, error?, durationMs }], synthesis?, synthesisError?, error? }`.
+`status` is `running`, `done`, `error` or `aborted`. `synthesisError` is set when synthesis was requested
+and failed; without it, a missing `synthesis` means none was requested or fewer than two agents succeeded.
 
 ### `fanout_abort`
 

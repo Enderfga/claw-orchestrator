@@ -76,6 +76,7 @@ export async function executeFanoutNode(node: NodeSpec, ctx: NodeContext): Promi
       agentCount: session.agentCount,
       results: session.results,
       synthesis: session.synthesis,
+      synthesisError: session.synthesisError,
     },
   };
 }
