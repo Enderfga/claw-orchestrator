@@ -667,6 +667,20 @@ describe('EmbeddedServer', () => {
       expect((res.body as Record<string, string>).error).toBe('Session failed');
     });
 
+    // Both refusals are about the caller's workspace, and the same request
+    // succeeds once the workspace is fixed — not a server fault.
+    it.each([
+      'Autoloop workspace has uncommitted changes; commit or stash them before starting',
+      'Autoloop could not isolate the run ledger from Git',
+    ])('answers 409 when autoloop refuses the workspace: %s', async (message) => {
+      (manager as unknown as Record<string, unknown>).autoloopStart = vi.fn().mockRejectedValue(new Error(message));
+      await server.start();
+
+      const res = await request(port, '/autoloop/new', { method: 'POST', body: { workspace: os.tmpdir() } });
+      expect(res.status).toBe(409);
+      expect((res.body as Record<string, string>).error).toBe(message);
+    });
+
     it('returns 400 for invalid JSON body', async () => {
       await server.start();
 

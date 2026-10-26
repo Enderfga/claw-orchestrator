@@ -40,6 +40,10 @@ function autoloopErrorStatus(error: unknown): number {
   if (/^Autoloop run '.+' not found in registry$/.test(message)) return 404;
   if (/^Autoloop with id '.+' (?:already exists|is being deleted|is still starting)$/.test(message)) return 409;
   if (/^Autoloop session name '.+' is already in use$/.test(message)) return 409;
+  // The caller's workspace refuses the start; the same request succeeds once
+  // the worktree is clean and the run ledger can be ignored.
+  if (/^Autoloop workspace has uncommitted changes\b/.test(message)) return 409;
+  if (/^Autoloop could not isolate the run ledger from Git$/.test(message)) return 409;
   if (/^(?:Planner|Coder|Reviewer) engine '.+' is not supported(?: by Autoloop)?$/.test(message)) return 400;
   if (/^(?:Planner|Coder|Reviewer) effort\b/.test(message)) return 400;
   // Any custom-engine config complaint is caller error, not a server fault.
