@@ -412,7 +412,11 @@ without a custom engine. The launcher is the caller's own command, at the same
 trust level as a contract's command check, which the HTTP API also accepts: set
 it through the SessionManager API, `/session/start` or a workflow spec (the `goal`
 node's `launcher`, which `workflow_start` and `clawo goal --launcher` also take). It
-is not a parameter of the `session_start` tool.
+is not a parameter of the `session_start` tool. On Windows, a launcher that runs
+through `cmd.exe` (a `.cmd` or `.bat`) is held to the same argv rule as an engine
+shim: an argument with a newline or an unbalanced double quote is refused before
+spawning, so an engine that takes its prompt on the command line needs a launcher
+that is a real executable.
 
 ## ISession Interface
 

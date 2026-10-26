@@ -241,4 +241,26 @@ describe('argv cmd.exe cannot carry', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  // With a launcher the process spawned is the launcher, so it is the launcher
+  // that decides whether the whole argv — engine and prompt included — goes
+  // through cmd.exe.
+  it.each([
+    ['a newline', 'line1\nline2'],
+    ['an unbalanced quote', 'say "hi'],
+  ])('refuses %s when the launcher is a batch target', (_label, arg) => {
+    const realPlatform = process.platform;
+    const dir = mkdtempSync(join(tmpdir(), 'clawo-batchrefuse-'));
+    writeFileSync(join(dir, 'sandbox.cmd'), '@echo off', 'utf8');
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    try {
+      const env = { PATH: dir, PATHEXT: '.COM;.EXE;.BAT;.CMD' };
+      expect(() => spawnEngine(process.execPath, ['run', arg], { env, launcher: ['sandbox', 'task'] })).toThrow(
+        /cmd\.exe/,
+      );
+    } finally {
+      Object.defineProperty(process, 'platform', { value: realPlatform });
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
