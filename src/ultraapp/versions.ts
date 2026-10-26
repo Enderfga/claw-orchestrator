@@ -1,12 +1,13 @@
 /**
  * Version snapshot + swap mechanics.
  *
- * Each successful patcher / spec-delta / structural-rerun bumps a version.
- * Versions live under `<runDir>/versions/v1/`, `v2/`, ..., each with their
- * own `artifact.json` carrying worktreePath + (optionally) deploy info.
+ * Each build and each successful patch takes a new version. Versions live under
+ * `<runDir>/versions/v1/`, `v2/`, ..., each with its own `codebase/` and an
+ * `artifact.json` carrying worktreePath + (once deployed) deploy info.
  *
- * `swapVersion` atomically retargets the router: deregister current slug,
- * stop current container, start new container, register slug to new port.
+ * `swapVersion` retargets the router between two deployed versions: deregister
+ * the slug, stop the current container, start the target, register the slug to
+ * the target's port.
  */
 
 import * as fs from 'node:fs';
@@ -25,6 +26,7 @@ export interface VersionEntry {
   builtAt: string;
   source?: string;
   deploy?: DeployInfoLite;
+  deployedAt?: string;
 }
 
 export function listVersions(versionsDir: string): VersionEntry[] {
@@ -50,14 +52,55 @@ function parseVersionNumber(version: string): number {
   return m ? parseInt(m[1], 10) : Number.MAX_SAFE_INTEGER;
 }
 
-export function snapshotVersion(versionsDir: string, args: { worktreePath: string; source: string }): string {
-  fs.mkdirSync(versionsDir, { recursive: true });
-  const existing = listVersions(versionsDir);
-  const next = `v${existing.length + 1}`;
-  const dir = path.join(versionsDir, next);
-  fs.mkdirSync(dir, { recursive: true });
+/**
+ * The next free version slot.
+ *
+ * Counts every `vN` directory, recorded or not, so a slot a failed build or patch
+ * left behind is skipped rather than written into.
+ */
+export function nextVersion(versionsDir: string): string {
+  let max = 0;
+  try {
+    for (const d of fs.readdirSync(versionsDir)) {
+      const m = /^v(\d+)$/.exec(d);
+      if (m) max = Math.max(max, parseInt(m[1], 10));
+    }
+  } catch {
+    /* no versions yet */
+  }
+  return `v${max + 1}`;
+}
+
+/**
+ * Not copied by a fork: every validation and deploy runs `npm install` first.
+ * Build output is copied, since a source directory can share its name.
+ */
+const NOT_FORKED = new Set(['node_modules']);
+
+/**
+ * Copy a version's codebase into the next slot, so a change can be made to the
+ * copy while the original keeps serving.
+ *
+ * The copy is not listed until {@link snapshotVersion} records it, so a change
+ * that fails leaves nothing that could be promoted.
+ */
+export function forkVersion(versionsDir: string, fromWorktree: string): { version: string; worktreePath: string } {
+  const version = nextVersion(versionsDir);
+  const worktreePath = path.join(versionsDir, version, 'codebase');
+  fs.cpSync(fromWorktree, worktreePath, {
+    recursive: true,
+    filter: (src) => !NOT_FORKED.has(path.relative(fromWorktree, src)),
+  });
+  return { version, worktreePath };
+}
+
+/** Record a forked version, which makes it listed and promotable. */
+export function snapshotVersion(
+  versionsDir: string,
+  args: { version: string; worktreePath: string; source: string },
+): string {
   fs.writeFileSync(
-    path.join(dir, 'artifact.json'),
+    path.join(versionsDir, args.version, 'artifact.json'),
     JSON.stringify(
       {
         worktreePath: args.worktreePath,
@@ -68,7 +111,7 @@ export function snapshotVersion(versionsDir: string, args: { worktreePath: strin
       2,
     ),
   );
-  return next;
+  return args.version;
 }
 
 export interface SwapArgs {
@@ -95,7 +138,14 @@ export async function swapVersion(args: SwapArgs): Promise<{ ok: boolean; error?
     });
   }
   const r = await args.startContainer(to.deploy.containerName);
-  if (!r.ok) return { ok: false, error: r.error };
+  if (!r.ok) {
+    // Leave the app on the version it was serving rather than on nothing.
+    if (from?.deploy) {
+      const back = await args.startContainer(from.deploy.containerName).catch(() => ({ ok: false }));
+      if (back.ok) args.router.register(args.slug, from.deploy.port);
+    }
+    return { ok: false, error: r.error };
+  }
   args.router.register(args.slug, to.deploy.port);
   return { ok: true };
 }

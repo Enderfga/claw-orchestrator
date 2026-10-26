@@ -4,6 +4,8 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { UltraappManager } from '../../ultraapp/manager.js';
 import { UltraappStore } from '../../ultraapp/store.js';
+import { listVersions } from '../../ultraapp/versions.js';
+import { resolveAlias } from '../../models.js';
 
 interface FakeSession {
   send: ReturnType<typeof vi.fn>;
@@ -37,6 +39,64 @@ const PASSING_BUILD = {
 
 function questionReply(): string {
   return '```question\n{"question":"hi","options":[{"label":"a","value":"a"}],"recommended":"a","freeformAccepted":true}\n```';
+}
+
+/** A version on disk as a finished build leaves it; deployed when `deployedAt` is given. */
+function writeVersion(
+  store: UltraappStore,
+  id: string,
+  version: string,
+  opts: { deployedAt?: string; port?: number; files?: Record<string, string> } = {},
+): string {
+  const dir = path.join(store.versionsDir(id), version);
+  const worktreePath = path.join(dir, 'codebase');
+  fs.mkdirSync(worktreePath, { recursive: true });
+  for (const [f, c] of Object.entries(opts.files ?? {})) fs.writeFileSync(path.join(worktreePath, f), c);
+  const deploy = opts.deployedAt
+    ? {
+        deployedAt: opts.deployedAt,
+        deploy: {
+          url: 'http://localhost:19000/forge/demo/',
+          port: opts.port ?? 19101,
+          containerName: `ultraapp-demo-${version}`,
+          imageTag: `ultraapp/demo:${version}`,
+        },
+      }
+    : {};
+  fs.writeFileSync(
+    path.join(dir, 'artifact.json'),
+    JSON.stringify({ worktreePath, builtAt: '2026-10-01T00:00:00.000Z', ...deploy }),
+  );
+  return worktreePath;
+}
+
+function fakeRouter() {
+  return {
+    register: vi.fn(),
+    deregister: vi.fn(),
+    list: () => [] as Array<{ slug: string; port: number }>,
+    port: () => 19000,
+  };
+}
+
+/** Stub both runtimes, so a test can see which one the manager drove. */
+async function stubRuntimes() {
+  const host = await import('../../ultraapp/host-strategy.js');
+  const docker = await import('../../ultraapp/docker.js');
+  const ok = async () => ({ ok: true });
+  const spies = {
+    hostStart: vi.spyOn(host, 'hostStart').mockImplementation(ok),
+    hostStop: vi.spyOn(host, 'hostStop').mockImplementation(ok),
+    hostRm: vi.spyOn(host, 'hostRm').mockImplementation(ok),
+    dockerStart: vi.spyOn(docker, 'dockerStart').mockImplementation(ok),
+    dockerStop: vi.spyOn(docker, 'dockerStop').mockImplementation(ok),
+    dockerRm: vi.spyOn(docker, 'dockerRm').mockImplementation(ok),
+  };
+  return { ...spies, restore: () => Object.values(spies).forEach((s) => s.mockRestore()) };
+}
+
+function cosmeticReply(): string {
+  return '```classification\n{"class":"cosmetic","reason":"r","proposedAction":"swap color"}\n```';
 }
 
 describe('UltraappManager', () => {
@@ -113,6 +173,29 @@ describe('UltraappManager', () => {
     const chat = await store.readChat(id);
     const questions = chat.filter((c) => c.kind === 'question');
     expect(questions.length).toBe(2);
+  });
+
+  it('picks up a run created by an earlier process', async () => {
+    const first = new UltraappManager({ store, sessionManager: fakeSessionManager(questionReply()) as never });
+    const id = await first.createRun();
+    await first.waitForIdle();
+
+    // A restarted orchestrator: the same store on disk, nothing in memory.
+    const sm = fakeSessionManager(questionReply());
+    const mgr = new UltraappManager({ store, sessionManager: sm as never });
+    activeMgr = mgr;
+    const events: Array<{ type: string }> = [];
+    mgr.subscribe(id, (ev) => events.push(ev));
+    await mgr.submitAnswer(id, { value: 'a' });
+    await mgr.applySpecEdit(id, [{ op: 'replace', path: '/meta/name', value: 'after-restart' }]);
+    await mgr.waitForIdle();
+
+    // The interview session is started by name, which resumes its conversation.
+    expect(sm.startSession).toHaveBeenCalledWith(expect.objectContaining({ name: `ultraapp-${id}` }));
+    expect(sm._session.send).toHaveBeenCalledWith('I picked: a');
+    expect(events.map((e) => e.type)).toEqual(expect.arrayContaining(['question', 'spec-updated']));
+    expect((await store.readSpec(id)).meta.name).toBe('after-restart');
+    await expect(mgr.submitAnswer('ua-0-missing', { value: 'a' })).rejects.toThrow(/unknown runId/);
   });
 
   it('applySpecEdit updates spec and emits spec-updated event', async () => {
@@ -332,6 +415,38 @@ describe('UltraappManager', () => {
     spy.mockRestore();
   });
 
+  it('runs the interview and patcher on the current Opus and the classifier on the current Haiku', async () => {
+    const sm = fakeSessionManager(
+      '```classification\n{"class":"cosmetic","reason":"r","proposedAction":"swap color"}\n```',
+    );
+    const mgr = new UltraappManager({ store, sessionManager: sm as never });
+    activeMgr = mgr;
+    const id = await mgr.createRun();
+    await store.setMode(id, 'done');
+    const wt = path.join(store.runDirAbsolute(id), 'versions', 'v1', 'codebase');
+    fs.mkdirSync(wt, { recursive: true });
+    await store.recordBuildArtifact(id, { worktreePath: wt, version: 'v1' });
+    const patcherMod = await import('../../ultraapp/patcher.js');
+    const spy = vi.spyOn(patcherMod, 'runPatcher').mockImplementation(async (a) => {
+      await a.llmCall('diff please');
+      return { ok: false, reason: 'stubbed' };
+    });
+    try {
+      await mgr.submitDoneModeMessage(id, 'make button green');
+    } finally {
+      spy.mockRestore();
+    }
+    const models = new Map(
+      (sm.startSession as ReturnType<typeof vi.fn>).mock.calls.map((c: [{ name: string; model: string }]) => [
+        c[0].name.replace(/-ua-.*$/, ''),
+        resolveAlias(c[0].model),
+      ]),
+    );
+    expect(models.get('ultraapp')).toBe(resolveAlias('opus'));
+    expect(models.get('patcher')).toBe(resolveAlias('opus'));
+    expect(models.get('classifier')).toBe(resolveAlias('haiku'));
+  });
+
   it('submitDoneModeMessage spec-delta branch flips mode back to interview', async () => {
     const sm = fakeSessionManager(
       '```classification\n{"class":"spec-delta","reason":"r","proposedAction":"focused"}\n```',
@@ -484,5 +599,245 @@ describe('UltraappManager', () => {
     expect(s.mode).toBe('failed');
     expect(s.failure).toMatch(/no consensus/);
     synth.mockRestore();
+  });
+
+  describe('versions', () => {
+    it('promoteVersion swaps processes with the configured runtime, host by default', async () => {
+      const rt = await stubRuntimes();
+      try {
+        const router = fakeRouter();
+        const mgr = new UltraappManager({
+          store,
+          sessionManager: fakeSessionManager(questionReply()) as never,
+          router: router as never,
+        });
+        activeMgr = mgr;
+        const id = await mgr.createRun();
+        await mgr.applySpecEdit(id, [{ op: 'replace', path: '/meta/name', value: 'demo' }]);
+        writeVersion(store, id, 'v1', { deployedAt: '2026-10-02T00:00:00.000Z', port: 19101 });
+        writeVersion(store, id, 'v2', { deployedAt: '2026-10-01T00:00:00.000Z', port: 19102 });
+
+        expect(await mgr.promoteVersion(id, 'v2')).toEqual({ ok: true });
+        expect(rt.hostStop).toHaveBeenCalledWith('ultraapp-demo-v1');
+        expect(rt.hostStart).toHaveBeenCalledWith('ultraapp-demo-v2');
+        expect(rt.dockerStart).not.toHaveBeenCalled();
+        expect(rt.dockerStop).not.toHaveBeenCalled();
+        expect(router.register).toHaveBeenLastCalledWith('demo', 19102);
+      } finally {
+        rt.restore();
+      }
+    });
+
+    it('promoteVersion rolls back from the live version, which a stop then acts on', async () => {
+      const rt = await stubRuntimes();
+      try {
+        const router = fakeRouter();
+        const mgr = new UltraappManager({
+          store,
+          sessionManager: fakeSessionManager(questionReply()) as never,
+          router: router as never,
+        });
+        activeMgr = mgr;
+        const id = await mgr.createRun();
+        await mgr.applySpecEdit(id, [{ op: 'replace', path: '/meta/name', value: 'demo' }]);
+        writeVersion(store, id, 'v1', { deployedAt: '2026-10-01T00:00:00.000Z', port: 19101 });
+        writeVersion(store, id, 'v2', { deployedAt: '2026-10-02T00:00:00.000Z', port: 19102 });
+
+        // v2 is live; roll back to v1.
+        expect(await mgr.promoteVersion(id, 'v1')).toEqual({ ok: true });
+        expect(rt.hostStop).toHaveBeenCalledWith('ultraapp-demo-v2');
+        expect(rt.hostStart).toHaveBeenCalledWith('ultraapp-demo-v1');
+        expect(router.register).toHaveBeenLastCalledWith('demo', 19101);
+
+        // v1 is the live version now, so it is the one a stop acts on.
+        await mgr.stopContainer(id);
+        expect(rt.hostStop).toHaveBeenLastCalledWith('ultraapp-demo-v1');
+      } finally {
+        rt.restore();
+      }
+    });
+
+    it('a cosmetic patch is made on a copy, and promoting the copy deploys it in place of the live one', async () => {
+      const rt = await stubRuntimes();
+      const patcherMod = await import('../../ultraapp/patcher.js');
+      const patcher = vi.spyOn(patcherMod, 'runPatcher').mockImplementation(async (a) => {
+        fs.writeFileSync(path.join(a.worktreePath, 'app.css'), '.btn { color: green; }\n');
+        return { ok: true, newWorktreePath: a.worktreePath };
+      });
+      try {
+        const deployFn = vi.fn().mockImplementation(async (a: { version: string }) => ({
+          ok: true,
+          url: 'http://localhost:19000/forge/demo/',
+          port: 19102,
+          containerName: `ultraapp-demo-${a.version}`,
+          imageTag: `ultraapp/demo:${a.version}`,
+        }));
+        const mgr = new UltraappManager({
+          store,
+          sessionManager: fakeSessionManager(cosmeticReply()) as never,
+          router: fakeRouter() as never,
+          deployFn,
+          runDeployChecksFn: async () => [],
+        });
+        activeMgr = mgr;
+        const id = await mgr.createRun();
+        await mgr.applySpecEdit(id, [{ op: 'replace', path: '/meta/name', value: 'demo' }]);
+        await store.setMode(id, 'done');
+        const v1 = writeVersion(store, id, 'v1', {
+          deployedAt: '2026-10-01T00:00:00.000Z',
+          files: { 'app.css': '.btn { color: blue; }\n' },
+        });
+
+        await mgr.submitDoneModeMessage(id, 'make button green');
+
+        // The live tree is untouched; the change is in v2's own copy.
+        expect(fs.readFileSync(path.join(v1, 'app.css'), 'utf8')).toContain('blue');
+        const v2 = listVersions(store.versionsDir(id)).find((v) => v.version === 'v2');
+        expect(v2?.worktreePath).toBe(path.join(store.versionsDir(id), 'v2', 'codebase'));
+        expect(fs.readFileSync(path.join(v2!.worktreePath, 'app.css'), 'utf8')).toContain('green');
+        expect(v2?.deploy).toBeUndefined();
+
+        expect(await mgr.promoteVersion(id, 'v2')).toEqual({ ok: true });
+        expect(deployFn).toHaveBeenCalledWith(
+          expect.objectContaining({ version: 'v2', worktreePath: v2!.worktreePath }),
+        );
+        expect(rt.hostStop).toHaveBeenCalledWith('ultraapp-demo-v1');
+        const arts = await store.readArtifacts(id);
+        expect(arts.find((a) => a.version === 'v2')?.deploy?.containerName).toBe('ultraapp-demo-v2');
+      } finally {
+        patcher.mockRestore();
+        rt.restore();
+      }
+    });
+
+    it('a version whose deploy fails leaves the live one serving, on a port no earlier version holds', async () => {
+      const rt = await stubRuntimes();
+      try {
+        const router = fakeRouter();
+        const deployFn = vi.fn().mockImplementation(async (a: { router: { register(s: string, p: number): void } }) => {
+          // A real deploy routes to the new backend before its health check.
+          a.router.register('demo', 19103);
+          return { ok: false, reason: 'health check timed out' };
+        });
+        const mgr = new UltraappManager({
+          store,
+          sessionManager: fakeSessionManager(questionReply()) as never,
+          router: router as never,
+          deployFn,
+          runDeployChecksFn: async () => [],
+        });
+        activeMgr = mgr;
+        const id = await mgr.createRun();
+        await mgr.applySpecEdit(id, [{ op: 'replace', path: '/meta/name', value: 'demo' }]);
+        writeVersion(store, id, 'v1', { deployedAt: '2026-10-01T00:00:00.000Z', port: 19101 });
+        writeVersion(store, id, 'v2', { deployedAt: '2026-10-02T00:00:00.000Z', port: 19102 });
+        writeVersion(store, id, 'v3');
+
+        const r = await mgr.promoteVersion(id, 'v3');
+        expect(r.ok).toBe(false);
+        expect(r.error).toMatch(/health check timed out/);
+        // v1 is stopped and unrouted, but a promote back would bring it up on 19101.
+        expect([...deployFn.mock.calls[0][0].takenPorts]).toEqual(expect.arrayContaining([19101, 19102]));
+        expect(router.register).toHaveBeenLastCalledWith('demo', 19102);
+        expect(rt.hostStop).not.toHaveBeenCalled();
+      } finally {
+        rt.restore();
+      }
+    });
+
+    it('a failed cosmetic patch leaves no new version behind', async () => {
+      const patcherMod = await import('../../ultraapp/patcher.js');
+      const patcher = vi.spyOn(patcherMod, 'runPatcher').mockResolvedValue({ ok: false, reason: 'no diff' });
+      try {
+        const mgr = new UltraappManager({ store, sessionManager: fakeSessionManager(cosmeticReply()) as never });
+        activeMgr = mgr;
+        const id = await mgr.createRun();
+        await store.setMode(id, 'done');
+        writeVersion(store, id, 'v1', { deployedAt: '2026-10-01T00:00:00.000Z' });
+        await mgr.submitDoneModeMessage(id, 'make button green');
+        expect(fs.readdirSync(store.versionsDir(id))).toEqual(['v1']);
+      } finally {
+        patcher.mockRestore();
+      }
+    });
+
+    it('a rebuild builds the next version and replaces the live one instead of overwriting it', async () => {
+      const rt = await stubRuntimes();
+      const councilMod = await import('../../ultraapp/council-adapter.js');
+      const synth = vi.spyOn(councilMod, 'runCouncilSynth').mockImplementation(async (a) => {
+        const codebase = a.codebaseDir ?? path.join(a.runDir, 'versions', 'v1', 'codebase');
+        fs.mkdirSync(codebase, { recursive: true });
+        fs.writeFileSync(path.join(codebase, 'built-for.txt'), a.spec.meta.title);
+        return { ok: true, worktreePath: codebase, rounds: 1 };
+      });
+      try {
+        let port = 19100;
+        const deployFn = vi.fn().mockImplementation(async (a: { version: string }) => ({
+          ok: true,
+          url: 'http://localhost:19000/forge/demo/',
+          port: ++port,
+          containerName: `ultraapp-demo-${a.version}`,
+          imageTag: `ultraapp/demo:${a.version}`,
+        }));
+        const mgr = new UltraappManager({
+          store,
+          sessionManager: fakeSessionManager(questionReply()) as never,
+          router: fakeRouter() as never,
+          deployFn,
+          buildContract: PASSING_BUILD,
+          runDeployChecksFn: async () => [],
+        });
+        activeMgr = mgr;
+        const id = await mgr.createRun();
+        const buildAs = async (title: string, deploys: number) => {
+          await mgr.applySpecEdit(id, [
+            { op: 'replace', path: '/meta/name', value: 'demo' },
+            { op: 'replace', path: '/meta/title', value: title },
+          ]);
+          await mgr.startBuild(id);
+          for (let i = 0; i < 100; i++) {
+            const s = await store.readState(id);
+            if ((s.mode === 'done' && deployFn.mock.calls.length === deploys) || s.mode === 'failed') break;
+            await new Promise((r) => setTimeout(r, 20));
+          }
+          expect((await store.readState(id)).mode).toBe('done');
+        };
+        await buildAs('first', 1);
+        await buildAs('second', 2);
+
+        expect(deployFn.mock.calls.map((c) => c[0].version)).toEqual(['v1', 'v2']);
+        const arts = await store.readArtifacts(id);
+        expect(arts.map((a) => a.version)).toEqual(['v1', 'v2']);
+        // v1 keeps its own tree and deploy record, so it can be promoted back.
+        expect(fs.readFileSync(path.join(arts[0].worktreePath, 'built-for.txt'), 'utf8')).toBe('first');
+        expect(arts[0].deploy?.containerName).toBe('ultraapp-demo-v1');
+        expect(rt.hostStop).toHaveBeenCalledWith('ultraapp-demo-v1');
+      } finally {
+        synth.mockRestore();
+        rt.restore();
+      }
+    });
+
+    it('deleteRun removes the process of every deployed version', async () => {
+      const rt = await stubRuntimes();
+      try {
+        const mgr = new UltraappManager({
+          store,
+          sessionManager: fakeSessionManager(questionReply()) as never,
+          router: fakeRouter() as never,
+        });
+        activeMgr = mgr;
+        const id = await mgr.createRun();
+        await mgr.applySpecEdit(id, [{ op: 'replace', path: '/meta/name', value: 'demo' }]);
+        writeVersion(store, id, 'v1', { deployedAt: '2026-10-01T00:00:00.000Z', port: 19101 });
+        writeVersion(store, id, 'v2', { deployedAt: '2026-10-02T00:00:00.000Z', port: 19102 });
+        writeVersion(store, id, 'v3');
+        await mgr.waitForIdle();
+        await mgr.deleteRun(id);
+        expect(rt.hostRm.mock.calls.map((c) => c[0]).sort()).toEqual(['ultraapp-demo-v1', 'ultraapp-demo-v2']);
+      } finally {
+        rt.restore();
+      }
+    });
   });
 });

@@ -8,7 +8,8 @@
  * The "projectDir" given to Council is a brand-new empty git repo — NOT the
  * claw-orchestrator repo. Council creates its own git worktrees inside that
  * project dir and merges to its main branch. After consensus, we copy the
- * main HEAD into versions/v1/codebase as the buildable artifact.
+ * main HEAD into the build's version slot (versions/vN/codebase) as the
+ * buildable artifact.
  */
 
 import * as fs from 'node:fs';
@@ -36,8 +37,10 @@ export interface CouncilSynthArgs {
   spec: AppSpec;
   runId: string;
   /** Per-run dir under ~/.claw-orchestrator/ultraapps/<runId>/. Adapter creates
-      `<runDir>/council-project/` (fresh git repo) and `<runDir>/versions/v1/codebase/`. */
+      `<runDir>/council-project/` (fresh git repo) and the codebase dir. */
   runDir: string;
+  /** Where the consensus codebase goes. Defaults to `<runDir>/versions/v1/codebase`. */
+  codebaseDir?: string;
   sessionManager: SessionManagerLike;
   /** Set by the kernel. A cancelled build, or one past its node timeout, opens no further round. */
   signal?: { aborted: boolean };
@@ -119,8 +122,7 @@ export async function runCouncilSynth(args: CouncilSynthArgs): Promise<CouncilSy
     return { ok: false, reason: `council ended in status '${session.status}'`, rounds };
   }
 
-  // Snapshot main HEAD into versions/v1/codebase
-  const codebaseDir = path.join(args.runDir, 'versions', 'v1', 'codebase');
+  const codebaseDir = args.codebaseDir ?? path.join(args.runDir, 'versions', 'v1', 'codebase');
   await snapshotMainBranch(projectDir, codebaseDir);
   return { ok: true, worktreePath: codebaseDir, rounds };
 }
@@ -137,21 +139,21 @@ function buildCouncilConfig(projectDir: string, slug: string): CouncilConfig {
         emoji: '🔵',
         persona: `${personaIntro} You lead with architecture and the framework choice; scaffold the project, define folder layout, set up basic /health and BYOK handling. Bias to forward progress.`,
         engine: 'claude',
-        model: 'claude-opus-4-7',
+        model: 'opus',
       },
       {
         name: 'agent-B',
         emoji: '🟠',
         persona: `${personaIntro} You implement the pipeline DAG: input ingestion, step execution, output assembly, persistence under /data. You make sure /run, /status, /result wire to real work.`,
         engine: 'claude',
-        model: 'claude-opus-4-7',
+        model: 'opus',
       },
       {
         name: 'agent-C',
         emoji: '🟢',
         persona: `${personaIntro} You verify and harden: smoke test, Dockerfile multi-stage, base path correctness, ESLint rule for no-server-keys, AND the §7g frontend gate. The §7g gate is binding: you MUST capture Chrome headless screenshots at 1440×900 AND 375×812, open the PNGs, and verify by eye that the rendering matches §7a–§7f at BOTH viewports — particularly that mobile has no horizontal overflow and h1 wraps at word (not letter) boundaries. Reading source code or meta tags is insufficient evidence; only the screenshots count. You vote NO until "npm run build && npm test && docker build . && npm run smoke" all pass green AND your screenshots are publishable. A working but ugly app, or one that overflows on mobile, is a NO vote.`,
         engine: 'claude',
-        model: 'claude-opus-4-7',
+        model: 'opus',
       },
     ],
     defaultPermissionMode: 'bypassPermissions',

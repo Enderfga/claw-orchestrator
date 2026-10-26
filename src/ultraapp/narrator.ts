@@ -49,7 +49,7 @@ export class Narrator {
     const r = await this.opts.sessionManager.startSession({
       name: `narrator-${this.opts.runId}`,
       engine: 'claude',
-      model: 'claude-haiku-4-5-20251001',
+      model: 'haiku',
       systemPrompt: NARRATOR_SYSTEM_PROMPT,
       permissionMode: 'bypassPermissions',
     });

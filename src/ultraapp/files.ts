@@ -4,7 +4,14 @@ import * as path from 'node:path';
 import * as crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 
-const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
+export const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
+
+/**
+ * The request body `POST /ultraapp/<id>/files` must accept for an upload of
+ * {@link MAX_UPLOAD_BYTES}: the file travels base64-encoded inside JSON, which is
+ * 4/3 of its size, plus a small envelope for the filename.
+ */
+export const MAX_UPLOAD_BODY_BYTES = Math.ceil(MAX_UPLOAD_BYTES / 3) * 4 + 64 * 1024;
 
 export interface PathValidationOptions {
   allow: string[];

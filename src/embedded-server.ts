@@ -22,6 +22,7 @@ import { boundedErrorReason } from './sanitize.js';
 import type { EffortLevel, EngineType } from './types.js';
 import { handleChatCompletion } from './openai-compat.js';
 import { getModelList } from './models.js';
+import { MAX_UPLOAD_BODY_BYTES } from './ultraapp/files.js';
 
 import {
   DEFAULT_SERVER_PORT,
@@ -480,12 +481,15 @@ export class EmbeddedServer {
         res.end(JSON.stringify({ ok: false, error: 'Content-Type must be application/json' }));
         return;
       }
+      // An ultraapp upload carries the file itself, base64 inside JSON, so that
+      // one route is sized to the upload limit; every other body stays small.
+      const bodyLimit = /^\/ultraapp\/[^/]+\/files$/.test(path) ? MAX_UPLOAD_BODY_BYTES : MAX_BODY_SIZE;
       let body = '';
       let aborted = false;
       req.on('data', (chunk) => {
         if (aborted) return;
         body += chunk;
-        if (body.length > MAX_BODY_SIZE) {
+        if (body.length > bodyLimit) {
           aborted = true;
           res.writeHead(413, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: false, error: 'Payload too large' }));
@@ -844,14 +848,14 @@ export class EmbeddedServer {
               persona:
                 'You are agent A, a careful planner. Lay out the approach and architecture before changing code.',
               engine: 'claude',
-              model: 'claude-opus-4-7',
+              model: 'opus',
             },
             {
               name: 'agent-B',
               emoji: '🟠',
               persona: 'You are agent B, a pragmatic implementer. Make the change small, focused, and review-ready.',
               engine: 'claude',
-              model: 'claude-opus-4-7',
+              model: 'opus',
             },
             {
               name: 'agent-C',
@@ -859,7 +863,7 @@ export class EmbeddedServer {
               persona:
                 'You are agent C, a critical reviewer. Block consensus until the quality bar is met — be specific about what is missing.',
               engine: 'claude',
-              model: 'claude-opus-4-7',
+              model: 'opus',
             },
           ],
           maxRounds: (body as { maxRounds?: number }).maxRounds ?? DEFAULT_MAX_ROUNDS,

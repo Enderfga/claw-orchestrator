@@ -10,9 +10,11 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { replayTrace, stripVolatile } from './trace-replayer.js';
 
 const TRACES = ['text-summariser', 'image-batch-resize', 'vlog-cut', 'llm-agent-pipeline', 'branching-dag'];
@@ -37,3 +39,17 @@ for (const trace of TRACES) {
     });
   });
 }
+
+describe('scripts/test-ultraapp-integration.ts', () => {
+  it('replays a trace with the documented command', () => {
+    const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
+    const tsx = path.join(root, 'node_modules', '.bin', 'tsx');
+    const r = spawnSync(tsx, ['scripts/test-ultraapp-integration.ts', '--trace=text-summariser'], {
+      cwd: root,
+      encoding: 'utf8',
+      timeout: 60_000,
+    });
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(r.stdout).toContain('[text-summariser] replay OK');
+  }, 60_000);
+});

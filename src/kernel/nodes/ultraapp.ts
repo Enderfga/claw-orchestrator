@@ -46,6 +46,7 @@ export interface UltraappNodeDeps {
     appRunId: string;
     runDir: string;
     slug: string;
+    codebasePath?: string;
     signal: { aborted: boolean };
   }): Promise<UltraappSynthOutcome>;
   deploy(args: {
@@ -66,6 +67,7 @@ export function makeUltraappSynthExecutor(deps: UltraappNodeDeps): NodeExecutor 
       appRunId: spec.appRunId,
       runDir: spec.runDir,
       slug: spec.slug,
+      codebasePath: spec.codebasePath,
       signal: ctx.signal,
     });
     return {

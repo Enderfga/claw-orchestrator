@@ -4,6 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { composeCouncilPrompt, runCouncilSynth } from '../../ultraapp/council-adapter.js';
 import { makeEmptySpec } from '../../ultraapp/spec.js';
+import { resolveAlias } from '../../models.js';
 import type { CouncilSession } from '../../types.js';
 
 describe('composeCouncilPrompt', () => {
@@ -125,6 +126,25 @@ describe('runCouncilSynth', () => {
       expect(r.rounds).toBe(4);
       // No signal given, none passed on.
       expect(fakeCouncilRun.mock.calls[0][0].signal).toBeUndefined();
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('runs every council agent on the current Opus', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ua-models-'));
+    try {
+      const councilRun = vi.fn().mockResolvedValue({ id: 'c', task: 't', status: 'error', config: {}, responses: [] });
+      await runCouncilSynth({
+        spec: makeEmptySpec('ua-models'),
+        runId: 'ua-models',
+        runDir: tmp,
+        sessionManager: { startSession: vi.fn(), sendMessage: vi.fn(), stopSession: vi.fn() } as never,
+        councilRun,
+      });
+      const agents = councilRun.mock.calls[0][0].agents as Array<{ model: string }>;
+      expect(agents).toHaveLength(3);
+      for (const a of agents) expect(resolveAlias(a.model)).toBe(resolveAlias('opus'));
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
     }

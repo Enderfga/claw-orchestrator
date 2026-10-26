@@ -532,6 +532,7 @@ export function ultraappWorkflow(args: UltraappArgs): WorkflowSpec {
       appRunId: args.appRunId,
       runDir: args.runDir,
       slug: args.slug,
+      codebasePath: args.codebasePath,
       // The synth stage is a three-agent, eight-round council (ultraapp/council-adapter.ts).
       timeoutMs: councilNodeBudget(3, 8),
     },
