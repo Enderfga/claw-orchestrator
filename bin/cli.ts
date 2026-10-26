@@ -304,7 +304,9 @@ program
   .option('--effort <level>', 'Effort level')
   .option('--plan', 'Plan mode')
   .option('-t, --timeout <ms>', 'Timeout', '300000')
-  .option('-s, --stream', 'Collect streaming chunks and include in output')
+  // Kept so scripts that pass it still parse: /session/send answers when the
+  // turn ends and has no streamed form.
+  .option('-s, --stream', 'No effect: the reply arrives when the turn ends')
   .option('--json', 'Print the whole result as JSON')
   .action(async (name, messageArg, opts) => {
     const message = opts.messageFile ? fs.readFileSync(opts.messageFile, 'utf-8') : messageArg;
@@ -318,16 +320,12 @@ program
       effort: opts.effort,
       plan: opts.plan,
       timeout: parseInt(opts.timeout),
-      stream: opts.stream || undefined,
     });
     if (opts.json) {
       console.log(JSON.stringify(result));
       if (!result.ok) process.exitCode = 1;
     } else if (result.ok) {
       console.log(result.output);
-      if (opts.stream && Array.isArray(result.chunks) && result.chunks.length > 0) {
-        console.log(`\n[${result.chunks.length} streaming chunks collected]`);
-      }
     } else fail(result.error);
   });
 

@@ -67,6 +67,18 @@ describe('session CLI for scripts', () => {
     });
   }, 30_000);
 
+  // The server returns a reply when the turn ends and has no streamed form of
+  // /session/send, so the flag stays only so existing scripts still parse.
+  it('accepts --stream, says it has no effect, and sends nothing for it', async () => {
+    const before = bodies.length;
+    const r = await run(['session-send', 's', 'hi', '--stream']);
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain('DONE');
+    expect(bodies.slice(before).find((b) => b.path === '/session/send')).not.toHaveProperty('stream');
+    const help = await run(['session-send', '--help']);
+    expect(help.stdout).toMatch(/-s, --stream\s+No effect/);
+  }, 30_000);
+
   it('prints the status as JSON', async () => {
     const r = await run(['session-status', 's', '--json']);
     expect(r.code).toBe(0);
