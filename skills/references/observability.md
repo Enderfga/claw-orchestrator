@@ -100,6 +100,11 @@ Notes:
   earlier and therefore costs less than an after-the-fact refusal.
 - `session_list` / `GET /session/list` expose `costUsd`, `budgetUsd` and
   `budgetExhausted` so a stalled session shows _why_ it stopped taking turns.
+- The turns a Codex `/goal` runs on its own (a `goal` workflow node, or a goal
+  set with `codex_goal_set`) are not sends: they write no ledger row, and the cap
+  does not stop a goal while it runs. Their spend does count toward the session's
+  total, so the next send on that session is gated by it; a `goal` node's spend
+  is added to its run's `costUsd`, and `tokenBudget` is the goal's own limit.
 
 ### Zeroing a model's pricing
 
