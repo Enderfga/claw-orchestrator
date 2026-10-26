@@ -17,23 +17,34 @@ import { cancelAcpTurn, createAcpAgent, emitImages } from '../acp-server.js';
 
 type Persisted = { name: string; cwd: string; engine?: 'claude' | 'codex'; model?: string; lastActivity: number };
 
+/**
+ * Mirrors the SessionManager surface the adapter uses, including that a session
+ * the manager no longer holds in memory refuses a send.
+ */
 function fakeManager(persisted: Persisted[] = []) {
   const starts: Array<Record<string, unknown>> = [];
   const stops: Array<{ name: string; keepPersisted?: boolean }> = [];
+  const live = new Set<string>();
   const manager = {
     starts,
     stops,
     async startSession(config: Record<string, unknown>) {
       starts.push(config);
+      live.add(String(config.name));
       return { name: String(config.name) };
     },
-    async sendMessage() {
+    async sendMessage(name: string) {
+      if (!live.has(name)) throw new Error(`Session '${name}' not found`);
       return { output: 'ok' };
     },
     async stopSession(name: string, opts?: { keepPersisted?: boolean }) {
       stops.push({ name, keepPersisted: opts?.keepPersisted });
+      live.delete(name);
     },
+    hasSession: (name: string) => live.has(name),
     listPersistedSessions: () => persisted,
+    /** What the idle-TTL sweep does: drop the session from memory, keep it on disk. */
+    reap: (name: string) => void live.delete(name),
   };
   return manager;
 }
@@ -127,6 +138,59 @@ describe('ACP session resume and list', () => {
     const { sessionId } = await conn.agent.request('session/new', { cwd: '/repo', mcpServers: [] });
     await conn.agent.request('session/set_config_option', { sessionId, configId: 'permission', value: 'plan' });
     expect(manager.stops).toEqual([{ name: sessionId, keepPersisted: true }]);
+    conn.close();
+  });
+
+  it('refuses a permission mode the selector does not offer, and keeps the session as it was', async () => {
+    const manager = fakeManager();
+    const { conn } = await connect(manager);
+    const { sessionId } = await conn.agent.request('session/new', { cwd: '/repo', mcpServers: [] });
+    await expect(
+      conn.agent.request('session/set_config_option', { sessionId, configId: 'permission', value: 'yolo' }),
+    ).rejects.toMatchObject({ code: -32602, data: expect.stringMatching(/permission mode/) });
+    expect(manager.stops).toEqual([]);
+    expect(manager.starts).toHaveLength(1);
+    conn.close();
+  });
+});
+
+// The manager stops a session idle past its TTL and keeps only the persisted
+// resume handle; the adapter still holds the ACP session, so it has to bring the
+// engine session back rather than fail on a name the manager no longer knows.
+describe('ACP sessions the manager dropped for idling', () => {
+  it('restarts the session on the next prompt, with the same engine, model and permission', async () => {
+    const manager = fakeManager();
+    const { conn } = await connect(manager);
+    const { sessionId } = await conn.agent.request('session/new', { cwd: '/repo', mcpServers: [] });
+    manager.reap(sessionId);
+
+    await expect(
+      conn.agent.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: 'still there?' }] }),
+    ).resolves.toMatchObject({ stopReason: 'end_turn' });
+    expect(manager.starts).toHaveLength(2);
+    expect(manager.starts[1]).toEqual(manager.starts[0]);
+    conn.close();
+  });
+
+  it('restarts the session on session/resume rather than treating the id as live', async () => {
+    const manager = fakeManager();
+    const { conn } = await connect(manager);
+    const { sessionId } = await conn.agent.request('session/new', { cwd: '/repo', mcpServers: [] });
+    manager.reap(sessionId);
+
+    await conn.agent.request('session/resume', { sessionId, cwd: '/repo' });
+    expect(manager.starts).toHaveLength(2);
+    expect(manager.hasSession(sessionId)).toBe(true);
+    conn.close();
+  });
+
+  it('leaves a live session alone', async () => {
+    const manager = fakeManager();
+    const { conn } = await connect(manager);
+    const { sessionId } = await conn.agent.request('session/new', { cwd: '/repo', mcpServers: [] });
+    await conn.agent.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: 'hi' }] });
+    await conn.agent.request('session/resume', { sessionId, cwd: '/repo' });
+    expect(manager.starts).toHaveLength(1);
     conn.close();
   });
 });

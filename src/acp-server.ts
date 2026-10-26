@@ -45,6 +45,11 @@ interface OrchestrationSnapshot {
   error?: string;
 }
 
+/** The part of a live `Council` this adapter listens to. */
+interface CouncilEmitter {
+  on(event: string, cb: (e: CouncilEvent) => void): unknown;
+}
+
 /**
  * SessionManager-like interface to avoid circular imports.
  *
@@ -63,6 +68,8 @@ interface SessionManagerLike {
     },
   ): Promise<{ output: string; sessionId?: string; images?: Array<{ path: string }> }>;
   stopSession(name: string, opts?: { keepPersisted?: boolean }): Promise<void>;
+  /** Whether the session is live in memory; one idle past the manager's TTL is not. */
+  hasSession?(name: string): boolean;
   /** The sessions on disk that can be resumed by name; see `session/resume`. */
   listPersistedSessions?(): Array<{
     name: string;
@@ -79,7 +86,7 @@ interface SessionManagerLike {
   councilAbort?(id: string): void;
   councilAccept?(id: string): Promise<unknown>;
   councilReject?(id: string, feedback: string): Promise<unknown>;
-  getCouncil?(id: string): { on(event: string, cb: (e: CouncilEvent) => void): unknown } | undefined;
+  getCouncil?(id: string): CouncilEmitter | undefined;
 
   ultraplanStart?(task: string, opts?: { model?: string; cwd?: string; timeout?: number }): Promise<{ id: string }>;
   ultraplanStatus?(id: string): OrchestrationSnapshot | undefined;
@@ -157,10 +164,32 @@ const ACP_COUNCIL_AGENTS = [
 const ACP_POLL_INTERVAL_MS = 3_000;
 const ACP_POLL_TIMEOUT_MS = 1_800_000;
 
-/** Slash commands offered once a council run is parked at its human gate. */
+/**
+ * How often, and for how long, to look for a council's live handle before
+ * leaving it to the slow poll. The kernel publishes it within a tick or two of
+ * the start, so the window only bounds a manager that never does.
+ */
+const ACP_COUNCIL_ATTACH_INTERVAL_MS = 20;
+const ACP_COUNCIL_ATTACH_WINDOW_MS = 10_000;
+
+/**
+ * Slash commands offered once a council run is parked at its human gate.
+ *
+ * Neither one merges anything: the agents merge their own work into the main
+ * branch during the rounds. Accepting cleans up after them; rejecting records
+ * feedback for another attempt.
+ */
 export const ACP_COUNCIL_COMMANDS = [
-  { name: 'council_accept', description: 'Accept the council result and merge the winning agent worktree.' },
-  { name: 'council_reject', description: 'Reject the council result. Text after the command is passed as feedback.' },
+  {
+    name: 'council_accept',
+    description:
+      'Accept the council result: keep what the agents merged into the main branch and remove the council worktrees, branches and plan.md.',
+  },
+  {
+    name: 'council_reject',
+    description:
+      'Reject the council result: rewrite plan.md with the text after the command as feedback. The worktrees are kept for a retry.',
+  },
 ];
 
 /**
@@ -206,10 +235,11 @@ const ENGINE_LABELS: Record<string, string> = {
  * a new user-facing selector would be advertising a dead end.
  *
  * `opencode` is absent for a different reason: its models are open-ended
- * `provider/model` strings passed straight through, so there is nothing in the
- * registry to enumerate. An opencode session is reachable by naming the model
- * at session start, just not by picking it from this list. `acp` is hidden for
- * the same reason: an ACP agent picks its own model.
+ * `provider/model` strings, so the registry holds none to enumerate, and
+ * `resolveEngineAndModel` never routes a model to it — a `provider/model`
+ * string resolves to the claude engine. This agent therefore cannot open an
+ * opencode session at all. `acp` is hidden because an ACP agent picks its own
+ * model.
  */
 const HIDDEN_ENGINES = new Set<string>(['gemini', 'cursor', 'acp']);
 
@@ -245,6 +275,9 @@ export function buildModelConfigOption(currentModel: string): acp.SessionConfigO
     })),
   };
 }
+
+/** The permission modes the selector offers, and the only ones a client may set. */
+export const ACP_PERMISSION_MODES: readonly PermissionMode[] = ['plan', 'acceptEdits', 'bypassPermissions'];
 
 /**
  * Permission selector.
@@ -409,6 +442,7 @@ export function createAcpAgent(manager: SessionManagerLike, options: AcpAgentOpt
       const { sessionId, cwd } = ctx.params;
       const live = sessions.get(sessionId);
       if (live) {
+        await ensureEngineSession(manager, live, log);
         return {
           modes: { currentModeId: live.modeId, availableModes: ACP_MODES },
           configOptions: [buildModelConfigOption(live.model), buildPermissionConfigOption(live.permissionMode)],
@@ -491,6 +525,13 @@ export function createAcpAgent(manager: SessionManagerLike, options: AcpAgentOpt
         state.engine = engine;
         state.model = model;
       } else if (ctx.params.configId === ACP_CONFIG_PERMISSION) {
+        // The value goes straight into engine CLI flags, so only the modes the
+        // selector offers are accepted.
+        if (!ACP_PERMISSION_MODES.includes(value as PermissionMode)) {
+          throw acp.RequestError.invalidParams(
+            `Unknown permission mode: ${value}. Expected one of ${ACP_PERMISSION_MODES.join(', ')}`,
+          );
+        }
         state.permissionMode = value as PermissionMode;
         await manager.stopSession(state.name, { keepPersisted: true }).catch(() => {});
         await manager.startSession({
@@ -527,8 +568,9 @@ export function createAcpAgent(manager: SessionManagerLike, options: AcpAgentOpt
         // A parked council owns the turn: falling through here started a second
         // `councilStart` over the worktrees and branches the parked one holds.
         await say(
-          'A council result is waiting on you. Run `/council_accept` to merge the winning worktree, ' +
-            'or `/council_reject [reason]` to discard it. Nothing else can run until then.',
+          'A council result is waiting on you. Run `/council_accept` to keep what the agents merged and ' +
+            'remove the council worktrees, or `/council_reject [reason]` to write your feedback into plan.md. ' +
+            'Nothing else can run until then.',
         );
         return { stopReason: 'end_turn' as const };
       }
@@ -577,32 +619,36 @@ export function createAcpAgent(manager: SessionManagerLike, options: AcpAgentOpt
       // nothing streamed — which is the case for one-shot wrappers.
       let streamedChars = 0;
 
-      const turn = manager.sendMessage(state.name, task, {
-        onChunk: (chunk: string) => {
-          if (cancelled || !chunk) return;
-          streamedChars += chunk.length;
-          void ctx.client.notify('session/update', {
-            sessionId,
-            update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: chunk } },
-          });
-        },
-        onEvent: (event) => {
-          if (cancelled) return;
-          if (event.type === 'tool_use' && event.tool?.name) {
+      const send = () =>
+        manager.sendMessage(state.name, task, {
+          onChunk: (chunk: string) => {
+            if (cancelled || !chunk) return;
+            streamedChars += chunk.length;
             void ctx.client.notify('session/update', {
               sessionId,
-              update: {
-                sessionUpdate: 'tool_call',
-                toolCallId: `${sessionId}-${event.tool.name}-${Date.now()}`,
-                title: event.tool.name,
-                kind: 'other',
-                status: 'in_progress',
-                rawInput: (event.tool.input ?? {}) as Record<string, unknown>,
-              },
+              update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: chunk } },
             });
-          }
-        },
-      });
+          },
+          onEvent: (event) => {
+            if (cancelled) return;
+            if (event.type === 'tool_use' && event.tool?.name) {
+              void ctx.client.notify('session/update', {
+                sessionId,
+                update: {
+                  sessionUpdate: 'tool_call',
+                  toolCallId: `${sessionId}-${event.tool.name}-${Date.now()}`,
+                  title: event.tool.name,
+                  kind: 'other',
+                  status: 'in_progress',
+                  rawInput: (event.tool.input ?? {}) as Record<string, unknown>,
+                },
+              });
+            }
+          },
+        });
+      // A cancel that lands while a dropped session is being restarted must not
+      // still send the prompt once the restart finishes.
+      const turn = ensureEngineSession(manager, state, log).then(() => (cancelled ? undefined : send()));
 
       try {
         const raced = await Promise.race([turn, cancelSignal]);
@@ -703,6 +749,26 @@ export function cancelAcpTurn(manager: SessionManagerLike, state: AcpSessionStat
   return true;
 }
 
+/**
+ * Start the underlying session again if the manager has dropped it.
+ *
+ * SessionManager stops a session idle past its TTL and keeps only the persisted
+ * resume handle, while the ACP session outlives it here. Starting it again by
+ * name resumes the engine's conversation, so the client sees the same session
+ * carry on rather than a "not found".
+ */
+async function ensureEngineSession(manager: SessionManagerLike, state: AcpSessionState, log?: Logger): Promise<void> {
+  if (!manager.hasSession || manager.hasSession(state.name)) return;
+  log?.info(`restarting ${state.name}: the session layer dropped it while idle`);
+  await manager.startSession({
+    name: state.name,
+    cwd: state.cwd,
+    engine: state.engine,
+    model: state.model,
+    permissionMode: state.permissionMode,
+  });
+}
+
 // ─── Orchestration modes ────────────────────────────────────────────────────
 
 type Emit = (update: Record<string, unknown>) => Promise<void>;
@@ -747,16 +813,25 @@ async function runCouncilMode(
       defaultPermissionMode: state.permissionMode,
     });
   } catch (err) {
-    // Council refuses to run outside a git repo, on a too-short task, and on a
-    // few other guardrails. Those are the caller's problem to fix, so report the
-    // reason rather than a bare failure.
+    // Only a spec the kernel refuses outright throws here. The council's own
+    // guardrails run inside the run and are read back from it below.
     throw acp.RequestError.invalidParams(`Council could not start: ${(err as Error).message}`);
   }
 
   const buffers = new Map<string, string>();
   const toolCallId = (agent: string, round?: number) => `${sessionId}-${agent}-r${round ?? 0}`;
-  const emitter = manager.getCouncil(council.id);
+  const abort = () => {
+    try {
+      manager.councilAbort?.(council.id);
+    } catch (err) {
+      log?.warn(`council ${council.id} abort failed: ${String(err)}`);
+    }
+  };
 
+  let cancelled = false;
+  /** Why the run failed, when the council said so in an event. */
+  let failure: string | undefined;
+  let attach: ReturnType<typeof setInterval> | undefined;
   let poll: ReturnType<typeof setInterval> | undefined;
   let timeout: ReturnType<typeof setTimeout> | undefined;
 
@@ -765,15 +840,17 @@ async function runCouncilMode(
     const done = () => {
       if (settled) return;
       settled = true;
-      // Clear here rather than after the await: the backstop poll and the
-      // 30-minute cap must stop the moment the run is over, or every council
-      // turn leaves a live timer behind for the rest of the process's life.
+      // Clear here rather than after the await: the polls and the 30-minute cap
+      // must stop the moment the run is over, or every council turn leaves a
+      // live timer behind for the rest of the process's life.
+      if (attach) clearInterval(attach);
       if (poll) clearInterval(poll);
       if (timeout) clearTimeout(timeout);
       resolve();
     };
 
-    emitter?.on('council-event', (event: CouncilEvent) => {
+    const onEvent = (event: CouncilEvent) => {
+      if (settled) return;
       const agent = event.agent ?? 'agent';
       switch (event.type) {
         case 'round-start':
@@ -812,6 +889,19 @@ async function runCouncilMode(
           break;
         }
         case 'error':
+          // An event naming an agent is that agent failing its round; the
+          // council carries on with the others. Only an unattributed error ends
+          // the run.
+          if (event.agent) {
+            void emit({
+              sessionUpdate: 'tool_call_update',
+              toolCallId: toolCallId(agent, event.round),
+              status: 'failed',
+              content: [{ type: 'content', content: { type: 'text', text: event.error ?? 'failed' } }],
+            });
+            break;
+          }
+          failure = event.error;
           log?.warn(`council ${council.id} error: ${event.error ?? 'unknown'}`);
           done();
           break;
@@ -821,34 +911,66 @@ async function runCouncilMode(
         default:
           break;
       }
-    });
+    };
 
+    // The kernel publishes the live council from inside its node, after
+    // `councilStart` has returned, so the first lookup usually misses. It is
+    // retried on a short interval until it finds the council; the first round
+    // opens only once the worktrees are set up, so attaching this late still
+    // sees every event translated above.
+    //
     // The emitter is live-only with no replay buffer, and a run that finishes
-    // before the first listener attaches would never resolve. Polling the status
-    // is the backstop; it is also how the parked state is detected, because
-    // parking is a status, not an event.
-    poll = setInterval(() => {
+    // before the listener attaches would never resolve. Reading the status is
+    // the backstop; it is also how the parked state is detected, because parking
+    // is a status, not an event.
+    let emitter: CouncilEmitter | undefined;
+    const check = () => {
+      if (!emitter) {
+        emitter = manager.getCouncil?.(council.id);
+        emitter?.on('council-event', onEvent);
+        if (emitter && attach) clearInterval(attach);
+      }
       const snapshot = manager.councilStatus?.(council.id);
       if (snapshot && snapshot.status !== 'running') done();
-    }, ACP_POLL_INTERVAL_MS);
-
+    };
+    const attachUntil = Date.now() + ACP_COUNCIL_ATTACH_WINDOW_MS;
+    attach = setInterval(() => {
+      check();
+      if (attach && Date.now() > attachUntil) clearInterval(attach);
+    }, ACP_COUNCIL_ATTACH_INTERVAL_MS);
+    poll = setInterval(check, ACP_POLL_INTERVAL_MS);
     timeout = setTimeout(() => {
-      manager.councilAbort?.(council.id);
+      abort();
       done();
     }, ACP_POLL_TIMEOUT_MS);
 
     state.cancelInFlight = () => {
-      manager.councilAbort?.(council.id);
+      cancelled = true;
       done();
+      abort();
     };
+    check();
   });
 
   await terminal;
   state.cancelInFlight = undefined;
+  // ACP v1 ends a cancelled prompt with `cancelled`, whatever the run reports.
+  if (cancelled) return { stopReason: 'cancelled' };
 
   const final = manager.councilStatus(council.id);
+  const reason = failure ?? final?.error ?? 'unknown error';
+  if (final?.status === 'error' && !final.responses?.length) {
+    // No agent ever answered: the task, the directory or the agents were
+    // refused. Those are the caller's to fix, so the reason goes back as the
+    // error rather than as a turn that seemed to run.
+    throw acp.RequestError.invalidParams(`Council could not start: ${reason}`);
+  }
   const summary = final?.finalSummary?.trim();
-  await say(summary || `Council finished with status '${final?.status ?? 'unknown'}' and produced no summary.`);
+  if (final?.status === 'error') {
+    await say(`Council failed: ${reason}${summary ? `\n\n${summary}` : ''}`);
+  } else {
+    await say(summary || `Council finished with status '${final?.status ?? 'unknown'}' and produced no summary.`);
+  }
 
   // Consensus parks the run for a human decision rather than completing it, so
   // the ACP turn ends at the gate and the decision becomes a slash command.
@@ -857,7 +979,8 @@ async function runCouncilMode(
     await emit({ sessionUpdate: 'available_commands_update', availableCommands: ACP_COUNCIL_COMMANDS });
     await say(
       '\n\nThe council reached consensus and is holding its worktrees for you. ' +
-        'Send `/council_accept` to merge the result, or `/council_reject <feedback>` to discard it.',
+        'Send `/council_accept` to keep what the agents merged into the main branch and clean up, ' +
+        'or `/council_reject <feedback>` to write your feedback into plan.md for a retry.',
     );
   }
 
@@ -921,17 +1044,13 @@ async function runPollingMode(
 }
 
 /**
- * Apply `/council_accept` or `/council_reject` to a parked run.
- *
- * Returns true when the prompt was a decision and the turn is finished.
- */
-/**
  * What a prompt did to a parked council: nothing was parked, the prompt decided
  * it, or one is parked and the prompt was not a decision — which is a stop, not
  * a pass-through.
  */
 export type ParkedCouncilOutcome = 'none' | 'decided' | 'blocked';
 
+/** Apply `/council_accept` or `/council_reject` to a parked run. */
 export async function resolveParkedCouncil(
   manager: SessionManagerLike,
   state: AcpSessionState,
@@ -949,10 +1068,13 @@ export async function resolveParkedCouncil(
 
   if (command.name === 'council_accept') {
     await manager.councilAccept?.(id);
-    await say('Council result accepted; the winning worktree has been merged.');
+    await say(
+      'Council result accepted. What the agents merged into the main branch stays; ' +
+        'the council worktrees, branches and plan.md have been removed.',
+    );
   } else if (command.name === 'council_reject') {
     await manager.councilReject?.(id, command.rest || 'rejected via ACP');
-    await say('Council result rejected and its worktrees discarded.');
+    await say('Council result rejected. plan.md now carries your feedback, and the worktrees are kept for a retry.');
   } else {
     return 'blocked';
   }

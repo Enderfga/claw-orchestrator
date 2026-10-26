@@ -949,6 +949,8 @@ export interface CouncilSession {
   endTime?: string;
   finalSummary?: string;
   compactContext?: string;
+  /** Why the run failed, when it did — a refused task or directory, a worktree that could not be made. */
+  error?: string;
 }
 
 // ─── Council Post-Processing Types ─────────────────────────────────────────

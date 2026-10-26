@@ -76,19 +76,26 @@ Treat council as a deliberate action, not a default.
 Agent deltas are buffered per agent and delivered on that agent's `tool_call_update`
 rather than streamed into the text channel. Several agents speak at once, and a
 consumer that only reads text — `dsh`'s ACP subagent reads nothing else — would
-otherwise receive them interleaved into one unreadable blob.
+otherwise receive them interleaved into one unreadable blob. An agent that fails a
+round has its `tool_call_update` marked `failed` with the error; the council carries
+on with the others.
 
-Council requires a git repository at the session `cwd`; it creates one worktree and
-branch per agent. Its guardrails (non-git directory, too-short task, and others)
-surface as an `invalid params` error naming the reason.
+Council works in the session `cwd`, initialising a git repository there if there is
+none, and creates one worktree and branch per agent. A run that fails before any
+agent answers — a too-short task, a `cwd` inside the orchestrator's own install
+directory, a worktree that cannot be created — ends the prompt with an
+`invalid params` error naming the reason. A run that fails later reports the reason
+as text and ends with stop reason `refusal`.
 
 **Consensus parks the run rather than finishing it.** The turn ends at the gate, and
-the decision becomes a slash command, advertised through `available_commands_update`:
+the decision becomes a slash command, advertised through `available_commands_update`.
+Neither command merges anything: the agents merge their own work into the main branch
+during the rounds.
 
-| Command                      | Effect                                                      |
-| ---------------------------- | ----------------------------------------------------------- |
-| `/council_accept`            | Merge the winning agent's worktree.                         |
-| `/council_reject <feedback>` | Discard the result; the text is passed through as feedback. |
+| Command                      | Effect                                                                                                                       |
+| ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `/council_accept`            | Keep what the agents merged into the main branch; remove the council worktrees, `council/*` branches, `plan.md`, `reviews/`. |
+| `/council_reject <feedback>` | Rewrite `plan.md` with the text as feedback and commit it; the worktrees and branches are kept for a retry.                  |
 
 Any other prompt while a council is parked is refused, so a second run cannot start
 over the same worktrees.
@@ -114,9 +121,10 @@ Other engines are absent for different reasons:
   works for callers that name it directly; it is not offered in a new picker.
 - **`cursor`** — a legacy engine, superseded by Grok Build in this lineup. Same
   treatment: callers that name it still work.
-- **`opencode`** — its models are open-ended `provider/model` strings passed
-  straight through, so there is nothing in the registry to enumerate. An opencode
-  session is reachable by naming the model, just not by picking it from this list.
+- **`opencode`** — its models are open-ended `provider/model` strings, so the
+  registry holds none to list, and no model name routes to it: a `provider/model`
+  string resolves to the Claude Code engine. This agent cannot open an opencode
+  session.
 
 ## Generated images
 
@@ -143,6 +151,11 @@ that can be replayed. A resumed session therefore opens with an empty view in th
 client while the engine still remembers it. Sessions are kept for 7 days after
 their last use.
 
+Within a running agent, the session layer stops an engine session that has sat
+idle for `OPENCLAW_SERVE_TTL_MINUTES` (default 60) and keeps its resume handle. The
+next prompt or `session/resume` on that ACP session starts it again on the same
+engine, model and permission, and the conversation continues.
+
 ## Permission
 
 ACP can ask the user mid-turn through `session/request_permission`. This agent does
@@ -151,7 +164,9 @@ permission is resolved once into engine CLI flags at session start, and
 `permissionPromptTool` routes to an MCP tool the caller hosts rather than back
 through the manager. Offering a prompt that cannot be honoured would be worse than
 saying so, so the choice is a session config option instead — which also suits
-`dsh-subagent-acp`, whose default is to auto-reject permission requests.
+`dsh-subagent-acp`, whose default is to auto-reject permission requests. The option
+accepts `plan`, `acceptEdits` and `bypassPermissions`; any other value is refused
+with `invalid params` and the session is left as it was.
 
 ## Cancellation
 
@@ -161,6 +176,10 @@ engine's conversation from the saved resume handle. Codex, codex-app, agy, curso
 opencode report theirs during a turn, so a cancel in the very first turn of a session
 can still start a fresh conversation. A cancel with **nothing in flight does
 nothing**.
+
+In council mode a cancel aborts the run, which removes its worktrees, and the prompt
+ends with `cancelled`. In ultraplan and ultrareview mode it ends the prompt with
+`cancelled` and abandons the poll.
 
 The session layer has **no mid-turn cancel** — `stopSession()` is the only lever and
 it destroys the session rather than pausing the turn. So the ACP turn returns
@@ -189,9 +208,10 @@ engine that never streams still gets its whole answer emitted as one final chunk
 
 ## Development notes
 
-Unit tests cover the translation helpers and the config-option shapes
-(`src/__tests__/acp-server.test.ts`). They cannot catch a corrupted frame
-stream, so also drive the real binary:
+Unit tests cover the translation helpers, the config-option shapes, and session
+and council behaviour over an in-process client connection
+(`src/__tests__/acp-server.test.ts`, `src/__tests__/acp-session-resume.test.ts`).
+They cannot catch a corrupted frame stream, so also drive the real binary:
 
 ```bash
 npm run build

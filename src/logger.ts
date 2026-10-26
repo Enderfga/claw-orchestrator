@@ -42,6 +42,22 @@ export function createConsoleLogger(prefix?: string): Logger {
   };
 }
 
+/**
+ * Every level to stderr, filtered by OPENCLAW_LOG_LEVEL like the console logger.
+ *
+ * For the stdio servers, whose stdout carries nothing but protocol frames.
+ */
+export function createStderrLogger(prefix?: string): Logger {
+  const threshold = LEVELS[parseLevel(process.env.OPENCLAW_LOG_LEVEL)];
+  const pfx = prefix ? `[${prefix}] ` : '';
+  const at =
+    (level: LogLevel) =>
+    (msg: string, ...args: unknown[]) => {
+      if (threshold <= LEVELS[level]) console.error(`${pfx}${msg}`, ...args);
+    };
+  return { debug: at('debug'), info: at('info'), warn: at('warn'), error: at('error') };
+}
+
 /** No-op logger — useful in tests to suppress output. */
 export const nullLogger: Logger = {
   debug: () => {},
