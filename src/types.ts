@@ -839,9 +839,8 @@ export interface PluginConfig {
 }
 
 export interface ProxyConfig {
+  /** Register the proxy routes on the gateway. On unless this is `false`. */
   enabled: boolean;
-  bigModel: string;
-  smallModel: string;
 }
 
 // ─── Inbox Types ────────────────────────────────────────────────────────────

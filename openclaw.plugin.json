@@ -57,18 +57,8 @@
         "properties": {
           "enabled": {
             "type": "boolean",
-            "default": false,
-            "description": "Enable built-in multi-model proxy"
-          },
-          "bigModel": {
-            "type": "string",
-            "default": "gemini-2.5-pro",
-            "description": "Accepted for existing configs; not read. The proxy routes each request by the model it names"
-          },
-          "smallModel": {
-            "type": "string",
-            "default": "gemini-2.5-flash",
-            "description": "Accepted for existing configs; not read. The proxy routes each request by the model it names"
+            "default": true,
+            "description": "Register the multi-model proxy routes on the gateway. The proxy routes each request by the model it names"
           }
         }
       },

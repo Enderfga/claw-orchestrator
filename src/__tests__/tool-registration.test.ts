@@ -5,7 +5,7 @@ import plugin from '../index.js';
 import { SessionManager } from '../session-manager.js';
 import { ENGINE_TYPES, EFFORT_LEVELS } from '../types.js';
 import { __rejectCustomEngineOverHttpForTest as rejectCustomEngineOverHttp } from '../embedded-server.js';
-import type { PluginConfig, PermissionMode, EffortLevel } from '../types.js';
+import type { PluginConfig, PermissionMode, EffortLevel, ProxyConfig } from '../types.js';
 
 interface RegisteredTool {
   name: string;
@@ -22,7 +22,7 @@ interface RegisteredService {
   stop: () => void;
 }
 
-function collectRegistration(): {
+function collectRegistration(pluginConfig: Record<string, unknown> = {}): {
   tools: RegisteredTool[];
   routes: RegisteredRoute[];
   services: RegisteredService[];
@@ -32,7 +32,7 @@ function collectRegistration(): {
   const services: RegisteredService[] = [];
   // Minimal stub PluginAPI — just enough to capture registration calls.
   const fakeApi = {
-    pluginConfig: {},
+    pluginConfig,
     logger: { info: () => {}, error: () => {}, warn: () => {} },
     registerTool: (def: RegisteredTool) => {
       tools.push(def);
@@ -502,6 +502,30 @@ describe('openclaw.plugin.json parity', () => {
       [...permissionModes].sort(),
     );
     expect([...(manifest.configSchema.properties.defaultEffort.enum ?? [])].sort()).toEqual([...effortLevels].sort());
+  });
+
+  // The host fills declared defaults into the config before register() sees it,
+  // so a `proxy` block that leaves `enabled` out arrives carrying the manifest's
+  // default. That has to do what no `proxy` block at all does, or adding any
+  // other proxy key would switch the routes off.
+  it('declares the proxy default the plugin applies, and only the proxy fields it reads', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { fileURLToPath } = await import('node:url');
+    const { dirname, join } = await import('node:path');
+    const here = dirname(fileURLToPath(import.meta.url));
+    const manifest = JSON.parse(readFileSync(join(here, '../../openclaw.plugin.json'), 'utf8')) as {
+      configSchema: { properties: { proxy: { properties: Record<string, { default?: unknown }> } } };
+    };
+    const declared = manifest.configSchema.properties.proxy.properties;
+    const routesWith = (pluginConfig: Record<string, unknown>) =>
+      collectRegistration(pluginConfig)
+        .routes.map((r) => r.path)
+        .sort();
+
+    expect(routesWith({ proxy: { enabled: declared.enabled?.default } })).toEqual(routesWith({}));
+
+    const read: Record<keyof ProxyConfig, true> = { enabled: true };
+    expect(Object.keys(declared).sort()).toEqual(Object.keys(read).sort());
   });
 
   // A host echoes the tool list back inside its request, so every schema this
