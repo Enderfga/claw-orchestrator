@@ -15,6 +15,7 @@ import * as crypto from 'node:crypto';
 import { SessionManager } from './session-manager.js';
 import { sanitizeCwd, validateRegex } from './validation.js';
 import { resolveSecretRefs } from './kernel/secrets.js';
+import { summarize, type RunSummary } from './kernel/store.js';
 import { validateAutoloopTimeoutConfig } from './autoloop/types.js';
 import { isUnconfirmedChatNotice } from './autoloop/dispatcher.js';
 import { boundedErrorReason } from './sanitize.js';
@@ -917,7 +918,14 @@ export class EmbeddedServer {
             Connection: 'keep-alive',
           });
           const send = sseSender(res);
-          const snapshot = this.manager.workflowList({ limit: 1000 }).find((r) => r.runId === runId);
+          // Read the named run itself: a listing is capped and newest first, so
+          // an older run would open with no snapshot.
+          let snapshot: RunSummary | undefined;
+          try {
+            snapshot = summarize(this.manager.workflowStatus(runId));
+          } catch {
+            // Unknown or unreadable run — the stream opens without a snapshot.
+          }
           if (snapshot) send('snapshot', snapshot);
           const unsubscribe = this.manager.onWorkflowEvent((e) => {
             if (e.runId === runId) send('workflow-event', e.event);
