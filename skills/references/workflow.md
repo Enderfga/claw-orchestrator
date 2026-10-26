@@ -407,8 +407,9 @@ belong before the task.
   running, so agent nodes name their session per attempt
   (`<runId>-<nodeId>-a<n>`), and a verifier names its fixer sessions per visit
   and attempt (`<runId>-<nodeId>-v<visit>a<n>-fix-<round>`) — otherwise the dying
-  attempt's teardown would stop the retry's session. A node that writes to a fixed path outside the run
-  directory can still race its own retry; scope such writes per attempt.
+  attempt's teardown would stop the retry's session. A node that writes to a
+  fixed path outside the run directory can still race its own retry; scope such
+  writes per attempt.
 
   Because such an attempt can still write, a run about to report `verified`
   waits briefly for outstanding attempts to settle, and reports `unverified`
