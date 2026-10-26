@@ -49,10 +49,11 @@ project/
 Agents cannot interfere with each other's files. All integration happens via `git merge` to `main`.
 
 If `projectDir` does not exist it is created; if it is not a git repository the council runs `git init`, and if
-the repository has no commit yet it commits whatever the directory holds. On every start it sets the repository's
-local `user.name` / `user.email` to a Council identity, which stays in `.git/config`. Agent names become branch
-names, so they must match `^[a-zA-Z0-9_-]+$`. A council refuses to start with a `projectDir` inside the
-orchestrator's own code directory.
+the repository has no commit yet it commits whatever the directory holds. Commits need a git identity: when the
+repository has none at any level, the council sets a local `Council <council@openclaw>` in `.git/config`; an
+identity you configured is left untouched. Agent names become branch names, so they must match
+`^[a-zA-Z0-9_-]+$`. A council refuses to start with a `projectDir` inside the orchestrator's own package
+directory.
 
 ### Consensus Voting
 
