@@ -4,17 +4,11 @@
  * Default concurrency = 1. Pending builds are FIFO. Subscribers receive every
  * BuildEvent emitted by the worker for any currently-running build.
  *
- * The queue is durable as of 6.0.0. It used to say so in this comment: "Disk
- * persistence (in-progress + pending lists) is NOT done in v0.2 — if the
- * orchestrator restarts mid-build, the build is marked failed and the user can
- * rerun." In practice a restart did not mark anything: the pending list simply
- * vanished, along with any queued build the user was waiting on, with no record
- * that it had ever been asked for.
- *
- * Now the pending list and the in-flight run id are written on every change and
- * restored on construction. A build that was in flight when the process died is
- * re-queued rather than resumed — each build starts from a fresh council
- * worktree, so re-running is safe and resuming a half-built tree is not.
+ * The queue is durable: the pending list and the in-flight run id are written on
+ * every change and restored on construction. A build that was in flight when the
+ * process died goes back to the front of the queue, and when it is dispatched
+ * again the worker resumes its kernel run from the last checkpoint — a stage that
+ * had already finished, typically the council, is not run a second time.
  *
  * Durability without ownership would be worse than neither: two processes each
  * restoring the same file would each run the same builds, doing every side

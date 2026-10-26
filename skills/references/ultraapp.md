@@ -262,9 +262,9 @@ the usual macOS app paths, then `PATH`.
 The build queue is persisted to `<store>/build-queue.json` and restored on
 startup.
 
-A build that was in flight when the process died is **re-queued, not resumed**,
-and goes to the front: each build starts from a fresh council worktree, so
-re-running is safe and continuing a half-built tree is not.
+A build that was in flight when the process died is re-queued at the front, and
+when it runs again it resumes its workflow run from the last checkpoint: a stage
+that had already finished (typically the council) is not run again.
 
 ## Known limitations
 
