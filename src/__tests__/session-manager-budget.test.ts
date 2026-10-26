@@ -300,6 +300,36 @@ describe('run ledger integration', () => {
     await mgr.shutdown();
   });
 
+  // An inbox delivery is a turn like any other: recorded on its own row, so the
+  // turn after it does not start from a snapshot that already holds its cost.
+  it('records an inbox turn on its own row', async () => {
+    const mgr = makeManager();
+    await mgr.startSession({ name: 'inbox-from', engine: 'codex', cwd: tmpDir });
+    await mgr.startSession({ name: 'inbox-to', engine: 'codex', cwd: tmpDir });
+    expect(await mgr.sessionSendTo('inbox-from', 'inbox-to', 'review this')).toEqual({
+      delivered: true,
+      queued: false,
+    });
+    await mgr.sendMessage('inbox-to', 'next');
+
+    const rows = readRunLedger({ session: 'inbox-to' });
+    expect(rows.map((r) => r.costUsd)).toEqual([0.5, 0.5]);
+    expect(rows.map((r) => r.turn)).toEqual([1, 2]);
+    await mgr.shutdown();
+  });
+
+  it('keeps an inbox turn in the conversation a handoff carries', async () => {
+    const mgr = makeManager();
+    await mgr.startSession({ name: 'inbox-ho-from', engine: 'codex', cwd: tmpDir });
+    await mgr.startSession({ name: 'inbox-ho-to', engine: 'codex', cwd: tmpDir });
+    await mgr.sessionSendTo('inbox-ho-from', 'inbox-ho-to', 'PLANTED: the release codename is heron');
+    await mgr.sendMessage('inbox-ho-to', 'next');
+
+    const out = await mgr.handoffSession('inbox-ho-to', { engine: 'opencode', message: 'go on' });
+    expect(out.result?.output).toContain('PLANTED: the release codename is heron');
+    await mgr.shutdown();
+  });
+
   it('getRunLedger returns rows plus a summary', async () => {
     const mgr = makeManager();
     await mgr.startSession({ name: 'ledger-sum', engine: 'codex', cwd: tmpDir });
@@ -332,6 +362,20 @@ describe('budget cap', () => {
     await mgr.startSession({ name: 'uncapped', engine: 'codex', cwd: tmpDir });
     for (let i = 0; i < 4; i++) await mgr.sendMessage('uncapped', `turn ${i}`);
     expect(engines[0].turns).toBe(4);
+    await mgr.shutdown();
+  });
+
+  it('refuses an inbox turn once the cap is reached and keeps the message queued', async () => {
+    const mgr = makeManager();
+    await mgr.startSession({ name: 'inbox-cap-from', engine: 'codex', cwd: tmpDir });
+    await mgr.startSession({ name: 'inbox-cap-to', engine: 'codex', cwd: tmpDir, maxBudgetUsd: 0.4 });
+    await mgr.sendMessage('inbox-cap-to', 'one');
+
+    const r = await mgr.sessionSendTo('inbox-cap-from', 'inbox-cap-to', 'more work');
+    expect(r).toEqual({ delivered: false, queued: true });
+    await expect(mgr.sessionDeliverInbox('inbox-cap-to')).rejects.toBeInstanceOf(BudgetExceededError);
+    expect(mgr.sessionInbox('inbox-cap-to')).toHaveLength(1);
+    expect(engines[1].turns).toBe(1);
     await mgr.shutdown();
   });
 

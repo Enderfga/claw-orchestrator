@@ -114,7 +114,8 @@ what carries across, what does not, and what is kept when the conversation is to
 ### `session_stop`
 
 Graceful shutdown (SIGTERM, then SIGKILL after 3s). The session is also removed from the resume
-registry, so a later `session_start` under the same name begins a new conversation.
+registry and its inbox is cleared, so a later `session_start` under the same name begins a new
+conversation with no messages left over from the old one.
 
 | Parameter | Type   | Required |
 | --------- | ------ | -------- |
@@ -395,8 +396,9 @@ resume/recovery repeats the same message construction.
 
 ### `fanout_status`
 
-Poll a fan-out by `id`. Returns `{ ok, id, status, results: [{ agent, engine, model, ok, output, error?, durationMs }], synthesis?, error? }`.
-`status` is `running`, `done`, `error` or `aborted`.
+Poll a fan-out by `id`. Returns `{ ok, id, status, results: [{ agent, engine, model, ok, output, error?, durationMs }], synthesis?, synthesisError?, error? }`.
+`status` is `running`, `done`, `error` or `aborted`. `synthesisError` is set when synthesis was requested
+and failed; without it, a missing `synthesis` means none was requested or fewer than two agents succeeded.
 
 ### `fanout_abort`
 

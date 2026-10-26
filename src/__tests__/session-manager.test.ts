@@ -1025,6 +1025,28 @@ describe('SessionManager', () => {
       expect(unread.length).toBe(0);
     });
 
+    it('stopping a session drops its queued messages, so a new session under the name starts empty', async () => {
+      await mgr.startSession({ name: 's1', cwd: '/tmp' });
+      await mgr.startSession({ name: 's2', cwd: '/tmp' });
+      mockSessions[1].setBusy(true);
+      await mgr.sessionSendTo('s1', 's2', 'for the old s2');
+
+      await mgr.stopSession('s2');
+      await mgr.startSession({ name: 's2', cwd: '/tmp' });
+      expect(mgr.sessionInbox('s2', false)).toEqual([]);
+    });
+
+    it('keeps the queued messages of a session stopped to be resumed', async () => {
+      await mgr.startSession({ name: 's1', cwd: '/tmp' });
+      await mgr.startSession({ name: 's2', cwd: '/tmp' });
+      mockSessions[1].setBusy(true);
+      await mgr.sessionSendTo('s1', 's2', 'still for s2');
+
+      await mgr.stopSession('s2', { keepPersisted: true });
+      await mgr.startSession({ name: 's2', cwd: '/tmp' });
+      expect(mgr.sessionInbox('s2').map((m) => m.text)).toEqual(['still for s2']);
+    });
+
     it('sessionDeliverInbox returns 0 when inbox is empty', async () => {
       await mgr.startSession({ name: 'empty-inbox', cwd: '/tmp' });
       const delivered = await mgr.sessionDeliverInbox('empty-inbox');
@@ -1252,6 +1274,16 @@ describe('SessionManager', () => {
       expect(status!.status).toBe('completed');
       expect(status!.findings).toContain('found a bug');
     });
+  });
+
+  // Through the real agent node: a spec field the executor drops would pass a
+  // spec-level assertion and still reach the session without it.
+  it('gives the ultraplan session the plan-only instruction', async () => {
+    const result = await mgr.ultraplanStart('plan task', { cwd: '/tmp' });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (mgr as any).kernel.wait(result.id);
+    expect(createdConfigs).toHaveLength(1);
+    expect(createdConfigs[0].appendSystemPrompt).toContain('plan only');
   });
 
   // ─── Health ─────────────────────────────────────────────────────────

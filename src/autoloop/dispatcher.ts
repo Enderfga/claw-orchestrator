@@ -57,7 +57,7 @@ import {
   type PlannerToolEffects,
   type SpawnSubagentsArgs,
 } from './planner-tools.js';
-import { extractIterComplete, extractReviewComplete, parseAgentReply } from './agent-tools.js';
+import { extractIterComplete, extractLogMessages, extractReviewComplete, parseAgentReply } from './agent-tools.js';
 
 /**
  * Character budget for the replayed transcript handed to engines without native
@@ -759,6 +759,22 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
   }
 
   /**
+   * Append a role's `coder_log` / `reviewer_log` entries, one JSONL row each.
+   * The prompts route these through the tool rather than a file write (the
+   * Coder may not touch `tasks/`), so this is the only writer. Best-effort.
+   */
+  private appendRoleLog(file: string, iter: number, messages: string[]): void {
+    if (messages.length === 0) return;
+    try {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      const ts = new Date().toISOString();
+      fs.appendFileSync(file, messages.map((message) => JSON.stringify({ ts, iter, message }) + '\n').join(''));
+    } catch (err) {
+      this.logger.warn?.(`[autoloop] ${path.basename(file)} append failed: ${(err as Error).message}`);
+    }
+  }
+
+  /**
    * Append a Planner-pane chat entry to <ledger>/chat.jsonl. Used by the
    * dashboard's GET /autoloop/<id>/chat_history endpoint so a browser
    * refresh / cross-process / re-opening a terminated run can replay the
@@ -1255,6 +1271,11 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
         ts: new Date().toISOString(),
       });
     }
+    this.appendRoleLog(
+      path.join(this.ledgerDir, 'coder_log.jsonl'),
+      env.iter,
+      extractLogMessages(parsed.calls, 'coder_log'),
+    );
 
     const ic = extractIterComplete(parsed.calls);
     if (!ic) {
@@ -1491,6 +1512,12 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
         ts: new Date().toISOString(),
       });
     }
+    // In the sandbox, where it survives restaging and the Reviewer can reread it.
+    this.appendRoleLog(
+      path.join(this.reviewerSandboxDir, 'reviewer_log.jsonl'),
+      env.payload.iter,
+      extractLogMessages(parsed.calls, 'reviewer_log'),
+    );
 
     const rc = extractReviewComplete(parsed.calls);
     if (!rc) {

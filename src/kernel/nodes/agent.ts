@@ -61,6 +61,7 @@ export async function executeAgentNode(node: NodeSpec, ctx: NodeContext): Promis
       model: spec.model,
       effort: spec.effort as never,
       ...(spec.acpAgent === undefined ? {} : { acpAgent: spec.acpAgent }),
+      ...(spec.appendSystemPrompt ? { appendSystemPrompt: spec.appendSystemPrompt } : {}),
       permissionMode: (spec.permissionMode as never) ?? 'bypassPermissions',
     },
   });

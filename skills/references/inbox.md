@@ -19,7 +19,8 @@ Session A (planner)          SessionManager           Session B (coder)
 ```
 
 - **Idle sessions** (ready and not busy) receive messages immediately as a new user turn. The call does not wait for the recipient's reply
-- **Busy sessions** have messages queued in an inbox (max 200 messages); so does an idle session whose delivery failed
+- **A delivered message is an ordinary turn**: it goes through the same send path as `session_send`, so the recipient's spend cap applies and the turn gets its own run-ledger row and a place in the conversation a handoff carries
+- **Busy sessions** have messages queued in an inbox (max 200 messages); so does an idle session whose turn could not start — for example one that has reached its spend cap
 - **Queued messages wait for a caller**: nothing delivers them on its own. Call `sessionDeliverInbox()` once the session is idle
 - Messages are wrapped in `<cross-session-message>` XML tags
 - Supports broadcast to all sessions via `to: "*"`; a broadcast skips the sender
@@ -50,7 +51,7 @@ const all = manager.sessionInbox('coder', false);
 
 ### Deliver Queued Messages
 
-When a session finishes a task and becomes idle, deliver its queued messages. All unread messages go in one turn, each in its own envelope, and are marked read:
+When a session finishes a task and becomes idle, deliver its queued messages. All unread messages go in one turn, each in its own envelope, and are marked read. The call does not wait for the reply; if the turn cannot start (spend cap reached) it throws and the messages stay unread:
 
 ```typescript
 const count = await manager.sessionDeliverInbox('coder');
@@ -83,4 +84,5 @@ The `summary` attribute is present only when a summary was given. Attribute valu
 
 - **Max size**: 200 messages per session
 - **Eviction**: oldest read messages dropped first, then oldest unread
-- **No TTL**: messages, read or unread, stay in memory until evicted or the process exits — stopping a session does not clear its inbox. They are not persisted to disk.
+- **No TTL**: messages, read or unread, stay in memory until evicted, the session is stopped, or the process exits. They are not persisted to disk.
+- **Stopping clears the inbox**: `stopSession()` drops the session's messages, so a new session started under the same name does not receive mail meant for the old one. A stop that keeps the session resumable (`keepPersisted: true`, used when a session is restarted to continue the same conversation) leaves them in place.

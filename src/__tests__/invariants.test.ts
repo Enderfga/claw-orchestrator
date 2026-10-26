@@ -285,6 +285,28 @@ describe('the legacy API contract survives the adapter', () => {
     fs.rmSync(cwd, { recursive: true, force: true });
   });
 
+  it('fan-out status tells a synthesis that failed apart from one never requested', async () => {
+    const cwd = gitRepo();
+    const start = mgr.startSession.bind(mgr);
+    mgr.startSession = async (config) => {
+      if (config.name?.endsWith('-synthesis')) throw new Error('synthesis engine unavailable');
+      return start(config);
+    };
+    const fan = await mgr.fanoutStart({
+      task: 't',
+      projectDir: cwd,
+      agents: [{ name: 'a' }, { name: 'b' }],
+      synthesize: true,
+    });
+    await (mgr as unknown as { kernel: { wait(id: string): Promise<unknown> } }).kernel.wait(fan.id);
+
+    const status = mgr.fanoutStatus(fan.id);
+    expect(status.synthesis).toBeUndefined();
+    expect(status.synthesisError).toBe('synthesis engine unavailable');
+
+    fs.rmSync(cwd, { recursive: true, force: true });
+  });
+
   it('fan-out preserves persona separately and composes it with the shared task', async () => {
     const cwd = gitRepo();
     const fan = await mgr.fanoutStart({

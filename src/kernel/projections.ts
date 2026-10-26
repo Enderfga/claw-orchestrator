@@ -86,6 +86,7 @@ export interface FanoutNodeData {
   agentCount: number;
   results: FanoutAgentResult[];
   synthesis?: string;
+  synthesisError?: string;
 }
 
 export function toFanoutSession(record: RunRecord): FanoutSession {
@@ -108,6 +109,7 @@ export function toFanoutSession(record: RunRecord): FanoutSession {
     finishedAt: record.endedAt,
     results: data?.results ?? [],
     synthesis: data?.synthesis,
+    synthesisError: data?.synthesisError,
     error: record.error,
   };
 }
