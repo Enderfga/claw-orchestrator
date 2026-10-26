@@ -333,14 +333,19 @@ describe('subflow', () => {
     expect(childAgentRuns).toBeLessThanOrEqual(1);
   });
 
-  it("adopts the child's tree digest with its verdict, so a later node is measured, not distrusted", async () => {
-    const repo = path.join(tmp, 'sub-repo');
+  const initRepo = (name: string): string => {
+    const repo = path.join(tmp, name);
     fs.mkdirSync(repo, { recursive: true });
     execSync('git init -q -b main', { cwd: repo, stdio: 'pipe' });
     execSync('git config user.email t@t.com', { cwd: repo, stdio: 'pipe' });
     execSync('git config user.name T', { cwd: repo, stdio: 'pipe' });
     fs.writeFileSync(path.join(repo, 'seed.txt'), 'seed\n');
     execSync('git add -A && git commit -qm init', { cwd: repo, stdio: 'pipe' });
+    return repo;
+  };
+
+  it("adopts the child's tree digest with its verdict, so a later node is measured, not distrusted", async () => {
+    const repo = initRepo('sub-repo');
 
     const run = async (edit: boolean) => {
       const kernel = registerDefaultExecutors(new RunKernel({ nodeTimeoutMs: 20_000 }));
@@ -370,6 +375,33 @@ describe('subflow', () => {
     const edited = await run(true);
     expect(edited.outcome).toBe('unverified');
     expect(edited.outcomeReason).toMatch(/changed afterwards/);
+  }, 30_000);
+
+  it('does not turn a child whose verdict expired into a refuted parent', async () => {
+    // The child's checks passed and its tree moved afterwards: `unverified`, not
+    // `refuted`. Adopting that as a failed verdict claims a check failed.
+    const repo = initRepo('stale-child');
+    const kernel = registerDefaultExecutors(new RunKernel({ nodeTimeoutMs: 20_000 }));
+    kernel.setExecutor('agent', async () => {
+      fs.writeFileSync(path.join(repo, 'after.txt'), 'edited\n');
+      return { ok: true };
+    });
+    const child: WorkflowSpec = {
+      name: 'child',
+      nodes: [
+        { id: 'check', kind: 'verifier', contract: { checks: [{ spec: { type: 'command', cmd: 'true' } }] } },
+        { id: 'edit', kind: 'agent', prompt: 'x' },
+      ],
+    };
+    const rec = await kernel.start({
+      name: 'parent',
+      cwd: repo,
+      nodes: [{ id: 'sub', kind: 'subflow', workflow: child }],
+    });
+    const done = (await kernel.wait(rec.runId))!;
+    expect(loadRun(done.nodes.sub.childRunId!)?.outcome).toBe('unverified');
+    expect(done.outcome).toBe('unverified');
+    expect(done.state).toBe('completed');
   }, 30_000);
 
   it('hands the parent secrets down to the child', async () => {

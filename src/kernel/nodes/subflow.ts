@@ -56,12 +56,16 @@ export function makeSubflowExecutor(kernel: RunKernel, resolve?: WorkflowResolve
     });
 
     const finished = (await kernel.wait(record.runId)) ?? record;
+    // Only a verdict that stands is adopted. A child that ended `unverified`
+    // has none — its checks may have passed on a tree that moved since — and
+    // reporting its evidence as not passed would make the parent `refuted`.
+    const judged = finished.outcome !== 'unverified';
     return {
       childRunId: record.runId,
       ok: finished.state === 'completed',
       output: `subflow ${finished.runId}: ${finished.state} / ${finished.outcome}`,
       error: finished.state === 'completed' ? undefined : (finished.error ?? `subflow ended ${finished.state}`),
-      evidenceId: finished.evidenceId,
+      evidenceId: judged ? finished.evidenceId : undefined,
       passed: finished.outcome === 'verified',
       // The digest goes with the verdict: without it, any workspace-touching node
       // the parent runs afterwards finds nothing to compare and downgrades it.
