@@ -32,8 +32,8 @@ import { runChecks } from '../verify/runner.js';
 import { contractPassed, type AcceptanceContract, type CheckResult } from '../verify/contract.js';
 import { writeEvidence } from '../verify/evidence.js';
 import { deployArtifact, type DeployArgs, type DeployResult } from './deploy.js';
-import { dockerBuild, dockerRun, dockerRmi } from './docker.js';
-import { hostBuild, hostRun, hostRmi } from './host-strategy.js';
+import { dockerBuild, dockerRm, dockerRmi, dockerRun, dockerStart, dockerStop } from './docker.js';
+import { hostBuild, hostRm, hostRmi, hostRun, hostStart, hostStop } from './host-strategy.js';
 import { startContainerAndRegister, stopContainerAndDeregister, deleteContainerAndDeregister } from './lifecycle.js';
 import type { UltraappRouter } from './router.js';
 import { Narrator } from './narrator.js';
@@ -618,21 +618,32 @@ export class UltraappManager {
     return { ok: true, url: dep.url, evidenceId, passed: true };
   }
 
+  /** Start, stop and remove a deployed version's process under the configured runtime. */
+  private runtime() {
+    const docker = this.opts.runtimeMode === 'docker';
+    return {
+      start: (name: string) => (docker ? dockerStart(name) : hostStart(name)),
+      stop: (name: string) => (docker ? dockerStop(name) : hostStop(name)),
+      rm: (name: string) => (docker ? dockerRm(name) : hostRm(name)),
+      rmi: (tag: string) => (docker ? dockerRmi(tag) : hostRmi(tag)),
+    };
+  }
+
   async startContainer(runId: string): Promise<{ ok: boolean; error?: string }> {
     if (!this.opts.router) return { ok: false, error: 'router not configured' };
     const arts = await this.opts.store.readArtifacts(runId);
     const latest = arts[arts.length - 1];
     if (!latest?.deploy) return { ok: false, error: 'no deployed artifact' };
     const spec = await this.opts.store.readSpec(runId);
-    const useDocker = this.opts.runtimeMode === 'docker';
-    const r = await startContainerAndRegister(
+    return startContainerAndRegister(
       latest.deploy.containerName,
       spec.meta.name,
       latest.deploy.port,
       this.opts.router,
-      useDocker ? undefined : { dockerStartFn: async (n) => (await import('./host-strategy.js')).hostStart(n) },
+      {
+        dockerStartFn: this.runtime().start,
+      },
     );
-    return r;
   }
 
   async stopContainer(runId: string): Promise<{ ok: boolean; error?: string }> {
@@ -641,13 +652,9 @@ export class UltraappManager {
     const latest = arts[arts.length - 1];
     if (!latest?.deploy) return { ok: false, error: 'no deployed artifact' };
     const spec = await this.opts.store.readSpec(runId);
-    const useDocker = this.opts.runtimeMode === 'docker';
-    return stopContainerAndDeregister(
-      latest.deploy.containerName,
-      spec.meta.name,
-      this.opts.router,
-      useDocker ? undefined : { dockerStopFn: async (n) => (await import('./host-strategy.js')).hostStop(n) },
-    );
+    return stopContainerAndDeregister(latest.deploy.containerName, spec.meta.name, this.opts.router, {
+      dockerStopFn: this.runtime().stop,
+    });
   }
 
   async deleteRun(runId: string): Promise<{ ok: boolean; error?: string }> {
@@ -659,16 +666,12 @@ export class UltraappManager {
     } catch {
       /* run already gone */
     }
-    const useDocker = this.opts.runtimeMode === 'docker';
     if (latest?.deploy && spec && this.opts.router) {
-      await deleteContainerAndDeregister(
-        latest.deploy.containerName,
-        spec.meta.name,
-        this.opts.router,
-        useDocker ? undefined : { dockerRmFn: async (n) => (await import('./host-strategy.js')).hostRm(n) },
-      );
-      const rmiFn = useDocker ? dockerRmi : hostRmi;
-      await rmiFn(latest.deploy.imageTag).catch(() => {
+      const rt = this.runtime();
+      await deleteContainerAndDeregister(latest.deploy.containerName, spec.meta.name, this.opts.router, {
+        dockerRmFn: rt.rm,
+      });
+      await rt.rmi(latest.deploy.imageTag).catch(() => {
         /* image may not exist */
       });
     }
@@ -727,20 +730,15 @@ export class UltraappManager {
     const target = versions.find((v) => v.version === toVersion);
     if (!target?.deploy) return { ok: false, error: `version ${toVersion} has no deploy` };
     const spec = await this.opts.store.readSpec(runId);
+    const rt = this.runtime();
     const r = await swapVersion({
       versionsDir: this.opts.store.versionsDir(runId),
       fromVersion: current?.version ?? toVersion,
       toVersion,
       slug: spec.meta.name,
       router: this.opts.router,
-      startContainer: async (name: string) => {
-        const { dockerStart } = await import('./docker.js');
-        return dockerStart(name);
-      },
-      stopContainer: async (name: string) => {
-        const { dockerStop } = await import('./docker.js');
-        return dockerStop(name);
-      },
+      startContainer: rt.start,
+      stopContainer: rt.stop,
     });
     if (r.ok) {
       const run = this.runs.get(runId);

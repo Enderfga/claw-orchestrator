@@ -40,6 +40,60 @@ function questionReply(): string {
   return '```question\n{"question":"hi","options":[{"label":"a","value":"a"}],"recommended":"a","freeformAccepted":true}\n```';
 }
 
+/** A version on disk as a finished build leaves it; deployed when `deployedAt` is given. */
+function writeVersion(
+  store: UltraappStore,
+  id: string,
+  version: string,
+  opts: { deployedAt?: string; port?: number; files?: Record<string, string> } = {},
+): string {
+  const dir = path.join(store.versionsDir(id), version);
+  const worktreePath = path.join(dir, 'codebase');
+  fs.mkdirSync(worktreePath, { recursive: true });
+  for (const [f, c] of Object.entries(opts.files ?? {})) fs.writeFileSync(path.join(worktreePath, f), c);
+  const deploy = opts.deployedAt
+    ? {
+        deployedAt: opts.deployedAt,
+        deploy: {
+          url: 'http://localhost:19000/forge/demo/',
+          port: opts.port ?? 19101,
+          containerName: `ultraapp-demo-${version}`,
+          imageTag: `ultraapp/demo:${version}`,
+        },
+      }
+    : {};
+  fs.writeFileSync(
+    path.join(dir, 'artifact.json'),
+    JSON.stringify({ worktreePath, builtAt: '2026-10-01T00:00:00.000Z', ...deploy }),
+  );
+  return worktreePath;
+}
+
+function fakeRouter() {
+  return {
+    register: vi.fn(),
+    deregister: vi.fn(),
+    list: () => [] as Array<{ slug: string; port: number }>,
+    port: () => 19000,
+  };
+}
+
+/** Stub both runtimes, so a test can see which one the manager drove. */
+async function stubRuntimes() {
+  const host = await import('../../ultraapp/host-strategy.js');
+  const docker = await import('../../ultraapp/docker.js');
+  const ok = async () => ({ ok: true });
+  const spies = {
+    hostStart: vi.spyOn(host, 'hostStart').mockImplementation(ok),
+    hostStop: vi.spyOn(host, 'hostStop').mockImplementation(ok),
+    hostRm: vi.spyOn(host, 'hostRm').mockImplementation(ok),
+    dockerStart: vi.spyOn(docker, 'dockerStart').mockImplementation(ok),
+    dockerStop: vi.spyOn(docker, 'dockerStop').mockImplementation(ok),
+    dockerRm: vi.spyOn(docker, 'dockerRm').mockImplementation(ok),
+  };
+  return { ...spies, restore: () => Object.values(spies).forEach((s) => s.mockRestore()) };
+}
+
 describe('UltraappManager', () => {
   let tmp: string;
   let store: UltraappStore;
@@ -540,5 +594,33 @@ describe('UltraappManager', () => {
     expect(s.mode).toBe('failed');
     expect(s.failure).toMatch(/no consensus/);
     synth.mockRestore();
+  });
+
+  describe('versions', () => {
+    it('promoteVersion swaps processes with the configured runtime, host by default', async () => {
+      const rt = await stubRuntimes();
+      try {
+        const router = fakeRouter();
+        const mgr = new UltraappManager({
+          store,
+          sessionManager: fakeSessionManager(questionReply()) as never,
+          router: router as never,
+        });
+        activeMgr = mgr;
+        const id = await mgr.createRun();
+        await mgr.applySpecEdit(id, [{ op: 'replace', path: '/meta/name', value: 'demo' }]);
+        writeVersion(store, id, 'v1', { deployedAt: '2026-10-02T00:00:00.000Z', port: 19101 });
+        writeVersion(store, id, 'v2', { deployedAt: '2026-10-01T00:00:00.000Z', port: 19102 });
+
+        expect(await mgr.promoteVersion(id, 'v2')).toEqual({ ok: true });
+        expect(rt.hostStop).toHaveBeenCalledWith('ultraapp-demo-v1');
+        expect(rt.hostStart).toHaveBeenCalledWith('ultraapp-demo-v2');
+        expect(rt.dockerStart).not.toHaveBeenCalled();
+        expect(rt.dockerStop).not.toHaveBeenCalled();
+        expect(router.register).toHaveBeenLastCalledWith('demo', 19102);
+      } finally {
+        rt.restore();
+      }
+    });
   });
 });
