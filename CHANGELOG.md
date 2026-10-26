@@ -84,6 +84,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fixed list, so it used to be left running.
 - **Codex, codex-app and ACP stderr is redacted** before it reaches the session log, as every
   other engine's already was.
+- **`clawo serve` exits 1 when its port is already in use**, instead of running without serving.
+- **`clawo session-send --stream` says in `--help` that it has no effect**, and no longer sends an
+  unused field: `/session/send` answers when the turn ends.
+- **The workflow event stream opens with the run's snapshot however old the run is**, not only
+  for the newest 1000 runs.
+- **`POST /autoloop/new` answers 409** instead of 500 when the workspace has uncommitted changes or
+  the run ledger cannot be isolated from Git.
 - **The CLI exits 1 on every usage error.** `clawo workflow` without a run id, `steer` without
   text and an unknown action exited 0; an unreadable `--message-file`, `--objective-file` or
   contract printed a stack trace instead of `Failed: …`. `clawo session-start --help` no longer
