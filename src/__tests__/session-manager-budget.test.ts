@@ -200,9 +200,9 @@ describe('run ledger integration', () => {
     const third = await mgr.sendMessage('usage-a', 'third');
 
     expect([...results, third].map((r) => r.usage)).toEqual([
-      { tokensIn: 100, tokensOut: 40 },
-      { tokensIn: 100, tokensOut: 40 },
-      { tokensIn: 100, tokensOut: 40 },
+      { tokensIn: 100, tokensOut: 40, costUsd: 0.5 },
+      { tokensIn: 100, tokensOut: 40, costUsd: 0.5 },
+      { tokensIn: 100, tokensOut: 40, costUsd: 0.5 },
     ]);
     await mgr.shutdown();
   });
