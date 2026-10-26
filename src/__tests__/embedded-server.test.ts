@@ -13,6 +13,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { EmbeddedServer, __sseSenderForTest as sseSenderForTest } from '../embedded-server.js';
 import type { SessionManager } from '../session-manager.js';
+import { resolveAlias } from '../models.js';
 import { useIsolatedHome } from './helpers/isolate-home.js';
 
 // Isolate ~/.openclaw/server-token to a per-file temp dir — see helper docs.
@@ -601,6 +602,16 @@ describe('EmbeddedServer', () => {
       });
       expect(res.status).toBe(200);
       expect(manager.getCost).toHaveBeenCalledWith('test');
+    });
+
+    it('starts the /council/new preset with every agent on the current Opus', async () => {
+      const councilStart = vi.fn().mockResolvedValue({ id: 'c1', status: 'running' });
+      (manager as unknown as { councilStart: typeof councilStart }).councilStart = councilStart;
+      const res = await request(port, '/council/new', { method: 'POST', body: { task: 't', projectDir: '/tmp' } });
+      expect(res.status).toBe(200);
+      const agents = councilStart.mock.calls[0][1].agents as Array<{ model: string }>;
+      expect(agents).toHaveLength(3);
+      for (const a of agents) expect(resolveAlias(a.model)).toBe(resolveAlias('opus'));
     });
 
     it('returns 404 for unknown routes', async () => {

@@ -4,6 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { UltraappManager } from '../../ultraapp/manager.js';
 import { UltraappStore } from '../../ultraapp/store.js';
+import { resolveAlias } from '../../models.js';
 
 interface FakeSession {
   send: ReturnType<typeof vi.fn>;
@@ -330,6 +331,38 @@ describe('UltraappManager', () => {
     const versionsDir = store.versionsDir(id);
     expect(fs.existsSync(path.join(versionsDir, 'v2', 'artifact.json'))).toBe(true);
     spy.mockRestore();
+  });
+
+  it('runs the interview and patcher on the current Opus and the classifier on the current Haiku', async () => {
+    const sm = fakeSessionManager(
+      '```classification\n{"class":"cosmetic","reason":"r","proposedAction":"swap color"}\n```',
+    );
+    const mgr = new UltraappManager({ store, sessionManager: sm as never });
+    activeMgr = mgr;
+    const id = await mgr.createRun();
+    await store.setMode(id, 'done');
+    const wt = path.join(store.runDirAbsolute(id), 'versions', 'v1', 'codebase');
+    fs.mkdirSync(wt, { recursive: true });
+    await store.recordBuildArtifact(id, { worktreePath: wt, version: 'v1' });
+    const patcherMod = await import('../../ultraapp/patcher.js');
+    const spy = vi.spyOn(patcherMod, 'runPatcher').mockImplementation(async (a) => {
+      await a.llmCall('diff please');
+      return { ok: false, reason: 'stubbed' };
+    });
+    try {
+      await mgr.submitDoneModeMessage(id, 'make button green');
+    } finally {
+      spy.mockRestore();
+    }
+    const models = new Map(
+      (sm.startSession as ReturnType<typeof vi.fn>).mock.calls.map((c: [{ name: string; model: string }]) => [
+        c[0].name.replace(/-ua-.*$/, ''),
+        resolveAlias(c[0].model),
+      ]),
+    );
+    expect(models.get('ultraapp')).toBe(resolveAlias('opus'));
+    expect(models.get('patcher')).toBe(resolveAlias('opus'));
+    expect(models.get('classifier')).toBe(resolveAlias('haiku'));
   });
 
   it('submitDoneModeMessage spec-delta branch flips mode back to interview', async () => {

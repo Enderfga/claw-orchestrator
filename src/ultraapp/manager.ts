@@ -221,7 +221,7 @@ export class UltraappManager {
     await this.opts.sessionManager.startSession({
       name: sessionName,
       engine: 'claude',
-      model: 'claude-opus-4-7',
+      model: 'opus',
       cwd: process.cwd(),
       systemPrompt: this.skillContent,
       permissionMode: 'bypassPermissions',
@@ -781,7 +781,7 @@ export class UltraappManager {
       await this.opts.sessionManager.startSession({
         name: sessionName,
         engine: 'claude',
-        model: 'claude-haiku-4-5-20251001',
+        model: 'haiku',
         permissionMode: 'bypassPermissions',
       });
       this.classifierSessions.add(runId);
@@ -841,7 +841,7 @@ export class UltraappManager {
     await this.opts.sessionManager.startSession({
       name: sessionName,
       engine: 'claude',
-      model: 'claude-opus-4-7',
+      model: 'opus',
       permissionMode: 'bypassPermissions',
     });
     try {

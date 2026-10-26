@@ -838,14 +838,14 @@ export class EmbeddedServer {
               persona:
                 'You are agent A, a careful planner. Lay out the approach and architecture before changing code.',
               engine: 'claude',
-              model: 'claude-opus-4-7',
+              model: 'opus',
             },
             {
               name: 'agent-B',
               emoji: '🟠',
               persona: 'You are agent B, a pragmatic implementer. Make the change small, focused, and review-ready.',
               engine: 'claude',
-              model: 'claude-opus-4-7',
+              model: 'opus',
             },
             {
               name: 'agent-C',
@@ -853,7 +853,7 @@ export class EmbeddedServer {
               persona:
                 'You are agent C, a critical reviewer. Block consensus until the quality bar is met — be specific about what is missing.',
               engine: 'claude',
-              model: 'claude-opus-4-7',
+              model: 'opus',
             },
           ],
           maxRounds: (body as { maxRounds?: number }).maxRounds ?? 15,

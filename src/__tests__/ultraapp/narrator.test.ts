@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { Narrator } from '../../ultraapp/narrator.js';
+import { resolveAlias } from '../../models.js';
 
 function fakeSessionManager(replies: string[]) {
   let i = 0;
@@ -17,6 +18,14 @@ async function flushMicrotasks() {
 }
 
 describe('Narrator', () => {
+  it('runs on the current Haiku', async () => {
+    const sm = fakeSessionManager([]);
+    const n = new Narrator({ runId: 'r1', sessionManager: sm as never, language: 'en', onChat: () => {} });
+    await n.start();
+    await n.stop();
+    expect(resolveAlias(sm.startSession.mock.calls[0][0].model)).toBe(resolveAlias('haiku'));
+  });
+
   it('flushes after eventCountThreshold events', async () => {
     const sm = fakeSessionManager(['Build started; agent-A and agent-B are spinning up.']);
     const out: string[] = [];
