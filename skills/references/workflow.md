@@ -302,7 +302,9 @@ by a usage limit. The node adds what an unattended run needs around that loop.
   thread id to `thread/resume`; a goal that had not finished continues where it
   was. If the resume lands on a different thread the node fails rather than
   starting the objective over. An app-server that exits mid-goal is reopened on
-  the same thread the same way.
+  the same thread the same way. A goal that had already ended (`complete`,
+  `budgetLimited`, `blocked`) when the process died ends the node with that
+  result on resume; it is not set again.
 - **Stalls are resumed within a bound.** A goal that is `usageLimited` or
   `paused`, or `active` with no turn running and either no news for `stallMs` or
   an error the server will not retry (`serverOverloaded`, `usageLimitExceeded`,
@@ -310,7 +312,8 @@ by a usage limit. The node adds what an unattended run needs around that loop.
   backoff that starts at `capacityRetry.backoffMs` and doubles to at most 15 min.
   Every attempt counts before it is made, reopening a dead app-server included;
   past `capacityRetry.max` the node fails.
-- **Repair on the same thread.** Revisited after a red verifier, the node clears
+- **Repair on the same thread.** Revisited after a red verifier — a red verdict
+  other than the one in force when its current objective was set — the node clears
   the finished goal and sets a new objective on the same thread: the failing
   checks first (as diagnostic data, like an agent node's repair brief), then the
   original objective. The agent keeps its context. The original objective is

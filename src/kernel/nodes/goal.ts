@@ -9,7 +9,8 @@
  *  - **Reattach, never restart.** The thread id is checkpointed as soon as the
  *    session opens. A resumed run hands it to `thread/resume`, and a resume
  *    that comes back on a different thread fails the attempt instead of quietly
- *    starting the objective over.
+ *    starting the objective over. A goal that had already ended when the
+ *    process died ends the node with that result; it is not set again.
  *  - **Resume what stalls, within a bound.** A usage-limited goal, a paused
  *    one, or an active goal with no turn and no news for `stallMs` is set back
  *    to `active` after a backoff. Every attempt counts before it is made, and
@@ -71,6 +72,12 @@ export interface GoalNodeData {
    */
   reportedCostUsd?: number;
   lastError?: { message: string; code: string | null; at: string };
+  /**
+   * The evidence id of the red verdict in force when the current objective was
+   * set, if there was one. A finished goal goes back to work only for a red
+   * verdict other than this one.
+   */
+  repairOf?: string;
 }
 
 const TERMINAL: ReadonlySet<string> = new Set(['complete', 'budgetLimited', 'blocked']);
@@ -137,8 +144,14 @@ export async function executeGoalNode(node: NodeSpec, ctx: NodeContext): Promise
       ? prior.threadId
       : undefined;
   // A thread whose goal had not finished is picked up where it was. A finished
-  // one means this is a revisit — the verifier sent the run back.
-  const resuming = !!priorThread && !TERMINAL.has(prior?.status ?? '');
+  // one goes back to work only for a red verdict its objective was not set
+  // against — that is the verifier sending the run back. Without one, the
+  // process died after the goal ended but before this node's result was
+  // committed, and the goal's own ending is the result.
+  const red = ctx.record.outcome === 'refuted' ? ctx.record.verdict?.evidenceId : undefined;
+  const finished = !!priorThread && TERMINAL.has(prior?.status ?? '');
+  const repairing = finished && red !== undefined && red !== prior?.repairOf;
+  const resuming = !!priorThread && !finished;
   // The first visit may start on a thread the caller names; after that the
   // checkpoint decides.
   const startThread = priorThread ?? (spec.threadId?.trim() || undefined);
@@ -156,6 +169,7 @@ export async function executeGoalNode(node: NodeSpec, ctx: NodeContext): Promise
     costUsd: prior?.costUsd ?? 0,
     reportedCostUsd: prior?.reportedCostUsd ?? 0,
     ...(prior?.lastError ? { lastError: prior.lastError } : {}),
+    ...(prior?.repairOf ? { repairOf: prior.repairOf } : {}),
   };
   const reported = prior?.reportedCostUsd ?? 0;
   let sessionName = '';
@@ -198,6 +212,28 @@ export async function executeGoalNode(node: NodeSpec, ctx: NodeContext): Promise
     publish(true);
     return { ok: false, error, data: { ...data }, costUsd };
   };
+  /** The node's result for a goal in a terminal status; undefined while it is not in one. */
+  const ended = (): NodeResult | undefined => {
+    if (data.status === 'complete') {
+      const costUsd = spent();
+      publish(true);
+      return {
+        ok: true,
+        output: `goal complete: ${data.tokensUsed} tokens, ${data.timeUsedSeconds}s`,
+        data: { ...data },
+        costUsd,
+      };
+    }
+    if (data.status === 'budgetLimited') return fail(`goal stopped: token budget spent (${data.tokensUsed} tokens)`);
+    if (data.status === 'blocked') return fail(`goal blocked${data.lastError ? `: ${data.lastError.message}` : ''}`);
+    return undefined;
+  };
+
+  const settled = finished && !repairing ? ended() : undefined;
+  if (settled) {
+    ctx.logger.info(`[goal ${ctx.runId}/${spec.id}] the goal had already ended (${data.status}); not setting it again`);
+    return settled;
+  }
 
   let lastNews = Date.now();
   // Set by an error the server will not retry itself and that names a capacity
@@ -327,7 +363,9 @@ export async function executeGoalNode(node: NodeSpec, ctx: NodeContext): Promise
       );
       const objective = composeObjective(preface, spec.objective);
       if (startThread) await session!.clearGoal();
-      absorb(await session!.setGoal({ objective, tokenBudget: spec.tokenBudget ?? null }));
+      const goal = await session!.setGoal({ objective, tokenBudget: spec.tokenBudget ?? null });
+      data.repairOf = red;
+      absorb(goal);
     }
     publish(true);
 
@@ -392,22 +430,10 @@ export async function executeGoalNode(node: NodeSpec, ctx: NodeContext): Promise
         absorb(await live.getGoal().catch(() => live.goal));
       }
 
-      const status = data.status;
-      if (status === 'complete') {
-        const costUsd = spent();
-        publish(true);
-        return {
-          ok: true,
-          output: `goal complete: ${data.tokensUsed} tokens, ${data.timeUsedSeconds}s`,
-          data: { ...data },
-          costUsd,
-        };
-      }
-      if (status === 'budgetLimited') return fail(`goal stopped: token budget spent (${data.tokensUsed} tokens)`);
-      if (status === 'blocked') {
-        return fail(`goal blocked${data.lastError ? `: ${data.lastError.message}` : ''}`);
-      }
+      const end = ended();
+      if (end) return end;
 
+      const status = data.status;
       const stalled = status === 'active' && !live.turnActive && (Date.now() - lastNews >= stallMs || capacityError);
       const needsResume = status === 'paused' || status === 'usageLimited' || stalled;
       if (!needsResume) {
