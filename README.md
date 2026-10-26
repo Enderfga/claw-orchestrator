@@ -1,4 +1,4 @@
-<p align="center"><img src="./assets/banner.jpg" alt="Claw Orchestrator" width="100%"></p>
+<p align="center"><img src="./assets/teaser.webp" alt="Claw Orchestrator: one run through six steps — declare the checks, dispatch to any engine, run, verify, record, verdict — with a failed check sent back to the agent, on a family of coding agents" width="100%"></p>
 
 <h1 align="center">Claw Orchestrator: A Unified Runtime for Coding Agent CLIs</h1>
 

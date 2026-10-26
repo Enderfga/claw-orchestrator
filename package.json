@@ -22,8 +22,7 @@
     "skills/",
     "openclaw.plugin.json",
     "README.md",
-    "LICENSE",
-    "assets/banner.jpg"
+    "LICENSE"
   ],
   "scripts": {
     "build": "rm -rf dist && tsc && node scripts/postbuild.mjs",
