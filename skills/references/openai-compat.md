@@ -18,6 +18,7 @@ Both modes share the same wire protocol; the difference is how a "new conversati
 | **Inspection endpoint** | `GET /v1/sessions` (lists active openai-compat sessions with caching stats)                                                                                                                                                                                                                     |
 | **Auth**                | `Authorization: Bearer <token>`. By default the server reuses the token in `~/.openclaw/server-token`, or generates one and writes it there (mode 0600). Set `OPENCLAW_SERVER_TOKEN=<value>` to choose the token, or `OPENCLAW_SERVER_TOKEN=disabled` to turn auth off (single-user hosts only) |
 | **Wire format**         | OpenAI Chat Completions, both streaming (SSE) and non-streaming                                                                                                                                                                                                                                 |
+| **Usage**               | `usage` (on the final chunk when streaming) counts this request's tokens — what the turn added to the session's running totals, which `GET /v1/sessions` reports                                                                                                                                |
 | **Default model**       | `claude-sonnet-4-6` when the request has no `model`                                                                                                                                                                                                                                             |
 
 The request fields the bridge reads are `model`, `messages`, `stream`, `user` and `tools`. `max_tokens` is
@@ -27,7 +28,8 @@ ignored — the CLI runs with its own settings.
 A streamed reply opens with a `role` chunk, sends a `: keepalive` comment every 30 seconds while the turn runs,
 ends with a chunk carrying `finish_reason` (and `usage`, when available), then `data: [DONE]`. When
 the request carries `tools`, the reply is held back until the turn finishes, so the tool calls can be parsed out of
-it, and then sent in one piece.
+it, and then sent as `tool_calls` chunks (finish reason `tool_calls`) or as one content chunk — on every engine,
+whether or not it streams deltas.
 
 ## Model routing
 
@@ -133,7 +135,7 @@ When `OPENAI_COMPAT_STATUS_URL` is set to a plain `http://` URL, each chat compl
 | `activity` | string         | Short human-readable line, e.g. `Processing request...`, `Reading: foo.ts`, `Running: npm test`, `Ready`, `Request failed`. |
 | `tool`     | string \| null | Tool name when `state === working`, otherwise `null`.                                                                       |
 
-Each POST has a 2-second timeout; failures are ignored (no retries). `https://` URLs are not supported. Use this from a small local HTTP handler that forwards status into your webchat UI.
+Failures are ignored (no retries) and never affect the completion: a request the endpoint has not answered within 2 s is dropped, and a URL the bridge cannot POST to — anything but `http://`, or malformed — sends nothing. Use this from a small local HTTP handler that forwards status into your webchat UI.
 
 ## Tool definitions and where they live
 
@@ -155,10 +157,10 @@ without it the CLI starts doing the work directly.
 
 A fresh session always gets the full block, so a thread is never created without
 the definitions — including when a session was evicted and is being recreated. A
-caller keyed by the hash fallback that changes its tool list mid-conversation
-also gets the full block, because the tool list is part of that hash, so a
-different list resolves to a different session. With an explicit key it does
-not; see [Known limitations](#known-limitations).
+caller with no explicit key (no `X-Session-Id`, no `user`) that changes its tool
+list mid-conversation also gets the full block, because the tool list is part of
+the hashed key, so a different list resolves to a different session. With an
+explicit key it does not — see [Known limitations](#known-limitations).
 
 The caller's own system prompt follows exactly the same rule on these engines: it
 is prepended to the message, and skipped only while the conversation it was sent
@@ -382,10 +384,10 @@ sends one round at a time.
 - **With an explicit key, a changed system prompt or tool list does not reach a live session.**
   `X-Session-Id` and `user` are used as the key as they are, with no fingerprint of the system prompt
   or the tools, so the request lands on the existing session. On `claude` both were fixed when that
-  session was created. On `codex`, `agy` and `grok`, once the thread is live, the system prompt is not
-  re-sent and the tools get only the short reminder. Send `X-Session-Reset: 1` with the changed
-  request, or use a new key. `OPENAI_COMPAT_TOOLS_PER_MESSAGE=1` re-sends the tool schemas every turn
-  instead; it does not change the system prompt.
+  session was created. On `codex`, `codex-app`, `agy`, `opencode` and `grok`, once the thread is live,
+  the system prompt is not re-sent and the tools get only the short reminder. Send
+  `X-Session-Reset: 1` with the changed request, or use a new key. `OPENAI_COMPAT_TOOLS_PER_MESSAGE=1`
+  re-sends the tool schemas every turn instead; it does not change the system prompt.
 
 ## Environment variables
 

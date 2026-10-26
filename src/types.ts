@@ -710,6 +710,12 @@ export interface SendResult {
    * the same files, but this list is the one to read.
    */
   images?: GeneratedImage[];
+  /**
+   * Tokens this send added to the session's running totals — `getStats()` accumulates over the
+   * session, so it cannot say what one turn cost. Measured inside the per-session send chain, so a
+   * send queued behind another is not charged for it.
+   */
+  usage?: { tokensIn: number; tokensOut: number };
 }
 
 export interface GeneratedImage {

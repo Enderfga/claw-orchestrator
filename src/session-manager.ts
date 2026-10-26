@@ -1389,6 +1389,11 @@ export class SessionManager {
         // front of its first message; after that the engine holds it itself.
         const outgoing = managed.pendingHandoff ? `${managed.pendingHandoff}\n\n${message}` : message;
         const result = await managed.session.send(outgoing, sendOpts);
+        const after = this._statsSnapshot(managed);
+        const usage = {
+          tokensIn: Math.max(0, after.tokensIn - ledgerBefore.tokensIn),
+          tokensOut: Math.max(0, after.tokensOut - ledgerBefore.tokensOut),
+        };
 
         // Update the resume-capable session ID if available (skip disk persist
         // for ephemeral sessions that were started with skipPersistence)
@@ -1432,12 +1437,13 @@ export class SessionManager {
             sessionId: this._managedResumeId(managed),
             error: turnError,
             events: [],
+            usage,
             ...(permissionDenials.length ? { permissionDenials } : {}),
             ...(images.length ? { images } : {}),
           };
         }
 
-        return { output: '', sessionId: this._managedResumeId(managed), events: [] };
+        return { output: '', sessionId: this._managedResumeId(managed), events: [], usage };
       } catch (err) {
         turnError = (err as Error).message;
         throw err;

@@ -76,7 +76,9 @@ Send a message and get the response.
 | `timeout` | number  |          | Timeout in ms (default 300000)                                                                                                                                                                                                                                                      |
 | `stream`  | boolean |          | Collect the text chunks into `chunks[]` on the result (returned with the final result, not streamed to the caller)                                                                                                                                                                  |
 
-Returns `{ ok, output, sessionId, error?, permissionDenials?, images?, chunks? }`. `permissionDenials` lists the tool
+Returns `{ ok, output, sessionId, error?, usage, permissionDenials?, images?, chunks? }`. `usage` is
+`{ tokensIn, tokensOut }` for this turn alone — what it added to the session's running totals, which
+`coding_session_status` reports. `permissionDenials` lists the tool
 calls the engine refused during the turn — `[{ toolName, toolUseId?, input? }]` — and is present only
 when there was at least one. Check it even when `error` is absent: a turn whose tool calls were all
 denied still ends as a success. See [sessions.md](./sessions.md) on what "succeeded" does and does
