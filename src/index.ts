@@ -194,6 +194,18 @@ const CUSTOM_ENGINE_SCHEMA = {
 } as const;
 
 /**
+ * `customEngine` on the surfaces that also take a preset id: session_start,
+ * session_handoff and council agents all reach `_createSession`, which expands a
+ * string through resolveCustomEngine. Autoloop roles validate an inline config
+ * and take CUSTOM_ENGINE_SCHEMA itself.
+ */
+const CUSTOM_ENGINE_OR_PRESET_SCHEMA = {
+  description:
+    'Custom engine (required when engine is "custom"): the id of a bundled preset (`clawo engines`), or, from a local caller only, an inline config.',
+  oneOf: [{ type: 'string', description: 'Preset id, e.g. "zcode"' }, CUSTOM_ENGINE_SCHEMA],
+};
+
+/**
  * OpenClaw plugin object — standard format
  */
 const plugin = {
@@ -455,7 +467,7 @@ const plugin = {
             description:
               'AWS Bedrock service tier (sets ANTHROPIC_BEDROCK_SERVICE_TIER). Only effective when routing through Bedrock.',
           },
-          customEngine: CUSTOM_ENGINE_SCHEMA,
+          customEngine: CUSTOM_ENGINE_OR_PRESET_SCHEMA,
           acpAgent: ACP_AGENT_SCHEMA,
           resumeSessionId: {
             type: 'string',
@@ -552,7 +564,7 @@ const plugin = {
             description:
               'Upper bound on the carried history, in characters (default 240000, minimum 4000). When the conversation is longer, the opening request and the newest turns are kept and the turns between them are left out.',
           },
-          customEngine: CUSTOM_ENGINE_SCHEMA,
+          customEngine: CUSTOM_ENGINE_OR_PRESET_SCHEMA,
           acpAgent: ACP_AGENT_SCHEMA,
         },
         required: ['name', 'engine'],
@@ -1711,7 +1723,7 @@ const plugin = {
                 },
                 model: { type: 'string', description: 'Model to use' },
                 baseUrl: { type: 'string', description: 'Custom API endpoint (for proxy)' },
-                customEngine: { type: 'object', description: 'Custom engine config (when engine="custom")' },
+                customEngine: CUSTOM_ENGINE_OR_PRESET_SCHEMA,
                 acpAgent: ACP_AGENT_ID_SCHEMA,
                 effort: {
                   type: 'string',

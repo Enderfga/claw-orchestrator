@@ -361,6 +361,28 @@ describe('plugin tool registration', () => {
     }
   });
 
+  // These three reach `_createSession`, which expands a string through
+  // resolveCustomEngine. A host that validates arguments against the schema
+  // refuses `customEngine: "zcode"` when the schema says object only.
+  it('accepts a preset id or an inline config for customEngine where a preset id is resolved', () => {
+    type Schema = { type?: string; oneOf?: Schema[]; required?: string[]; items?: { properties?: Props } };
+    type Props = Record<string, Schema>;
+    const props = (name: string) => (byName.get(name)!.parameters.properties ?? {}) as Props;
+    const branches = (s: Schema) => s.oneOf ?? [s];
+
+    for (const [where, schema] of [
+      ['session_start', props('session_start').customEngine],
+      ['session_handoff', props('session_handoff').customEngine],
+      ['council_start agents', props('council_start').agents!.items!.properties!.customEngine],
+    ] as const) {
+      expect(
+        branches(schema!).some((b) => b.type === 'string'),
+        where,
+      ).toBe(true);
+      expect(branches(schema!).find((b) => b.type === 'object')?.required, where).toEqual(['name', 'bin', 'args']);
+    }
+  });
+
   it('session_handoff and fanout_start forward the ACP agent they are given', async () => {
     const registration = collectRegistration();
     const tool = (name: string) => registration.tools.find((t) => t.name === name)!;
