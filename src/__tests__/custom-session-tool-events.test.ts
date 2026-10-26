@@ -10,9 +10,11 @@ import { SESSION_EVENT } from '../constants.js';
 import type { CustomEngineConfig } from '../types.js';
 
 const mockSpawn = vi.fn();
+const mockKillTree = vi.fn();
 vi.mock('../engine-spawn.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../engine-spawn.js')>()),
   spawnEngine: (...args: unknown[]) => mockSpawn(...args),
+  killEngineTree: (...args: unknown[]) => mockKillTree(...args),
 }));
 
 const { PersistentCustomSession } = await import('../persistent-custom-session.js');
@@ -52,8 +54,8 @@ describe('PersistentCustomSession tool events', () => {
 function createMockProc() {
   const proc = new EventEmitter() as EventEmitter & {
     stdout: Readable;
-    stderr: EventEmitter;
-    stdin: { writable: boolean; write: (s: string, cb?: (e?: Error) => void) => boolean };
+    stderr: Readable;
+    stdin: { writable: boolean; write: (s: string, cb?: (e?: Error) => void) => boolean; end: () => void };
     written: string[];
     kill: ReturnType<typeof vi.fn>;
     unref: () => void;
@@ -62,7 +64,7 @@ function createMockProc() {
     killed: boolean;
   };
   proc.stdout = new Readable({ read() {} });
-  proc.stderr = new EventEmitter();
+  proc.stderr = new Readable({ read() {} });
   proc.written = [];
   proc.stdin = {
     writable: true,
@@ -71,6 +73,7 @@ function createMockProc() {
       cb?.();
       return true;
     },
+    end: () => undefined,
   };
   proc.kill = vi.fn();
   proc.unref = () => undefined;
@@ -138,5 +141,40 @@ describe('PersistentCustomSession — appendSystemPrompt', () => {
       (line) => (JSON.parse(line) as { message: { content: Array<{ text: string }> } }).message.content[0].text,
     );
     expect(texts).toEqual(['SEAT RULES\n\n---\n\nhi', 'again']);
+  });
+});
+
+// A plain kill ends only the direct child: under a launcher, or behind a
+// Windows `.cmd` shim, the CLI itself would outlive its turn.
+describe('PersistentCustomSession — one-shot cleanup', () => {
+  beforeEach(() => {
+    mockSpawn.mockReset();
+    mockKillTree.mockReset();
+  });
+
+  const engine: CustomEngineConfig = { name: 'one-shot-cli', bin: 'x', args: { print: '-p' } };
+
+  it('ends the whole process tree when a turn times out', async () => {
+    const proc = createMockProc();
+    mockSpawn.mockReturnValue(proc);
+    const session = new PersistentCustomSession({ name: 'c', cwd: process.cwd(), customEngine: engine });
+    await session.start();
+    await expect(session.send('hi', { waitForComplete: true, timeout: 10 })).rejects.toThrow(
+      /Timeout waiting for one-shot-cli/,
+    );
+    expect(mockKillTree).toHaveBeenCalledWith(proc);
+    expect(proc.kill).not.toHaveBeenCalled();
+  });
+
+  it('ends the whole process tree when stopped mid-turn', async () => {
+    const proc = createMockProc();
+    mockSpawn.mockReturnValue(proc);
+    const session = new PersistentCustomSession({ name: 'c', cwd: process.cwd(), customEngine: engine });
+    await session.start();
+    void session.send('hi', { waitForComplete: true }).catch(() => undefined);
+    await new Promise((r) => setTimeout(r, 5));
+    session.stop();
+    expect(mockKillTree).toHaveBeenCalledWith(proc);
+    expect(proc.kill).not.toHaveBeenCalled();
   });
 });

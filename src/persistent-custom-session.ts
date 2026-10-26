@@ -16,7 +16,7 @@
  */
 
 import { ChildProcess } from 'node:child_process';
-import { spawnEngine } from './engine-spawn.js';
+import { killEngineTree, spawnEngine } from './engine-spawn.js';
 import { EventEmitter } from 'node:events';
 import * as readline from 'node:readline';
 import * as fs from 'node:fs';
@@ -525,7 +525,7 @@ export class PersistentCustomSession extends EventEmitter implements ISession {
       const timer = setTimeout(() => {
         if (!settled) {
           settled = true;
-          proc.kill('SIGTERM');
+          killEngineTree(proc);
           reject(new Error(`Timeout waiting for ${this.engineConfig.name} response`));
         }
       }, timeout);
@@ -1064,11 +1064,7 @@ export class PersistentCustomSession extends EventEmitter implements ISession {
       this.currentProc.stdin?.end();
       this.currentProc.stdout?.destroy();
       this.currentProc.stderr?.destroy();
-      try {
-        this.currentProc.kill('SIGTERM');
-      } catch {
-        /* ignore */
-      }
+      killEngineTree(this.currentProc);
       this.currentProc = null;
     }
 
