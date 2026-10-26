@@ -458,6 +458,71 @@ describe('PersistentCodexAppServerSession — appendSystemPrompt', () => {
   });
 });
 
+// The goal loop runs turns no `turn/start` asked for, so the thread itself has
+// to carry the effort; `turn/start` carries it too, so a later setEffort() or a
+// per-send effort reaches the next turn.
+describe('PersistentCodexAppServerSession — effort', () => {
+  beforeEach(() => mockSpawn.mockReset());
+
+  it('opens the thread with the effort and sends it on every turn', async () => {
+    const proc = createMockProc(defaultResponder());
+    mockSpawn.mockReturnValue(proc);
+    const session = new PersistentCodexAppServerSession({
+      name: 't',
+      cwd: '/tmp',
+      engine: 'codex-app',
+      effort: 'xhigh',
+    });
+    await session.start();
+    expect(proc.written.find((m) => m.method === 'thread/start')?.params?.config).toEqual({
+      model_reasoning_effort: 'xhigh',
+    });
+    await session.send('one');
+    session.setEffort('low');
+    await session.send('two');
+    await session.send('three', { effort: 'max' });
+    await new Promise((r) => setTimeout(r, 5));
+    expect(proc.written.filter((m) => m.method === 'turn/start').map((m) => m.params?.effort)).toEqual([
+      'xhigh',
+      'low',
+      'max',
+    ]);
+  });
+
+  it('carries the effort onto a resumed thread', async () => {
+    const proc = createMockProc(
+      defaultResponder((m) => (m.method === 'thread/resume' ? { thread: { id: 't9' } } : undefined)),
+    );
+    mockSpawn.mockReturnValue(proc);
+    await new PersistentCodexAppServerSession({
+      name: 't',
+      cwd: '/tmp',
+      engine: 'codex-app',
+      effort: 'high',
+      resumeSessionId: 't9',
+    }).start();
+    expect(proc.written.find((m) => m.method === 'thread/resume')?.params?.config).toEqual({
+      model_reasoning_effort: 'high',
+    });
+  });
+
+  it('leaves the effort to codex when it is auto or unset', async () => {
+    const proc = createMockProc(defaultResponder());
+    mockSpawn.mockReturnValue(proc);
+    const session = new PersistentCodexAppServerSession({
+      name: 't',
+      cwd: '/tmp',
+      engine: 'codex-app',
+      effort: 'auto',
+    });
+    await session.start();
+    await session.send('hi');
+    await new Promise((r) => setTimeout(r, 5));
+    expect(proc.written.find((m) => m.method === 'thread/start')?.params).not.toHaveProperty('config');
+    expect(proc.written.find((m) => m.method === 'turn/start')?.params).not.toHaveProperty('effort');
+  });
+});
+
 // Goals moved from `/goal …` chat text to typed RPCs. These pin the request
 // shapes against `codex app-server generate-ts` (0.164) and the two behaviours
 // the goal node leans on: a structured error, and a steer into a turn the goal

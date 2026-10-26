@@ -46,6 +46,7 @@ import type {
 import { getModelPricing, resolveAlias, getContextWindow } from './models.js';
 import { SESSION_EVENT, MAX_HISTORY_ITEMS, DEFAULT_HISTORY_LIMIT } from './constants.js';
 import { sanitizeSecrets } from './sanitize.js';
+import { codexReasoningEffort } from './persistent-codex-session.js';
 
 // ─── Hand-translated protocol types (subset we use) ────────────────────────
 //
@@ -272,6 +273,7 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
     // 2. thread/start — captures threadId both from the response and the
     //    `thread/started` notification (which arrives before the response per
     //    observed protocol semantics).
+    const effort = codexReasoningEffort(this.options.effort);
     const startParams = {
       cwd: this.options.cwd,
       model: this.options.model,
@@ -281,6 +283,9 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
       // that wanted approval left the turn waiting forever. The sandbox mode is
       // the boundary instead.
       approvalPolicy: 'never',
+      // On the thread, not only on `turn/start`: the goal loop starts its own
+      // turns, and those read the thread's config.
+      ...(effort ? { config: { model_reasoning_effort: effort } } : {}),
     };
     // When resuming a known thread, use `thread/resume` (loads prior turns)
     // instead of `thread/start` (which opens a fresh thread). A stale/unknown
@@ -361,7 +366,7 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
     if (instructions) text = `${instructions}\n\n---\n\n${text}`;
 
     if (!options.waitForComplete) {
-      this._fireAndForgetTurn(text).catch((err) => this._emitError(err as Error));
+      this._fireAndForgetTurn(text, options).catch((err) => this._emitError(err as Error));
       return { requestId: this._nextRpcId, sent: true };
     }
 
@@ -373,11 +378,18 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
     }
   }
 
-  private async _fireAndForgetTurn(text: string): Promise<void> {
-    await this._request('turn/start', {
+  private async _fireAndForgetTurn(text: string, options: SessionSendOptions): Promise<void> {
+    await this._request('turn/start', this._turnStartParams(text, options));
+  }
+
+  /** `turn/start` params. The effort holds for this turn and the ones after it. */
+  private _turnStartParams(text: string, options: SessionSendOptions): Record<string, unknown> {
+    const effort = codexReasoningEffort(options.effort ?? this.options.effort);
+    return {
       threadId: this.threadId,
       input: [{ type: 'text', text, text_elements: [] }],
-    });
+      ...(effort ? { effort } : {}),
+    };
   }
 
   private async _runTurn(text: string, options: SessionSendOptions): Promise<TurnResult> {
@@ -410,10 +422,7 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
     }, timeout);
 
     try {
-      await this._request('turn/start', {
-        threadId: this.threadId,
-        input: [{ type: 'text', text, text_elements: [] }],
-      });
+      await this._request('turn/start', this._turnStartParams(text, options));
       const result = await turnPromise;
       return result;
     } finally {
