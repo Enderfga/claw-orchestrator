@@ -110,7 +110,8 @@ npx tsx scripts/sweep.ts --json --out report.json
 - **Lazy initialization** — SessionManager created on first tool call, not at plugin load
 - **Engine-agnostic** — all session engines implement `ISession` interface (types.ts)
 - **Adding a new tool** — register in `src/index.ts`, add it to `openclaw.plugin.json` `contracts.tools`
-  (`tool-registration.test.ts` fails when the two differ), document it in `skills/references/tools.md`,
+  and give it MCP hints in `src/mcp-annotations.ts` (`tool-registration.test.ts` fails when any of the
+  three differ), document it in `skills/references/tools.md` and the annotation table in `mcp.md`,
   and update the tool count where it is quoted: `openclaw-tool-result-contract.test.ts`, README.md,
   `skills/SKILL.md`, `skills/references/tools.md`, `mcp.md`, `getting-started.md`, and this file
 - **Legacy engines** — `gemini` and `cursor` stay in `ENGINE_TYPES` for existing callers; they are not

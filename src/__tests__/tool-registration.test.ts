@@ -5,6 +5,7 @@ import plugin from '../index.js';
 import { SessionManager } from '../session-manager.js';
 import { ENGINE_TYPES, EFFORT_LEVELS } from '../types.js';
 import { __rejectCustomEngineOverHttpForTest as rejectCustomEngineOverHttp } from '../embedded-server.js';
+import { TOOL_ANNOTATIONS } from '../mcp-annotations.js';
 import type { PluginConfig, PermissionMode, EffortLevel, ProxyConfig } from '../types.js';
 
 interface RegisteredTool {
@@ -626,6 +627,17 @@ describe('openclaw.plugin.json parity', () => {
     } finally {
       registration.services[0]?.stop();
     }
+  });
+});
+
+// `clawo-mcp` advertises these to every MCP host. A tool without an entry gets
+// the protocol's defaults — not read-only, possibly destructive, open-world — so
+// a status poll looks as dangerous as a delete to a host deciding what may run
+// unprompted.
+describe('MCP tool annotations', () => {
+  it('annotate every registered tool, and only registered tools', () => {
+    const registered = collectRegistration().tools.map((t) => t.name);
+    expect(Object.keys(TOOL_ANNOTATIONS).sort()).toEqual([...registered].sort());
   });
 });
 
