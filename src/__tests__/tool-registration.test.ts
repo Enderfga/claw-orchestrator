@@ -3,7 +3,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import plugin from '../index.js';
 import { SessionManager } from '../session-manager.js';
-import { ENGINE_TYPES } from '../types.js';
+import { ENGINE_TYPES, EFFORT_LEVELS } from '../types.js';
 import { __rejectCustomEngineOverHttpForTest as rejectCustomEngineOverHttp } from '../embedded-server.js';
 import type { PluginConfig, PermissionMode, EffortLevel } from '../types.js';
 
@@ -495,7 +495,8 @@ describe('openclaw.plugin.json parity', () => {
       'plan',
       'auto',
     ];
-    const effortLevels: EffortLevel[] = ['low', 'medium', 'high', 'xhigh', 'max', 'auto'];
+    // The runtime list rather than a copy, which falls behind when a level is added.
+    const effortLevels: readonly EffortLevel[] = EFFORT_LEVELS;
 
     expect([...(manifest.configSchema.properties.defaultPermissionMode.enum ?? [])].sort()).toEqual(
       [...permissionModes].sort(),

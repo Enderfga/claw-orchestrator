@@ -36,6 +36,7 @@
           "high",
           "xhigh",
           "max",
+          "ultra",
           "auto"
         ],
         "default": "auto"
