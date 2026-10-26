@@ -3286,11 +3286,25 @@ export class SessionManager {
     );
   }
 
-  councilAbort(id: string): void {
+  /**
+   * Abort a council running in this process. One that is not — finished, or
+   * running elsewhere — is left alone and the result says so: its worktrees are
+   * either awaiting accept/reject or in use by the process that runs it.
+   */
+  councilAbort(id: string): { aborted: boolean; state?: RunState; reason?: string } {
     // Cancel the run first so the kernel stops advancing, then abort the engine
     // so the current round tears down its worktrees.
-    if (!this.kernel.cancel(id) && !loadRun(id)) throw new Error(`Council '${id}' not found`);
-    this.kernel.handle<Council>(id, LEGACY_NODE)?.abort();
+    if (this.kernel.cancel(id)) {
+      this.kernel.handle<Council>(id, LEGACY_NODE)?.abort();
+      return { aborted: true };
+    }
+    const record = loadRun(id);
+    if (!record) throw new Error(`Council '${id}' not found`);
+    return {
+      aborted: false,
+      state: record.state,
+      reason: `Council '${id}' is ${record.state} and not running in this process — nothing was aborted`,
+    };
   }
 
   councilInject(id: string, message: string): void {
@@ -3302,11 +3316,33 @@ export class SessionManager {
   }
 
   async councilAccept(id: string): Promise<CouncilAcceptResult> {
-    return this._councilForPostProcessing(id).accept();
+    const result = await this._councilForPostProcessing(id).accept();
+    this._recordCouncilDecision(id, 'accepted');
+    return result;
   }
 
   async councilReject(id: string, feedback: string): Promise<CouncilRejectResult> {
-    return this._councilForPostProcessing(id).reject(feedback);
+    const result = await this._councilForPostProcessing(id).reject(feedback);
+    this._recordCouncilDecision(id, 'rejected');
+    return result;
+  }
+
+  /**
+   * Write the decision onto the run, which is where `council_status` reads it.
+   * The `Council` that took it is usually rebuilt from the record and dropped,
+   * so its own status would go nowhere.
+   */
+  private _recordCouncilDecision(id: string, status: 'accepted' | 'rejected'): void {
+    // A council live in this process carries the status on its own session.
+    if (this.kernel.handle<Council>(id, LEGACY_NODE)) return;
+    let recorded = false;
+    let why = 'the run has not finished';
+    try {
+      recorded = this.kernel.amendFinishedNode(id, LEGACY_NODE, { councilStatus: status }, `council ${status}`);
+    } catch (err) {
+      why = (err as Error).message;
+    }
+    if (!recorded) this.logger.warn(`[council] ${id}: ${status}, but the status could not be recorded (${why})`);
   }
 
   /**

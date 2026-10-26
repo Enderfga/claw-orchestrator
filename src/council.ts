@@ -191,17 +191,25 @@ async function setupWorktrees(
     await spawnAsync('git', ['-C', projectDir, 'init'], { timeout: GIT_CMD_TIMEOUT_MS });
   }
 
-  // Git user config
-  await spawnAsync('git', ['-C', projectDir, 'config', '--local', 'user.email', 'council@openclaw'], {
-    timeout: GIT_CMD_TIMEOUT_MS,
-  }).catch((err) => {
-    log.error('Failed to set git user.email:', err.message);
-  });
-  await spawnAsync('git', ['-C', projectDir, 'config', '--local', 'user.name', 'Council'], {
-    timeout: GIT_CMD_TIMEOUT_MS,
-  }).catch((err) => {
-    log.error('Failed to set git user.name:', err.message);
-  });
+  // Commits here (and the agents' own, in the worktrees) need an identity. Only
+  // a missing one is filled in: `.git/config` belongs to the user and outlives
+  // the council, so an identity they configured at any level is left alone.
+  for (const [key, value] of [
+    ['user.email', 'council@openclaw'],
+    ['user.name', 'Council'],
+  ]) {
+    const configured = await spawnAsync('git', ['-C', projectDir, 'config', '--get', key], {
+      timeout: GIT_CMD_TIMEOUT_MS,
+    })
+      .then((r) => r.stdout.trim().length > 0)
+      .catch(() => false);
+    if (configured) continue;
+    await spawnAsync('git', ['-C', projectDir, 'config', '--local', key, value], {
+      timeout: GIT_CMD_TIMEOUT_MS,
+    }).catch((err) => {
+      log.error(`Failed to set git ${key}:`, err.message);
+    });
+  }
 
   // Ensure at least one commit
   const hasCommit = await spawnAsync('git', ['-C', projectDir, 'rev-parse', 'HEAD'], { timeout: GIT_CMD_TIMEOUT_MS })
@@ -369,6 +377,21 @@ At the **end** of your response, you must vote (pick one):
 Collaboration ends **only when all members vote YES**.
 
 Start working!`;
+}
+
+/**
+ * The package this module belongs to: the nearest directory above it holding a
+ * package.json. A fixed `..` is right from `src/` but lands on `dist/` from the
+ * built `dist/src/`, which would leave the package root itself unguarded.
+ */
+export function programRoot(moduleFile: string = fileURLToPath(import.meta.url)): string {
+  let dir = path.dirname(moduleFile);
+  for (;;) {
+    if (fs.existsSync(path.join(dir, 'package.json'))) return dir;
+    const parent = path.dirname(dir);
+    if (parent === dir) return path.resolve(path.dirname(moduleFile), '..');
+    dir = parent;
+  }
 }
 
 /** Resolve the path to configs/ relative to this module (works from both src/ and dist/) */
@@ -632,7 +655,7 @@ export class Council extends EventEmitter {
     const trimmedTask = session.task;
 
     // Safety check: prevent council from running inside the program's own directory
-    const moduleRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+    const moduleRoot = programRoot();
     const resolvedProjectDir = path.resolve(this.config.projectDir);
     const rel = path.relative(moduleRoot, resolvedProjectDir);
     const isInside = rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));

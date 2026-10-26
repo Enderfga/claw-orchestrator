@@ -462,11 +462,14 @@ Get status of a running or recently completed council.
 
 ### `council_abort`
 
-Abort a running council, stopping all agent sessions and removing the worktrees it created.
+Abort a council running in this process, stopping all agent sessions and removing the worktrees it created.
 
 | Parameter | Type   | Required |
 | --------- | ------ | -------- |
 | `id`      | string | yes      |
+
+**Returns**: `{ ok: true, aborted: true }`. A council that is not running in this process — finished, or
+running in another one — is left alone: `{ ok: false, aborted: false, state, error }`, with the run's state.
 
 ### `council_inject`
 
@@ -491,7 +494,7 @@ Review a completed council session. Returns a structured report of all changed f
 
 ### `council_accept`
 
-Accept and finalize council work. Cleans up all council scaffolding: removes worktrees, deletes `council/*` branches, removes `plan.md` and `reviews/` directory.
+Accept and finalize council work. Cleans up all council scaffolding: removes worktrees, deletes `council/*` branches, removes `plan.md` and `reviews/` directory. The status `accepted` is recorded on the run, so `council_status` reports it, after a restart too.
 
 | Parameter | Type   | Required |
 | --------- | ------ | -------- |
@@ -501,7 +504,7 @@ Accept and finalize council work. Cleans up all council scaffolding: removes wor
 
 ### `council_reject`
 
-Reject council work and provide feedback. Rewrites `plan.md` with rejection feedback and commits it. Does NOT delete any worktrees or branches — the council can be restarted to retry.
+Reject council work and provide feedback. Rewrites `plan.md` with rejection feedback and commits it. Does NOT delete any worktrees or branches — the council can be restarted to retry. The status `rejected` is recorded on the run, as for `council_accept`.
 
 | Parameter  | Type   | Required | Description                                 |
 | ---------- | ------ | -------- | ------------------------------------------- |
@@ -868,6 +871,7 @@ survives a process restart and can be resumed.
 | `reviewers`   | array                                      | `solve` only — up to 8, same agent binding, for final reviewers                                               |
 | `implementer` | object                                     | `solve` only — `{ engine?, model?, acpAgent? }` for the agent that writes the change                          |
 | `humanGate`   | boolean                                    | `solve` only — park for approval before anything is written                                                   |
+| `maxRounds`   | number                                     | `council` only — max collaboration rounds, default 15                                                         |
 | `maxRepairs`  | number                                     | `solve` / `goal` — repair attempts, default 3 for `solve`, 1 for `goal`                                       |
 | `model`       | string                                     | `goal` only — Codex model (default: Codex's own)                                                              |
 | `tokenBudget` | number                                     | `goal` only — tokens the goal may spend                                                                       |

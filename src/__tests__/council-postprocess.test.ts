@@ -11,7 +11,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { execSync } from 'node:child_process';
-import { Council, getDefaultCouncilConfig, councilWorktreePaths } from '../council.js';
+import { Council, getDefaultCouncilConfig, councilWorktreePaths, programRoot } from '../council.js';
 import type { CouncilConfig, CouncilSession } from '../types.js';
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
@@ -443,5 +443,69 @@ describe('Council seat charter', () => {
       expect(seat.claudeMd).toBe(false);
       expect(seat.charter).toContain(`Only read or write inside \`${seat.cwd}\` and the project at \`${dir}\``);
     }
+  });
+});
+
+// Starting a council must not replace the identity the user configured for
+// their own repository — `.git/config` outlives the council.
+describe('Council git identity', () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = createTempRepo();
+  });
+
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  const runOnce = async (projectDir: string): Promise<void> => {
+    const config: CouncilConfig = { ...getDefaultCouncilConfig(projectDir), maxRounds: 1 };
+    const council = new Council(config, mockManager as never);
+    await council.run('do the thing');
+  };
+  const localConfig = (cwd: string, key: string): string =>
+    execSync(`git config --local ${key}`, { cwd, encoding: 'utf-8' }).trim();
+
+  it("leaves the repository's own identity alone", async () => {
+    await runOnce(dir);
+    expect(localConfig(dir, 'user.email')).toBe('test@test.com');
+    expect(localConfig(dir, 'user.name')).toBe('Test');
+  });
+
+  it('supplies one only where none is configured, so the first commit can still be made', async () => {
+    // The test HOME has no global identity, so this directory has none at all.
+    const fresh = fs.mkdtempSync(path.join(os.tmpdir(), 'council-noid-'));
+    try {
+      await runOnce(fresh);
+      expect(execSync('git log -1 --format=%ae', { cwd: fresh, encoding: 'utf-8' }).trim()).toBe('council@openclaw');
+    } finally {
+      fs.rmSync(fresh, { recursive: true, force: true });
+    }
+  });
+});
+
+// The self-protection guard has to name the package root wherever the module
+// sits: `src/` in a checkout, `dist/src/` once built and installed.
+describe('programRoot', () => {
+  let pkg: string;
+
+  beforeEach(() => {
+    pkg = fs.mkdtempSync(path.join(os.tmpdir(), 'council-pkg-'));
+    fs.writeFileSync(path.join(pkg, 'package.json'), '{}\n');
+    fs.mkdirSync(path.join(pkg, 'dist', 'src'), { recursive: true });
+    fs.mkdirSync(path.join(pkg, 'src'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(pkg, { recursive: true, force: true });
+  });
+
+  it('is the package root from the compiled module, not dist/', () => {
+    expect(programRoot(path.join(pkg, 'dist', 'src', 'council.js'))).toBe(pkg);
+  });
+
+  it('is the package root from the source module', () => {
+    expect(programRoot(path.join(pkg, 'src', 'council.ts'))).toBe(pkg);
   });
 });

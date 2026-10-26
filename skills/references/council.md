@@ -49,10 +49,11 @@ project/
 Agents cannot interfere with each other's files. All integration happens via `git merge` to `main`.
 
 If `projectDir` does not exist it is created; if it is not a git repository the council runs `git init`, and if
-the repository has no commit yet it commits whatever the directory holds. On every start it sets the repository's
-local `user.name` / `user.email` to a Council identity, which stays in `.git/config`. Agent names become branch
-names, so they must match `^[a-zA-Z0-9_-]+$`. A council refuses to start with a `projectDir` inside the
-orchestrator's own code directory.
+the repository has no commit yet it commits whatever the directory holds. Commits need a git identity: when the
+repository has none at any level, the council sets a local `Council <council@openclaw>` in `.git/config`; an
+identity you configured is left untouched. Agent names become branch names, so they must match
+`^[a-zA-Z0-9_-]+$`. A council refuses to start with a `projectDir` inside the orchestrator's own package
+directory.
 
 ### Consensus Voting
 
@@ -130,8 +131,8 @@ Agents can use different engines and models. Each agent also accepts `effort` an
 | Tool             | Description                                                                                                             |
 | ---------------- | ----------------------------------------------------------------------------------------------------------------------- |
 | `council_start`  | Start a council. Runs in background, returns session ID immediately.                                                    |
-| `council_status` | Get current status (`running` / `awaiting_user` / `max_rounds` / `error`) and every agent response with its vote.       |
-| `council_abort`  | Stop all agent sessions, terminate the council, and remove the worktrees it created.                                    |
+| `council_status` | Status (`running`, `awaiting_user`, `max_rounds`, `error`, `accepted`, `rejected`) and each response with its vote.     |
+| `council_abort`  | Stop all agent sessions, terminate a council running in this process, and remove the worktrees it created.              |
 | `council_inject` | Inject a user message into all agents' prompts in the next round. A second inject before that round replaces the first. |
 | `council_review` | Review completed council output: changed files, branches, plan status, agent summaries.                                 |
 | `council_accept` | Accept work and clean up: remove worktrees, branches, plan.md, reviews/.                                                |
@@ -170,7 +171,7 @@ Checks out `main` (or `master`), then cleans up all council scaffolding:
   somewhere in its path is never touched
 - Deletes all `council/*` branches
 - Removes `plan.md` and `reviews/` directory
-- Sets council status to `accepted`
+- Sets council status to `accepted`, recorded on the run so `council_status` reports it
 
 ### 3. Reject
 
@@ -178,7 +179,7 @@ Checks out `main` (or `master`), then cleans up all council scaffolding:
 { "tool": "council_reject", "args": { "id": "<council-id>", "feedback": "..." } }
 ```
 
-Rewrites `plan.md` with rejection feedback and commits it. All worktrees and branches are preserved so the council can be restarted to address the feedback: a new `council_start` on the same `projectDir` with the same agent names reuses those worktrees (resetting each to its branch head, which discards uncommitted changes in them).
+Rewrites `plan.md` with rejection feedback and commits it, and sets council status to `rejected`, recorded on the run. All worktrees and branches are preserved so the council can be restarted to address the feedback: a new `council_start` on the same `projectDir` with the same agent names reuses those worktrees (resetting each to its branch head, which discards uncommitted changes in them).
 
 ## Configuration
 
@@ -266,9 +267,11 @@ returns real records from disk, across processes.
 | `GET /council/<id>/events` | SSE: a `snapshot`, then a `council-event` for each session, round and agent event (output chunks included). Only for a council running in this process; 404 otherwise. |
 
 `council_review` / `council_accept` / `council_reject` work after a restart:
-they act on the git state the council left behind, not on live agents.
-`council_inject` and `council_abort` need the live run: inject says so plainly
-when there is none, and abort then has nothing to stop.
+they act on the git state the council left behind, not on live agents, and the
+accept / reject decision is written to the run record.
+`council_inject` and `council_abort` need the live run and say so plainly when
+there is none: `council_abort` then returns `ok: false` with the run's state and
+leaves the run and its worktrees as they are.
 
 ## Changed-file reporting
 

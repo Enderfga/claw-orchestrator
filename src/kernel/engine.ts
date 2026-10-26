@@ -749,6 +749,35 @@ export class RunKernel extends EventEmitter {
     return true;
   }
 
+  /**
+   * Merge `patch` into the data of one node of a finished run.
+   *
+   * For decisions made after a run has ended — a council's work accepted or
+   * rejected — that belong on its record. Only a terminal run that nothing is
+   * executing qualifies: claiming a live one would cut its owner off. False when
+   * the run does not qualify; throws when another owner holds it.
+   */
+  amendFinishedNode(runId: string, nodeId: string, patch: Record<string, unknown>, message: string): boolean {
+    const finished = (r: RunRecord | undefined): r is RunRecord =>
+      Boolean(r?.nodes[nodeId]) && isTerminalRunState(r!.state);
+    // Checked before claiming as well as after: a run this kernel is still
+    // starting is not in `live` yet, and re-claiming it would void its guard.
+    if (this.live.has(runId) || !finished(loadRun(runId))) return false;
+    const guard = acquireLease(runId, this.ownerId);
+    try {
+      const record = loadRun(runId);
+      if (!finished(record)) return false;
+      const ts = new Date().toISOString();
+      const node = record.nodes[nodeId];
+      node.data = { ...(node.data as Record<string, unknown> | undefined), ...patch };
+      record.updatedAt = ts;
+      const events: KernelEvent[] = [{ ts, type: 'log', level: 'info', message }];
+      return commit(guard, { record, events }, this.logger).outcome === 'committed';
+    } finally {
+      releaseLease(guard);
+    }
+  }
+
   get(runId: string): RunRecord | undefined {
     return loadRun(runId);
   }

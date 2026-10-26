@@ -772,3 +772,33 @@ describe('steer', () => {
     expect(new RunKernel().steer('nope', 'x')).toBe(false);
   });
 });
+
+describe('amendFinishedNode', () => {
+  const single: WorkflowSpec = { name: 'one', cwd: '/tmp', nodes: [{ id: 'a', kind: 'agent', prompt: 'a' }] };
+
+  it('merges into the node data of a finished run, on disk', async () => {
+    const { kernel } = makeKernel({ agent: async () => ({ ok: true, output: 'x', data: { status: 'parked', n: 1 } }) });
+    const started = await kernel.start(single);
+    await kernel.wait(started.runId);
+
+    expect(kernel.amendFinishedNode(started.runId, 'a', { status: 'accepted' }, 'decided')).toBe(true);
+
+    expect(loadRun(started.runId)!.nodes.a.data).toEqual({ status: 'accepted', n: 1 });
+    expect(readEvents(started.runId).some((e) => e.type === 'log' && e.message === 'decided')).toBe(true);
+  });
+
+  it('refuses a run that is still executing, and leaves it to finish', async () => {
+    let release: (() => void) | undefined;
+    const { kernel } = makeKernel({
+      agent: () => new Promise<NodeResult>((resolve) => (release = () => resolve({ ok: true, output: 'x' }))),
+    });
+    const started = await kernel.start(single);
+    await vi.waitFor(() => expect(release).toBeDefined());
+
+    expect(kernel.amendFinishedNode(started.runId, 'a', { status: 'accepted' }, 'decided')).toBe(false);
+
+    release!();
+    const done = await kernel.wait(started.runId);
+    expect(done!.state).toBe('completed');
+  });
+});

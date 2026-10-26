@@ -1330,6 +1330,7 @@ const plugin = {
             },
           },
           humanGate: { type: 'boolean', description: '`solve` only: park for approval before writing anything.' },
+          maxRounds: { type: 'number', description: '`council` only: max collaboration rounds (default 15).' },
           maxRepairs: {
             type: 'number',
             description: '`solve` / `goal`: repair attempts allowed (default 3 for solve, 1 for goal).',
@@ -1427,7 +1428,7 @@ const plugin = {
           if (!task) throw new Error('workflow_start needs `spec`, or `template` with `task`');
           const agents = (args.agents as SolveArgs['scouts']) ?? [{ name: 'agent' }];
           if (template === 'council') {
-            spec = councilWorkflow({ task, cwd, agents });
+            spec = councilWorkflow({ task, cwd, agents, maxRounds: args.maxRounds as number | undefined });
           } else if (template === 'fanout') {
             spec = fanoutWorkflow({ task, cwd, agents, synthesize: agents.length >= 2 });
           } else if (template === 'goal') {
@@ -1780,15 +1781,17 @@ const plugin = {
 
     registerTool({
       name: 'council_abort',
-      description: 'Abort a running council, stopping all agent sessions and removing the worktrees it created',
+      description:
+        'Abort a council running in this process, stopping all agent sessions and removing the worktrees it created. A council that is not running here is left alone and the call returns ok: false.',
       parameters: {
         type: 'object',
         properties: { id: { type: 'string', description: 'Council session ID' } },
         required: ['id'],
       },
       execute: async (_id, args) => {
-        getManager().councilAbort(args.id as string);
-        return { ok: true };
+        const result = getManager().councilAbort(args.id as string);
+        if (!result.aborted) return { ok: false, aborted: false, state: result.state, error: result.reason };
+        return { ok: true, aborted: true };
       },
     });
 
