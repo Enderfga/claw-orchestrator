@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `session_start`.
 - **`workflow_status` returns `outcomeReason` and `verdict`**, so a pass downgraded to
   `unverified` says why.
+- **Workflow `agent` nodes take `appendSystemPrompt`.**
 - **The SDK exports `PersistentAcpSession` and `PersistentCodexAppServerSession`.**
 - **`session_send` returns the turn's `usage`** (`{ tokensIn, tokensOut }`, this turn alone).
 - **The `council` workflow template takes `maxRounds`.**
@@ -37,6 +38,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   nothing here can stop a write. The session used to start and run writable under the read-only
   label; it now fails at start with the reason, as a custom engine without a read-only flag does.
   `permissionMode: 'plan'` still rejects every permission request an agent sends.
+- **The plugin `defaultModel` applies only to an engine that runs that model** (any model on
+  `claude`, which proxies non-Claude ones). A codex, codex-app, agy, grok, opencode or custom
+  session started without a model used to receive it — usually a Claude model id — and now runs
+  the engine's own default.
+- **Inbox deliveries run through the normal send path.** `session_send_to`,
+  `session_deliver_inbox` and `team_send` turns are held to the recipient's spend cap, get their
+  own run-ledger row and are kept in the conversation a handoff carries; a session busy with a
+  delivered turn queues the next message.
+- **Stopping a session clears its inbox**, so a new session under the same name no longer
+  receives messages meant for the old one; a stop that keeps the session resumable leaves them.
 - **ultrareview refuses engine `acp`** before starting any reviewer: its reviewers run read-only.
 - **Autoloop refuses engine `acp`** for every role, at start and in `spawn_subagents`: a role is
   configured by engine name alone and cannot name the agent. Over HTTP the refusal is a 400.
@@ -61,6 +72,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`session_list` and `autoloop_list` report persisted sessions and recorded autoloop runs** on a
   process that has not run another tool yet.
 - **`clawo-mcp` advertises annotations for every tool.**
+- **`codex-app` passes reasoning effort**: the thread is opened or resumed with
+  `model_reasoning_effort`, so the goal loop's own turns use it, and each `turn/start` carries the
+  per-send or session effort. `clawo goal --effort`, the goal node's `effort` and `setEffort` were
+  ignored.
+- **Custom engines deliver `appendSystemPrompt`** in one-shot mode (through
+  `args.appendSystemPrompt` when mapped, else at the top of each message), and a persistent custom
+  engine without that flag puts it at the top of its first message; a council seat's charter was
+  dropped.
+- **A custom engine's `pricing` prices a model the registry does not know**, or a session with no
+  model; such sessions were billed at the Sonnet rate.
+- **A timed-out Grok turn, and a one-shot custom engine turn that times out or is stopped, end the
+  engine's whole process tree** instead of only the direct child.
+- **On Windows a `.cmd` / `.bat` launcher is held to the `cmd.exe` argv rule**: an argument with a
+  newline or an unbalanced double quote is refused before spawning.
+- **Ultraplan gives its session the plan-only system prompt again.**
+- **Autoloop records the Coder's `coder_log` and the Reviewer's `reviewer_log` calls** as JSONL
+  rows; nothing wrote them.
+- **`fanout_status` returns `synthesisError`**, so a failed synthesis no longer looks like one
+  never requested.
 - **Starting a council no longer overwrites the project repository's git identity.** A local
   identity is set only when none is configured at any level.
 - **`council_accept` and `council_reject` are recorded on the run**, so `council_status` reports
