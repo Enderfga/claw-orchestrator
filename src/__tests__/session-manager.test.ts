@@ -721,6 +721,35 @@ describe('SessionManager', () => {
       const list = mgr.listSessions();
       expect(list[0].model).toBe('claude-sonnet-5-5');
     });
+
+    // Engines do not share a model namespace: a Claude id handed to codex, agy,
+    // grok or opencode names a model that CLI does not have.
+    it('gives defaultModel only to an engine that runs that model', async () => {
+      await mgr.shutdown();
+      mgr = createManager({ defaultModel: 'opus', maxConcurrentSessions: 10 });
+      const engines = ['claude', 'codex', 'codex-app', 'agy', 'grok', 'opencode'] as const;
+      for (const engine of engines) await mgr.startSession({ name: `dm-${engine}`, cwd: '/tmp', engine });
+      expect(createdConfigs.map((c) => [c.engine, c.model])).toEqual([
+        ['claude', 'opus'],
+        ['codex', undefined],
+        ['codex-app', undefined],
+        ['agy', undefined],
+        ['grok', undefined],
+        ['opencode', undefined],
+      ]);
+      // A model the caller names is theirs, whatever the engine.
+      await mgr.startSession({ name: 'dm-explicit', cwd: '/tmp', engine: 'codex', model: 'opus' });
+      expect(createdConfigs.at(-1)?.model).toBe('opus');
+    });
+
+    it('gives a non-Claude defaultModel to the engines that run it', async () => {
+      await mgr.shutdown();
+      mgr = createManager({ defaultModel: 'gpt-5.5', maxConcurrentSessions: 10 });
+      for (const engine of ['codex', 'codex-app', 'grok'] as const) {
+        await mgr.startSession({ name: `dm-${engine}`, cwd: '/tmp', engine });
+      }
+      expect(createdConfigs.map((c) => c.model)).toEqual(['gpt-5.5', 'gpt-5.5', undefined]);
+    });
   });
 
   // ─── Grep Session ───────────────────────────────────────────────────
