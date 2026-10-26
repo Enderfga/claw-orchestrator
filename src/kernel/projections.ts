@@ -53,6 +53,10 @@ export interface CouncilNodeData {
 export function toCouncilSession(record: RunRecord): CouncilSession {
   const data = node(record)?.data as CouncilNodeData | undefined;
   const declared = spec<{ task: string; agents: CouncilSession['config']['agents']; maxRounds?: number }>(record);
+  // A council that throws during setup publishes `running` on its first event
+  // and nothing after, so a finished run would read as running forever.
+  const reported = data?.councilStatus === 'running' && isDone(record.state) ? undefined : data?.councilStatus;
+  const error = node(record)?.error ?? record.error;
   return {
     id: record.runId,
     task: data?.task ?? declared?.task ?? record.workflow,
@@ -66,11 +70,12 @@ export function toCouncilSession(record: RunRecord): CouncilSession {
     // run's state stands in. A run that was cancelled or failed before the
     // council spoke has no council status to report, and inventing `consensus`
     // for it would be the exact kind of claim this release removes.
-    status: data?.councilStatus ?? (record.state === 'running' ? 'running' : 'error'),
+    status: reported ?? (record.state === 'running' ? 'running' : 'error'),
     startTime: record.createdAt,
     endTime: record.endedAt,
     finalSummary: data?.finalSummary,
     compactContext: data?.compactContext,
+    ...(error ? { error } : {}),
   };
 }
 

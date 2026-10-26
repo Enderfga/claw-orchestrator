@@ -3,25 +3,36 @@
  *
  * These cover the pure translation helpers and the config-option shapes, which
  * are what a client renders and therefore what silently breaks a picker when a
- * field name drifts. The end-to-end protocol behaviour (handshake, streaming,
- * stdout purity) is exercised against the real binary — see skills/references/acp.md.
+ * field name drifts, and council mode driven over an in-process client
+ * connection. Stdout purity is exercised against the real binary — see
+ * skills/references/acp.md.
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { EventEmitter } from 'node:events';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import * as acp from '@agentclientprotocol/sdk';
 
 import {
   ACP_MODES,
   ACP_DEFAULT_MODE,
   ACP_CONFIG_MODEL,
   ACP_CONFIG_PERMISSION,
+  ACP_COUNCIL_COMMANDS,
   buildModelConfigOption,
   buildPermissionConfigOption,
+  createAcpAgent,
   flattenPromptContent,
   parseSlashCommand,
   resolveParkedCouncil,
   cancelAcpTurn,
   ACP_MODE_COMMANDS,
 } from '../acp-server.js';
+import { SessionManager } from '../session-manager.js';
+import { nullLogger } from '../logger.js';
+import type { CostBreakdown, EffortLevel, ISession, SessionSendOptions, SessionStats, TurnResult } from '../types.js';
 
 describe('ACP modes', () => {
   it('advertises the default mode among the available ones', () => {
@@ -244,6 +255,37 @@ describe('resolveParkedCouncil', () => {
     expect(state.parkedCouncilId).toBe('council-1');
   });
 
+  // The agents merge their own work into the main branch during the rounds.
+  // Accept cleans up after them and reject keeps the worktrees, so text that
+  // promises a merge or a discard tells the user the opposite of what happens.
+  it('describes accept as cleanup and reject as keeping the worktrees', async () => {
+    const accept = ACP_COUNCIL_COMMANDS.find((c) => c.name === 'council_accept')?.description ?? '';
+    const reject = ACP_COUNCIL_COMMANDS.find((c) => c.name === 'council_reject')?.description ?? '';
+    expect(accept).not.toMatch(/merge the winning/i);
+    expect(accept).toMatch(/worktrees/);
+    expect(reject).not.toMatch(/discard/i);
+    expect(reject).toMatch(/plan\.md/);
+
+    const said: string[] = [];
+    await resolveParkedCouncil(
+      { councilReject: async () => {} } as unknown as Parameters<typeof resolveParkedCouncil>[0],
+      parkedState(),
+      { name: 'council_reject', rest: 'no' },
+      async (t) => void said.push(t),
+      async () => {},
+    );
+    await resolveParkedCouncil(
+      { councilAccept: async () => {} } as unknown as Parameters<typeof resolveParkedCouncil>[0],
+      parkedState(),
+      { name: 'council_accept', rest: '' },
+      async (t) => void said.push(t),
+      async () => {},
+    );
+    expect(said[0]).not.toMatch(/discard/i);
+    expect(said[0]).toMatch(/plan\.md/);
+    expect(said[1]).not.toMatch(/has been merged/i);
+  });
+
   it('reports none when nothing is parked, so an ordinary turn proceeds', async () => {
     const state = { ...parkedState(), parkedCouncilId: undefined };
     const done = await resolveParkedCouncil(
@@ -326,5 +368,229 @@ describe('cancelAcpTurn', () => {
     expect(cancelled).toBe(true);
     await new Promise((r) => setTimeout(r, 0));
     expect(calls).toEqual(['stop:acp-x', 'start:acp-x']);
+  });
+});
+
+// ── Council mode, over a client connection ──────────────────────────────────
+
+type Update = Record<string, unknown>;
+
+async function connectAgent(manager: object, cwd: string) {
+  const updates: Update[] = [];
+  const app = createAcpAgent(manager as never, { defaultModel: 'claude-sonnet-4-6' });
+  const conn = acp
+    .client({ name: 'test-editor' })
+    .onNotification('session/update', (ctx) => void updates.push(ctx.params.update as unknown as Update))
+    .connect(app);
+  await conn.agent.request('initialize', { protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} });
+  const { sessionId } = await conn.agent.request('session/new', { cwd, mcpServers: [] });
+  const prompt = (text: string) =>
+    conn.agent.request('session/prompt', { sessionId, prompt: [{ type: 'text', text }] });
+  return { conn, sessionId, updates, prompt };
+}
+
+/** An engine session that answers every turn with the same text, streamed once. */
+class ScriptedSession extends EventEmitter implements ISession {
+  sessionId?: string;
+  private turns = 0;
+  constructor(private readonly reply: string) {
+    super();
+  }
+  get isReady() {
+    return true;
+  }
+  get isPaused() {
+    return false;
+  }
+  get isBusy() {
+    return false;
+  }
+  async start(): Promise<this> {
+    this.sessionId = `scripted-${Math.random().toString(36).slice(2, 8)}`;
+    return this;
+  }
+  stop(): void {}
+  pause(): void {}
+  resume(): void {}
+  async send(_message: string | unknown[], options?: SessionSendOptions): Promise<TurnResult> {
+    this.turns++;
+    options?.callbacks?.onText?.(this.reply);
+    return { text: this.reply, event: { type: 'result', result: this.reply } };
+  }
+  getStats(): SessionStats & { sessionId?: string; uptime: number } {
+    return {
+      turns: this.turns,
+      turnsSucceeded: this.turns,
+      toolCalls: 0,
+      toolErrors: 0,
+      tokensIn: 0,
+      tokensOut: 0,
+      cachedTokens: 0,
+      costUsd: 0,
+      isReady: true,
+      startTime: null,
+      lastActivity: null,
+      contextPercent: 0,
+      retries: 0,
+      sessionId: this.sessionId,
+      uptime: 0,
+    };
+  }
+  getHistory(): Array<{ time: string; type: string; event: unknown }> {
+    return [];
+  }
+  getCost(): CostBreakdown {
+    return {
+      model: 'scripted',
+      tokensIn: 0,
+      tokensOut: 0,
+      cachedTokens: 0,
+      pricing: { inputPer1M: 0, outputPer1M: 0, cachedPer1M: 0 },
+      breakdown: { inputCost: 0, cachedCost: 0, outputCost: 0 },
+      totalUsd: 0,
+    };
+  }
+  async compact(): Promise<TurnResult> {
+    return { text: '', event: { type: 'result', result: '' } };
+  }
+  getEffort(): EffortLevel {
+    return 'auto';
+  }
+  setEffort(): void {}
+  resolveModel(alias: string): string {
+    return alias;
+  }
+}
+
+// The real SessionManager, kernel and Council, with every engine replaced by a
+// scripted session: what is under test is the timing between them, which a
+// hand-written fake manager would only restate.
+describe('council mode on the real council', () => {
+  const managers: SessionManager[] = [];
+  const dirs: string[] = [];
+  afterEach(async () => {
+    for (const m of managers.splice(0)) await m.shutdown();
+    for (const d of dirs.splice(0)) fs.rmSync(d, { recursive: true, force: true });
+  });
+
+  const tempDir = () => {
+    const dir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'clawo-acp-council-'));
+    dirs.push(dir);
+    return dir;
+  };
+  const realManager = (reply: string) => {
+    const mgr = new SessionManager({ maxConcurrentSessions: 8 }, nullLogger);
+    (mgr as unknown as { _createSession: () => ISession })._createSession = () => new ScriptedSession(reply);
+    managers.push(mgr);
+    return mgr;
+  };
+
+  // The kernel publishes the live Council from inside its node, after
+  // `councilStart` has returned, so a lookup made straight after the start
+  // found nothing and the client saw none of the agents.
+  it('reports each agent as a tool call and each round as a plan', async () => {
+    const { conn, updates, prompt } = await connectAgent(realManager('Looks right. [CONSENSUS: YES]'), tempDir());
+
+    await expect(prompt('/council add a greeting to the readme')).resolves.toMatchObject({ stopReason: 'end_turn' });
+
+    const calls = updates.filter((u) => u.sessionUpdate === 'tool_call').map((u) => u.title);
+    expect(calls.sort()).toEqual(['Builder — round 1', 'Critic — round 1']);
+    const finished = updates.filter((u) => u.sessionUpdate === 'tool_call_update');
+    expect(finished).toHaveLength(2);
+    for (const u of finished) {
+      expect(u.status).toBe('completed');
+      expect(JSON.stringify(u.content)).toContain('Looks right.');
+    }
+    expect(updates.some((u) => u.sessionUpdate === 'plan')).toBe(true);
+    conn.close();
+  });
+
+  // The council's guardrails now run inside the kernel run, so `councilStart`
+  // no longer throws them; they have to be read back from the run.
+  it('names the guardrail that refused the run', async () => {
+    const { conn, prompt } = await connectAgent(realManager('[CONSENSUS: YES]'), tempDir());
+    await expect(prompt('/council hi')).rejects.toMatchObject({
+      code: -32602,
+      data: expect.stringMatching(/Council could not start: Task description too short/),
+    });
+    conn.close();
+  });
+
+  // A run that failed during worktree setup still said `running`, so the turn
+  // waited out the thirty-minute cap with nothing to show for it.
+  it('reports a run that failed while setting up its worktrees instead of waiting it out', async () => {
+    const file = path.join(tempDir(), 'not-a-directory');
+    fs.writeFileSync(file, '');
+    const { conn, prompt } = await connectAgent(realManager('[CONSENSUS: YES]'), file);
+    await expect(prompt('/council add a greeting to the readme')).rejects.toMatchObject({
+      code: -32602,
+      data: expect.stringMatching(/Council could not start: .*Not a directory/),
+    });
+    conn.close();
+  }, 15_000);
+});
+
+/** A manager whose council the test drives by hand, event by event. */
+function fakeCouncilManager() {
+  const council = new EventEmitter();
+  const state = { status: 'running', finalSummary: undefined as string | undefined, aborted: [] as string[] };
+  const manager = {
+    async startSession(config: Record<string, unknown>) {
+      return { name: String(config.name) };
+    },
+    async sendMessage() {
+      return { output: '' };
+    },
+    async stopSession() {},
+    async councilStart(task: string) {
+      return { id: 'council-1', task, responses: [], status: 'running' };
+    },
+    getCouncil: () => council,
+    councilStatus: (id: string) => ({ id, status: state.status, responses: [], finalSummary: state.finalSummary }),
+    councilAbort: (id: string) => void state.aborted.push(id),
+  };
+  const emit = (event: Record<string, unknown>) =>
+    council.emit('council-event', { sessionId: 'council-1', timestamp: new Date().toISOString(), ...event });
+  const attached = () => vi.waitFor(() => expect(council.listenerCount('council-event')).toBeGreaterThan(0));
+  return { manager, state, emit, attached };
+}
+
+describe('council mode, event by event', () => {
+  // ACP v1: a prompt the client cancelled must end with stopReason `cancelled`.
+  it('ends a cancelled council prompt with stopReason cancelled', async () => {
+    const { manager, state, attached } = fakeCouncilManager();
+    const { conn, sessionId, prompt } = await connectAgent(manager, '/repo');
+    const turn = prompt('/council add a greeting to the readme');
+    await attached();
+
+    await conn.agent.notify('session/cancel', { sessionId });
+
+    await expect(turn).resolves.toMatchObject({ stopReason: 'cancelled' });
+    expect(state.aborted).toEqual(['council-1']);
+    conn.close();
+  });
+
+  // An agent error fails that agent's round; the council carries on with the
+  // others, so the turn must not end on it.
+  it('marks a failed agent as a failed tool call and keeps the turn open', async () => {
+    const { manager, state, emit, attached } = fakeCouncilManager();
+    const { conn, updates, prompt } = await connectAgent(manager, '/repo');
+    let settled = false;
+    const turn = prompt('/council add a greeting to the readme').finally(() => {
+      settled = true;
+    });
+    await attached();
+
+    emit({ type: 'agent-start', agent: 'Builder', round: 1 });
+    emit({ type: 'error', agent: 'Builder', round: 1, error: 'engine exited' });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(settled).toBe(false);
+
+    state.status = 'max_rounds';
+    state.finalSummary = 'No agreement.';
+    emit({ type: 'complete', status: 'max_rounds' });
+    await expect(turn).resolves.toMatchObject({ stopReason: 'end_turn' });
+    expect(updates).toContainEqual(expect.objectContaining({ sessionUpdate: 'tool_call_update', status: 'failed' }));
+    conn.close();
   });
 });

@@ -25,6 +25,7 @@ import { Readable, Writable } from 'node:stream';
 
 import * as acp from '@agentclientprotocol/sdk';
 
+import { createStderrLogger } from '../src/logger.js';
 import type { PermissionMode } from '../src/types.js';
 
 // Suppress the embedded HTTP server before anything can construct it — it is
@@ -32,27 +33,21 @@ import type { PermissionMode } from '../src/types.js';
 process.env.CLAWO_NO_EMBEDDED_SERVER ??= '1';
 
 const { SessionManager } = await import('../src/session-manager.js');
-const { createAcpAgent } = await import('../src/acp-server.js');
+const { createAcpAgent, ACP_PERMISSION_MODES } = await import('../src/acp-server.js');
 
-/** Only the three modes the ACP config selector offers are accepted from the env. */
-const PERMISSION_MODES = new Set<PermissionMode>(['plan', 'acceptEdits', 'bypassPermissions']);
+/** Every level to stderr, filtered by OPENCLAW_LOG_LEVEL. See the header: stdout belongs to the protocol. */
+const log = createStderrLogger('clawo-acp');
+
+/** Only the modes the ACP config selector offers are accepted from the env. */
 function envPermissionMode(): PermissionMode | undefined {
   const raw = (process.env.CLAWO_ACP_PERMISSION || '').trim() as PermissionMode;
   if (!raw) return undefined;
-  if (!PERMISSION_MODES.has(raw)) {
-    console.error(`[clawo-acp] ignoring CLAWO_ACP_PERMISSION='${raw}' — expected one of ${[...PERMISSION_MODES]}`);
+  if (!ACP_PERMISSION_MODES.includes(raw)) {
+    log.warn(`ignoring CLAWO_ACP_PERMISSION='${raw}' — expected one of ${ACP_PERMISSION_MODES.join(',')}`);
     return undefined;
   }
   return raw;
 }
-
-/** Every level to stderr. See the header: stdout belongs to the protocol. */
-const log = {
-  debug: (msg: string, ...args: unknown[]) => console.error('[clawo-acp]', msg, ...args),
-  info: (msg: string, ...args: unknown[]) => console.error('[clawo-acp]', msg, ...args),
-  warn: (msg: string, ...args: unknown[]) => console.error('[clawo-acp]', msg, ...args),
-  error: (msg: string, ...args: unknown[]) => console.error('[clawo-acp]', msg, ...args),
-};
 
 const manager = new SessionManager(
   {

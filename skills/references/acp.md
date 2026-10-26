@@ -92,18 +92,22 @@ Treat council as a deliberate action, not a default.
 Agent deltas are buffered per agent and delivered on that agent's `tool_call_update`
 rather than streamed into the text channel. Several agents speak at once, and a
 consumer that only reads text — `dsh`'s ACP subagent reads nothing else — would
-otherwise receive them interleaved into one unreadable blob.
+otherwise receive them interleaved into one unreadable blob. An agent that fails a
+round has its `tool_call_update` marked `failed` with the error; the council carries
+on with the others.
 
 Council works in git at the session `cwd`: a directory that is not a repository, or
 has no commits yet, is initialised and given an initial commit of what it holds,
 and each agent gets its own worktree under `.worktrees/` and a `council/<agent>`
-branch. An error raised while the run is being created is reported as an
-`invalid params` error naming the reason. The council's own checks (a task under
-five characters, for one) run once it has started, so a council that fails one,
-or fails later, ends the turn with stop reason `refusal`.
+branch. A run that fails before any agent answers — a too-short task, a `cwd`
+inside the orchestrator's own install directory, a worktree that cannot be
+created — ends the prompt with an `invalid params` error naming the reason. A run
+that fails later reports the reason as text and ends with stop reason `refusal`.
 
 **Consensus parks the run rather than finishing it.** The turn ends at the gate, and
-the decision becomes a slash command, advertised through `available_commands_update`:
+the decision becomes a slash command, advertised through `available_commands_update`.
+Neither command merges anything: the agents merge their own work into the main branch
+during the rounds.
 
 | Command                        | Effect                                                                                                                                                   |
 | ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -136,8 +140,9 @@ Other engines are absent for different reasons:
   Their models are filtered out of the list; a model name that routes to one, set
   through `CLAWO_ACP_MODEL`, still works.
 - **`opencode`** — its models are open-ended `provider/model` strings with nothing
-  in the registry to enumerate, and no model name routes to it, so the ACP agent
-  does not start opencode sessions.
+  in the registry to enumerate, and no model name routes to it (a `provider/model`
+  string resolves to the Claude Code engine), so the ACP agent does not start
+  opencode sessions.
 - **`acp`** — an ACP agent picks its own model.
 
 ## Generated images
@@ -167,6 +172,11 @@ that can be replayed. A resumed session therefore opens with an empty view in th
 client while the engine still remembers it. Sessions are kept for 7 days after
 their last use.
 
+Within a running agent, the session layer stops an engine session that has sat
+idle for `OPENCLAW_SERVE_TTL_MINUTES` (default 60) and keeps its resume handle. The
+next prompt or `session/resume` on that ACP session starts it again on the same
+engine, model and permission, and the conversation continues.
+
 ## Permission
 
 ACP can ask the user mid-turn through `session/request_permission`. This agent does
@@ -175,9 +185,10 @@ permission is resolved once into engine CLI flags at session start, and
 `permissionPromptTool` routes to an MCP tool the caller hosts rather than back
 through the manager. Offering a prompt that cannot be honoured would be worse than
 saying so, so the choice is a session config option instead — which also suits
-`dsh-subagent-acp`, whose default is to auto-reject permission requests. Changing
-it restarts the underlying session on the same engine, which continues the
-conversation.
+`dsh-subagent-acp`, whose default is to auto-reject permission requests. The option
+accepts `plan`, `acceptEdits` and `bypassPermissions`; any other value is refused
+with `invalid params` and the session is left as it was. Changing it restarts the
+underlying session on the same engine, which continues the conversation.
 
 ## Cancellation
 
@@ -196,6 +207,10 @@ What `session/cancel` does depends on the mode:
   on.
 
 A cancel with **nothing in flight does nothing**.
+
+In council mode a cancel aborts the run, which removes its worktrees, and the prompt
+ends with `cancelled`. In ultraplan and ultrareview mode it ends the prompt with
+`cancelled` and abandons the poll.
 
 The session layer has **no mid-turn cancel** — `stopSession()` is the only lever and
 it destroys the session rather than pausing the turn. So in `single` mode the ACP
@@ -252,9 +267,10 @@ The full reference — turn outcomes, cost, each preset's environment — is in
 
 ## Development notes
 
-Unit tests cover the translation helpers and the config-option shapes
-(`src/__tests__/acp-server.test.ts`). They cannot catch a corrupted frame
-stream, so also drive the real binary:
+Unit tests cover the translation helpers, the config-option shapes, and session
+and council behaviour over an in-process client connection
+(`src/__tests__/acp-server.test.ts`, `src/__tests__/acp-session-resume.test.ts`).
+They cannot catch a corrupted frame stream, so also drive the real binary:
 
 ```bash
 npm run build
