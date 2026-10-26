@@ -487,10 +487,10 @@ check run.
 
 `POST /workflow/new` takes `{ spec, cwd?, runId?, contract? }`; the templates are
 built by the tool and by the CLI, which posts the spec it built. `workflow_status`
-returns the run's state, outcome, current node, evidence id, cost, error, node
-records and consensus votes, plus its last N events with `events: N`;
-`GET /workflow/<id>/state` and `clawo workflow show <id> --json` return the whole
-record, including `outcomeReason`. The event stream opens with a `snapshot` (the
+returns the run's state, outcome, `outcomeReason`, verdict, current node, evidence
+id, cost, error, node records and consensus votes, plus its last N events with
+`events: N`; `GET /workflow/<id>/state` and `clawo workflow show <id> --json` return
+the whole record. The event stream opens with a `snapshot` (the
 run's `workflow_list` entry), then sends each kernel event as a `workflow-event`. `GET /workflow/list` and
 `workflow_list` filter by `workflow` and `state`, newest first, 25 by default.
 

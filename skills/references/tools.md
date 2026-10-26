@@ -886,12 +886,16 @@ Codex `/goal` on one `codex-app` thread, then the contract, then repairs on the 
 
 ### `workflow_status`
 
-`{ runId, events? }` → run state, per-node status, `outcome`, `evidenceId`,
-`costUsd`, `consensusVotes`, and the last N events when `events` is given.
+`{ runId, events? }` → run state, per-node status, `outcome`, `outcomeReason`,
+`verdict`, `evidenceId`, `costUsd`, `consensusVotes`, and the last N events when
+`events` is given.
 
 `outcome` is `verified` (a contract passed), `refuted` (it failed), or
-`unverified` (**none was declared — nothing checked the work**, which is not the
-same as a failure).
+`unverified` (**nothing checked the work**, which is not the same as a failure):
+either no contract was declared, or a pass no longer stands because the tree
+changed after it or an abandoned attempt was still running, in which case
+`outcomeReason` says why. `verdict` is the most recent verifier result: its node,
+`evidenceId` and the tree digest it was taken at.
 
 ### `workflow_list` / `workflow_resume` / `workflow_cancel` / `workflow_steer` / `workflow_approve`
 

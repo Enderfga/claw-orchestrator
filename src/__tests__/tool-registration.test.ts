@@ -425,6 +425,36 @@ describe('plugin tool registration', () => {
     }
   });
 
+  // A pass the tree moved away from ends `unverified`, which otherwise reads as
+  // "no contract was declared"; the reason is what tells the two apart.
+  it('workflow_status reports why the outcome is what it is, and the verdict in force', async () => {
+    const registration = collectRegistration();
+    const reason = 'evidence ev-1 passed, but the working tree changed afterwards';
+    const verdict = { node: 'verify', evidenceId: 'ev-1', treeFingerprint: 'abc', sideEffectSeq: 2 };
+    const status = vi.spyOn(SessionManager.prototype, 'workflowStatus').mockReturnValue({
+      runId: 'wf-1',
+      workflow: 'solve',
+      state: 'completed',
+      outcome: 'unverified',
+      outcomeReason: reason,
+      verdict,
+      nodes: {},
+    } as never);
+    const previousNoServer = process.env.CLAWO_NO_EMBEDDED_SERVER;
+    process.env.CLAWO_NO_EMBEDDED_SERVER = '1';
+    try {
+      const result = await registration.tools
+        .find((t) => t.name === 'workflow_status')!
+        .execute('s', { runId: 'wf-1' });
+      expect(result).toMatchObject({ details: { outcome: 'unverified', outcomeReason: reason, verdict } });
+    } finally {
+      registration.services[0]?.stop();
+      status.mockRestore();
+      if (previousNoServer === undefined) delete process.env.CLAWO_NO_EMBEDDED_SERVER;
+      else process.env.CLAWO_NO_EMBEDDED_SERVER = previousNoServer;
+    }
+  });
+
   it('session_handoff and fanout_start forward the ACP agent they are given', async () => {
     const registration = collectRegistration();
     const tool = (name: string) => registration.tools.find((t) => t.name === name)!;

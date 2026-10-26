@@ -1507,7 +1507,7 @@ const plugin = {
     registerTool({
       name: 'workflow_status',
       description:
-        'Poll a workflow run. Returns state, per-node status, and the outcome: `verified` (a contract passed), `refuted` (it failed), or `unverified` (none was declared — nothing checked the work).',
+        'Poll a workflow run. Returns state, per-node status, and the outcome: `verified` (a contract passed), `refuted` (it failed), or `unverified` (nothing checked the work: none was declared, or a pass no longer stands, in which case `outcomeReason` says why).',
       parameters: {
         type: 'object',
         properties: {
@@ -1525,6 +1525,8 @@ const plugin = {
           workflow: record.workflow,
           state: record.state,
           outcome: record.outcome,
+          outcomeReason: record.outcomeReason,
+          verdict: record.verdict,
           currentNode: record.currentNode,
           evidenceId: record.evidenceId,
           costUsd: record.costUsd,
