@@ -1411,7 +1411,33 @@ export class RunKernel extends EventEmitter {
       this._setRunState(handle, 'failed', error ?? 'acceptance contract was not satisfied');
       return;
     }
+    const unchecked = this._runContractUnchecked(txn.record);
+    if (unchecked) {
+      this._setRunState(handle, 'failed', unchecked);
+      return;
+    }
     this._setRunState(handle, 'completed');
+  }
+
+  /**
+   * Why a run that declares a run-level contract may not complete, or undefined
+   * if it may.
+   *
+   * `prepareSpec` guarantees that a `contract: 'run'` verifier exists, not that
+   * control reaches it: a router can route past it, and the run would end with
+   * the declared contract never run. Another verifier's pass does not stand in
+   * for it — the caller declared this contract. The outcome stays `unverified`,
+   * not `refuted`: nothing ran, so nothing failed.
+   */
+  private _runContractUnchecked(record: RunRecord): string | undefined {
+    if (!record.spec.contract) return undefined;
+    const ran =
+      record.verdict !== undefined &&
+      record.spec.nodes.some((n) => {
+        const node = record.nodes[n.id];
+        return n.kind === 'verifier' && n.contract === 'run' && !!node?.evidenceId && node.state !== 'pending';
+      });
+    return ran ? undefined : 'the workflow declares an acceptance contract, but the run ended without running it';
   }
 
   /**

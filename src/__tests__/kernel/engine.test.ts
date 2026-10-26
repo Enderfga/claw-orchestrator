@@ -166,6 +166,51 @@ describe('honesty about verification', () => {
     expect(done!.error).toContain('npm test');
   });
 
+  it('does not complete a run whose router skipped the verifier of its declared contract', async () => {
+    let checked = 0;
+    const { kernel } = makeKernel({
+      verifier: async (): Promise<NodeResult> => {
+        checked++;
+        return { ok: false, passed: false, evidenceId: 'v-01', error: 'red' };
+      },
+    });
+    const started = await kernel.start({
+      name: 'skips-the-gate',
+      contract: { checks: [{ spec: { type: 'command', cmd: 'false' }, required: true }] },
+      nodes: [
+        { id: 'a', kind: 'agent', prompt: 'a' },
+        { id: 'skip', kind: 'router', routes: [], default: 'b' },
+        { id: 'verify', kind: 'verifier', contract: 'run' },
+        { id: 'b', kind: 'agent', prompt: 'b' },
+      ],
+    });
+    const done = await kernel.wait(started.runId);
+    expect(checked).toBe(0);
+    expect(done!.state).toBe('failed');
+    // Not `refuted`: no check ran, so none failed.
+    expect(done!.outcome).toBe('unverified');
+    expect(done!.error).toMatch(/acceptance contract/);
+  });
+
+  it("does not let another verifier's pass stand in for the declared contract", async () => {
+    const { kernel } = makeKernel({
+      verifier: async (node): Promise<NodeResult> => ({ ok: true, passed: true, evidenceId: `${node.id}-01` }),
+    });
+    const started = await kernel.start({
+      name: 'wrong-gate',
+      contract: { checks: [{ spec: { type: 'command', cmd: 'false' }, required: true }] },
+      nodes: [
+        { id: 'inline', kind: 'verifier', contract: { checks: [{ spec: { type: 'command', cmd: 'true' } }] } },
+        { id: 'skip', kind: 'router', routes: [], default: 'b' },
+        { id: 'verify', kind: 'verifier', contract: 'run' },
+        { id: 'b', kind: 'agent', prompt: 'b' },
+      ],
+    });
+    const done = await kernel.wait(started.runId);
+    expect(done!.nodes.verify.state).toBe('pending');
+    expect(done!.state).toBe('failed');
+  });
+
   it('records consensus votes without letting them decide anything', async () => {
     const { kernel } = makeKernel({
       council: async (): Promise<NodeResult> => ({

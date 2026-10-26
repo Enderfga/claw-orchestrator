@@ -189,14 +189,17 @@ A run ends `verified`, `refuted`, or `unverified`.
 is not a failure and it is not a pass. `clawo runs` prints it as `—` and
 `clawo workflow list` as `unchecked`, and the `clawo runs` summary line says so in
 words, because collapsing it into either bucket would let an unchecked run read
-as a checked one. A verdict that expired (see below) also reads `unverified`.
+as a checked one. A verdict that expired (see below) also reads `unverified`, and
+so does a run that declared a contract and ended without running it — that run
+ends `failed`.
 
 ## What the guarantee is, precisely
 
 - The checks are run by the runtime, and their exit codes are read by the
   runtime. No part of the verdict is an agent's report about itself.
 - A run carrying a contract cannot reach `completed` unless every required check
-  passed.
+  passed. A run-level contract also has to have run: a run that a router steered
+  past its `contract: "run"` verifier ends `failed` (outcome `unverified`).
 - If anything that can touch the workspace runs after the checks and the tree's
   **content** changes, the verdict expires: the outcome drops to `unverified`
   with the reason recorded. Not `refuted` — no check failed.

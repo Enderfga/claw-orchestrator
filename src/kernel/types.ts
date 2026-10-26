@@ -20,16 +20,18 @@ import type { AgentBinding, EngineType } from '../types.js';
 // ─── Run + node state ───────────────────────────────────────────────────────
 
 /**
- * `completed` is reachable only from `verifying`. A run carrying a contract
- * whose evidence is red goes to `failed`, never to `completed` — that is the
- * whole point of the state machine.
+ * `completed` is entered from `running` once control runs out of nodes; a
+ * verifier holds the run in `verifying` only while its checks run. A run
+ * carrying a contract whose evidence is red goes to `failed`, never to
+ * `completed` — that is the whole point of the state machine — and so does a
+ * run that declares a run-level contract and ends without having run it.
  */
 export type RunState = 'pending' | 'running' | 'awaiting_human' | 'verifying' | 'completed' | 'failed' | 'cancelled';
 
 /**
  * Whether anything independent of the agent checked the work.
  * - `verified`   — a contract ran and every required check passed.
- * - `unverified` — no contract was declared. We do not know.
+ * - `unverified` — no contract ran, or its verdict no longer describes the tree. We do not know.
  * - `refuted`    — a contract ran and a required check failed.
  */
 export type RunOutcome = 'verified' | 'unverified' | 'refuted';
@@ -279,7 +281,10 @@ export interface WorkflowSpec {
   cwd?: string;
   /**
    * Run-level acceptance contract. When present the kernel appends an implicit
-   * terminal verifier, so `completed` always means "a contract passed".
+   * terminal verifier unless the spec places its own `contract: 'run'` one, and a
+   * run that ends without a verdict from such a verifier fails — so `completed`
+   * always means "this contract ran and passed". An outcome of `unverified` on a
+   * completed run says the verdict stopped describing the tree afterwards.
    */
   contract?: AcceptanceContract;
   /** Loop bound. Exceeding it fails the run rather than spinning. Default 50. */

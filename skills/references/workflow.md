@@ -361,12 +361,21 @@ so anything the reviewers change is covered by the verdict.
 ## Completion
 
 `RunState` is `pending | running | awaiting_human | verifying | completed |
-failed | cancelled`. **`completed` is reachable only from `verifying`.**
+failed | cancelled`. A verifier holds the run in `verifying` while its checks
+run; `completed` is entered from `running` once control runs out of nodes.
 
 `RunOutcome` is `verified | unverified | refuted` and answers a different
 question: not "did it stop" but "did anything check it". A run with no contract
 completes as `unverified` — it says it does not know, which is not the same as
 success.
+
+A run whose spec declares a run-level `contract` cannot complete without having
+run it. The kernel appends a terminal verifier unless the spec places its own
+`contract: "run"` verifier, but a router can still send control past that
+verifier; a run that ends with no verdict from a `contract: "run"` verifier ends
+`failed`, with outcome `unverified` (nothing ran, so nothing was refuted). A
+pass from a verifier with an inline contract does not stand in for the declared
+one.
 
 ## Control
 
