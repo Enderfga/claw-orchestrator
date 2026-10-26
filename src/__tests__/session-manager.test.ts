@@ -996,6 +996,28 @@ describe('SessionManager', () => {
       expect(unread.length).toBe(0);
     });
 
+    it('stopping a session drops its queued messages, so a new session under the name starts empty', async () => {
+      await mgr.startSession({ name: 's1', cwd: '/tmp' });
+      await mgr.startSession({ name: 's2', cwd: '/tmp' });
+      mockSessions[1].setBusy(true);
+      await mgr.sessionSendTo('s1', 's2', 'for the old s2');
+
+      await mgr.stopSession('s2');
+      await mgr.startSession({ name: 's2', cwd: '/tmp' });
+      expect(mgr.sessionInbox('s2', false)).toEqual([]);
+    });
+
+    it('keeps the queued messages of a session stopped to be resumed', async () => {
+      await mgr.startSession({ name: 's1', cwd: '/tmp' });
+      await mgr.startSession({ name: 's2', cwd: '/tmp' });
+      mockSessions[1].setBusy(true);
+      await mgr.sessionSendTo('s1', 's2', 'still for s2');
+
+      await mgr.stopSession('s2', { keepPersisted: true });
+      await mgr.startSession({ name: 's2', cwd: '/tmp' });
+      expect(mgr.sessionInbox('s2').map((m) => m.text)).toEqual(['still for s2']);
+    });
+
     it('sessionDeliverInbox returns 0 when inbox is empty', async () => {
       await mgr.startSession({ name: 'empty-inbox', cwd: '/tmp' });
       const delivered = await mgr.sessionDeliverInbox('empty-inbox');

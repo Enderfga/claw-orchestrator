@@ -84,4 +84,5 @@ The `summary` attribute is present only when a summary was given. Attribute valu
 
 - **Max size**: 200 messages per session
 - **Eviction**: oldest read messages dropped first, then oldest unread
-- **No TTL**: messages, read or unread, stay in memory until evicted or the process exits — stopping a session does not clear its inbox. They are not persisted to disk.
+- **No TTL**: messages, read or unread, stay in memory until evicted, the session is stopped, or the process exits. They are not persisted to disk.
+- **Stopping clears the inbox**: `stopSession()` drops the session's messages, so a new session started under the same name does not receive mail meant for the old one. A stop that keeps the session resumable (`keepPersisted: true`, used when a session is restarted to continue the same conversation) leaves them in place.

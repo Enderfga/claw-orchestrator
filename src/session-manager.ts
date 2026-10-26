@@ -1923,6 +1923,9 @@ export class SessionManager {
       // Claude conversation) pass keepPersisted: true.
       this._forgetPersisted(name);
       this._savePersisted();
+      // Its unread mail was for this conversation; a later session that takes
+      // the name is a different one and must not receive it.
+      this._inbox.clear(name);
     }
   }
 
