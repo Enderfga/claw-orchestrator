@@ -1672,15 +1672,19 @@
             panel.innerHTML = '';
             return;
           }
+          // Every version of an app shares one URL; the live one is the one deployed or promoted last.
+          const live = j.artifacts
+            .filter((a) => a.deploy)
+            .reduce((m, a) => (!m || (a.deployedAt || '') >= (m.deployedAt || '') ? a : m), null);
           const html = j.artifacts
             .map((a) => {
-              const isDeployed = !!a.deploy;
+              const isLive = a === live;
               const url = a.deploy?.url || '';
               return `<li class="version-row">
                 <span class="version-tag">${escapeHtml(a.version)}</span>
                 <span class="version-meta">${a.builtAt ? new Date(a.builtAt).toLocaleString() : ''}</span>
-                ${isDeployed ? `<a href="${escapeHtml(url)}" target="_blank">${escapeHtml(url)}</a>` : '<span class="version-meta">(not deployed)</span>'}
-                ${isDeployed ? `<button data-promote="${escapeHtml(a.version)}">Promote</button>` : ''}
+                ${isLive ? `<a href="${escapeHtml(url)}" target="_blank">${escapeHtml(url)}</a>` : `<span class="version-meta">${a.deploy ? '(not live)' : '(not deployed)'}</span>`}
+                ${isLive ? '' : `<button data-promote="${escapeHtml(a.version)}">Promote</button>`}
               </li>`;
             })
             .join('');

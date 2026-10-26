@@ -246,6 +246,8 @@ export interface UltraappSynthNode extends NodeBase {
   /** Absolute per-run directory; the council project and the codebase live under it. */
   runDir: string;
   slug: string;
+  /** Where to put the consensus codebase. Absent on runs recorded before builds were versioned: `versions/v1/codebase`. */
+  codebasePath?: string;
 }
 
 export interface UltraappDeployNode extends NodeBase {

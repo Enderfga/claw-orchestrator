@@ -8,7 +8,8 @@
  * The "projectDir" given to Council is a brand-new empty git repo — NOT the
  * claw-orchestrator repo. Council creates its own git worktrees inside that
  * project dir and merges to its main branch. After consensus, we copy the
- * main HEAD into versions/v1/codebase as the buildable artifact.
+ * main HEAD into the build's version slot (versions/vN/codebase) as the
+ * buildable artifact.
  */
 
 import * as fs from 'node:fs';
@@ -36,8 +37,10 @@ export interface CouncilSynthArgs {
   spec: AppSpec;
   runId: string;
   /** Per-run dir under ~/.claw-orchestrator/ultraapps/<runId>/. Adapter creates
-      `<runDir>/council-project/` (fresh git repo) and `<runDir>/versions/v1/codebase/`. */
+      `<runDir>/council-project/` (fresh git repo) and the codebase dir. */
   runDir: string;
+  /** Where the consensus codebase goes. Defaults to `<runDir>/versions/v1/codebase`. */
+  codebaseDir?: string;
   sessionManager: SessionManagerLike;
   /** Set by the kernel. A cancelled build, or one past its node timeout, opens no further round. */
   signal?: { aborted: boolean };
@@ -119,8 +122,7 @@ export async function runCouncilSynth(args: CouncilSynthArgs): Promise<CouncilSy
     return { ok: false, reason: `council ended in status '${session.status}'`, rounds };
   }
 
-  // Snapshot main HEAD into versions/v1/codebase
-  const codebaseDir = path.join(args.runDir, 'versions', 'v1', 'codebase');
+  const codebaseDir = args.codebaseDir ?? path.join(args.runDir, 'versions', 'v1', 'codebase');
   await snapshotMainBranch(projectDir, codebaseDir);
   return { ok: true, worktreePath: codebaseDir, rounds };
 }

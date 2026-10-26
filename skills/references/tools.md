@@ -791,7 +791,7 @@ Done-mode feedback. Haiku classifier routes into `cosmetic` (Opus patcher), `spe
 
 ### `ultraapp_promote_version`
 
-Atomically swap the deployed version. Stops the current container/process, starts the target's, updates the router map.
+Make a version the one serving the app. A version deployed before is swapped in: the live container/process is stopped, the target's is started, and the router map is updated; if the target does not start, the previous version is put back. A version never deployed (a patched one, typically) is built and deployed first, which replaces the live version.
 
 | Parameter | Type   | Required | Description                          |
 | --------- | ------ | -------- | ------------------------------------ |

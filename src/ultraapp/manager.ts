@@ -3,7 +3,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { type AppSpec, validateAppSpec } from './spec.js';
-import { type UltraappStore, type ChatEntry, type RunMode } from './store.js';
+import { type UltraappStore, type ChatEntry, type DeployInfo, type RunMode } from './store.js';
 import { parseInterviewReply, type QuestionEnvelope } from './interview-parser.js';
 import { runToolCalls } from './interview-tools.js';
 import {
@@ -40,7 +40,7 @@ import { Narrator } from './narrator.js';
 import { classifyFeedback, type FeedbackClass } from './feedback-classifier.js';
 import { runPatcher } from './patcher.js';
 import { startSpecDeltaInterview } from './spec-delta.js';
-import { snapshotVersion, swapVersion, listVersions } from './versions.js';
+import { forkVersion, listVersions, nextVersion, snapshotVersion, swapVersion } from './versions.js';
 
 export type RunEvent =
   | { type: 'question'; question: QuestionEnvelope }
@@ -159,6 +159,22 @@ function buildPhaseOf(nodeId: string | undefined): 'council' | 'fix-on-failure' 
   return 'orchestrator';
 }
 
+/**
+ * The version serving the app: the one most recently deployed or promoted.
+ *
+ * Read from the version records rather than the router, because a stopped app
+ * has no route and `start` still has to know which version to bring back.
+ */
+function liveVersion<T extends { deploy?: DeployInfo; deployedAt?: string }>(
+  arts: T[],
+): (T & { deploy: DeployInfo }) | undefined {
+  let live: (T & { deploy: DeployInfo }) | undefined;
+  for (const a of arts) {
+    if (a.deploy && (!live || (a.deployedAt ?? '') >= (live.deployedAt ?? ''))) live = a as T & { deploy: DeployInfo };
+  }
+  return live;
+}
+
 export class UltraappManager {
   private readonly runs = new Map<string, ActiveRun>();
   private readonly skillContent: string;
@@ -200,11 +216,12 @@ export class UltraappManager {
 
   private ultraappNodeDeps(): UltraappNodeDeps {
     return {
-      synth: async ({ appRunId, runDir, signal }) =>
+      synth: async ({ appRunId, runDir, codebasePath, signal }) =>
         runCouncilSynth({
           spec: await this.opts.store.readSpec(appRunId),
           runId: appRunId,
           runDir,
+          codebaseDir: codebasePath,
           sessionManager: this.opts.sessionManager,
           signal,
         }),
@@ -337,9 +354,22 @@ export class UltraappManager {
     emit({ type: 'build-start', runId });
     const spec = await this.opts.store.readSpec(runId);
     const runDir = this.opts.store.runDirAbsolute(runId);
-    const version = 'v1';
-    const codebasePath = path.join(runDir, 'versions', version, 'codebase');
     const useDocker = this.opts.runtimeMode === 'docker';
+
+    const kernelRunId = ultraappKernelRunId(runId);
+    const previous = this.kernel.get(kernelRunId);
+    const resumable = previous && !['completed', 'failed', 'cancelled'].includes(previous.state);
+
+    // A resumed build carries on in the slot it started in. Anything else is a new
+    // version, so a rebuild never writes over one that is deployed or promotable.
+    const versionsDir = this.opts.store.versionsDir(runId);
+    const resumedCodebase = resumable
+      ? (previous.spec.nodes.find((n) => n.id === 'build') as { cwd?: string } | undefined)?.cwd
+      : undefined;
+    const codebasePath = resumedCodebase ?? path.join(versionsDir, nextVersion(versionsDir), 'codebase');
+    const version = path.basename(path.dirname(codebasePath));
+    // Claimed now: the council only creates the directory once it has finished.
+    fs.mkdirSync(path.dirname(codebasePath), { recursive: true });
 
     const workflow = ultraappWorkflow({
       appRunId: runId,
@@ -352,10 +382,6 @@ export class UltraappManager {
       buildContract: this.opts.buildContract ?? ultraappBuildContract({ useDocker }),
       deploy: Boolean(this.opts.router),
     });
-
-    const kernelRunId = ultraappKernelRunId(runId);
-    const previous = this.kernel.get(kernelRunId);
-    const resumable = previous && !['completed', 'failed', 'cancelled'].includes(previous.state);
 
     const off = this.subscribeKernel(kernelRunId, runId, emit, { version, codebasePath });
     try {
@@ -520,6 +546,9 @@ export class UltraappManager {
     slug: string;
   }): Promise<UltraappDeployOutcome> {
     const router = this.opts.router!;
+    const arts = await this.opts.store.readArtifacts(args.runId);
+    const live = liveVersion(arts);
+    const replaced = live && live.version !== args.version ? live.deploy : undefined;
     // Recorded here rather than only from the build-succeeded handler: those
     // handlers are async and do not gate the next node, so the deploy could
     // reach `recordDeploy` before the artifact it belongs to existed. Writing
@@ -528,7 +557,12 @@ export class UltraappManager {
       worktreePath: args.worktreePath,
       version: args.version,
     });
-    const taken = new Set(router.list().map((r) => r.port));
+    // Every port a version of this app was deployed on stays reserved, so a
+    // version promoted back later comes up on the port it was recorded with.
+    const taken = new Set([
+      ...router.list().map((r) => r.port),
+      ...arts.flatMap((a) => (a.deploy ? [a.deploy.port] : [])),
+    ]);
     const deploy = this.opts.deployFn ?? deployArtifact;
     const useDocker = this.opts.runtimeMode === 'docker';
     const dep = await deploy({
@@ -562,7 +596,12 @@ export class UltraappManager {
       fetchFn: fetch,
       takenPorts: taken,
     });
-    if (!dep.ok) return { ok: false, reason: `deploy: ${dep.reason ?? 'unknown'}` };
+    if (!dep.ok) {
+      // The deploy registers its route before the health check, so a failed one
+      // would leave the app routed to a backend that never came up.
+      if (replaced) router.register(args.slug, replaced.port);
+      return { ok: false, reason: `deploy: ${dep.reason ?? 'unknown'}` };
+    }
 
     await this.opts.store.recordDeploy(args.runId, args.version, {
       url: dep.url!,
@@ -570,6 +609,11 @@ export class UltraappManager {
       containerName: dep.containerName!,
       imageTag: dep.imageTag!,
     });
+    if (replaced) {
+      await this.runtime()
+        .stop(replaced.containerName)
+        .catch(() => undefined);
+    }
 
     // §7g, enforced by the runtime instead of by persona text. We capture the
     // two viewports ourselves against the deployed URL and store the PNGs as
@@ -631,47 +675,41 @@ export class UltraappManager {
 
   async startContainer(runId: string): Promise<{ ok: boolean; error?: string }> {
     if (!this.opts.router) return { ok: false, error: 'router not configured' };
-    const arts = await this.opts.store.readArtifacts(runId);
-    const latest = arts[arts.length - 1];
-    if (!latest?.deploy) return { ok: false, error: 'no deployed artifact' };
+    const live = liveVersion(await this.opts.store.readArtifacts(runId));
+    if (!live) return { ok: false, error: 'no deployed artifact' };
     const spec = await this.opts.store.readSpec(runId);
-    return startContainerAndRegister(
-      latest.deploy.containerName,
-      spec.meta.name,
-      latest.deploy.port,
-      this.opts.router,
-      {
-        dockerStartFn: this.runtime().start,
-      },
-    );
+    return startContainerAndRegister(live.deploy.containerName, spec.meta.name, live.deploy.port, this.opts.router, {
+      dockerStartFn: this.runtime().start,
+    });
   }
 
   async stopContainer(runId: string): Promise<{ ok: boolean; error?: string }> {
     if (!this.opts.router) return { ok: false, error: 'router not configured' };
-    const arts = await this.opts.store.readArtifacts(runId);
-    const latest = arts[arts.length - 1];
-    if (!latest?.deploy) return { ok: false, error: 'no deployed artifact' };
+    const live = liveVersion(await this.opts.store.readArtifacts(runId));
+    if (!live) return { ok: false, error: 'no deployed artifact' };
     const spec = await this.opts.store.readSpec(runId);
-    return stopContainerAndDeregister(latest.deploy.containerName, spec.meta.name, this.opts.router, {
+    return stopContainerAndDeregister(live.deploy.containerName, spec.meta.name, this.opts.router, {
       dockerStopFn: this.runtime().stop,
     });
   }
 
   async deleteRun(runId: string): Promise<{ ok: boolean; error?: string }> {
     const arts = await this.opts.store.readArtifacts(runId).catch(() => []);
-    const latest = arts[arts.length - 1];
     let spec: AppSpec | null = null;
     try {
       spec = await this.opts.store.readSpec(runId);
     } catch {
       /* run already gone */
     }
-    if (latest?.deploy && spec && this.opts.router) {
-      const rt = this.runtime();
-      await deleteContainerAndDeregister(latest.deploy.containerName, spec.meta.name, this.opts.router, {
+    const rt = this.runtime();
+    // Every deployed version, not only the live one: a stopped version still
+    // holds its process record (host) or container and image (docker).
+    for (const a of arts) {
+      if (!a.deploy || !spec || !this.opts.router) continue;
+      await deleteContainerAndDeregister(a.deploy.containerName, spec.meta.name, this.opts.router, {
         dockerRmFn: rt.rm,
       });
-      await rt.rmi(latest.deploy.imageTag).catch(() => {
+      await rt.rmi(a.deploy.imageTag).catch(() => {
         /* image may not exist */
       });
     }
@@ -719,21 +757,33 @@ export class UltraappManager {
   }
 
   /**
-   * Promote a previously-built version to the currently-deployed one.
-   * Stops the current container, starts the target's container, and updates
-   * the router map atomically.
+   * Make a version the one serving the app.
+   *
+   * A version deployed before is swapped in: the live one is stopped and the
+   * target restarted on its recorded port. One never deployed — a patched
+   * version, typically — goes through the deploy stage, which puts it live and
+   * stops the version it replaces.
    */
   async promoteVersion(runId: string, toVersion: string): Promise<{ ok: boolean; error?: string }> {
     if (!this.opts.router) return { ok: false, error: 'router not configured' };
-    const versions = listVersions(this.opts.store.versionsDir(runId));
-    const current = versions.find((v) => v.deploy?.containerName);
-    const target = versions.find((v) => v.version === toVersion);
-    if (!target?.deploy) return { ok: false, error: `version ${toVersion} has no deploy` };
+    const versionsDir = this.opts.store.versionsDir(runId);
+    const target = listVersions(versionsDir).find((v) => v.version === toVersion);
+    if (!target) return { ok: false, error: `no version ${toVersion}` };
     const spec = await this.opts.store.readSpec(runId);
+    if (!target.deploy) {
+      const r = await this.deployStage({
+        runId,
+        version: toVersion,
+        worktreePath: target.worktreePath,
+        slug: spec.meta.name,
+      });
+      return r.ok ? { ok: true } : { ok: false, error: r.reason };
+    }
+    const live = liveVersion(await this.opts.store.readArtifacts(runId));
     const rt = this.runtime();
     const r = await swapVersion({
-      versionsDir: this.opts.store.versionsDir(runId),
-      fromVersion: current?.version ?? toVersion,
+      versionsDir,
+      fromVersion: live?.version ?? toVersion,
       toVersion,
       slug: spec.meta.name,
       router: this.opts.router,
@@ -741,6 +791,8 @@ export class UltraappManager {
       stopContainer: rt.stop,
     });
     if (r.ok) {
+      // Re-recording the deploy is what marks the target as the live version.
+      await this.opts.store.recordDeploy(runId, toVersion, target.deploy);
       const run = this.runs.get(runId);
       if (run) this.emit(run, { type: 'app-url', url: target.deploy.url, version: toVersion });
     }
@@ -799,31 +851,33 @@ export class UltraappManager {
 
   private async runPatcherFlow(runId: string, feedback: string): Promise<void> {
     const run = this.requireRun(runId);
-    const versions = listVersions(this.opts.store.versionsDir(runId));
-    const current = versions.find((v) => v.deploy?.containerName) ?? versions[versions.length - 1];
+    const versionsDir = this.opts.store.versionsDir(runId);
+    const versions = listVersions(versionsDir);
+    const current = liveVersion(versions) ?? versions[versions.length - 1];
     if (!current?.worktreePath) {
       const err = 'no buildable worktree found for patcher';
       this.emit(run, { type: 'error', message: err });
       return;
     }
 
+    // The patch is made on a copy, so the version serving the app is untouched
+    // until the new one is promoted.
+    const fork = forkVersion(versionsDir, current.worktreePath);
     const patch = await runPatcher({
-      worktreePath: current.worktreePath,
+      worktreePath: fork.worktreePath,
       feedback,
       llmCall: (p) => this.patcherCall(runId, p),
       validate: (a) => runFixOnFailure({ ...a, maxRounds: 3 }),
     });
     if (!patch.ok) {
+      fs.rmSync(path.dirname(fork.worktreePath), { recursive: true, force: true });
       const msg = `Patcher failed: ${patch.reason ?? 'unknown'}`;
       await this.opts.store.appendChat(runId, { role: 'system', kind: 'error', text: msg });
       this.emit(run, { type: 'chat', entry: { role: 'system', kind: 'error', text: msg } });
       return;
     }
-    const nextVersion = snapshotVersion(this.opts.store.versionsDir(runId), {
-      worktreePath: current.worktreePath,
-      source: 'patcher',
-    });
-    const msg = `Patched and saved as ${nextVersion}. Promote it from the AppSpec column to swap the deployed container.`;
+    const version = snapshotVersion(versionsDir, { ...fork, source: 'patcher' });
+    const msg = `Patched and saved as ${version}. Promote it from the Versions panel to deploy it in place of the live version.`;
     await this.opts.store.appendChat(runId, { role: 'system', kind: 'narrator', text: msg });
     this.emit(run, { type: 'chat', entry: { role: 'system', kind: 'narrator', text: msg } });
   }

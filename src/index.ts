@@ -2378,7 +2378,7 @@ const plugin = {
     registerTool({
       name: 'ultraapp_promote_version',
       description:
-        "Atomically swap which previously-built version is currently deployed. Stops the old container, starts the target version's container, updates the router map. Requires a router to be wired (see clawo serve).",
+        'Make a version the one serving the app. A version deployed before is swapped in (the live one is stopped, the target restarted, the router map updated); one never deployed, such as a patched version, is built and deployed first. Requires a router to be wired (see clawo serve).',
       parameters: {
         type: 'object',
         properties: {

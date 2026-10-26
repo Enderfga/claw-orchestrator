@@ -50,7 +50,7 @@ nodes:
 
 | Node     | Kind              | Does                                                         |
 | -------- | ----------------- | ------------------------------------------------------------ |
-| `synth`  | `ultraapp_synth`  | The 3-agent council; snapshots consensus into `versions/v1/` |
+| `synth`  | `ultraapp_synth`  | The 3-agent council; snapshots consensus into `versions/vN/` |
 | `build`  | `verifier`        | The build contract, with its fix-on-red loop and evidence    |
 | `deploy` | `ultraapp_deploy` | Starts the app, registers the route, runs the §7g gate       |
 
@@ -123,9 +123,13 @@ persists to `~/.claw-orchestrator/host-procs.json`.
 └── versions/
     ├── v1/
     │   ├── codebase/          # snapshot of council main HEAD
-    │   └── artifact.json      # { worktreePath, builtAt, deploy: { url, port, … } }
-    └── v2/                    # patcher / spec-delta produces v2, v3, …
+    │   └── artifact.json      # { worktreePath, builtAt, deploy: { url, port, … }, deployedAt }
+    └── v2/                    # each build and each successful patch takes the next vN
 ```
+
+Every version keeps its own `codebase/`, so any of them can be promoted. The live
+version is the one most recently deployed or promoted; `start`, `stop` and the
+patcher act on it.
 
 A run is read back from this directory on first use, so every route works on a
 run started before the orchestrator restarted. Its interview session is
@@ -153,7 +157,7 @@ All routes are served by the embedded server (default `:18796`), under
 | `POST /ultraapp/<id>/stop`            | Stop without deleting.                                                                                                                                                                                                          |
 | `POST /ultraapp/<id>/delete`          | Stop + remove all per-run state.                                                                                                                                                                                                |
 | `POST /ultraapp/<id>/feedback`        | Body: `{ text }`. Done-mode classifier routes cosmetic / spec-delta / structural.                                                                                                                                               |
-| `POST /ultraapp/<id>/promote-version` | Body: `{ version: "vN" }`. Atomically swap deployed version.                                                                                                                                                                    |
+| `POST /ultraapp/<id>/promote-version` | Body: `{ version: "vN" }`. Make that version live (deploying it first if it never was).                                                                                                                                         |
 
 ## MCP tools (14)
 
@@ -174,15 +178,17 @@ ultraapp_start_container ultraapp_stop_container ultraapp_delete
 After the run reaches `done`, chat input goes to a per-run Haiku
 classifier. Three classes:
 
-| Class        | Routes to         | Behaviour                                                                                                                                                                                                                                              |
-| ------------ | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `cosmetic`   | Patcher           | A Claude Opus session generates a unified diff against the deployed worktree → `applyUnifiedDiff` → validate via fix-on-failure → on success snapshot to `versions/vN+1/`, on any failure restore the snapshot atomically and post the reason to chat. |
-| `spec-delta` | Focused interview | Flips mode back to `interview` with a bootstrap message that names the field(s) being changed. Completion auto-triggers a fresh `startBuild`.                                                                                                          |
-| `structural` | Suggestion only   | Posts a narrator note: "this sounds like a different app — click + New".                                                                                                                                                                               |
+| Class        | Routes to         | Behaviour                                                                                                                                                                                                                                                                                                                                                           |
+| ------------ | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cosmetic`   | Patcher           | Copies the live version's codebase to the next `versions/vN/`, then a Claude Opus session generates a unified diff against the copy → `applyUnifiedDiff` → validate via fix-on-failure. On success the copy is recorded as `vN` (not deployed; the live app is untouched until you promote it); on any failure the copy is discarded and the reason posted to chat. |
+| `spec-delta` | Focused interview | Flips mode back to `interview` with a bootstrap message that names the field(s) being changed. Completion auto-triggers a fresh `startBuild`, which builds the next `vN`, deploys it in place of the live version and stops the one it replaced.                                                                                                                    |
+| `structural` | Suggestion only   | Posts a narrator note: "this sounds like a different app — click + New".                                                                                                                                                                                                                                                                                            |
 
-To swap which version is live, use `promote-version` (HTTP) or
-`ultraapp_promote_version` (MCP) — the router map and host-procs map
-update atomically.
+To change which version is live, use `promote-version` (HTTP),
+`ultraapp_promote_version` (MCP) or **Promote** in the dashboard's Versions panel.
+A version deployed before is restarted on its recorded port and the live one
+stopped; if it does not start, the previous version is put back. A version never
+deployed is built and deployed first.
 
 ## Reference traces + replay
 
@@ -221,7 +227,7 @@ open "http://127.0.0.1:18796/dashboard?token=$(cat ~/.openclaw/server-token)"
 # 3. After [Start Build] (or POST /ultraapp/<id>/build), watch:
 #      mode pill: queued → building → done
 #      narrator: short conversational chat updates
-#      Versions panel: v1, v2, … with Promote per row
+#      Versions panel: v1, v2, …; the live one links to the app, the others have Promote
 
 # 4. Live URL appears in the share card. The deployed app is reachable at:
 curl http://127.0.0.1:19000/forge/<slug>/health
