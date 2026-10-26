@@ -63,6 +63,10 @@ export function makeSubflowExecutor(kernel: RunKernel, resolve?: WorkflowResolve
       error: finished.state === 'completed' ? undefined : (finished.error ?? `subflow ended ${finished.state}`),
       evidenceId: finished.evidenceId,
       passed: finished.outcome === 'verified',
+      // The digest goes with the verdict: without it, any workspace-touching node
+      // the parent runs afterwards finds nothing to compare and downgrades it.
+      treeFingerprint: finished.verdict?.treeFingerprint,
+      fingerprintCwd: finished.verdict?.fingerprintCwd ?? finished.cwd,
       costUsd: finished.costUsd,
     };
   };

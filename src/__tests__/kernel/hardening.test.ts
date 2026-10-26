@@ -292,6 +292,45 @@ describe('subflow', () => {
     expect(childAgentRuns).toBeLessThanOrEqual(1);
   });
 
+  it("adopts the child's tree digest with its verdict, so a later node is measured, not distrusted", async () => {
+    const repo = path.join(tmp, 'sub-repo');
+    fs.mkdirSync(repo, { recursive: true });
+    execSync('git init -q -b main', { cwd: repo, stdio: 'pipe' });
+    execSync('git config user.email t@t.com', { cwd: repo, stdio: 'pipe' });
+    execSync('git config user.name T', { cwd: repo, stdio: 'pipe' });
+    fs.writeFileSync(path.join(repo, 'seed.txt'), 'seed\n');
+    execSync('git add -A && git commit -qm init', { cwd: repo, stdio: 'pipe' });
+
+    const run = async (edit: boolean) => {
+      const kernel = registerDefaultExecutors(new RunKernel({ nodeTimeoutMs: 20_000 }));
+      kernel.setExecutor('agent', async () => {
+        if (edit) fs.writeFileSync(path.join(repo, 'after.txt'), 'edited\n');
+        return { ok: true };
+      });
+      const child: WorkflowSpec = {
+        name: 'child',
+        nodes: [{ id: 'check', kind: 'verifier', contract: { checks: [{ spec: { type: 'command', cmd: 'true' } }] } }],
+      };
+      const rec = await kernel.start({
+        name: 'parent',
+        cwd: repo,
+        nodes: [
+          { id: 'sub', kind: 'subflow', workflow: child },
+          { id: 'after', kind: 'agent', prompt: 'x' },
+        ],
+      });
+      return (await kernel.wait(rec.runId))!;
+    };
+
+    const untouched = await run(false);
+    expect(untouched.outcomeReason).toBeUndefined();
+    expect(untouched.outcome).toBe('verified');
+    // And measuring still catches a real edit after the child's checks.
+    const edited = await run(true);
+    expect(edited.outcome).toBe('unverified');
+    expect(edited.outcomeReason).toMatch(/changed afterwards/);
+  }, 30_000);
+
   it('hands the parent secrets down to the child', async () => {
     // Secrets are the custom-engine configs the spec deliberately cannot carry;
     // a child that does not get them runs its agents on a different engine than
