@@ -155,18 +155,27 @@ program
 
     const server = new EmbeddedServer(manager, parseInt(opts.port), opts.host);
     const port = await server.start();
-    if (port) {
-      console.log(`Standalone server running on http://127.0.0.1:${port}`);
-      console.log('Press Ctrl+C to stop');
-      const shutdown = async () => {
-        await server.stop();
-        if (routerStartedPort !== null) await router.stop().catch(() => {});
-        await manager.shutdown();
-        process.exit(0);
-      };
-      process.on('SIGINT', shutdown);
-      process.on('SIGTERM', shutdown);
+    // start() resolves 0 when the port is taken, which lets the plugin defer to
+    // a server already running. Here nothing else would serve, and the router
+    // and the manager's timer would keep the process alive doing nothing.
+    if (!port) {
+      console.error(
+        `Error: port ${opts.port} is already in use; stop the server holding it or pick another port with -p`,
+      );
+      if (routerStartedPort !== null) await router.stop().catch(() => {});
+      await manager.shutdown();
+      process.exit(1);
     }
+    console.log(`Standalone server running on http://127.0.0.1:${port}`);
+    console.log('Press Ctrl+C to stop');
+    const shutdown = async () => {
+      await server.stop();
+      if (routerStartedPort !== null) await router.stop().catch(() => {});
+      await manager.shutdown();
+      process.exit(0);
+    };
+    process.on('SIGINT', shutdown);
+    process.on('SIGTERM', shutdown);
   });
 
 // Session commands
