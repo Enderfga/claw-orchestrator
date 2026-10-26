@@ -51,9 +51,10 @@ Deltas rather than totals means summing a query window gives that window's spend
 without double-counting.
 
 Every send funnels through `SessionManager.sendMessage`, so council, fanout,
-autoloop, workflow agent nodes and verifier fixers, the ACP server, the
-OpenAI-compatible bridge, the MCP server and the CLI are all covered by the same
-hook. `parent` is what lets you reassemble a multi-agent run:
+autoloop, workflow agent nodes and verifier fixers, cross-session inbox
+deliveries, the ACP server, the OpenAI-compatible bridge, the MCP server and the
+CLI are all covered by the same hook. `parent` is what lets you reassemble a
+multi-agent run:
 
 ```bash
 clawo runs --parent council-mh3k2x1a-1a2b3c4d

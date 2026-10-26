@@ -1289,6 +1289,16 @@ export class SessionManager {
   }
 
   async sendMessage(name: string, message: string, options: SendOptions = {}): Promise<SendResult> {
+    return this._sendTurn(name, message, options);
+  }
+
+  /** `onDispatch` fires once the turn has passed every check and is handed to the engine. */
+  private async _sendTurn(
+    name: string,
+    message: string,
+    options: SendOptions,
+    onDispatch?: () => void,
+  ): Promise<SendResult> {
     const managed = this._getSession(name);
 
     // Per-session serialization. Two concurrent sendMessage() calls on the
@@ -1388,6 +1398,7 @@ export class SessionManager {
         // A session handed off from another engine carries that conversation in
         // front of its first message; after that the engine holds it itself.
         const outgoing = managed.pendingHandoff ? `${managed.pendingHandoff}\n\n${message}` : message;
+        onDispatch?.();
         const result = await managed.session.send(outgoing, sendOpts);
 
         // Update the resume-capable session ID if available (skip disk persist
@@ -3386,7 +3397,31 @@ export class SessionManager {
       getSession: (name) => this.sessions.get(name),
       exists: (name) => this.sessions.has(name),
       allNames: () => this.sessions.keys(),
+      deliver: (name, text) => this._deliverInboxTurn(name, text),
     };
+  }
+
+  /**
+   * An inbox delivery is a turn like any other — capped, written to the run
+   * ledger and kept in the handoff record — that its sender does not wait on.
+   * Resolves once the turn reaches the engine; a refusal before that (spend cap,
+   * session stopped) rejects so the inbox queues the message instead. A failure
+   * after it belongs to the turn and is recorded with it.
+   */
+  private _deliverInboxTurn(name: string, text: string): Promise<void> {
+    return new Promise((resolve, reject) => {
+      let dispatched = false;
+      this._sendTurn(name, text, {}, () => {
+        dispatched = true;
+        resolve();
+      }).then(
+        () => resolve(),
+        (err: Error) => {
+          if (!dispatched) reject(err);
+          else this.logger.warn(`[SessionManager] inbox turn on '${name}' failed: ${err.message}`);
+        },
+      );
+    });
   }
 
   async sessionSendTo(

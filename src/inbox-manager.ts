@@ -16,6 +16,14 @@ export interface SessionLookup {
   getSession(name: string): { session: ISession } | undefined;
   exists(name: string): boolean;
   allNames(): Iterable<string>;
+  /**
+   * Start a turn carrying `text` on the named session without waiting for its
+   * reply. Resolves once the turn has reached the engine; rejects when it could
+   * not start, which leaves the message queued. SessionManager supplies this so
+   * an inbox turn is capped and recorded like any other; without it the text is
+   * written to the session directly.
+   */
+  deliver?(name: string, text: string): Promise<void>;
 }
 
 export class InboxManager {
@@ -121,7 +129,7 @@ export class InboxManager {
     if (unread.length === 0) return 0;
 
     const formatted = unread.map((m) => this.wrapCrossSessionMessage(m)).join('\n\n');
-    await managed.session.send(formatted, { waitForComplete: false });
+    await this._send(name, managed.session, formatted, lookup);
     for (const m of unread) m.read = true;
     return unread.length;
   }
@@ -132,6 +140,11 @@ export class InboxManager {
   }
 
   // ── Private ─────────────────────────────────────────────────────────────
+
+  private async _send(name: string, session: ISession, text: string, lookup: SessionLookup): Promise<void> {
+    if (lookup.deliver) await lookup.deliver(name, text);
+    else await session.send(text, { waitForComplete: false });
+  }
 
   /**
    * Three outcomes, because two of them are not each other's negation: a name
@@ -156,7 +169,7 @@ export class InboxManager {
     // If session is idle, deliver directly
     if (!managed.session.isBusy && managed.session.isReady) {
       try {
-        await managed.session.send(this.wrapCrossSessionMessage(msg), { waitForComplete: false });
+        await this._send(sessionName, managed.session, this.wrapCrossSessionMessage(msg), lookup);
         msg.read = true;
         return 'delivered';
       } catch {
