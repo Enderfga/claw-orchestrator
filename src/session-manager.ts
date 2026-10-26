@@ -1416,6 +1416,7 @@ export class SessionManager {
         const usage = {
           tokensIn: Math.max(0, after.tokensIn - ledgerBefore.tokensIn),
           tokensOut: Math.max(0, after.tokensOut - ledgerBefore.tokensOut),
+          costUsd: Math.max(0, after.costUsd - ledgerBefore.costUsd),
         };
 
         // Update the resume-capable session ID if available (skip disk persist

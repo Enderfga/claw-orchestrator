@@ -21,7 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `unverified` says why.
 - **Workflow `agent` nodes take `appendSystemPrompt`.**
 - **The SDK exports `PersistentAcpSession` and `PersistentCodexAppServerSession`.**
-- **`session_send` returns the turn's `usage`** (`{ tokensIn, tokensOut }`, this turn alone).
+- **`session_send` returns the turn's `usage`** (`{ tokensIn, tokensOut, costUsd }`, this turn
+  alone), and each fan-out agent result carries its `costUsd`.
 - **The `council` workflow template takes `maxRounds`.**
 - `CITATION.cff` and a Citation section in the README, with the research built on this runtime.
 
@@ -91,6 +92,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rows; nothing wrote them.
 - **`fanout_status` returns `synthesisError`**, so a failed synthesis no longer looks like one
   never requested.
+- **A run's cost includes what its fan-out and council agents spent.** The `fanout` and
+  `council` nodes reported no cost, so `clawo solve` printed only the implementer's spend and a
+  fan-out run read $0; the run ledger's per-turn rows were right.
 - **Starting a council no longer overwrites the project repository's git identity.** A local
   identity is set only when none is configured at any level.
 - **`council_accept` and `council_reject` are recorded on the run**, so `council_status` reports

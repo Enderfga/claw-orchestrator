@@ -81,7 +81,7 @@ Send a message and get the response.
 | `stream`  | boolean |          | Collect the text chunks into `chunks[]` on the result (returned with the final result, not streamed to the caller)                                                                                                                                                                  |
 
 Returns `{ ok, output, sessionId, error?, usage, permissionDenials?, images?, chunks? }`. `usage` is
-`{ tokensIn, tokensOut }` for this turn alone — what it added to the session's running totals, which
+`{ tokensIn, tokensOut, costUsd }` for this turn alone — what it added to the session's running totals, which
 `coding_session_status` reports. `permissionDenials` lists the tool
 calls the engine refused during the turn — `[{ toolName, toolUseId?, input? }]` — and is present only
 when there was at least one. Check it even when `error` is absent: a turn whose tool calls were all

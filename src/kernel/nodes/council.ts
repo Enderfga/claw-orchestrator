@@ -90,6 +90,8 @@ export async function executeCouncilNode(node: NodeSpec, ctx: NodeContext): Prom
       session.finalSummary ??
       session.responses.map((r) => `## ${r.agent} (round ${r.round})\n\n${r.content}`).join('\n\n'),
     error: ok ? undefined : 'council ended in error',
+    // What the agents spent, so the run's cost includes it.
+    costUsd: session.costUsd,
     consensusVotes,
     data: {
       task: session.task,

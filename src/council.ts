@@ -470,6 +470,11 @@ export class Council extends EventEmitter {
    * from a rebuilt session. This is what lets them run after a restart, which
    * the in-memory registry made impossible.
    */
+  /** Add one send's cost to the council's total. */
+  private _charge(result: SendResult): void {
+    if (this._session && result.usage) this._session.costUsd = (this._session.costUsd ?? 0) + result.usage.costUsd;
+  }
+
   adoptSession(session: CouncilSession): void {
     this._session = session;
   }
@@ -566,6 +571,7 @@ export class Council extends EventEmitter {
             this.emitEvent({ type: 'agent-chunk', sessionId, round, agent: agent.name, content: chunk });
           },
         });
+        this._charge(result);
 
         content = result.output;
 
@@ -589,6 +595,7 @@ export class Council extends EventEmitter {
               'Stop all tool calls. Output your complete report now, including your consensus vote [CONSENSUS: YES] or [CONSENSUS: NO].',
               { timeout: FOLLOWUP_TIMEOUT_MS, parentRunId: sessionId },
             );
+            this._charge(followup);
             if (followup.output.trim().length > 0) {
               content = followup.output;
               if (hasConsensusMarker(content) || content.length >= MIN_COMPLETE_RESPONSE_LENGTH) break;

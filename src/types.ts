@@ -715,11 +715,11 @@ export interface SendResult {
    */
   images?: GeneratedImage[];
   /**
-   * Tokens this send added to the session's running totals — `getStats()` accumulates over the
-   * session, so it cannot say what one turn cost. Measured inside the per-session send chain, so a
-   * send queued behind another is not charged for it.
+   * Tokens and cost this send added to the session's running totals — `getStats()` accumulates
+   * over the session, so it cannot say what one turn cost. Measured inside the per-session send
+   * chain, so a send queued behind another is not charged for it.
    */
-  usage?: { tokensIn: number; tokensOut: number };
+  usage?: { tokensIn: number; tokensOut: number; costUsd: number };
 }
 
 export interface GeneratedImage {
@@ -966,6 +966,8 @@ export interface CouncilSession {
   compactContext?: string;
   /** Why the run failed, when it did — a refused task or directory, a worktree that could not be made. */
   error?: string;
+  /** Every agent turn summed, as each send measured it — the council's share of its run's cost. */
+  costUsd?: number;
 }
 
 // ─── Council Post-Processing Types ─────────────────────────────────────────

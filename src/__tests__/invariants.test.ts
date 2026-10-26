@@ -44,6 +44,8 @@ interface Observed {
 }
 
 let observed: Observed[] = [];
+/** What each fake turn costs; tests that measure spend set it, the rest leave it at 0. */
+let fakeTurnCostUsd = 0;
 let mgr: SessionManager;
 let wfDir: string;
 
@@ -81,6 +83,7 @@ class FakeSession extends EventEmitter implements Partial<ISession> {
   async send(message: string): Promise<{ output: string; events: never[] }> {
     this.stats.turns++;
     this.stats.turnsSucceeded++;
+    this.stats.costUsd += fakeTurnCostUsd;
     const record = observed.find((o) => o.config.name === this.config.name);
     record?.messages.push(message);
     // An agent that is allowed to write, writes. What stops it is engine-specific,
@@ -103,7 +106,7 @@ class FakeSession extends EventEmitter implements Partial<ISession> {
     return { ...this.stats };
   }
   getCost(): { totalCostUsd: number; totalUsd: number } {
-    return { totalCostUsd: 0, totalUsd: 0 };
+    return { totalCostUsd: this.stats.costUsd, totalUsd: this.stats.costUsd };
   }
   getHistory(): never[] {
     return [];
@@ -232,6 +235,7 @@ function holdLock(
 
 beforeEach(() => {
   observed = [];
+  fakeTurnCostUsd = 0;
   wfDir = fs.mkdtempSync(path.join(os.tmpdir(), 'clawo-inv-wf-'));
   process.env.CLAWO_WF_DIR = wfDir;
   mgr = makeManager();
@@ -543,6 +547,30 @@ describe('an ACP agent is named on every surface that can start one', () => {
     const nodes = spec.nodes as Array<{ id: string; acpAgent?: string; agents?: Array<{ acpAgent?: string }> }>;
     expect(nodes.find((n) => n.id === 'implement')!.acpAgent).toBe('dsh');
     expect(nodes.find((n) => n.id === 'triage')!.agents![0]!.acpAgent).toBe('kimi-code');
+  });
+
+  it("counts a fan-out's and a council's agent spend in the run's cost", { timeout: 60_000 }, async () => {
+    fakeTurnCostUsd = 0.25;
+    const cwd = gitRepo();
+    const fan = await mgr.fanoutStart({
+      task: 'T',
+      projectDir: cwd,
+      agents: [{ name: 'a' }, { name: 'b' }],
+      synthesize: true,
+    });
+    await wait(fan.id);
+    const { loadRun } = await import('../kernel/store.js');
+    // two agents and the synthesis pass
+    expect(loadRun(fan.id)!.costUsd).toBeCloseTo(0.75);
+
+    const council = await mgr.councilStart('build it', {
+      agents: [{ name: 'solo', emoji: '', persona: 'P' }],
+      maxRounds: 1,
+      projectDir: cwd,
+    });
+    await wait(council.id);
+    expect(loadRun(council.id)!.costUsd).toBeGreaterThanOrEqual(0.25);
+    fs.rmSync(cwd, { recursive: true, force: true });
   });
 
   it('ultrareview refuses acp before starting any reviewer', async () => {

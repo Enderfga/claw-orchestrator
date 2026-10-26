@@ -98,6 +98,8 @@ export interface FanoutAgentResult {
   output: string;
   error?: string;
   durationMs: number;
+  /** What this agent's turn cost, as its send measured it. */
+  costUsd?: number;
 }
 
 export interface FanoutSession {
@@ -111,6 +113,8 @@ export interface FanoutSession {
   synthesis?: string;
   /** Set when synthesis was requested but failed, so callers can tell it apart from "not requested". */
   synthesisError?: string;
+  /** Every agent turn and the synthesis pass, summed — the fan-out's share of its run's cost. */
+  costUsd?: number;
   error?: string;
 }
 
@@ -233,6 +237,7 @@ export class Fanout {
         output: result.output,
         error: ok ? undefined : result.error || 'engine did not report the turn as succeeded',
         durationMs: Date.now() - start,
+        ...(result.usage ? { costUsd: this._charge(result.usage.costUsd) } : {}),
       };
     } catch (err) {
       return {
@@ -259,6 +264,12 @@ export class Fanout {
    * before/after pair that turns out to be the same reference silently compares
    * a value against itself and always reports success.
    */
+  /** Add one send's cost to the fan-out's total and hand it back. */
+  private _charge(costUsd: number): number {
+    this.session.costUsd = (this.session.costUsd ?? 0) + costUsd;
+    return costUsd;
+  }
+
   private _stats(name: string): { turns: number; turnsSucceeded: number } | undefined {
     if (!this.manager.getStatus) return undefined;
     try {
@@ -293,6 +304,7 @@ export class Fanout {
         timeout: this.config.agentTimeoutMs ?? DEFAULT_AGENT_TIMEOUT_MS,
         parentRunId: this.session.id,
       });
+      if (result.usage) this._charge(result.usage.costUsd);
       // `sendMessage` reports a turn-level failure (auth loss mid-turn, invalid
       // model, rate-limit exhaustion) by RETURNING `{error}`, not by throwing —
       // so the catch below never saw those and `result.output` (the error text,

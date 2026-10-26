@@ -71,6 +71,8 @@ export async function executeFanoutNode(node: NodeSpec, ctx: NodeContext): Promi
     ok: session.status !== 'error' && failures.length < session.results.length,
     output: body,
     error: failures.length > 0 ? `${failures.length}/${session.results.length} agent(s) failed` : undefined,
+    // What the agents and the synthesis spent, so the run's cost includes it.
+    costUsd: session.costUsd,
     data: {
       task: session.task,
       agentCount: session.agentCount,
