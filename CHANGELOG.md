@@ -84,6 +84,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fixed list, so it used to be left running.
 - **Codex, codex-app and ACP stderr is redacted** before it reaches the session log, as every
   other engine's already was.
+- **Each ultraapp build and each cosmetic patch gets its own version.** A patch is made on a
+  copy and can be promoted (it is deployed first); a rebuild no longer overwrites the deployed
+  version; the live version is the one deployed or promoted last, and `delete` removes every
+  deployed version.
+- **Promoting an ultraapp version uses the configured runtime**, so it works on the default host
+  runtime.
+- **Ultraapp runs created before a restart are picked up from disk** instead of reported as
+  unknown.
+- **Ultraapp uploads up to the 100 MiB limit are accepted** over HTTP and from the dashboard.
+- **Ultraapp, its narrator and the dashboard council preset use the `opus` / `haiku` aliases**
+  instead of pinned older model ids.
+- The documented `scripts/test-ultraapp-integration.ts --trace=…` replay command runs again.
 - **`clawo serve` exits 1 when its port is already in use**, instead of running without serving.
 - **`clawo session-send --stream` says in `--help` that it has no effect**, and no longer sends an
   unused field: `/session/send` answers when the turn ends.
