@@ -155,8 +155,10 @@ export function spawnEngine(
   // it, so a session started by a server ran in the server's directory.
   const env = cwd ? { ...(spawnOptions.env ?? process.env), PWD: resolvePath(cwd) } : (spawnOptions.env ?? process.env);
   if (launcher && launcher.length > 0) {
+    // The launcher is what gets spawned, so it decides whether this argv goes
+    // through cmd.exe.
     const [head, ...rest] = launcher;
-    return crossSpawn(head, [...rest, bin, ...args], { ...spawnOptions, env });
+    return crossSpawn(head, prepareArgs(head, [...rest, bin, ...args], env, cwd), { ...spawnOptions, env });
   }
   return crossSpawn(bin, prepareArgs(bin, args, env, cwd), { ...spawnOptions, env });
 }

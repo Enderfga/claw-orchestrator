@@ -218,7 +218,7 @@ import {
   overrideModelPricing,
   ENGINE_BINARY_NAMES,
 } from './types.js';
-import { resolveAlias, isClaudeModel, lookupModel } from './models.js';
+import { resolveAlias, isClaudeModel, lookupModel, resolveEngineAndModel } from './models.js';
 import { isAgyConversationId } from './agy-conversation.js';
 import { Council } from './council.js';
 import { Fanout, type FanoutConfig, type FanoutSession, type FanoutAgentSpec } from './fanout.js';
@@ -566,6 +566,18 @@ function validateAutoloopRole(
   // agent an `acp` engine starts, so the session could only fail later.
   if (resolved === 'acp') throw new Error(`${label} engine 'acp' is not supported by Autoloop`);
   return resolved;
+}
+
+/**
+ * The plugin's `defaultModel` for a session on `engine` that names no model, or
+ * undefined to let the engine run its own default. Engines do not share a model
+ * namespace, so the default goes only to an engine that runs it; the claude
+ * engine takes any model, proxying a non-Claude one to the gateway.
+ */
+function defaultModelFor(engine: EngineType, defaultModel: string | undefined): string | undefined {
+  if (!defaultModel || engine === 'claude') return defaultModel;
+  const owner = resolveEngineAndModel(defaultModel).engine;
+  return owner === (engine === 'codex-app' ? 'codex' : engine) ? defaultModel : undefined;
 }
 
 function validateAutoloopEffort(role: AutoloopRoleName, effort: EffortLevel | undefined): void {
@@ -1195,6 +1207,7 @@ export class SessionManager {
     const persisted = skipPersist ? undefined : this.persistedSessions.get(name);
     // Unified: only use resumeSessionId (claudeResumeId is an internal alias, not exposed)
     const resumeId = config.resumeSessionId ?? persisted?.claudeSessionId;
+    const engine: EngineType = config.engine || persisted?.engine || 'claude';
 
     // ORDER IS LOAD-BEARING — do not "fix" it by moving `...config` up.
     //
@@ -1211,7 +1224,7 @@ export class SessionManager {
       cwd: config.cwd || persisted?.cwd || process.cwd(),
       permissionMode: config.permissionMode || this.pluginConfig.defaultPermissionMode,
       effort: config.effort || this.pluginConfig.defaultEffort,
-      model: config.model || persisted?.model || this.pluginConfig.defaultModel,
+      model: config.model || persisted?.model || defaultModelFor(engine, this.pluginConfig.defaultModel),
       sandboxMode: config.sandboxMode ?? persisted?.sandboxMode,
       autoCompactPercent: config.autoCompactPercent ?? persisted?.autoCompactPercent,
       chrome: config.chrome ?? persisted?.chrome,
@@ -1224,10 +1237,6 @@ export class SessionManager {
       fullConfig.resolvedModel = this._resolveModel(fullConfig.model, fullConfig.modelOverrides);
     }
 
-    // Auto-inject proxy baseUrl for non-Claude models on the claude engine.
-    // Starts a local proxy server that converts Anthropic → OpenAI format
-    // and forwards to the OpenClaw gateway. Zero config required.
-    const engine: EngineType = fullConfig.engine || persisted?.engine || 'claude';
     // Write the resolved engine back so downstream consumers of the managed
     // config (agy resume-id lookups, _persistSession's registry entry) see the
     // real engine even when it came from the persisted registry.
@@ -1236,6 +1245,9 @@ export class SessionManager {
     // Circuit breaker — reject early if engine is in backoff
     this._circuitBreaker.check(engine);
 
+    // Auto-inject proxy baseUrl for non-Claude models on the claude engine.
+    // Starts a local proxy server that converts Anthropic → OpenAI format
+    // and forwards to the OpenClaw gateway. Zero config required.
     if (engine === 'claude' && fullConfig.resolvedModel && !fullConfig.baseUrl) {
       if (!isClaudeModel(fullConfig.resolvedModel!)) {
         const proxyPort = await this._ensureProxyServer();

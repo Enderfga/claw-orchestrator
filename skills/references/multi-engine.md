@@ -127,6 +127,7 @@ Wraps `codex app-server --listen stdio:// --enable goals` as a long-running JSON
 - Real-time streaming via `item/agentMessage/delta` notifications
 - Cumulative token tracking from `thread/tokenUsage/updated` notifications. The same notification's `last` breakdown and `modelContextWindow` drive `contextPercent`, so it reports live occupancy against the window the server enforces rather than a running total over the model's published window
 - `appendSystemPrompt` is placed at the top of the first message of a new thread (app-server has no system-prompt flag); a resumed thread already carries it
+- Reasoning effort: the session `effort` opens or resumes the thread with `config: { model_reasoning_effort }`, so the goal loop's own turns use it too, and each `turn/start` carries `effort` (the per-send override, else the session's), so `setEffort` reaches the next turn. The levels are the same as `codex`'s; `auto` passes nothing, and codex keeps the last effort it was sent for the turns after it
 - Goals through the typed RPCs `thread/goal/set` / `get` / `clear`: setting an objective starts the server's own turn loop, which runs until the goal is `complete`, `budgetLimited`, `blocked`, `usageLimited` or `paused`. Each change arrives as `thread/goal/updated`. The `codex_goal_*` tools wrap these; the kernel's `goal` node drives them for unattended runs ([workflow.md](./workflow.md#goal))
 - `error` notifications are read as `{ error: { message, codexErrorInfo }, willRetry }`. The session keeps the last one (`lastError`, with `codexErrorInfo` as a name such as `serverOverloaded`) and emits it as `codex:error`; an error notification never throws when nothing listens for errors
 - v2 RPC tools (Codex 0.137): `codex_interrupt` (`turn/interrupt`), `codex_steer` (`turn/steer`, including into a turn the goal loop started), `codex_fork` (`thread/fork`), `codex_rollback` (`thread/rollback`), `codex_models` (`model/list`), `codex_thread_list` (`thread/list`). A `turn/completed` with `status: 'failed'` rejects the turn and increments `toolErrors`.
@@ -411,7 +412,11 @@ without a custom engine. The launcher is the caller's own command, at the same
 trust level as a contract's command check, which the HTTP API also accepts: set
 it through the SessionManager API, the `session_start` tool, `/session/start` or a
 workflow spec (the `goal` node's `launcher`, which `workflow_start` and
-`clawo goal --launcher` also take).
+`clawo goal --launcher` also take). On Windows, a launcher that runs through
+`cmd.exe` (a `.cmd` or `.bat`) is held to the same argv rule as an engine shim: an
+argument with a newline or an unbalanced double quote is refused before spawning,
+so an engine that takes its prompt on the command line needs a launcher that is a
+real executable.
 
 ## ISession Interface
 
@@ -523,6 +528,8 @@ Two protocol modes:
 - **Persistent** (`persistent: true`) — long-running subprocess with stream-json I/O over stdin/stdout (like Claude Code). It keeps the conversation; `args.resume` passes `resumeSessionId` when a session is restarted
 - **One-shot** (`persistent: false`, default) — new process spawned per `send()`, with the message on the command line right after `args.print`. Nothing carries over between sends. On Windows, a CLI that runs through `cmd.exe` (an npm `.cmd` shim) cannot take a message containing a newline or an unbalanced double quote this way; use persistent mode
 
+`appendSystemPrompt` goes through `args.appendSystemPrompt` when the config maps it. Without that flag it is put at the top of the first message of a conversation: every message in one-shot mode, the first one in persistent mode unless the session resumed through `args.resume`.
+
 `sandboxMode: 'read-only'` needs both `args.permissionMode` and a `permissionModes` entry for the session's permission mode that maps to the CLI's read-only or plan value. Without them the CLI is never run writable: a persistent session refuses to start, and a one-shot session refuses every send.
 
 ### CustomEngineConfig
@@ -542,8 +549,9 @@ Two protocol modes:
 
 Cost is the reported tokens priced at the registry rate for the session's `model`,
 or at its `pricingOverrides` entry when it has one. An unregistered model, or no
-model, is priced at the `claude-sonnet-4-6` rate, so `pricing` applies only to an
-unregistered model, and only when that fallback rate has been overridden to zero.
+model, is priced at `pricing`, and at the `claude-sonnet-4-6` rate when the engine
+sets none. With no model, a `pricingOverrides` entry for `claude-sonnet-4-6` still
+takes precedence over `pricing`.
 
 ### args field
 
@@ -558,7 +566,7 @@ unregistered model, and only when that fallback rate has been overridden to zero
 | `permissionMode`         | `"--permission-mode"`          | Permission mode flag                       |
 | `model`                  | `"--model"`                    | Model selection flag                       |
 | `systemPrompt`           | `"--system-prompt"`            | System prompt override flag                |
-| `appendSystemPrompt`     | `"--append-system-prompt"`     | Append system prompt (persistent only)     |
+| `appendSystemPrompt`     | `"--append-system-prompt"`     | Append system prompt flag                  |
 | `maxTurns`               | `"--max-turns"`                | Max agent turns flag                       |
 | `resume`                 | `"--resume"`                   | Session resume flag (persistent only)      |
 | `verbose`                | `"--verbose"`                  | Verbose output flag (persistent only)      |

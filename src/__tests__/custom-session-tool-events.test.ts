@@ -3,9 +3,21 @@
  * block arrives twice: on `content_block_start` with an empty input, then as an
  * `assistant` event with the same id and the full input.
  */
-import { describe, it, expect } from 'vitest';
-import { PersistentCustomSession } from '../persistent-custom-session.js';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { EventEmitter } from 'node:events';
+import { Readable } from 'node:stream';
 import { SESSION_EVENT } from '../constants.js';
+import type { CustomEngineConfig } from '../types.js';
+
+const mockSpawn = vi.fn();
+const mockKillTree = vi.fn();
+vi.mock('../engine-spawn.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../engine-spawn.js')>()),
+  spawnEngine: (...args: unknown[]) => mockSpawn(...args),
+  killEngineTree: (...args: unknown[]) => mockKillTree(...args),
+}));
+
+const { PersistentCustomSession } = await import('../persistent-custom-session.js');
 
 describe('PersistentCustomSession tool events', () => {
   it('reports each tool call once, with its input', () => {
@@ -36,5 +48,133 @@ describe('PersistentCustomSession tool events', () => {
       { tool: { name: 'Bash', input: { command: 'echo one' } } },
       { tool: { name: 'Bash', input: { command: 'echo two' } } },
     ]);
+  });
+});
+
+function createMockProc() {
+  const proc = new EventEmitter() as EventEmitter & {
+    stdout: Readable;
+    stderr: Readable;
+    stdin: { writable: boolean; write: (s: string, cb?: (e?: Error) => void) => boolean; end: () => void };
+    written: string[];
+    kill: ReturnType<typeof vi.fn>;
+    unref: () => void;
+    pid: number;
+    exitCode: number | null;
+    killed: boolean;
+  };
+  proc.stdout = new Readable({ read() {} });
+  proc.stderr = new Readable({ read() {} });
+  proc.written = [];
+  proc.stdin = {
+    writable: true,
+    write(s: string, cb?: (e?: Error) => void) {
+      proc.written.push(s);
+      cb?.();
+      return true;
+    },
+    end: () => undefined,
+  };
+  proc.kill = vi.fn();
+  proc.unref = () => undefined;
+  proc.pid = 5150;
+  proc.exitCode = null;
+  proc.killed = false;
+  return proc;
+}
+
+// The charter of a council seat travels in `appendSystemPrompt`, so a custom
+// engine has to deliver it whichever mode it runs in: through the configured
+// flag, or else at the top of the first message of each conversation.
+describe('PersistentCustomSession — appendSystemPrompt', () => {
+  beforeEach(() => mockSpawn.mockReset());
+
+  const oneShot = (args: CustomEngineConfig['args']): CustomEngineConfig => ({ name: 'one-shot-cli', bin: 'x', args });
+
+  async function runOneShot(engine: CustomEngineConfig, message: string): Promise<string[]> {
+    const proc = createMockProc();
+    mockSpawn.mockReturnValueOnce(proc);
+    const session = new PersistentCustomSession({
+      name: 'seat',
+      cwd: process.cwd(),
+      customEngine: engine,
+      appendSystemPrompt: 'SEAT RULES',
+    });
+    await session.start();
+    const turn = session.send(message, { waitForComplete: true });
+    setTimeout(() => {
+      proc.stdout.push('done\n');
+      proc.stdout.push(null);
+      setTimeout(() => proc.emit('close', 0), 5);
+    }, 5);
+    await turn;
+    return mockSpawn.mock.calls.at(-1)![1] as string[];
+  }
+
+  it('one-shot: leads every message when the CLI has no flag for it', async () => {
+    const engine = oneShot({ print: '-p' });
+    expect(await runOneShot(engine, 'hi')).toEqual(['-p', 'SEAT RULES\n\n---\n\nhi']);
+    // Nothing carries over between one-shot sends, so each one is a new conversation.
+    expect(await runOneShot(engine, 'again')).toEqual(['-p', 'SEAT RULES\n\n---\n\nagain']);
+  });
+
+  it('one-shot: goes through the configured flag when there is one', async () => {
+    const argv = await runOneShot(oneShot({ print: '-p', appendSystemPrompt: '--append-system-prompt' }), 'hi');
+    expect(argv).toEqual(['-p', 'hi', '--append-system-prompt', 'SEAT RULES']);
+  });
+
+  it('persistent: leads the first message only when the CLI has no flag for it', async () => {
+    const proc = createMockProc();
+    mockSpawn.mockReturnValue(proc);
+    const session = new PersistentCustomSession({
+      name: 'seat',
+      cwd: process.cwd(),
+      customEngine: { name: 'stream-json-cli', bin: 'x', persistent: true, args: {} },
+      appendSystemPrompt: 'SEAT RULES',
+    });
+    const started = session.start();
+    proc.stdout.push(JSON.stringify({ type: 'system', subtype: 'init', session_id: 's1' }) + '\n');
+    await started;
+    await session.send('hi');
+    await session.send('again');
+    const texts = proc.written.map(
+      (line) => (JSON.parse(line) as { message: { content: Array<{ text: string }> } }).message.content[0].text,
+    );
+    expect(texts).toEqual(['SEAT RULES\n\n---\n\nhi', 'again']);
+  });
+});
+
+// A plain kill ends only the direct child: under a launcher, or behind a
+// Windows `.cmd` shim, the CLI itself would outlive its turn.
+describe('PersistentCustomSession — one-shot cleanup', () => {
+  beforeEach(() => {
+    mockSpawn.mockReset();
+    mockKillTree.mockReset();
+  });
+
+  const engine: CustomEngineConfig = { name: 'one-shot-cli', bin: 'x', args: { print: '-p' } };
+
+  it('ends the whole process tree when a turn times out', async () => {
+    const proc = createMockProc();
+    mockSpawn.mockReturnValue(proc);
+    const session = new PersistentCustomSession({ name: 'c', cwd: process.cwd(), customEngine: engine });
+    await session.start();
+    await expect(session.send('hi', { waitForComplete: true, timeout: 10 })).rejects.toThrow(
+      /Timeout waiting for one-shot-cli/,
+    );
+    expect(mockKillTree).toHaveBeenCalledWith(proc);
+    expect(proc.kill).not.toHaveBeenCalled();
+  });
+
+  it('ends the whole process tree when stopped mid-turn', async () => {
+    const proc = createMockProc();
+    mockSpawn.mockReturnValue(proc);
+    const session = new PersistentCustomSession({ name: 'c', cwd: process.cwd(), customEngine: engine });
+    await session.start();
+    void session.send('hi', { waitForComplete: true }).catch(() => undefined);
+    await new Promise((r) => setTimeout(r, 5));
+    session.stop();
+    expect(mockKillTree).toHaveBeenCalledWith(proc);
+    expect(proc.kill).not.toHaveBeenCalled();
   });
 });

@@ -19,7 +19,14 @@ import { writeFileSync, unlinkSync, readFileSync, readdirSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
 
-import type { GeneratedImage, SessionConfig, SessionSendOptions, StreamEvent, TurnResult } from './types.js';
+import type {
+  EffortLevel,
+  GeneratedImage,
+  SessionConfig,
+  SessionSendOptions,
+  StreamEvent,
+  TurnResult,
+} from './types.js';
 import { SESSION_EVENT } from './constants.js';
 import { BaseOneShotSession } from './base-oneshot-session.js';
 import { sanitizeSecrets } from './sanitize.js';
@@ -62,6 +69,22 @@ interface CodexTurnFailed {
 interface CodexError {
   type: 'error';
   message?: string;
+}
+
+/**
+ * Codex's `model_reasoning_effort` value for an engine-agnostic effort, or
+ * undefined to leave it to codex. `auto` means "leave it to the engine".
+ *
+ * codex 0.149's ladder is none|minimal|low|medium|high|xhigh|max|ultra, and its
+ * release notes call out `max` and `ultra` as selectable levels. Every level in
+ * our union has a same-named counterpart, so this is a passthrough. codex does
+ * not validate the value — it sends whatever it is given — so an unknown level
+ * would fail at the API, not at spawn. That is why the ladder is listed rather
+ * than guessed.
+ */
+export function codexReasoningEffort(effort: EffortLevel | undefined): string | undefined {
+  const known: ReadonlySet<string> = new Set(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
+  return effort && known.has(effort) ? effort : undefined;
 }
 
 // ─── PersistentCodexSession ─────────────────────────────────────────────────
@@ -321,24 +344,11 @@ export class PersistentCodexSession extends BaseOneShotSession {
   /**
    * Map the engine-agnostic `effort` to Codex's reasoning-effort config override
    * (`-c model_reasoning_effort=<level>`), which both `exec` and `exec resume`
-   * accept. `auto` and `ultracode` are ignored — `auto` means "leave it to the
-   * engine", and `ultracode` is a Claude-only setting, not an effort level.
+   * accept.
    */
   private _reasoningEffortArgs(): string[] {
-    const e = this.options.effort;
-    if (!e || e === 'auto') return [];
-    // codex 0.149's ladder is none|minimal|low|medium|high|xhigh|max|ultra, and
-    // its release notes call out `max` and `ultra` as selectable levels. Every
-    // level in our union now has a same-named counterpart, so this is a
-    // passthrough. It used to fold `max` down to `xhigh`, which was correct
-    // when `max` did not exist and is a silent downgrade now.
-    //
-    // `-c` values are not validated at parse time — codex prints
-    // `reasoning effort: <whatever>` and sends it — so an unknown level fails
-    // at the API, not at spawn. That is why the ladder is listed rather than
-    // guessed.
-    const known: ReadonlySet<string> = new Set(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
-    return known.has(e) ? ['-c', `model_reasoning_effort=${e}`] : [];
+    const e = codexReasoningEffort(this.options.effort);
+    return e ? ['-c', `model_reasoning_effort=${e}`] : [];
   }
 
   /**

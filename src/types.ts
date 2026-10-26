@@ -236,8 +236,8 @@ export interface CustomEngineConfig {
   permissionModes?: Record<string, string>;
 
   /**
-   * Default pricing per 1M tokens (for cost estimation when model is unknown).
-   * Falls back to { input: 0, output: 0 } if omitted.
+   * Pricing per 1M tokens for a model the registry cannot price: an unregistered
+   * one, or none. Without it such a model is priced at the claude-sonnet-4-6 rate.
    */
   pricing?: { input: number; output: number; cached?: number };
 
