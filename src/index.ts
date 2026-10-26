@@ -604,11 +604,12 @@ const plugin = {
 
     registerTool({
       name: 'session_list',
-      description: 'List all active coding sessions',
+      description:
+        'List the active coding sessions, and the persisted ones that a session_start under the same name resumes',
       parameters: { type: 'object', properties: {} },
       execute: async (_id) => {
-        if (!manager) return { ok: true, sessions: [], persisted: [] };
-        return { ok: true, sessions: manager.listSessions(), persisted: manager.listPersistedSessions() };
+        const m = getManager();
+        return { ok: true, sessions: m.listSessions(), persisted: m.listPersistedSessions() };
       },
     });
 
@@ -2185,10 +2186,7 @@ const plugin = {
       name: 'autoloop_list',
       description: 'List the v2 autoloop runs recorded on this machine, running and finished, newest first.',
       parameters: { type: 'object', properties: {} },
-      execute: async () => {
-        if (!manager) return { ok: true, runs: [] };
-        return { ok: true, runs: getManager().autoloopList() };
-      },
+      execute: async () => ({ ok: true, runs: getManager().autoloopList() }),
     });
 
     // ─── Tool: autoloop_reset_agent ──────────────────────────────

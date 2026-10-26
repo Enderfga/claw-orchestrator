@@ -383,6 +383,36 @@ describe('plugin tool registration', () => {
     }
   });
 
+  // Both lists come from disk — the resume registry and the durable run store —
+  // so a process that has run no other tool yet still has them to report.
+  it('session_list and autoloop_list report persisted state on a fresh process', async () => {
+    // One registration each: the first call through either one starts its manager.
+    const forSessions = collectRegistration();
+    const forLoops = collectRegistration();
+    const tool = (registration: typeof forSessions, name: string) => registration.tools.find((t) => t.name === name)!;
+    const persisted = vi
+      .spyOn(SessionManager.prototype, 'listPersistedSessions')
+      .mockReturnValue([{ name: 'kept' }] as never);
+    const runs = vi.spyOn(SessionManager.prototype, 'autoloopList').mockReturnValue([{ runId: 'loop-1' }] as never);
+    const previousNoServer = process.env.CLAWO_NO_EMBEDDED_SERVER;
+    process.env.CLAWO_NO_EMBEDDED_SERVER = '1';
+    try {
+      expect(await tool(forSessions, 'session_list').execute('l', {})).toMatchObject({
+        details: { ok: true, sessions: [], persisted: [{ name: 'kept' }] },
+      });
+      expect(await tool(forLoops, 'autoloop_list').execute('a', {})).toMatchObject({
+        details: { ok: true, runs: [{ runId: 'loop-1' }] },
+      });
+    } finally {
+      forSessions.services[0]?.stop();
+      forLoops.services[0]?.stop();
+      persisted.mockRestore();
+      runs.mockRestore();
+      if (previousNoServer === undefined) delete process.env.CLAWO_NO_EMBEDDED_SERVER;
+      else process.env.CLAWO_NO_EMBEDDED_SERVER = previousNoServer;
+    }
+  });
+
   it('session_handoff and fanout_start forward the ACP agent they are given', async () => {
     const registration = collectRegistration();
     const tool = (name: string) => registration.tools.find((t) => t.name === name)!;
