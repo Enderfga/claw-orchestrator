@@ -419,6 +419,16 @@ describe('PersistentGrokSession — failure handling', () => {
     await expect(p).rejects.toThrow('You have reached your usage limit for now.');
   });
 
+  // A plain kill ends only the direct child: under a launcher, or behind a
+  // Windows shim, the engine itself would keep running past the deadline.
+  it('ends the whole process tree when a turn times out', async () => {
+    const s = new PersistentGrokSession({ name: 't', cwd: '/tmp', permissionMode: 'bypassPermissions' });
+    await s.start();
+    await expect(s.send('hi', { waitForComplete: true, timeout: 10 })).rejects.toThrow(/Timeout waiting for Grok/);
+    expect(mockKillTree).toHaveBeenCalledWith(mockProc);
+    expect(mockProc.kill).not.toHaveBeenCalled();
+  });
+
   // grok's read-only profile leaves the temp directory writable, so a project
   // there would be writable under a read-only label.
   it('refuses read-only for a project under the temp directory', async () => {

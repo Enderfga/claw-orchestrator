@@ -237,7 +237,7 @@ export class PersistentGrokSession extends BaseOneShotSession {
       const timer = setTimeout(() => {
         if (!settled) {
           settled = true;
-          proc.kill('SIGKILL');
+          killEngineTree(proc);
           reject(new Error('Timeout waiting for Grok response'));
         }
       }, timeout);
