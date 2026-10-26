@@ -91,6 +91,14 @@ export function extractReviewComplete(calls: AgentToolCall[]): ReviewCompletePay
   return { decision: dec as ReviewCompletePayload['decision'], metric, audit_notes, flags };
 }
 
+/** Every `coder_log` / `reviewer_log` message, in order; a blank or non-string one is skipped. */
+export function extractLogMessages(calls: AgentToolCall[], tool: 'coder_log' | 'reviewer_log'): string[] {
+  return calls
+    .filter((c) => c.tool === tool)
+    .map((c) => c.args.message)
+    .filter((m): m is string => typeof m === 'string' && m.trim() !== '');
+}
+
 /** Convenience: find first request_clarification, if any. */
 export function extractClarification(calls: AgentToolCall[]): string | null {
   const m = calls.find((c) => c.tool === 'request_clarification');

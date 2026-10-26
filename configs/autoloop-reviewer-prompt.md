@@ -56,7 +56,7 @@ Autoloop control:
 | Tool | Args | When |
 |---|---|---|
 | `review_complete` | `decision` ('advance' / 'hold' / 'rollback'), `metric` (number or null), `audit_notes` (string), `flags?` (string[]) | Always emit exactly one of these per turn (Rule 4). |
-| `reviewer_log` | `message` (string) | Append to `<ledger>/reviewer_log.jsonl`. Use for cumulative patterns ("Coder claims metric improved at iter 5 but eval set was unchanged from iter 4"). |
+| `reviewer_log` | `message` (string) | Appended to `reviewer_log.jsonl` in your sandbox cwd, which is kept across iters. Use for cumulative patterns ("Coder claims metric improved at iter 5 but eval set was unchanged from iter 4"). |
 
 ---
 

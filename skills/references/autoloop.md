@@ -397,6 +397,7 @@ JSONL, one entry per line, ts-prefixed.
 ├── push_log.jsonl       # every notify_user attempt + channel used
 ├── decisions.jsonl      # runner / dispatcher audit trail (see above)
 ├── chat.jsonl           # chat for all three panes (user, Planner, Coder, Reviewer), replayed by /chat_history
+├── coder_log.jsonl      # one row per Coder `coder_log` call: { ts, iter, message }
 ├── evidence/iter-<n>/   # acceptance-contract bundle, when a contract is configured
 ├── reviewer_sandbox/    # Reviewer cwd; restaged per iter
 │   ├── plan.md          # copy of the workspace-root file
@@ -404,7 +405,7 @@ JSONL, one entry per line, ts-prefixed.
 │   ├── iter-N/          # this iter's directive + diff + eval
 │   ├── prior_verdict.json
 │   ├── reviewer_memory.md   # persistent (frozen-injected at session start)
-│   └── reviewer_log.jsonl   # persistent (Reviewer's append-only audit log)
+│   └── reviewer_log.jsonl   # persistent; one row per Reviewer `reviewer_log` call: { ts, iter, message }
 └── iter/<n>/
     ├── directive.json     # Planner → Coder        (schema_version: 1)
     ├── eval_output.json   # what Coder reported     (schema_version: 1)

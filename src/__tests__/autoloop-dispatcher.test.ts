@@ -1004,6 +1004,52 @@ describe('ClaudeAgentDispatcher — stageReviewSandbox whitelist', () => {
   });
 });
 
+// The role prompts send these entries through a tool rather than a file write —
+// the Coder may not touch `tasks/` at all — so nothing lands unless the
+// dispatcher appends what the tool carries.
+describe('ClaudeAgentDispatcher — coder_log / reviewer_log', () => {
+  const readJsonl = (file: string) =>
+    fs
+      .readFileSync(file, 'utf-8')
+      .trim()
+      .split('\n')
+      .map((l) => JSON.parse(l));
+
+  it('appends each coder_log message to <ledger>/coder_log.jsonl', async () => {
+    const { dispatcher, ledgerDir } = makeDispatcher(
+      {},
+      {
+        sendOutput: [
+          'Tried the cache, no gain.',
+          plannerControl('coder_log', { message: 'LRU cache did not move the metric' }),
+          plannerControl('coder_log', { message: 'next: try batching' }),
+        ].join('\n'),
+      },
+    );
+    await dispatcher.spawnSubagents();
+    await dispatcher.deliver(Msg.directive(0, { goal: 'g', constraints: [], success_criteria: [], max_attempts: 1 }));
+
+    const rows = readJsonl(path.join(ledgerDir, 'coder_log.jsonl'));
+    expect(rows.map((r) => [r.iter, r.message])).toEqual([
+      [0, 'LRU cache did not move the metric'],
+      [0, 'next: try batching'],
+    ]);
+    expect(typeof rows[0].ts).toBe('string');
+  });
+
+  it('appends reviewer_log to the reviewer_log.jsonl kept in the Reviewer sandbox', async () => {
+    const { dispatcher, ledgerDir } = makeDispatcher(
+      {},
+      { sendOutput: plannerControl('reviewer_log', { message: 'eval set unchanged since iter 1' }) },
+    );
+    await dispatcher.spawnSubagents();
+    await dispatcher.deliver(Msg.reviewRequest(2, { iter: 2, ledger_path: ledgerDir, prior_metrics: [] }));
+
+    const rows = readJsonl(path.join(ledgerDir, 'reviewer_sandbox', 'reviewer_log.jsonl'));
+    expect(rows.map((r) => [r.iter, r.message])).toEqual([[2, 'eval set unchanged since iter 1']]);
+  });
+});
+
 describe('ClaudeAgentDispatcher — auto-compact', () => {
   it('fires compact + writes decisions.jsonl when contextPercent crosses threshold', async () => {
     const { dispatcher, calls, ledgerDir } = makeDispatcher(
