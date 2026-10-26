@@ -21,6 +21,7 @@ import { boundedErrorReason } from './sanitize.js';
 import type { EffortLevel, EngineType } from './types.js';
 import { handleChatCompletion } from './openai-compat.js';
 import { getModelList } from './models.js';
+import { MAX_UPLOAD_BODY_BYTES } from './ultraapp/files.js';
 
 import {
   DEFAULT_SERVER_PORT,
@@ -474,12 +475,15 @@ export class EmbeddedServer {
         res.end(JSON.stringify({ ok: false, error: 'Content-Type must be application/json' }));
         return;
       }
+      // An ultraapp upload carries the file itself, base64 inside JSON, so that
+      // one route is sized to the upload limit; every other body stays small.
+      const bodyLimit = /^\/ultraapp\/[^/]+\/files$/.test(path) ? MAX_UPLOAD_BODY_BYTES : MAX_BODY_SIZE;
       let body = '';
       let aborted = false;
       req.on('data', (chunk) => {
         if (aborted) return;
         body += chunk;
-        if (body.length > MAX_BODY_SIZE) {
+        if (body.length > bodyLimit) {
           aborted = true;
           res.writeHead(413, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: false, error: 'Payload too large' }));

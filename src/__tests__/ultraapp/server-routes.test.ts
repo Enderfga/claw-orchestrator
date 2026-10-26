@@ -96,11 +96,13 @@ function fakeManager() {
 describe('ultraapp routes', () => {
   let srv: EmbeddedServer;
   let port: number;
+  let manager: ReturnType<typeof fakeManager>;
 
   beforeEach(async () => {
     process.env.OPENCLAW_SERVER_TOKEN = 'disabled';
     port = await getFreePort();
-    srv = new EmbeddedServer(fakeManager() as unknown as SessionManager, port, '127.0.0.1');
+    manager = fakeManager();
+    srv = new EmbeddedServer(manager as unknown as SessionManager, port, '127.0.0.1');
     await srv.start();
   });
   afterEach(async () => {
@@ -198,6 +200,19 @@ describe('ultraapp routes', () => {
     });
     expect(r.status).toBe(200);
     expect(JSON.parse(r.body).ok).toBe(true);
+  });
+
+  it('POST /ultraapp/<id>/files accepts an upload larger than the JSON body cap', async () => {
+    // Base64 inside JSON: 4 MiB of file is ~5.6 MB on the wire, past the 5 MiB
+    // cap every other route keeps.
+    const data = Buffer.alloc(4 * 1024 * 1024, 7);
+    const r = await request(port, '/ultraapp/ua-test-1/files', {
+      body: { filename: 'sample.bin', dataB64: data.toString('base64') },
+    });
+    expect(r.status).toBe(200);
+    const args = manager.getUltraappManager().addFile.mock.calls[0][1] as { kind: string; data: Buffer };
+    expect(args.kind).toBe('upload');
+    expect(args.data.equals(data)).toBe(true);
   });
 
   it('POST /ultraapp/<id>/promote-version rejects bad version format', async () => {

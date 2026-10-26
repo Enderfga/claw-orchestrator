@@ -1600,23 +1600,33 @@
         const path = $('forgePath');
         const fileInput = $('forgeFile');
 
-        for (const f of fileInput.files) {
-          const buf = await f.arrayBuffer();
-          const b64 = btoa(String.fromCharCode(...new Uint8Array(buf)));
-          await fetch('/ultraapp/' + encodeURIComponent(runId) + '/files', {
+        const addFile = async (label, body) => {
+          const r = await fetch('/ultraapp/' + encodeURIComponent(runId) + '/files', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ filename: f.name, dataB64: b64 }),
+            body: JSON.stringify(body),
           });
+          const j = await r.json().catch(() => ({}));
+          if (!r.ok || !j.ok) {
+            renderChatEntry({ role: 'system', kind: 'error', text: `[error] ${label}: ${j.error || r.status}` });
+          }
+        };
+        for (const f of fileInput.files) {
+          // FileReader encodes natively; spreading the bytes into fromCharCode
+          // overflows the call stack for anything past ~100 KB.
+          const dataUrl = await new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(String(reader.result));
+            reader.onerror = () => reject(reader.error);
+            reader.readAsDataURL(f);
+          });
+          const b64 = dataUrl.slice(dataUrl.indexOf(',') + 1);
+          await addFile(f.name, { filename: f.name, dataB64: b64 });
         }
         fileInput.value = '';
 
         if (path.value.trim()) {
-          await fetch('/ultraapp/' + encodeURIComponent(runId) + '/files', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ absolutePath: path.value.trim() }),
-          });
+          await addFile(path.value.trim(), { absolutePath: path.value.trim() });
           path.value = '';
         }
 

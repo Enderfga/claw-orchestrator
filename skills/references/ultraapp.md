@@ -132,23 +132,23 @@ persists to `~/.claw-orchestrator/host-procs.json`.
 All routes are served by the embedded server (default `:18796`), under
 `Authorization: Bearer <token>` from `~/.openclaw/server-token`.
 
-| Method + path                         | Purpose                                                                                                       |
-| ------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| `GET /ultraapp/list`                  | All runs with mode + createdAt.                                                                               |
-| `POST /ultraapp/new`                  | No body. Returns `{ runId }`.                                                                                 |
-| `GET /ultraapp/<id>`                  | Full snapshot: spec + chat + state.                                                                           |
-| `POST /ultraapp/<id>/answer`          | Body: `{ value, freeform? }`. Submit interview answer.                                                        |
-| `POST /ultraapp/<id>/spec-edit`       | Body: `{ patch: [...] }` (RFC 6902 ops). Edit the spec mid-interview.                                         |
-| `POST /ultraapp/<id>/files`           | JSON body `{ absolutePath }` (a file on the server host) or `{ filename, dataB64 }`. Copies into `examples/`. |
-| `GET /ultraapp/<id>/events`           | SSE stream of build/chat events (mode pill, narrator, council activity).                                      |
-| `POST /ultraapp/<id>/build`           | Validate spec strictly + enqueue.                                                                             |
-| `POST /ultraapp/<id>/build/cancel`    | Abort the active build.                                                                                       |
-| `GET /ultraapp/<id>/artifacts`        | List `versions/vN/`.                                                                                          |
-| `POST /ultraapp/<id>/start`           | Start the deployed container/process for the active version.                                                  |
-| `POST /ultraapp/<id>/stop`            | Stop without deleting.                                                                                        |
-| `POST /ultraapp/<id>/delete`          | Stop + remove all per-run state.                                                                              |
-| `POST /ultraapp/<id>/feedback`        | Body: `{ text }`. Done-mode classifier routes cosmetic / spec-delta / structural.                             |
-| `POST /ultraapp/<id>/promote-version` | Body: `{ version: "vN" }`. Atomically swap deployed version.                                                  |
+| Method + path                         | Purpose                                                                                                                                                                                                                         |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /ultraapp/list`                  | All runs with mode + createdAt.                                                                                                                                                                                                 |
+| `POST /ultraapp/new`                  | No body. Returns `{ runId }`.                                                                                                                                                                                                   |
+| `GET /ultraapp/<id>`                  | Full snapshot: spec + chat + state.                                                                                                                                                                                             |
+| `POST /ultraapp/<id>/answer`          | Body: `{ value, freeform? }`. Submit interview answer.                                                                                                                                                                          |
+| `POST /ultraapp/<id>/spec-edit`       | Body: `{ patch: [...] }` (RFC 6902 ops). Edit the spec mid-interview.                                                                                                                                                           |
+| `POST /ultraapp/<id>/files`           | JSON body `{ absolutePath }` (a file on the server host) or `{ filename, dataB64 }`. Copies into `examples/`. An upload may be up to 100 MiB; this route accepts a body sized for that, every other route caps bodies at 5 MiB. |
+| `GET /ultraapp/<id>/events`           | SSE stream of build/chat events (mode pill, narrator, council activity).                                                                                                                                                        |
+| `POST /ultraapp/<id>/build`           | Validate spec strictly + enqueue.                                                                                                                                                                                               |
+| `POST /ultraapp/<id>/build/cancel`    | Abort the active build.                                                                                                                                                                                                         |
+| `GET /ultraapp/<id>/artifacts`        | List `versions/vN/`.                                                                                                                                                                                                            |
+| `POST /ultraapp/<id>/start`           | Start the deployed container/process for the active version.                                                                                                                                                                    |
+| `POST /ultraapp/<id>/stop`            | Stop without deleting.                                                                                                                                                                                                          |
+| `POST /ultraapp/<id>/delete`          | Stop + remove all per-run state.                                                                                                                                                                                                |
+| `POST /ultraapp/<id>/feedback`        | Body: `{ text }`. Done-mode classifier routes cosmetic / spec-delta / structural.                                                                                                                                               |
+| `POST /ultraapp/<id>/promote-version` | Body: `{ version: "vN" }`. Atomically swap deployed version.                                                                                                                                                                    |
 
 ## MCP tools (14)
 
