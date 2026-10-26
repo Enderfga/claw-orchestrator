@@ -19,10 +19,14 @@ import { runContract, type FixerSpawner } from '../../verify/runner.js';
 
 function makeFixer(ctx: NodeContext, nodeId: string): FixerSpawner | undefined {
   if (!ctx.manager) return undefined;
+  // Scoped to this visit and attempt, like an agent node's session: an
+  // abandoned attempt may still be inside its fixer, and its teardown would
+  // stop a retry's or a revisit's fixer of the same name.
+  const visit = ctx.record.nodes[nodeId]?.visits ?? 1;
   return async ({ cwd, failingCheck, tail, round }) => {
     await runAgentStep({
       manager: ctx.manager!,
-      sessionName: `${ctx.runId}-${nodeId}-fix-${round}`,
+      sessionName: `${ctx.runId}-${nodeId}-v${visit}a${ctx.attempt}-fix-${round}`,
       parentRunId: ctx.runId,
       logger: ctx.logger,
       config: { cwd, permissionMode: 'bypassPermissions' },

@@ -240,6 +240,47 @@ describe('attempt isolation', () => {
     expect(new Set(names).size).toBe(names.length);
     expect(names.at(-1)).toMatch(/-a3$/);
   });
+
+  it('gives each verifier attempt and visit its own fixer session', async () => {
+    // Same hazard one layer down: an abandoned verifier attempt is still inside
+    // its fixer, and a retry or a repair-loop revisit naming the same fixer
+    // session would have its session stopped by the dying one.
+    const work = fs.mkdtempSync(path.join(tmp, 'fixers-'));
+    const fixers: string[] = [];
+    const manager = {
+      async startSession(config: { name?: string }) {
+        fixers.push(String(config.name));
+        return { name: config.name } as never;
+      },
+      async sendMessage() {
+        return { output: 'tried' } as never;
+      },
+      async stopSession() {},
+    };
+    const kernel = registerDefaultExecutors(new RunKernel({ manager, nodeTimeoutMs: 8000 }));
+    const rec = await kernel.start({
+      name: 'fixers',
+      cwd: work,
+      nodes: [
+        {
+          id: 'verify',
+          kind: 'verifier',
+          retry: { max: 1, backoffMs: 1 },
+          onFailure: 'continue',
+          contract: { fixOnFailureRounds: 1, checks: [{ spec: { type: 'file', path: 'never-there.txt' } }] },
+        },
+        {
+          id: 'again',
+          kind: 'router',
+          routes: [{ when: { type: 'visits_lt', node: 'verify', n: 2 }, to: 'verify' }],
+        },
+      ],
+    });
+    await kernel.wait(rec.runId);
+    // Two visits × two attempts, one fixer round each.
+    expect(fixers).toHaveLength(4);
+    expect(new Set(fixers).size).toBe(4);
+  }, 20_000);
 });
 
 describe('subflow', () => {

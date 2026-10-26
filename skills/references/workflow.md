@@ -405,8 +405,9 @@ belong before the task.
   in-flight agent turn is owned by the session layer and finishes on its own
   schedule; the kernel does not pretend to kill it. The abandoned attempt keeps
   running, so agent nodes name their session per attempt
-  (`<runId>-<nodeId>-a<n>`) — otherwise the dying attempt's teardown would stop
-  the retry's session. A node that writes to a fixed path outside the run
+  (`<runId>-<nodeId>-a<n>`), and a verifier names its fixer sessions per visit
+  and attempt (`<runId>-<nodeId>-v<visit>a<n>-fix-<round>`) — otherwise the dying
+  attempt's teardown would stop the retry's session. A node that writes to a fixed path outside the run
   directory can still race its own retry; scope such writes per attempt.
 
   Because such an attempt can still write, a run about to report `verified`
