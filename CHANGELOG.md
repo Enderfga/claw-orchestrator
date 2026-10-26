@@ -17,10 +17,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `acp` but had nowhere to name the agent, so its session could only fail at start. They take a
   preset id only, because a run's spec is written to disk; inline ACP configs stay on
   `session_start`.
+- **`session_send` returns the turn's `usage`** (`{ tokensIn, tokensOut }`, this turn alone).
+- **The `council` workflow template takes `maxRounds`.**
 - `CITATION.cff` and a Citation section in the README, with the research built on this runtime.
 
 ### Changed
 
+- **A declared acceptance contract has to run and has to contain checks.** A run whose spec
+  declares a run-level contract ends `failed` (outcome `unverified`) when a router steers it past
+  its `contract: "run"` verifier, instead of `completed`. A workflow's own `contract` and a
+  verifier's inline `contract` are normalised like the `contract` start option, so a bare check
+  (`{ "type": "command", "cmd": … }`) works there too, and a contract with no recognised check is
+  refused at start rather than passing through unchecked.
 - **An ACP session refuses `sandboxMode: 'read-only'`.** The agent's tools run inside the agent
   process, and this client sees only the permission requests the agent chooses to send, so
   nothing here can stop a write. The session used to start and run writable under the read-only
@@ -29,6 +37,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **ultrareview refuses engine `acp`** before starting any reviewer: its reviewers run read-only.
 - **Autoloop refuses engine `acp`** for every role, at start and in `spawn_subagents`: a role is
   configured by engine name alone and cannot name the agent. Over HTTP the refusal is a 400.
+- **Council workflow nodes default to 15 rounds**, like `council_start`; they ran 8.
+- **`council_abort` says when nothing was aborted**: for a council not running in this process it
+  returns `ok: false` with the run's state, instead of reporting success.
+- **Verifier fixer sessions are named per visit and attempt**
+  (`<runId>-<node>-v<visit>a<attempt>-fix-<round>`).
+- **The ACP agent's permission option accepts `plan`, `acceptEdits` and `bypassPermissions`**
+  only; any other value is refused with `invalid params`.
+
+### Fixed
+
+- **Starting a council no longer overwrites the project repository's git identity.** A local
+  identity is set only when none is configured at any level.
+- **`council_accept` and `council_reject` are recorded on the run**, so `council_status` reports
+  `accepted` / `rejected`, including after a restart.
+- **A council agent's emoji reaches its charter and transcript** when started through
+  `council_start` or a council workflow node.
+- **Council's refusal to run inside the orchestrator's own directory covers the installed package
+  root**, not only its `dist/` folder.
+- **A `subflow` node adopts the child's tree digest with its verdict**, so a later node in a git
+  repository no longer downgrades the parent with "not a git repository"; a child that ends
+  `unverified` no longer makes its parent `refuted`.
+- **A resumed `goal` node whose goal had already ended finishes with that result** instead of
+  setting the objective again.
+- **`verify_run` refuses a `label` that is the id of an existing workflow run** instead of writing
+  evidence into that run's directory.
+- **ACP council mode reports each agent as a tool call and each round as a plan** again; a council
+  that cannot start ends the prompt with an error naming the reason; cancelling a council prompt
+  ends it with stop reason `cancelled`.
+- **An ACP session the server dropped for idling restarts on the next prompt or
+  `session/resume`** and continues its conversation.
+- **`clawo-acp` honours `OPENCLAW_LOG_LEVEL`.**
+- **ACP council accept/reject text describes what the commands do**: accept keeps what the
+  agents merged and cleans up; reject records the feedback in `plan.md` and keeps the worktrees.
+- **`/v1/chat/completions`**: a streamed request with `tools` on an engine that does not stream
+  deltas returns `tool_calls` chunks instead of the raw text; `usage` counts the request's own
+  tokens instead of the session's running total; a status-webhook URL the bridge cannot POST to
+  (`https://`, malformed) no longer fails the completion, and an unanswered webhook is dropped
+  after 2 s.
 - **An ACP session receives `systemPrompt` and `appendSystemPrompt`** at the top of the first
   message of a new session. ACP has no system-prompt channel, and both were dropped — including
   the charter a council seat receives this way. A resumed session already holds them.
@@ -42,8 +88,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   text and an unknown action exited 0; an unreadable `--message-file`, `--objective-file` or
   contract printed a stack trace instead of `Failed: …`. `clawo session-start --help` no longer
   offers the legacy `gemini` and `cursor` engines.
+
+### Docs
+
 - **The reference docs were checked against the code**, file by file: tool parameters and
   defaults, CLI options, engine flags, workflow node fields, ledger fields, endpoints and limits.
+  `observability.md` states that the turns a Codex `/goal` runs on its own write no ledger row and
+  are not stopped by `maxBudgetUsd` while the goal runs.
+- The README opens with an animated teaser.
 
 ## [7.14.0] - 2026-10-25
 
