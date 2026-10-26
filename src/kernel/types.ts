@@ -106,6 +106,8 @@ export interface FanoutNode extends NodeBase {
   synthesize?: boolean;
   synthesisEngine?: EngineType;
   synthesisModel?: string;
+  /** The ACP agent preset for a synthesis pass on engine `acp`. */
+  synthesisAcpAgent?: string;
   synthesisPermissionMode?: string;
   maxTurnsPerAgent?: number;
   maxBudgetUsd?: number;

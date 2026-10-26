@@ -125,7 +125,7 @@ export interface SolveArgs extends CommonArgs {
   /** Agents that explore the problem in parallel before anything is written. */
   scouts: FanoutAgentSpec[];
   /** Engine/model that does the implementation. */
-  implementer?: { engine?: FanoutAgentSpec['engine']; model?: string };
+  implementer?: { engine?: FanoutAgentSpec['engine']; model?: string; acpAgent?: string };
   /** Reviewers that read the finished change. */
   reviewers?: FanoutAgentSpec[];
   /** Ask a human before writing anything. */
@@ -167,6 +167,7 @@ export function solveWorkflow(args: SolveArgs): WorkflowSpec {
     prompt: args.task,
     engine: args.implementer?.engine,
     model: args.implementer?.model,
+    acpAgent: args.implementer?.acpAgent,
     cwd: args.cwd,
     // A failed implementation attempt still goes to the verifier, so the
     // evidence bundle records what was actually wrong rather than just "the
@@ -389,6 +390,7 @@ export interface LegacyFanoutArgs {
   synthesize?: boolean;
   synthesisEngine?: FanoutNode['synthesisEngine'];
   synthesisModel?: string;
+  synthesisAcpAgent?: string;
   synthesisPermissionMode?: string;
   maxTurnsPerAgent?: number;
   maxBudgetUsd?: number;
@@ -409,6 +411,7 @@ export function legacyFanoutWorkflow(args: LegacyFanoutArgs): WorkflowSpec {
         synthesize: args.synthesize,
         synthesisEngine: args.synthesisEngine,
         synthesisModel: args.synthesisModel,
+        synthesisAcpAgent: args.synthesisAcpAgent,
         synthesisPermissionMode: args.synthesisPermissionMode,
         maxTurnsPerAgent: args.maxTurnsPerAgent,
         maxBudgetUsd: args.maxBudgetUsd,

@@ -422,6 +422,7 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
     if (selection.engine === 'custom' && !selection.customEngine) {
       throw new Error(`${label} custom engine config is required`);
     }
+    if (selection.engine === 'acp') throw new Error(`${label} engine 'acp' is not supported by Autoloop`);
   }
 
   /**

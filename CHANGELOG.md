@@ -9,7 +9,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **An ACP agent on fan-out, council, workflow agent nodes and handoff.** `acpAgent`, a bundled
+  preset id, on each fan-out and council agent, on a workflow `agent` node, on `solve`'s
+  implementer and scouts, on `session_handoff`, and as `synthesisAcpAgent` for a fan-out's
+  synthesis pass. On the CLI an agent is written `acp:<preset>`, as in
+  `clawo fanout "…" -e claude,acp:kimi-code,acp:dsh`. These surfaces already accepted engine
+  `acp` but had nowhere to name the agent, so its session could only fail at start. They take a
+  preset id only, because a run's spec is written to disk; inline ACP configs stay on
+  `session_start`.
 - `CITATION.cff` and a Citation section in the README, with the research built on this runtime.
+
+### Changed
+
+- **An ACP session refuses `sandboxMode: 'read-only'`.** The agent's tools run inside the agent
+  process, and this client sees only the permission requests the agent chooses to send, so
+  nothing here can stop a write. The session used to start and run writable under the read-only
+  label; it now fails at start with the reason, as a custom engine without a read-only flag does.
+  `permissionMode: 'plan'` still rejects every permission request an agent sends.
+- **ultrareview refuses engine `acp`** before starting any reviewer: its reviewers run read-only.
+- **Autoloop refuses engine `acp`** for every role, at start and in `spawn_subagents`: a role is
+  configured by engine name alone and cannot name the agent. Over HTTP the refusal is a 400.
+- **An ACP session receives `systemPrompt` and `appendSystemPrompt`** at the top of the first
+  message of a new session. ACP has no system-prompt channel, and both were dropped — including
+  the charter a council seat receives this way. A resumed session already holds them.
+- **Orphan cleanup recognises any engine's process.** The command line of each session's process
+  is recorded with its pid, and after an unclean exit a process still running that command line
+  is stopped. An ACP agent (`kimi acp`, `dsh`) or a custom engine runs a binary that is on no
+  fixed list, so it used to be left running.
+- **Codex, codex-app and ACP stderr is redacted** before it reaches the session log, as every
+  other engine's already was.
+- **The CLI exits 1 on every usage error.** `clawo workflow` without a run id, `steer` without
+  text and an unknown action exited 0; an unreadable `--message-file`, `--objective-file` or
+  contract printed a stack trace instead of `Failed: …`. `clawo session-start --help` no longer
+  offers the legacy `gemini` and `cursor` engines.
+- **The reference docs were checked against the code**, file by file: tool parameters and
+  defaults, CLI options, engine flags, workflow node fields, ledger fields, endpoints and limits.
 
 ## [7.14.0] - 2026-10-25
 

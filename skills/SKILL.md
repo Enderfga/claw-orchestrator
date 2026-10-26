@@ -1,6 +1,6 @@
 ---
 name: claw-orchestrator
-description: Manage persistent coding sessions across Claude Code, Codex, Antigravity (agy), Grok Build, and OpenCode engines. Use when orchestrating multi-engine coding agents, starting/sending/stopping sessions, running multi-agent council collaborations, cross-session messaging, ultraplan deep planning, ultrareview parallel code review, autoloop autonomous workspace iteration, ultraapp building deployable web apps from a structured Q&A interview, switching models/tools at runtime, exposing the orchestrator's 78 tools as an MCP server to Hermes Agent / Claude Desktop / Cursor / Cline / Continue / Zed / Windsurf / Goose, or running as an Agent Client Protocol (ACP) agent that Zed / JetBrains / Neovim / Emacs / VS Code / dsh can drive directly. Triggers on "start a session", "send to session", "run council", "ultraplan", "ultrareview", "autoloop", "ultraapp", "Forge tab", "build a web app", "one-click app", "AppSpec", "autonomous iteration", "iterate until goal", "auto research", "switch model", "hand off a session", "session handoff", "switch engine", "continue on codex", "continue on claude", "move this session to another engine", "multi-agent coding", "coding session", "session inbox", "grok session", "grok build", "opencode", "mcp server", "clawo-mcp", "hermes mcp", "model context protocol", "ultracode", "dynamic workflow", "fanout", "fan-out", "best-of-N", "steer turn", "interrupt turn", "fork thread", "rollback turns", "acp", "agent client protocol", "clawo acp", "zed agent", "jetbrains agent", "external agent", "dsh subagent", "deepseek harness", "acp engine", "acp agent", "kimi code", "kimi acp", "dsh acp", "any acp agent", "clawo runs", "run ledger", "session cost", "coding-agent token usage", "spend cap", "budget limit", "maxBudgetUsd", "durable workflow", "resume a run", "verify a coding run", "acceptance contract", "evidence bundle", "did the agent's tests actually pass", "protected tests", "agent edited the tests", "human gate", "repair loop", "clawo workflow", "clawo verify", "clawo solve", "clawo fanout", "fix and verify", "solve from the terminal", "codex goal", "/goal", "clawo goal", "long-horizon goal", "unattended codex run", "goal node", "run codex in a sandbox", "launcher".
+description: Manage persistent coding sessions across Claude Code, Codex, Antigravity (agy), Grok Build, OpenCode, any Agent Client Protocol agent (Kimi Code, dsh) and custom CLIs. Use when orchestrating multi-engine coding agents, starting/sending/stopping sessions, running durable, resumable workflows (solve / fanout / council / Codex goal) and having the runtime verify the result against an acceptance contract, fanning one task out to several engines, running multi-agent council collaborations, cross-session messaging, ultraplan deep planning, ultrareview parallel code review, autoloop autonomous workspace iteration, ultraapp building deployable web apps from a structured Q&A interview, switching models/tools at runtime, tracking per-turn cost and spend caps across engines, exposing the orchestrator's 78 tools as an MCP server to Hermes Agent / Claude Desktop / Cursor / Cline / Continue / Zed / Windsurf / Goose, or running as an Agent Client Protocol (ACP) agent that Zed / JetBrains / Neovim / Emacs / VS Code / dsh can drive directly. Triggers on "start a session", "send to session", "run council", "ultraplan", "ultrareview", "autoloop", "ultraapp", "Forge tab", "build a web app", "one-click app", "AppSpec", "autonomous iteration", "iterate until goal", "auto research", "switch model", "hand off a session", "session handoff", "switch engine", "continue on codex", "continue on claude", "move this session to another engine", "multi-agent coding", "coding session", "session inbox", "grok session", "grok build", "opencode", "mcp server", "clawo-mcp", "hermes mcp", "model context protocol", "ultracode", "dynamic workflow", "fanout", "fan-out", "best-of-N", "steer turn", "interrupt turn", "fork thread", "rollback turns", "acp", "agent client protocol", "clawo acp", "zed agent", "jetbrains agent", "external agent", "dsh subagent", "deepseek harness", "acp engine", "acp agent", "kimi code", "kimi acp", "dsh acp", "any acp agent", "clawo runs", "run ledger", "session cost", "coding-agent token usage", "spend cap", "budget limit", "maxBudgetUsd", "durable workflow", "resume a run", "verify a coding run", "acceptance contract", "evidence bundle", "did the agent's tests actually pass", "protected tests", "agent edited the tests", "human gate", "repair loop", "clawo workflow", "clawo verify", "clawo solve", "clawo fanout", "fix and verify", "solve from the terminal", "codex goal", "/goal", "clawo goal", "long-horizon goal", "unattended codex run", "goal node", "run codex in a sandbox", "launcher".
 metadata:
   {
     'openclaw':
@@ -36,17 +36,20 @@ metadata:
 
 # Claw Orchestrator Skill
 
-Claw Orchestrator — persistent multi-engine coding session manager for claw-style agent systems. Runs as a standalone CLI/server, with first-class OpenClaw plugin support. Wraps Claude Code, Codex, Antigravity, Grok Build, OpenCode, and custom CLIs into headless agentic engines with 78 tools.
+Claw Orchestrator — persistent multi-engine coding session manager for claw-style agent systems. Runs as a standalone CLI/server, with first-class OpenClaw plugin support. Wraps Claude Code, Codex, Antigravity, Grok Build, OpenCode, any Agent Client Protocol agent, and custom CLIs into headless agentic engines with 78 tools.
 
 ## Engine Quick Reference
 
-| Engine     | CLI            | Session Type          | Best For                                                 |
-| ---------- | -------------- | --------------------- | -------------------------------------------------------- |
-| `claude`   | `claude`       | Persistent subprocess | Multi-turn, complex tasks                                |
-| `codex`    | `codex exec`   | Per-message spawn     | One-shot execution                                       |
-| `agy`      | `agy -p`       | Per-message spawn     | Google Antigravity; plain-text, auto conversation resume |
-| `grok`     | `grok -p`      | Per-message spawn     | xAI Grok Build; engine-reported cost, resumable session  |
-| `opencode` | `opencode run` | Per-message spawn     | Provider-agnostic (`provider/model`)                     |
+| Engine      | CLI                          | Session Type          | Best For                                                                           |
+| ----------- | ---------------------------- | --------------------- | ---------------------------------------------------------------------------------- |
+| `claude`    | `claude`                     | Persistent subprocess | Multi-turn, complex tasks                                                          |
+| `codex`     | `codex exec`                 | Per-message spawn     | One-shot execution; the thread is resumed on each send                             |
+| `codex-app` | `codex app-server`           | Persistent subprocess | Codex `/goal`, plus interrupt / steer / fork / rollback of turns                   |
+| `agy`       | `agy -p`                     | Per-message spawn     | Google Antigravity; reported token usage, conversation resumed by id               |
+| `grok`      | `grok -p`                    | Per-message spawn     | xAI Grok Build; engine-reported cost, resumable session                            |
+| `opencode`  | `opencode run`               | Per-message spawn     | Provider-agnostic (`provider/model`)                                               |
+| `acp`       | the agent's own command      | Persistent subprocess | Any Agent Client Protocol agent, named by `acpAgent` (presets: `kimi-code`, `dsh`) |
+| `custom`    | yours (`CustomEngineConfig`) | Either (`persistent`) | Any other coding CLI, described by a config or a bundled preset                    |
 
 ## Core Workflow
 
@@ -62,6 +65,7 @@ session_start({
   engine: 'opencode',
   model: 'anthropic/claude-sonnet-5',
 });
+session_start({ name: 'kimi-task', cwd: '/path/to/project', engine: 'acp', acpAgent: 'kimi-code' });
 
 // 2. Send messages
 session_send({ name: 'myproject', message: 'Fix the auth bug' });
@@ -76,14 +80,18 @@ session_stop({ name: 'myproject' });
 
 ## Session Options
 
-| Parameter        | Description                                                                                                     |
-| ---------------- | --------------------------------------------------------------------------------------------------------------- |
-| `engine`         | `claude` (default), `codex`, `agy`, `grok`, `opencode`, `custom`                                                |
-| `model`          | Model name or alias (`fable`, `opus` → claude-opus-5-5, `sonnet`, `haiku`, `gpt-5.5`, `agy-pro`)                |
-| `permissionMode` | `acceptEdits`, `auto`, `plan`, `bypassPermissions`, `manual`, `dontAsk` (`default` = legacy alias for `manual`) |
-| `effort`         | `low`, `medium`, `high`, `xhigh`, `max`, `ultra`, `auto` (each engine clamps to its own ceiling)                |
-| `maxBudgetUsd`   | Cost limit in USD                                                                                               |
-| `allowedTools`   | List of allowed tool names                                                                                      |
+| Parameter         | Description                                                                                                                                                                                                                                                           |
+| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `engine`          | `claude` (default), `codex`, `codex-app`, `agy`, `grok`, `opencode`, `acp`, `custom`                                                                                                                                                                                  |
+| `model`           | Model name or alias (`fable`, `opus` → claude-opus-5-5, `sonnet`, `haiku`, `gpt-5.5`, `agy-pro`)                                                                                                                                                                      |
+| `permissionMode`  | `acceptEdits`, `auto`, `plan`, `bypassPermissions`, `manual`, `dontAsk` (`default` = legacy alias for `manual`)                                                                                                                                                       |
+| `effort`          | `low`, `medium`, `high`, `xhigh`, `max`, `ultra`, `auto` (each engine clamps to its own ceiling)                                                                                                                                                                      |
+| `maxBudgetUsd`    | Cost limit in USD, enforced by the runtime on every engine                                                                                                                                                                                                            |
+| `allowedTools`    | List of allowed tool names                                                                                                                                                                                                                                            |
+| `sandboxMode`     | `read-only`, `workspace-write`, `danger-full-access`. Codex applies all three; claude, agy, grok and opencode enforce `read-only` through their own plan/read-only modes; a custom engine must map it through `permissionModes` or refuses to start; `acp` refuses it |
+| `acpAgent`        | With `engine: 'acp'`: a bundled preset id (`clawo engines`), or an inline `{ name, command, args, env }` from a local caller                                                                                                                                          |
+| `customEngine`    | With `engine: 'custom'`: a bundled preset id, or an inline `CustomEngineConfig` from a local caller                                                                                                                                                                   |
+| `resumeSessionId` | Resume an earlier conversation by the engine's own id (session, thread or conversation id)                                                                                                                                                                            |
 
 ### Claude-engine options
 
@@ -152,14 +160,14 @@ team_send({ name: 'myproject', teammate: 'teammate', message: 'Review this' });
 
 ## Ultraplan & Ultrareview
 
-- **Ultraplan**: Opus deep planning session (up to 30 min), produces detailed implementation plan
-- **Ultrareview**: 1-20 read-only reviewer agents (default 5) running in parallel, each from one angle (security, logic, perf, types, etc.), merged by a synthesis pass
+- **Ultraplan**: Opus deep planning session (default timeout 30 min), produces detailed implementation plan
+- **Ultrareview**: 1-20 read-only reviewer agents (default 5) running in parallel, each from one angle (security, logic, perf, types, etc.), merged by a synthesis pass. Reviewers can be spread across engines; `custom` and `acp` are refused because they cannot be held read-only
 
 Both are async — start then poll status.
 
 ## Autoloop (autonomous workspace iteration)
 
-Autoloop uses three persistent roles. You chat with the Planner to define `plan.md` and `goal.json`; after explicit approval it starts a Coder/Reviewer iteration loop. Each role may use a different engine.
+Autoloop uses three persistent roles. You chat with the Planner to define `plan.md` and `goal.json`; after explicit approval it starts a Coder/Reviewer iteration loop. Each role may use a different engine (any engine except `acp`).
 
 ```javascript
 autoloop_start({
@@ -175,7 +183,7 @@ autoloop_status({ run_id: 'fix-parser' });
 autoloop_stop({ run_id: 'fix-parser', reason: 'done' });
 ```
 
-Claude roles default to Planner `opus` and Coder/Reviewer `sonnet`. A non-Claude role with no model uses that engine's own default. Custom engine configs are supplied only at start (or HTTP resume), never by Planner output. The Reviewer runs in a restaged sandbox and returns advance/hold/rollback verdicts; push policy and SSE keep long runs observable.
+Claude roles default to Planner `opus` and Coder/Reviewer `sonnet`. A non-Claude role with no model uses that engine's own default. Custom engine configs come from a local caller at start or resume — or, on an HTTP resume, by reference (`plannerCustomEngineRef` etc., resolved from a `CLAWO_CUSTOM_ENGINE_<NAME>` variable on the host) — never from Planner output. The Reviewer runs in a restaged sandbox and returns advance/hold/rollback verdicts; push policy and SSE keep long runs observable.
 
 For the full control protocol, registry/resume behavior, and ledger layout, see [references/autoloop.md](references/autoloop.md).
 
@@ -214,14 +222,15 @@ For setup, the dsh YAML block, and the cancellation/permission limits: see [refe
 ## Durable workflows
 
 `workflow_start` runs a declarative graph of `agent` / `fanout` / `council` / `goal` /
-`verifier` / `human_gate` / `router` / `subflow` / `autoloop` / `ultraapp_synth` /
+`verifier` / `human_gate` / `router` / `subflow` nodes; autoloop runs (`autoloop_start`) and
+UltraApp builds use the same kernel through their own `autoloop` / `ultraapp_synth` /
 `ultraapp_deploy` nodes. Every state transition is checkpointed to
 `~/.claw-orchestrator/wf/<runId>/`, so a run survives a process restart and `workflow_resume`
 picks it up at the node boundary — nodes already succeeded are not re-run, and the one that
 was in flight is retried because a half-finished node left no result to trust.
 
-Four built-in templates: `solve` (triage → implement → verify → repair-until-green →
-review), `council`, `fanout`, and `goal` (a Codex `/goal` on one `codex-app` thread, run
+Four built-in templates: `solve` (triage → implement → optional review → verify →
+repair until green), `council`, `fanout`, and `goal` (a Codex `/goal` on one `codex-app` thread, run
 unattended for as long as it takes — reattached on resume, resumed after usage limits and
 stalls within a bound, optionally under a sandbox `launcher` — then verify → repair on the
 same thread; `clawo goal` from the terminal). Retry, per-node timeout, cancel, steer, human gates, and
@@ -267,6 +276,24 @@ at all means no contract was declared — not that it failed. `clawo runs --veri
 For the row schema, the query surfaces, and which engines report real token usage versus
 estimating it: see [references/observability.md](references/observability.md)
 
+## From the terminal
+
+With `clawo serve` running, the same runtime is scriptable from a shell. Commands that fail exit
+with status 1. Full list: [references/cli.md](references/cli.md).
+
+```bash
+clawo session-start fix -e codex -d /path/to/project
+clawo session-send fix --message-file task.md --json   # the whole result as one JSON line
+clawo session-status fix --json
+clawo solve "The test fails. Fix it." -e claude --check "npm test" --wait   # exit 0 only if it completes
+clawo fanout "Review this design" --engines claude,codex,grok --synthesize --wait
+clawo goal --objective-file GOAL.md --check "npm test" --wait
+clawo workflow list                                    # then: clawo workflow show <runId>
+clawo verify <runId>                                   # the evidence bundle
+clawo runs --since 24h                                 # the per-turn ledger
+clawo engines                                          # bundled community presets
+```
+
 ## Authentication Prerequisites
 
 Each engine requires its own auth before use:
@@ -276,3 +303,4 @@ Each engine requires its own auth before use:
 - **Antigravity**: run `agy` once and complete the Google OAuth login
 - **Grok**: run `grok` once and sign in (grok.com account or `XAI_API_KEY`)
 - **OpenCode**: `opencode auth login` (provider-agnostic; use `provider/model` form for `model`)
+- **ACP agents**: log in with the agent's own CLI first; the session runs no ACP authentication step

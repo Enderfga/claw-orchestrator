@@ -1617,6 +1617,13 @@ describe('SessionManager', () => {
       expect(createdConfigs).toEqual([]);
     });
 
+    it('rejects an acp role before creating a session', async () => {
+      await expect(mgr.autoloopStart({ runId: 'acp-coder', workspace: '/tmp', coderEngine: 'acp' })).rejects.toThrow(
+        "Coder engine 'acp' is not supported by Autoloop",
+      );
+      expect(createdConfigs).toEqual([]);
+    });
+
     it('rejects a custom Planner without its trusted config before creating a session', async () => {
       await expect(
         mgr.autoloopStart({ runId: 'missing-custom', workspace: '/tmp', plannerEngine: 'custom' }),

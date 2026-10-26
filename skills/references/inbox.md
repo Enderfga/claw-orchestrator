@@ -15,15 +15,16 @@ Session A (planner)          SessionManager           Session B (coder)
      │                            │    queue in inbox      │
      │                            │         │              │
      │                            │    ... B becomes idle  │
-     │                            ├── deliverInbox(B) ────►│ deliver queued msgs
+     │     caller ── deliverInbox(B) ─────────────────────►│ deliver queued msgs
 ```
 
-- **Idle sessions** receive messages immediately as a new user turn
-- **Busy sessions** have messages queued in an inbox (max 200 messages)
+- **Idle sessions** (ready and not busy) receive messages immediately as a new user turn. The call does not wait for the recipient's reply
+- **Busy sessions** have messages queued in an inbox (max 200 messages); so does an idle session whose delivery failed
+- **Queued messages wait for a caller**: nothing delivers them on its own. Call `sessionDeliverInbox()` once the session is idle
 - Messages are wrapped in `<cross-session-message>` XML tags
 - Supports broadcast to all sessions via `to: "*"`; a broadcast skips the sender
-- Sender and target must be existing sessions, otherwise the call fails
-- Returns `{ delivered, queued }`
+- Sender and target must be live sessions on this SessionManager, otherwise the call fails
+- Returns `{ delivered, queued }`. On a broadcast, `delivered` is true when any recipient got the message at once and `queued` when any recipient's copy was queued; a broadcast that fails for one recipient is logged and does not stop the others
 
 ## Usage
 
@@ -49,7 +50,7 @@ const all = manager.sessionInbox('coder', false);
 
 ### Deliver Queued Messages
 
-When a session finishes a task and becomes idle, deliver its queued messages:
+When a session finishes a task and becomes idle, deliver its queued messages. All unread messages go in one turn, each in its own envelope, and are marked read:
 
 ```typescript
 const count = await manager.sessionDeliverInbox('coder');
@@ -64,6 +65,8 @@ console.log(`Delivered ${count} queued messages`);
 | `session_inbox`         | Read inbox messages                     |
 | `session_deliver_inbox` | Deliver queued messages to idle session |
 
+`team_send` (CLI: `clawo session-team-send`) sends through the same inbox, with the summary `team message from <sender>`. The three tools above have no CLI command.
+
 ## Message Format
 
 Messages delivered to sessions are wrapped in XML:
@@ -74,10 +77,10 @@ The auth module needs rate limiting. Please add a token bucket...
 </cross-session-message>
 ```
 
-Attribute values are XML-escaped, and any `cross-session-message` tag inside the body is escaped, so a sender cannot forge a second envelope.
+The `summary` attribute is present only when a summary was given. Attribute values are XML-escaped, and any `cross-session-message` tag inside the body is escaped, so a sender cannot forge a second envelope.
 
 ## Inbox Limits
 
 - **Max size**: 200 messages per session
 - **Eviction**: oldest read messages dropped first, then oldest unread
-- **No TTL**: messages, read or unread, stay in memory until evicted or the process exits. They are not persisted to disk.
+- **No TTL**: messages, read or unread, stay in memory until evicted or the process exits — stopping a session does not clear its inbox. They are not persisted to disk.

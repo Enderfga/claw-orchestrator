@@ -39,7 +39,7 @@ function autoloopErrorStatus(error: unknown): number {
   if (/^Autoloop run '.+' not found in registry$/.test(message)) return 404;
   if (/^Autoloop with id '.+' (?:already exists|is being deleted|is still starting)$/.test(message)) return 409;
   if (/^Autoloop session name '.+' is already in use$/.test(message)) return 409;
-  if (/^(?:Planner|Coder|Reviewer) engine '.+' is not supported$/.test(message)) return 400;
+  if (/^(?:Planner|Coder|Reviewer) engine '.+' is not supported(?: by Autoloop)?$/.test(message)) return 400;
   if (/^(?:Planner|Coder|Reviewer) effort\b/.test(message)) return 400;
   // Any custom-engine config complaint is caller error, not a server fault.
   // The old form pinned a single dotted segment and the verb "must be", so

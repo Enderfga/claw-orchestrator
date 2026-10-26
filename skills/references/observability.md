@@ -16,6 +16,10 @@ every engine passes through, not only through Claude Code's `--max-budget-usd`.
 - Location: `~/.claw-orchestrator/runs/YYYY-MM-DD.jsonl` (override with
   `CLAWO_RUNS_DIR`).
 - One JSON object per line, one line per completed turn — **successful or not**.
+  The turns a Codex `/goal` runs on its own (a workflow `goal` node, or the
+  `codex_goal_*` tools) are the exception: they do not pass through a send, so they
+  write no rows, and a goal node's spend is reported on its run instead
+  ([`workflow.md`](./workflow.md#goal)).
 - Shards are one file per UTC day. Queries always filter on the row timestamp, so
   the shard boundary is a storage detail; `--since 24h` spans midnight correctly.
 - Writes are best-effort: a ledger failure is logged at `warn` and swallowed. It
@@ -25,33 +29,34 @@ every engine passes through, not only through Claude Code's `--max-budget-usd`.
 
 ### Row schema
 
-| Field                                     | Meaning                                                                                                                                                                                                                                                                                                                                                                                                    |
-| ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ts`                                      | ISO timestamp of turn completion                                                                                                                                                                                                                                                                                                                                                                           |
-| `session`                                 | SessionManager session name                                                                                                                                                                                                                                                                                                                                                                                |
-| `engine`                                  | `claude` / `codex` / `codex-app` / `grok` / `opencode` / `agy` / `cursor` (legacy) / `custom`                                                                                                                                                                                                                                                                                                              |
-| `model`                                   | Configured model, or the engine's own reported model when none was set (Claude Code: the model named in its `init` event). A configured alias such as `opus[1m]` is recorded as the model the engine reports it resolved to. Absent when neither is known                                                                                                                                                  |
-| `cwd`                                     | Working directory the turn ran in                                                                                                                                                                                                                                                                                                                                                                          |
-| `turn`                                    | 1-based index of the send within the session, counted by the process that recorded it                                                                                                                                                                                                                                                                                                                      |
-| `tokensIn` / `tokensOut` / `cachedTokens` | **Per-turn deltas**, not session totals                                                                                                                                                                                                                                                                                                                                                                    |
-| `costUsd`                                 | Per-turn delta in USD — token count × the registry rate. On a flat-rate plan (a subscription seat) nobody was billed this: set `pricingOverrides` in the plugin config to zero the model out (`{"gpt-5.5": {"input": 0, "output": 0, "cached": 0}}`). Read [Zeroing a model's pricing](#zeroing-a-models-pricing) first — it disables `maxBudgetUsd` for that model, except on `grok`, which prices itself |
-| `tokensEstimated`                         | `true` when the counts came from `estimateTokens()` (see below)                                                                                                                                                                                                                                                                                                                                            |
-| `durationMs`                              | Wall-clock for the turn                                                                                                                                                                                                                                                                                                                                                                                    |
-| `toolCalls` / `toolErrors`                | Per-turn deltas                                                                                                                                                                                                                                                                                                                                                                                            |
-| `ok`                                      | `false` for a turn that threw, or that the session's own `turnsSucceeded` counter did not count (see `sessions.md`). Falls back to "nothing was thrown" when the counter cannot be read                                                                                                                                                                                                                    |
-| `error`                                   | Failure text, truncated to 500 chars. Absent when the turn resolved but the engine did not count it as succeeded (an interrupted or non-SUCCESS turn), so a failed row does not always carry one                                                                                                                                                                                                           |
-| `refusalFallback`                         | `{ from, to, category? }` when the model refused and the engine re-ran the turn on another model (Claude Code’s refusal fallback, for example Opus 5.5 to an older Opus on a `cyber` refusal). Absent otherwise                                                                                                                                                                                            |
-| `parent`                                  | council / fanout / autoloop / workflow run id, when the turn belongs to one                                                                                                                                                                                                                                                                                                                                |
+| Field                                     | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ts`                                      | ISO timestamp of turn completion                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `session`                                 | SessionManager session name                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `engine`                                  | `claude` / `codex` / `codex-app` / `grok` / `opencode` / `agy` / `acp` / `custom`, or a legacy `gemini` / `cursor`                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `model`                                   | Configured model, or the engine's own reported model when none was set (Claude Code: the model named in its `init` event). A configured alias such as `opus[1m]` is recorded as the model the engine reports it resolved to. Absent when neither is known                                                                                                                                                                                                                                                                                                                                   |
+| `cwd`                                     | Working directory the turn ran in                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `turn`                                    | 1-based index of the send within the session, counted by the process that recorded it                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `tokensIn` / `tokensOut` / `cachedTokens` | **Per-turn deltas**, not session totals                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `costUsd`                                 | Per-turn delta in USD — token count × the registry rate, or the engine's own figure where it reports one (`claude`, `grok`, `opencode`; an `acp` agent uses its own figure or its preset's `pricing` — see [Accuracy](#accuracy-which-engines-report-real-usage)). On a flat-rate plan (a subscription seat) nobody was billed this: set `pricingOverrides` in the plugin config to zero a registry-priced model out (`{"gpt-5.5": {"input": 0, "output": 0, "cached": 0}}`). Read [Zeroing a model's pricing](#zeroing-a-models-pricing) first — it disables `maxBudgetUsd` for that model |
+| `tokensEstimated`                         | `true` when the counts came from `estimateTokens()` (see below)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `durationMs`                              | Wall-clock for the turn                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `toolCalls` / `toolErrors`                | Per-turn deltas                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `ok`                                      | `false` for a turn that threw, or that the session's own `turnsSucceeded` counter did not count (see `sessions.md`). Falls back to "nothing was thrown" when the counter cannot be read                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `error`                                   | Failure text, truncated to 500 chars. Absent when the turn resolved but the engine did not count it as succeeded (an interrupted or non-SUCCESS turn), so a failed row does not always carry one                                                                                                                                                                                                                                                                                                                                                                                            |
+| `refusalFallback`                         | `{ from, to, category? }` when the model refused and the engine re-ran the turn on another model (Claude Code’s refusal fallback, for example Opus 5.5 to an older Opus on a `cyber` refusal). Absent otherwise                                                                                                                                                                                                                                                                                                                                                                             |
+| `parent`                                  | The run id — workflow, council, fan-out, ultraplan, ultrareview or autoloop — when the turn belongs to one                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 
 Deltas rather than totals means summing a query window gives that window's spend
 without double-counting.
 
-Every path funnels through `SessionManager.sendMessage`, so council, fanout,
-autoloop, ACP, the OpenAI-compatible bridge, the MCP server and the CLI are all
-covered by the same hook. `parent` is what lets you reassemble a multi-agent run:
+Every send funnels through `SessionManager.sendMessage`, so council, fanout,
+autoloop, workflow agent nodes and verifier fixers, the ACP server, the
+OpenAI-compatible bridge, the MCP server and the CLI are all covered by the same
+hook. `parent` is what lets you reassemble a multi-agent run:
 
 ```bash
-clawo runs --parent council-1a2b3c4d
+clawo runs --parent council-mh3k2x1a-1a2b3c4d
 ```
 
 ### Reading it
@@ -60,10 +65,12 @@ clawo runs --parent council-1a2b3c4d
 clawo runs                                   # last 24h, table
 clawo runs --since 7d --engine codex         # one engine, one week
 clawo runs --session my-session --json       # raw rows + summary
-clawo runs --parent fanout-b5f7c886          # every agent turn of one fan-out
+clawo runs --parent fanout-mh3k2x1a-b5f7c886 # every agent turn of one fan-out
 ```
 
-Over HTTP (GET query string or POST JSON body):
+Over HTTP (GET query string or POST JSON body; the body wins). It takes `since`,
+`session`, `engine`, `parent`, `verified=true|false` and `limit` (default 200, the
+newest rows):
 
 ```bash
 curl "http://127.0.0.1:18796/runs?since=24h&limit=200" -H "Authorization: Bearer $TOKEN"
@@ -74,7 +81,11 @@ Returns `{ ok, rows, summary }`, where `summary` carries `rows`, `costUsd`,
 `unverifiedRows` and a per-engine breakdown `byEngine`. The dashboard
 header shows the 24-hour figure from the same endpoint.
 
-Programmatically: `manager.getRunLedger({ since, session, engine, parent, limit })`.
+Programmatically: `manager.getRunLedger({ since, session, engine, parent, verified, limit })`.
+
+`since` takes a relative window (`30m`, `24h`, `7d`, `2w`), an ISO timestamp or
+epoch milliseconds; one it cannot parse widens the query rather than emptying it.
+`clawo runs` reads the last 24 h and prints 50 rows by default.
 
 ## Spend caps
 
@@ -98,8 +109,11 @@ Notes:
 - A cap of `0` or a negative number means _unset_, not _refuse everything_.
 - Claude Code still receives `--max-budget-usd` as well: an in-CLI stop happens
   earlier and therefore costs less than an after-the-fact refusal.
-- `session_list` / `GET /session/list` expose `costUsd`, `budgetUsd` and
-  `budgetExhausted` so a stalled session shows _why_ it stopped taking turns.
+- `session_list` / `GET /session/list` expose `costUsd`, and `budgetUsd` and
+  `budgetExhausted` when a cap is set, so a stalled session shows _why_ it stopped
+  taking turns.
+- `maxBudgetUsd` does not bound a `goal` node: its turns never pass the per-send
+  check. Its `tokenBudget` and `timeoutMs` do.
 
 ### Zeroing a model's pricing
 
@@ -109,20 +123,29 @@ for that model**: the cap compares the session's accrued `getCost().totalUsd` ag
 and that number is pricing-derived, so at a rate of 0 it never reaches any cap. There is
 no separate token or turn ceiling behind it.
 
-- `engine: 'claude'` keeps the CLI's own `--max-budget-usd`, which the CLI accounts itself
-  and which a zeroed registry rate does not touch. `engine: 'grok'` is outside this for a
-  different reason: it writes the engine's own `total_cost_usd` into `_stats.costUsd` and
-  never consults the registry, so zeroing a model's pricing does not disable its cap.
-  For codex, cursor, agy, opencode and custom the runtime check is the only one.
+- `engine: 'claude'` is outside this: its cost is the CLI's own `total_cost_usd`, so an
+  override neither zeroes a Claude row nor disables its cap. The registry rate is used only
+  for the first turn of a resumed process and for proxy sessions (see below), and the CLI's
+  own `--max-budget-usd` applies as well. `engine: 'grok'` is outside it for the same
+  reason: it writes the engine's own `total_cost_usd` into `_stats.costUsd` and never
+  consults the registry, so zeroing a model's pricing does not disable its cap.
+  `engine: 'acp'` is outside it too: it takes the agent's own reported cost, or prices
+  tokens from its preset's `pricing`, and never reads the registry — an agent that
+  reports no cost and has no `pricing` accrues nothing, so its cap never bites.
+  `engine: 'opencode'` is outside it whenever opencode reports a `cost` for its steps,
+  which is then the bill; only output that carries none is priced from the registry.
+  For `codex`, `codex-app`, `agy`, `custom` and the legacy engines the runtime check
+  is the only one.
 - `maxTurns` (and `maxRounds` on a council) still bound the work, and they are the right
   ceiling to reach for once a model prices at 0.
 - In a council the cap cannot bite before an agent's second turn in any case: the first
   enters with nothing accrued, and one `sendMessage` runs up to `maxTurnsPerAgent` turns
   inside the CLI, so it can pass the whole cap on its own.
-- `cursor` and `opencode` sessions started without a model price by their engine default,
-  which is `claude-sonnet-4-6` for both. Zeroing a Claude subscription therefore zeroes
-  those default sessions too, and their reported ids (`cursor-default`, `opencode-default`)
-  are display names that cannot themselves be overridden.
+- An `opencode` session started without a model, on turns opencode reports no cost for,
+  prices at its engine default `claude-sonnet-4-6`, and so does a session on the legacy
+  `cursor` engine started without one. Zeroing a Claude subscription therefore zeroes
+  those turns too, and their reported ids (`opencode-default`, `cursor-default`) are
+  display names that cannot themselves be overridden.
 
 The override is read once, in the `SessionManager` constructor, from the plugin config.
 `clawo serve`, `clawo-acp` and `clawo-mcp` do not pass one, so a ledger written by those
@@ -130,21 +153,23 @@ processes prices at registry rates whichever way this is set.
 
 ## Accuracy: which engines report real usage
 
-`costUsd` is derived from token counts times the model's price in `models.ts`.
+`costUsd` is derived from token counts times the model's price in `models.ts`,
+except where the engine reports its own cost (marked in the table below).
 Where the engine reports usage, those counts are the engine's own. Where it does
 not, the wrapper falls back to `estimateTokens()` (characters ÷ 4) and the row is
 flagged `tokensEstimated: true`; the CLI marks those costs with a trailing `~`.
 
-| Engine            | Token counts                                                                                                                                                                                             |
-| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `claude`          | Engine-reported, including the **cost** (see below)                                                                                                                                                      |
-| `codex`           | Engine-reported                                                                                                                                                                                          |
-| `codex-app`       | Engine-reported                                                                                                                                                                                          |
-| `grok`            | Engine-reported — and so is the **cost**: this engine reports `total_cost_usd`, which the wrapper passes through instead of pricing tokens from the registry, so registry drift cannot affect a grok row |
-| `cursor` (legacy) | Engine-reported when the stream carries `usage`, else estimated                                                                                                                                          |
-| `opencode`        | Engine-reported when the run JSON carries `tokens`, else estimated                                                                                                                                       |
-| `agy`             | Engine-reported when the result event carries usage, else estimated                                                                                                                                      |
-| `custom`          | Depends on the CLI; estimated when it emits no usage                                                                                                                                                     |
+| Engine            | Token counts                                                                                                                                                                                                                                                         |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `claude`          | Engine-reported, including the **cost** (see below)                                                                                                                                                                                                                  |
+| `codex`           | Engine-reported                                                                                                                                                                                                                                                      |
+| `codex-app`       | Engine-reported                                                                                                                                                                                                                                                      |
+| `grok`            | Engine-reported — and so is the **cost**: this engine reports `total_cost_usd`, which the wrapper passes through instead of pricing tokens from the registry, so registry drift cannot affect a grok row                                                             |
+| `acp`             | Agent-reported when the prompt response carries `usage`. Cost is the agent's own `usage_update` figure when it sends one in USD, else priced from the preset's `pricing`, else 0. Never estimated — see [`multi-engine.md`](./multi-engine.md#acp-agents-engine-acp) |
+| `cursor` (legacy) | Engine-reported when the stream carries `usage`, else estimated                                                                                                                                                                                                      |
+| `opencode`        | Engine-reported when the run JSON carries `tokens`, else estimated. The **cost** is opencode's own per-step `cost` when it reports one, else priced from the registry                                                                                                |
+| `agy`             | Engine-reported when the result event carries usage, else estimated                                                                                                                                                                                                  |
+| `custom`          | Depends on the CLI; estimated when it emits no usage                                                                                                                                                                                                                 |
 
 How a `claude` row's cost is taken:
 
@@ -156,9 +181,9 @@ How a `claude` row's cost is taken:
   restart) reports a total that includes the resumed history. Its first report is
   taken as a baseline, and that one turn is priced from the registry instead, so
   the history is not billed twice (`maxBudgetUsd` gates against this number).
-- Proxy sessions (`baseUrl` set) use the registry estimate instead: the CLI
-  believes it is running `opus` while another provider serves the tokens, so its
-  own figure would be Opus list price.
+- Proxy sessions (a non-Claude `model` with `baseUrl` set) use the registry
+  estimate instead: the CLI believes it is running `opus` while another provider
+  serves the tokens, so its own figure would be Opus list price.
 
 ### What "input tokens" means is not the same on every engine
 
@@ -190,9 +215,10 @@ it is not an accounting guarantee, and it is not a substitute for the spend limi
 your provider offers.
 
 Cost figures are also only as good as the pricing table: a model missing from
-`models.ts` prices at its family default, and subscription plans (Claude Max,
-ChatGPT Pro) bill nothing per token while the ledger still reports the API-rate
-equivalent. Read `costUsd` as "what this would cost at API rates".
+`models.ts` is priced as its engine's default model (with a warning in the log),
+and subscription plans (Claude Max, ChatGPT Pro) bill nothing per token while the
+ledger still reports the API-rate equivalent. Read `costUsd` as "what this would
+cost at API rates".
 
 ## `ok` vs `verified`
 
@@ -220,8 +246,8 @@ either would make the ledger useless for the thing it is for.
 `verified` is **not written at turn time**, deliberately. The turns that produce
 the work all finish before the verifier that judges it, so stamping a verdict on
 them as they are written would be inventing one. It is joined in at read time
-from the run record via the row's `parent`, by `annotateVerdicts()`. The exception
-is a standalone `verify_run`, which writes its verdict directly.
+from the run record via the row's `parent`, by `annotateVerdicts()`. A standalone
+`verify_run` writes no row at all: its result is the evidence bundle it returns.
 
 Two consequences worth knowing:
 
@@ -234,10 +260,11 @@ Two consequences worth knowing:
 
 | Field                      | Source                                                                                                                                                          |
 | -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `evidenceId`, `contractId` | Joined from the run record                                                                                                                                      |
-| `nodeKind`                 | The kernel node the turn belonged to (`agent`, `council`, `verifier`, …)                                                                                        |
+| `verified`                 | Joined from the run record: `true` for `verified`, `false` for `refuted`, absent for `unverified` (see above)                                                   |
+| `evidenceId`, `contractId` | Joined from the run record: the evidence behind its current verdict, and the id of its run-level contract                                                       |
+| `nodeKind`                 | The kind of node the turn ran in, when the caller stamps one. Today only fan-out agents do (`fanout`)                                                           |
 | `repoLang`                 | Detected from a manifest (`package.json`, `pyproject.toml`, `go.mod`, …). Never guessed — a wrong label would corrupt the comparison the field exists to enable |
-| `taskKind`                 | Caller-declared only. Never inferred from the prompt                                                                                                            |
+| `taskKind`                 | Caller-declared only, through `sendMessage`'s `taskKind` option; no tool or route sets it. Never inferred from the prompt                                       |
 
 All are optional and absent on rows written before 6.0.0. The reader already
 skips unknown and missing keys, so old shards stay readable; nothing backfills
@@ -246,7 +273,7 @@ them, because we cannot know retroactively.
 ```bash
 clawo runs --since 7d --verified     # only turns whose contract passed
 clawo runs --since 7d --refuted      # only turns whose contract failed
-clawo runs --parent wf-abc123        # every turn of one workflow run
+clawo runs --parent wf-mh3k2x1a-a1b2c3   # every turn of one workflow run
 ```
 
 ## Related

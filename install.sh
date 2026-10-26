@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# One-line installer for Claw Orchestrator
+# One-line installer for Claw Orchestrator as an OpenClaw plugin.
+# Standalone use (CLI, MCP server, ACP agent) needs only: npm install -g @enderfga/claw-orchestrator
 # Usage: curl -fsSL https://raw.githubusercontent.com/Enderfga/claw-orchestrator/main/install.sh | bash
 set -euo pipefail
 
@@ -14,8 +15,8 @@ warn()  { printf '\033[1;33m!\033[0m %s\n' "$*"; }
 fail()  { printf '\033[1;31m✘\033[0m %s\n' "$*" >&2; exit 1; }
 
 # ── Prerequisites ────────────────────────────────────────
-command -v npm  >/dev/null 2>&1 || fail "npm not found. Install Node.js first: https://nodejs.org"
-command -v openclaw >/dev/null 2>&1 || fail "openclaw not found. Install OpenClaw first: https://docs.openclaw.ai"
+command -v npm  >/dev/null 2>&1 || fail "npm not found. Install Node.js 22 or later first: https://nodejs.org"
+command -v openclaw >/dev/null 2>&1 || fail "openclaw not found. This script installs the OpenClaw plugin: install OpenClaw first (https://docs.openclaw.ai), or for standalone use run: npm install -g ${NPM_PACKAGE}"
 
 # ── Step 1: npm global install ───────────────────────────
 info "Installing ${NPM_PACKAGE} via npm..."
@@ -118,5 +119,5 @@ else
 fi
 
 echo ""
-ok "Done! You now have session_start, council_start, and 30+ coding-agent tools."
+ok "Done! Your OpenClaw agents now have session_start, workflow_start, council_start and the rest of the Claw Orchestrator tools."
 echo "  Docs: https://github.com/Enderfga/claw-orchestrator"

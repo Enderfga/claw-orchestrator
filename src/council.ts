@@ -530,6 +530,7 @@ export class Council extends EventEmitter {
           maxTurns: this.config.maxTurnsPerAgent || DEFAULT_MAX_TURNS_PER_AGENT,
           maxBudgetUsd: this.config.maxBudgetUsd,
           customEngine: agent.customEngine,
+          ...(agent.acpAgent === undefined ? {} : { acpAgent: agent.acpAgent }),
           effort: agent.effort,
           ultracode: agent.ultracode,
         });

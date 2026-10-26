@@ -87,6 +87,16 @@ async function startSession(proc: ReturnType<typeof createMockProc>) {
 describe('PersistentCodexAppServerSession v2 RPCs', () => {
   beforeEach(() => mockSpawn.mockReset());
 
+  it('redacts secrets from app-server stderr in its log lines', async () => {
+    const proc = createMockProc(defaultResponder());
+    const session = await startSession(proc);
+    const logs: string[] = [];
+    session.on('log', (line: string) => logs.push(line));
+    proc.stderr.emit('data', Buffer.from('OPENAI_API_KEY=sk-live-0123456789abcdef\n'));
+    expect(logs.join('')).toContain('OPENAI_API_KEY=***');
+    expect(logs.join('')).not.toContain('0123456789abcdef');
+  });
+
   it('thread/start handshake captures the thread id', async () => {
     const session = await startSession(createMockProc(defaultResponder()));
     expect(session.codexThreadId).toBe('t1');

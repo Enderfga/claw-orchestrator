@@ -28,12 +28,14 @@ This page is the operator reference.
 | **Coder**    | claude / sonnet | workspace                                      | code changes, eval execution                     |
 | **Reviewer** | claude / sonnet | `<workspace>/tasks/<run_id>/reviewer_sandbox/` | distrust audit; advance / hold / rollback        |
 
-Each role can use any built-in engine, or a `custom` engine config supplied by a
-local caller (custom engines name an executable, so the HTTP API does not accept
-them — see [tools.md](./tools.md)). If a non-Claude role omits `model`, that CLI
-uses its own default model rather than receiving the Claude `opus` / `sonnet`
-defaults. Role instructions are included in-band for engines that do not expose a
-native system-prompt flag.
+Each role can use any built-in engine except `acp`, or a `custom` engine config
+supplied by a local caller (custom engines name an executable, so the HTTP API
+does not accept them — see [tools.md](./tools.md)). `acp` is refused for every
+role: a role is configured by engine name alone and has no field for the ACP
+agent to start. If a non-Claude role omits `model`, that CLI uses its own default
+model rather than receiving the Claude `opus` / `sonnet` defaults. Claude receives
+each role's instructions as its system prompt; every other engine receives them
+in-band, at the top of each message to that role.
 
 Each role also accepts an optional fixed reasoning effort at run start:
 `planner_effort`, `coder_effort`, and `reviewer_effort`. Accepted values are
@@ -46,14 +48,15 @@ their existing behavior.
 Engines without native multi-turn conversation (one-shot custom engines) spawn a
 fresh process per send with nothing to resume, so the dispatcher replays that
 role's transcript in-band as a `<conversation_history>` block, oldest turns dropped
-past a character budget. Claude, Codex, Antigravity, Grok and OpenCode each
-resume their own conversation by id and get no replay — see
+past a character budget. Claude, Codex (`codex` and `codex-app`), Antigravity,
+Grok and OpenCode each resume their own conversation and get no replay — see
 `engineHasNativeConversation` in `types.ts`, which is the single source of truth for
 this and is checked with a two-turn recall test per engine.
 
 The Planner runs read-only so strategy cannot turn into source edits, and that is
 enforced by the engine rather than requested politely: Claude uses plan mode,
-Antigravity uses its plan mode, and OpenCode gets a generated
+Antigravity uses its plan mode, Codex and Grok run in their own read-only
+sandbox, and OpenCode gets a generated
 `clawo-readonly` agent that denies `edit`/`bash`/`external_directory` (its built-in
 `plan` agent is a user-overridable preset that denies neither, so a "read-only"
 session could otherwise still author files through a shell heredoc). A custom
@@ -90,7 +93,9 @@ failing with "Session not found".
 ## UX flow
 
 ```
-1. autoloop_start { run_id, workspace }       → Planner session ready (refuses if the workspace Git tree already has tracked, staged, untracked, or submodule changes — including when repository status configuration hides them, `status.showUntrackedFiles=no`, or the porcelain listing is too large to buffer; unexpected `git status` failures also refuse; untracked (`??`) or index-clean worktree modifications (` M`) under `tasks/<id>/` with a regular `tasks/<id>/goal.json` are ignored so a second start can proceed after a committed ledger is appended, including when workspace is a nested repo subdirectory after stripping a verified `show-prefix`; dirt outside the workspace still refuses; ignored paths and non-repo workspaces still start). On a Git workspace, after that dirty check passes, start creates `tasks/<runId>/.gitignore` with `*` as the first ledger file (accepting an existing exact `*`, `*\n`, or `*\r\n` without overwrite), proves the ledger is ignored via `git check-ignore`, and refuses with one fixed generic error when the ledger is tracked, the ignore file is partial/deceptive, or `tasks`/`tasks/<runId>` is not a real in-workspace directory (e.g. a committed `tasks` symlink). Failed proofs and later start failures retain the run-local dirs/`.gitignore` (never deleted). Does not write `info/exclude` or any repository-wide ignore. The same fresh-start boundary runs on the first boot of a workflow `autoloop` node (`visits === 1`); `autoloopResume` / `workflowResume` and later visits skip it. Non-Git starts are unchanged.
+1. autoloop_start { run_id, workspace }       → Planner session ready
+                                                (a Git workspace must be clean,
+                                                see below)
 2. autoloop_chat { run_id, "<your goal>" }    → Planner reads workspace,
                                                 drafts plan.md + goal.json,
                                                 asks "ready to spawn?"
@@ -104,6 +109,38 @@ failing with "Session not found".
 
 Stopping at a target or at `max_iters` from `goal.json` is the Planner's
 decision: the runtime does not evaluate `goal.json`.
+
+### Starting on a Git workspace
+
+On a Git workspace, `autoloop_start` refuses with _Autoloop workspace has
+uncommitted changes; commit or stash them before starting_ when the worktree has
+any tracked, staged, untracked or submodule change. Repository configuration
+cannot hide a change from this check (`status.showUntrackedFiles=no` included),
+and a status listing too large to buffer, or any unexpected `git status` failure,
+also refuses. The one exception is an earlier run's ledger: untracked (`??`) or
+index-clean modified (` M`) files under `tasks/<id>/` are ignored when
+`tasks/<id>/goal.json` is a regular file, so a second run can start after a
+committed ledger was appended to. This also holds when the workspace is a
+subdirectory of the repository; changes outside the workspace still refuse.
+Ignored paths and non-Git workspaces start normally.
+
+Once that check passes, start keeps the run's ledger out of Git before writing
+anything else to it:
+
+- It creates `tasks/<runId>/.gitignore` containing `*` as the ledger's first
+  file. An existing file whose content is exactly `*`, `*\n` or `*\r\n` is
+  accepted without being overwritten.
+- It proves with `git check-ignore` that the ledger is ignored.
+- It refuses with the fixed error _Autoloop could not isolate the run ledger
+  from Git_ when the ledger is tracked, the ignore file holds anything else, or
+  `tasks` / `tasks/<runId>` is not a real directory inside the workspace (for
+  example a committed `tasks` symlink).
+
+Nothing is deleted on failure: a failed proof or a later start failure leaves the
+run's directories and `.gitignore` in place. Start never writes
+`.git/info/exclude` or any repository-wide ignore. The same boundary runs on the
+first boot of a workflow `autoloop` node (`visits === 1`); `autoloopResume` /
+`workflowResume` and later visits skip it.
 
 ## Timeout hierarchy and recoverable sends
 
@@ -261,7 +298,8 @@ for the `CustomEngineConfig` shape.
 | on_decision_needed     | decision / both                                       |
 
 The runtime fires five of these itself: `on_stall_30min` (30 minutes without
-activity), `on_metric_regression_2`, `on_reviewer_reject_2` (two in a row),
+activity), `on_metric_regression_2` (two `rollback` verdicts in a row),
+`on_reviewer_reject_2` (two `hold` or `rollback` verdicts in a row),
 `on_phase_error`, and `on_target_hit` (only when an acceptance contract passes,
 see [Acceptance contracts](#acceptance-contracts)). `on_start`,
 `on_iter_done_ok` and `on_decision_needed` are policy entries for the Planner's
@@ -302,7 +340,8 @@ CLIs expose no such command. The threshold is still meaningful there because
 `contextPercent` tracks real occupancy, but crossing it cannot free space:
 the session emits a single warning on its log channel the first time compaction
 is requested, then the thread keeps growing until the CLI refuses the request.
-Treat that warning as the signal to start a fresh session.
+Treat that warning as the signal to start a fresh session. `codex-app` does
+compact, through the app-server's own thread compaction.
 
 ## Phase-error circuit
 
@@ -344,6 +383,8 @@ decisions:
 | `update_push_policy`     | Planner mutates the policy                         |
 | `policy_silence_blocked` | Planner tried to silence a critical channel        |
 | `phase_error`            | Surfaced from dispatcher to runner                 |
+| `send_timeout`           | A role's send hit `send_timeout_ms`; run paused    |
+| `timeout_migration`      | A resume raised `send_timeout_ms` (see above)      |
 | `terminate`              | Run ends (planner reason or `phase_error_circuit`) |
 
 JSONL, one entry per line, ts-prefixed.
@@ -353,15 +394,13 @@ JSONL, one entry per line, ts-prefixed.
 ```
 <workspace>/tasks/<run_id>/
 ├── .gitignore           # run-local `*`; first file on Git start; keeps the ledger out of status/add
-├── plan.md              # Planner-authored (workspace-root copies are what iters commit)
-├── goal.json            # Planner-authored (workspace-root copies are what iters commit)
 ├── push_log.jsonl       # every notify_user attempt + channel used
 ├── decisions.jsonl      # runner / dispatcher audit trail (see above)
-├── chat.jsonl           # Planner-pane conversation, replayed by /chat_history
+├── chat.jsonl           # chat for all three panes (user, Planner, Coder, Reviewer), replayed by /chat_history
 ├── evidence/iter-<n>/   # acceptance-contract bundle, when a contract is configured
 ├── reviewer_sandbox/    # Reviewer cwd; restaged per iter
-│   ├── plan.md          # copy
-│   ├── goal.json        # copy
+│   ├── plan.md          # copy of the workspace-root file
+│   ├── goal.json        # copy of the workspace-root file
 │   ├── iter-N/          # this iter's directive + diff + eval
 │   ├── prior_verdict.json
 │   ├── reviewer_memory.md   # persistent (frozen-injected at session start)
@@ -374,9 +413,10 @@ JSONL, one entry per line, ts-prefixed.
     └── coder_summary.txt
 ```
 
-On a Git workspace, `autoloop_start` writes `.gitignore` before other ledger
-files and fails closed unless `git check-ignore` confirms the ledger is
-ignored. The run-local ignore is self-contained: it does not rely on
+`plan.md` and `goal.json` live at the workspace root, where `write_plan` /
+`write_goal` put them; the Reviewer gets copies in its sandbox. On a Git
+workspace the ledger is kept out of Git by its own `.gitignore` (see
+[Starting on a Git workspace](#starting-on-a-git-workspace)); it does not rely on
 `.git/info/exclude` or a root `.gitignore` entry for `tasks/`.
 
 The orchestrator git-commits each iter automatically. Coder must NOT call
@@ -393,18 +433,83 @@ Every JSON artifact in the ledger carries a `schema_version` field (currently
 
 ## Backend HTTP / SSE
 
-| Endpoint                                 | Returns                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `GET /autoloop/list`                     | `{ ok, runs: AutoloopState[] }`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| `POST /autoloop/new`                     | `{ ok, run_id, planner_session }` — body `{ workspace, run_id?, planner_engine?, planner_model?, coder_engine?, coder_model?, reviewer_engine?, reviewer_model?, send_timeout_ms?, activity_lease_ms?, autoloop_hard_timeout_ms? }`. Timeout fields use the defaults and inclusive bounds documented above; malformed or out-of-range values return 400 before a run starts.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| `GET /autoloop/<id>/state`               | `{ ok, state: AutoloopState, live }` — `live` is `true` only when the run is running in this process. For a run that is not live here, `state` is the last state recorded in the run store, so historical runs open with their real iteration count. 404 when there is no such run.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `GET /autoloop/<id>/push_log`            | `{ ok, entries: PushLogEntry[] }` — served from the ledger via `autoloopStatus`, so historical runs work the same as live ones.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| `GET /autoloop/<id>/chat_history`        | `{ ok, entries: ChatEntry[] }` — replays `<ledger>/chat.jsonl`. The dashboard fetches this when opening a run so the Planner-pane conversation survives a page refresh / cross-process / re-opening a terminated run. Returns `[]` when the file doesn't exist.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| `GET /autoloop/<id>/events`              | SSE: `snapshot` / `message` / `state` / `push` / `iter_done` / `planner_reply` / `planner_error` / `coder_reply` / `reviewer_reply` / `terminated`. For runs that are NOT in this process's memory (terminated, or live in another process), the endpoint emits a single-shot `snapshot` + `terminated` then closes — the dashboard's existing handlers render history without hanging. A run still in memory that has already reached `terminated` or `crashed` gets the same single-shot pair instead of an open stream that would never receive another event. Every such stream sets `retry: 864000000`, so an `EventSource` does not keep reconnecting to a stream that can only end again.                                                                                                                                                                                                                                                                                            |
-| `POST /autoloop/<id>/chat`               | **202** `{ ok, queued: true }` — body `{ text }`. Fire-and-forget: the Planner's reply streams back via the `/events` SSE channel as a `planner_reply` event (or `planner_error` on failure); the HTTP response intentionally does NOT wait for it, because first-contact replies routinely exceed reverse-proxy idle limits (e.g. Cloudflare Tunnel cuts at ~100s → 524). 400 on empty text. 404 when the run is not in this process's memory: if the store still holds it, the error says so and names `POST /autoloop/<id>/resume`; an unknown or malformed id is plain `not found`. The MCP `autoloop_chat` tool path keeps the synchronous await-and-return-reply semantics (it runs in-process).                                                                                                                                                                                                                                                                                      |
-| `GET /autoloop/<id>/resume-requirements` | `{ ok, runId, rolesNeedingCustomEngine }` — the roles whose engine was `custom`, so a caller knows which secret references a resume needs. Role names only; nothing sensitive. 404 when there is no such run.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| `POST /autoloop/<id>/resume`             | `{ ok, state }` — for a live ordinary or activity-lease pause (`pending_dispatch` null), an empty timeout body continues that run: the response returns once status is `planning` or `running` again, the lease re-arms, the hard deadline stays put, and parked Planner input is then delivered once, in order. A live `awaiting_resume` pause is unchanged unless the body increases the send timeout. Otherwise restore the role engine/model choices from the run's spec and re-create dispatcher + runner. For recoverable send timeouts, body fields `send_timeout_ms` and `pending_dispatch_id` apply the increase-only migration described above; `allow_decrease`, lease overrides, and hard-cap overrides are rejected. A custom-engine config is never persisted and is never accepted over HTTP, so a role using `custom` is re-supplied by **reference**: `plannerCustomEngineRef` / `coderCustomEngineRef` / `reviewerCustomEngineRef` name an environment variable `CLAWO_CUSTOM_ENGINE_<NAME>` on the orchestrator host, which the server reads and resolves. The name is not sensitive, the value never crosses the wire, and an unknown name is an error rather than a silent start without credentials. Existing engine-specific conversation resume behavior is reused where supported; `chat.jsonl` remains the visual history fallback. 404 when there is no such run. |
-| `POST /autoloop/<id>/delete`             | `{ ok }` — stops the loop if still live, deletes the run record from the run store, and purges the role sessions' persisted resume ids so the run cannot be resumed. The ledger directory under `<workspace>/tasks/<run_id>/` is kept on disk. 404 when there is no such run.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| Endpoint                                 | Returns                                                                                                                                                                                                                                                                             |
+| ---------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /autoloop/list`                     | `{ ok, runs: AutoloopState[] }`                                                                                                                                                                                                                                                     |
+| `POST /autoloop/new`                     | `{ ok, run_id, planner_session }` — see [Starting a run](#starting-a-run).                                                                                                                                                                                                          |
+| `GET /autoloop/<id>/state`               | `{ ok, state: AutoloopState, live }` — `live` is `true` only when the run is running in this process. For a run that is not live here, `state` is the last state recorded in the run store, so historical runs open with their real iteration count. 404 when there is no such run. |
+| `GET /autoloop/<id>/push_log`            | `{ ok, entries: PushLogEntry[] }` — served from the ledger via `autoloopStatus`, so historical runs work the same as live ones.                                                                                                                                                     |
+| `GET /autoloop/<id>/chat_history`        | `{ ok, entries: ChatEntry[] }` — replays `<ledger>/chat.jsonl`, so the dashboard's panes survive a page refresh, another process, or re-opening a terminated run. `[]` when the file doesn't exist.                                                                                 |
+| `GET /autoloop/<id>/events`              | SSE — see [Event stream](#event-stream).                                                                                                                                                                                                                                            |
+| `POST /autoloop/<id>/chat`               | **202** `{ ok, queued: true }` — see [Chat over HTTP](#chat-over-http).                                                                                                                                                                                                             |
+| `GET /autoloop/<id>/resume-requirements` | `{ ok, runId, rolesNeedingCustomEngine }` — the roles whose engine was `custom`, so a caller knows which secret references a resume needs. Role names only; nothing sensitive. 404 when there is no such run.                                                                       |
+| `POST /autoloop/<id>/resume`             | `{ ok, state }` — see [Resume over HTTP](#resume-over-http). 404 when there is no such run.                                                                                                                                                                                         |
+| `POST /autoloop/<id>/delete`             | `{ ok }` — stops the loop if still live, deletes the run record from the run store, and purges the role sessions' persisted resume ids so the run cannot be resumed. The ledger directory under `<workspace>/tasks/<run_id>/` is kept on disk. 404 when there is no such run.       |
+
+### Starting a run
+
+`POST /autoloop/new` takes `{ workspace, run_id?, planner_engine?, planner_model?,
+planner_effort?, coder_engine?, coder_model?, coder_effort?, reviewer_engine?,
+reviewer_model?, reviewer_effort?, send_timeout_ms?, activity_lease_ms?,
+autoloop_hard_timeout_ms? }`. A `run_id` that is missing or does not match
+`^[a-zA-Z0-9_-]{1,64}$` is replaced by a generated `auto-<timestamp>-<hex>`.
+Timeout fields use the defaults and inclusive bounds documented above; malformed
+or out-of-range values return 400 before a run starts. Custom-engine configs are
+not accepted over HTTP, so a `custom` role can only be started by a local caller.
+
+### Event stream
+
+`GET /autoloop/<id>/events` emits `snapshot` / `message` / `state` / `push` /
+`iter_done` / `planner_reply` / `planner_error` / `coder_reply` /
+`reviewer_reply` / `compact` / `terminated`.
+
+For a run that is NOT in this process's memory (terminated, or live in another
+process), the endpoint emits a single-shot `snapshot` + `terminated` then closes —
+the dashboard's existing handlers render history without hanging. A run still in
+memory that has already reached `terminated` or `crashed` gets the same
+single-shot pair instead of an open stream that would never receive another
+event. Every such stream sets `retry: 864000000`, so an `EventSource` does not
+keep reconnecting to a stream that can only end again.
+
+### Chat over HTTP
+
+`POST /autoloop/<id>/chat` takes `{ text }` and is fire-and-forget: the
+Planner's reply streams back on `/events` as a `planner_reply` event (or
+`planner_error` on failure). The HTTP response intentionally does not wait for
+it, because first-contact replies routinely exceed reverse-proxy idle limits
+(e.g. Cloudflare Tunnel cuts at ~100s → 524). The MCP `autoloop_chat` tool keeps
+the synchronous await-and-return-reply semantics (it runs in-process).
+
+400 on empty text. 404 when the run is not in this process's memory: if the
+store still holds it, the error says so and names `POST /autoloop/<id>/resume`;
+an unknown or malformed id is plain `not found`.
+
+### Resume over HTTP
+
+`POST /autoloop/<id>/resume` returns `{ ok, state }`.
+
+- **A live ordinary or activity-lease pause** (`pending_dispatch` null): an empty
+  timeout body continues that run. The response returns once status is
+  `planning` or `running` again, the lease re-arms, the hard deadline stays put,
+  and parked Planner input is then delivered once, in order.
+- **A live `awaiting_resume` pause** is unchanged unless the body increases the
+  send timeout.
+- **Otherwise** the role engine/model choices are restored from the run's spec
+  and the dispatcher and runner are re-created. Existing engine-specific
+  conversation resume is reused where supported; `chat.jsonl` remains the visual
+  history fallback.
+
+For recoverable send timeouts, body fields `send_timeout_ms` and
+`pending_dispatch_id` apply the increase-only migration described above;
+`allow_decrease`, lease overrides, and hard-cap overrides are rejected.
+
+A custom-engine config is never persisted and never accepted over HTTP, so a role
+using `custom` is re-supplied by **reference**: `plannerCustomEngineRef` /
+`coderCustomEngineRef` / `reviewerCustomEngineRef` name an environment variable
+`CLAWO_CUSTOM_ENGINE_<NAME>` on the orchestrator host, whose value is the JSON
+custom-engine config; the server reads and resolves it. The name is not
+sensitive, the value never crosses the wire, and an unknown name is an error
+rather than a silent start without credentials.
 
 The dashboard's 3-pane autoloop view (`/dashboard`) consumes these endpoints:
 
@@ -519,8 +624,8 @@ retries it.
 - **One-way push.** Replies to a push are not routed back to the Planner;
   answer with `autoloop_chat`.
 - **No fork / population mode.** Single linear iter trajectory per run.
-- **Cross-run knowledge isolated.** Each run's `reviewer_memory.md` and
-  `coder_notes.md` live in that run's ledger; there is no shared store.
+- **Cross-run knowledge isolated.** Each run's `reviewer_memory.md` lives in
+  that run's ledger; there is no shared store.
 - **No cost cap.** `maxBudgetUsd` is not exposed for autoloop. Wall-clock time
   is bounded by `autoloop_hard_timeout_ms` (default 24 h); the iteration count
   is bounded only by the Planner honouring `max_iters` in `goal.json`.

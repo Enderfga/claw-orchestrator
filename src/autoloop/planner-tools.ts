@@ -200,6 +200,7 @@ function preparePlannerCall(call: PlannerToolCall, iter: number): PreparedPlanne
         if (value !== undefined && (typeof value !== 'string' || !ENGINE_TYPES.includes(value as EngineType))) {
           throw new Error(`spawn_subagents ${field} has unknown engine '${String(value)}'`);
         }
+        if (value === 'acp') throw new Error(`spawn_subagents ${field} 'acp' is not supported by Autoloop`);
       }
       for (const field of ['coder_model', 'reviewer_model'] as const) {
         const value = raw[field];

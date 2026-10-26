@@ -178,7 +178,8 @@ describe('plugin tool registration', () => {
     const properties = (tool!.parameters.properties ?? {}) as Record<string, Record<string, unknown>>;
 
     for (const role of ['planner', 'coder', 'reviewer'] as const) {
-      expect(properties[`${role}_engine`]?.enum).toEqual(ENGINE_TYPES);
+      // Every engine but acp: a role cannot name the ACP agent an acp engine starts.
+      expect(properties[`${role}_engine`]?.enum).toEqual(ENGINE_TYPES.filter((e) => e !== 'acp'));
       expect(properties[`${role}_model`]?.type).toBe('string');
       expect(properties[`${role}_effort`]?.enum).toEqual(['low', 'medium', 'high', 'xhigh', 'max', 'ultra', 'auto']);
       expect(properties[`${role}_custom_engine`]?.type).toBe('object');
@@ -339,6 +340,64 @@ describe('plugin tool registration', () => {
       type: 'string',
       description: expect.stringMatching(/replace.*shared task/i),
     });
+  });
+
+  it('lets every surface that offers engine acp name the ACP agent, and no other surface offer it', () => {
+    type Props = Record<string, { type?: string; enum?: string[]; items?: { properties?: Props; enum?: string[] } }>;
+    const props = (name: string) => (byName.get(name)!.parameters.properties ?? {}) as Props;
+    const items = (name: string, field: string) => props(name)[field]!.items!.properties!;
+
+    expect(props('session_handoff').acpAgent).toBeDefined();
+    expect(items('fanout_start', 'agents').acpAgent).toMatchObject({ type: 'string' });
+    expect(props('fanout_start').synthesisAcpAgent).toMatchObject({ type: 'string' });
+    expect(items('council_start', 'agents').acpAgent).toMatchObject({ type: 'string' });
+    expect(items('workflow_start', 'agents').acpAgent).toMatchObject({ type: 'string' });
+    expect(items('workflow_start', 'reviewers').acpAgent).toMatchObject({ type: 'string' });
+    expect((props('workflow_start').implementer as unknown as { properties: Props }).properties.acpAgent).toBeDefined();
+
+    expect(props('ultrareview_start').engines!.items!.enum).not.toContain('acp');
+    for (const role of ['planner_engine', 'coder_engine', 'reviewer_engine']) {
+      expect(props('autoloop_start')[role]!.enum, role).not.toContain('acp');
+    }
+  });
+
+  it('session_handoff and fanout_start forward the ACP agent they are given', async () => {
+    const registration = collectRegistration();
+    const tool = (name: string) => registration.tools.find((t) => t.name === name)!;
+    const handoff = vi
+      .spyOn(SessionManager.prototype, 'handoffSession')
+      .mockResolvedValue({ name: 'b', engine: 'acp' } as never);
+    const fanout = vi
+      .spyOn(SessionManager.prototype, 'fanoutStart')
+      .mockResolvedValue({ id: 'f', status: 'running', results: [] } as never);
+    const previousNoServer = process.env.CLAWO_NO_EMBEDDED_SERVER;
+    process.env.CLAWO_NO_EMBEDDED_SERVER = '1';
+    try {
+      await tool('session_handoff').execute('h', { name: 'a', engine: 'acp', acpAgent: 'kimi-code' });
+      expect(handoff).toHaveBeenCalledWith('a', expect.objectContaining({ engine: 'acp', acpAgent: 'kimi-code' }));
+
+      await tool('fanout_start').execute('f', {
+        task: 't',
+        projectDir: fs.realpathSync(os.tmpdir()),
+        agents: [{ name: 'k', engine: 'acp', acpAgent: 'kimi-code' }],
+        synthesize: true,
+        synthesisEngine: 'acp',
+        synthesisAcpAgent: 'dsh',
+      });
+      expect(fanout).toHaveBeenCalledWith(
+        expect.objectContaining({
+          agents: [expect.objectContaining({ acpAgent: 'kimi-code' })],
+          synthesisEngine: 'acp',
+          synthesisAcpAgent: 'dsh',
+        }),
+      );
+    } finally {
+      registration.services[0]?.stop();
+      handoff.mockRestore();
+      fanout.mockRestore();
+      if (previousNoServer === undefined) delete process.env.CLAWO_NO_EMBEDDED_SERVER;
+      else process.env.CLAWO_NO_EMBEDDED_SERVER = previousNoServer;
+    }
   });
 });
 

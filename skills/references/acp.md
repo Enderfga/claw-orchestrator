@@ -1,29 +1,30 @@
 # Agent Client Protocol (ACP)
 
-Claw Orchestrator can run **as an ACP agent**: a coding agent that any ACP client
-drives over JSON-RPC stdio. Zed, JetBrains IDEs, Neovim, Emacs and the VS Code ACP
-extension are clients; so is `dsh`, whose `@deepseek-ai/dsh-subagent-acp` provider
-spawns an arbitrary command as a subagent.
+Claw Orchestrator speaks ACP in both directions:
 
-The model selector spans several engines, and session modes select the
-orchestration shape: a single agent, a council, a planning pass, or a review.
-
-The other direction, the orchestrator as an ACP **client** driving an agent such
-as `kimi acp` or `dsh --profile acp`, is the `acp` engine: see
-[multi-engine.md](./multi-engine.md#acp-agents-engine-acp).
+- **As an ACP agent** (`clawo acp`): a coding agent that any ACP client drives over
+  JSON-RPC stdio. Zed, JetBrains IDEs, Neovim, Emacs and the VS Code ACP extension
+  are clients; so is `dsh`, whose `@deepseek-ai/dsh-subagent-acp` provider spawns an
+  arbitrary command as a subagent. The model selector spans several engines, and
+  session modes select the orchestration shape: a single agent, a council, a
+  planning pass, or a review. Most of this page covers this direction.
+- **As an ACP client** (the `acp` engine): the orchestrator drives an agent that
+  serves ACP, such as `kimi acp` or `dsh --profile acp`, as one of its own sessions.
+  See [The `acp` engine](#the-acp-engine-driving-other-acp-agents) below.
 
 ```bash
 clawo acp          # or the dedicated binary:
 clawo-acp
 # without a global install:
-npx -y @enderfga/claw-orchestrator acp
+npx -y -p @enderfga/claw-orchestrator clawo-acp
 ```
 
 Requires Node ≥ 22 and at least one engine CLI (`claude`, `codex`, `agy`,
 `grok`) installed and logged in.
 
 Both read the protocol from stdin and write it to stdout. **Stdout carries nothing
-but protocol frames** — all logging goes to stderr.
+but protocol frames** — all logging goes to stderr. The agent exits when the client
+closes its stdin, stopping the engine processes it started.
 
 ## Protocol version
 
@@ -35,13 +36,25 @@ Implemented: `initialize`, `authenticate`, `session/new`, `session/resume`,
 `session/list`, `session/prompt`, `session/set_mode`, `session/set_config_option`,
 `session/cancel`.
 
+`session/new` requires an absolute `cwd`.
+
 ## Configuration
 
-| Env var                | Default             | Meaning                                                                                         |
-| ---------------------- | ------------------- | ----------------------------------------------------------------------------------------------- |
-| `CLAWO_ACP_MODEL`      | `claude-sonnet-4-6` | Model (and therefore engine) for a new session                                                  |
-| `CLAWO_ACP_PERMISSION` | `acceptEdits`       | `plan` \| `acceptEdits` \| `bypassPermissions`; an unrecognised value is ignored with a warning |
-| `OPENCLAW_LOG_LEVEL`   | `info`              | Set `warn` to quieten the stderr channel                                                        |
+| Env var                       | Default             | Meaning                                                                                         |
+| ----------------------------- | ------------------- | ----------------------------------------------------------------------------------------------- |
+| `CLAWO_ACP_MODEL`             | `claude-sonnet-4-6` | Model (and therefore engine) for a new session                                                  |
+| `CLAWO_ACP_PERMISSION`        | `acceptEdits`       | `plan` \| `acceptEdits` \| `bypassPermissions`; an unrecognised value is ignored with a warning |
+| `OPENCLAW_SERVE_MAX_SESSIONS` | `32`                | Maximum number of engine sessions running at once                                               |
+| `OPENCLAW_SERVE_TTL_MINUTES`  | `60`                | Idle minutes before an engine session is stopped                                                |
+| `OPENCLAW_LOG_LEVEL`          | `info`              | Set `warn` to quieten the stderr channel                                                        |
+
+## Prompt content
+
+Only `text` and `resource_link` blocks are read from a prompt. `text` blocks are
+concatenated; a `resource_link` becomes a textual `[resource_link name=… uri=…]`
+reference that the engine may open with its own tools; other blocks are dropped
+(`initialize` advertises no image, audio or embedded-context support). A prompt
+that yields no text this way is refused with `invalid params`.
 
 ## Session modes
 
@@ -56,12 +69,15 @@ slash command, advertised through `available_commands_update` when the session o
 
 That is the only way to reach a mode in a client that does not draw the picker.
 
-| Mode          | What a turn does                                                                                                                                                          |
-| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `single`      | One engine answers. Text streams as `agent_message_chunk`; tool use becomes `tool_call`.                                                                                  |
-| `council`     | Several engines debate in isolated git worktrees. Each agent becomes a `tool_call` the client can collapse, each round emits a `plan`, and the synthesis arrives as text. |
-| `ultraplan`   | Long-horizon planning pass. Result arrives as a `plan` update and as text.                                                                                                |
-| `ultrareview` | Parallel reviewers sweep the working tree; findings arrive the same way.                                                                                                  |
+| Mode          | What a turn does                                                                                                                                                                                             |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `single`      | One engine answers. Text streams as `agent_message_chunk`; tool use becomes `tool_call`. The turn ends with a `usage_update` (context used and size, session cost) when the model's context window is known. |
+| `council`     | Several engines debate in isolated git worktrees. Each agent becomes a `tool_call` the client can collapse, each round emits a `plan`, and the synthesis arrives as text.                                    |
+| `ultraplan`   | Long-horizon planning pass. Result arrives as a `plan` update and as text.                                                                                                                                   |
+| `ultrareview` | Parallel reviewers sweep the working tree; findings arrive the same way.                                                                                                                                     |
+
+A `council`, `ultraplan` or `ultrareview` turn gives up after 30 minutes; a council
+is aborted at that point.
 
 ### Council
 
@@ -78,26 +94,31 @@ rather than streamed into the text channel. Several agents speak at once, and a
 consumer that only reads text — `dsh`'s ACP subagent reads nothing else — would
 otherwise receive them interleaved into one unreadable blob.
 
-Council requires a git repository at the session `cwd`; it creates one worktree and
-branch per agent. Its guardrails (non-git directory, too-short task, and others)
-surface as an `invalid params` error naming the reason.
+Council works in git at the session `cwd`: a directory that is not a repository, or
+has no commits yet, is initialised and given an initial commit of what it holds,
+and each agent gets its own worktree under `.worktrees/` and a `council/<agent>`
+branch. An error raised while the run is being created is reported as an
+`invalid params` error naming the reason. The council's own checks (a task under
+five characters, for one) run once it has started, so a council that fails one,
+or fails later, ends the turn with stop reason `refusal`.
 
 **Consensus parks the run rather than finishing it.** The turn ends at the gate, and
 the decision becomes a slash command, advertised through `available_commands_update`:
 
-| Command                      | Effect                                                      |
-| ---------------------------- | ----------------------------------------------------------- |
-| `/council_accept`            | Merge the winning agent's worktree.                         |
-| `/council_reject <feedback>` | Discard the result; the text is passed through as feedback. |
+| Command                        | Effect                                                                                                                                                   |
+| ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/council_accept`              | Accept the work the agents have merged on the main branch, and clean up: the worktrees, the `council/*` branches, `plan.md` and `reviews/` are removed.  |
+| `/council_reject [<feedback>]` | Reject the work: `plan.md` is rewritten with the feedback and committed. Worktrees and branches are kept so the council can retry. Feedback is optional. |
 
-Any other prompt while a council is parked is refused, so a second run cannot start
-over the same worktrees.
+Any other prompt while a council is parked is answered with a reminder of these two
+commands and runs nothing, so a second run cannot start over the same worktrees.
+Either command with no council parked is refused with `invalid params`.
 
 ### Ultraplan and ultrareview
 
 Neither emits events — they are started and then polled — so progress is reported as
-`agent_thought_chunk` heartbeats. Ultraplan has **no abort path at all**, so
-cancelling one abandons the poll rather than stopping the work.
+`agent_thought_chunk` heartbeats. The agent does not stop either run on a cancel:
+cancelling one abandons the poll, and the run carries on.
 
 ## Cross-engine model selector
 
@@ -110,20 +131,21 @@ another engine starts a new one, since one engine cannot read another's.
 
 Other engines are absent for different reasons:
 
-- **`gemini`** — the Gemini CLI is sunset and superseded by Antigravity. It still
-  works for callers that name it directly; it is not offered in a new picker.
-- **`cursor`** — a legacy engine, superseded by Grok Build in this lineup. Same
-  treatment: callers that name it still work.
-- **`opencode`** — its models are open-ended `provider/model` strings passed
-  straight through, so there is nothing in the registry to enumerate. An opencode
-  session is reachable by naming the model, just not by picking it from this list.
+- **`gemini`** and **`cursor`** — legacy engines (the Gemini CLI is sunset and
+  superseded by Antigravity; Cursor is superseded by Grok Build in this lineup).
+  Their models are filtered out of the list; a model name that routes to one, set
+  through `CLAWO_ACP_MODEL`, still works.
+- **`opencode`** — its models are open-ended `provider/model` strings with nothing
+  in the registry to enumerate, and no model name routes to it, so the ACP agent
+  does not start opencode sessions.
+- **`acp`** — an ACP agent picks its own model.
 
 ## Generated images
 
 When the engine generates an image in a turn (Codex does, when asked for one), the agent names the
 file's path in a text chunk and then sends the image itself as an `image` content block, so a client
-that renders images shows it and one that does not still gets the path. Files over 8 MB are named
-only.
+that renders images shows it and one that does not still gets the path. Files over 8 MB, and files
+that are not PNG, JPEG, WebP or GIF, are named only.
 
 ## Resuming sessions
 
@@ -135,7 +157,9 @@ Sessions outlive the agent process. `initialize` advertises
 - **`session/resume`** reattaches a session by id after the editor or the agent
   restarts, on the engine and model it was using, and the next prompt continues
   its conversation. The `cwd` must be the one the session was created in — the
-  engines keep conversations per directory.
+  engines keep conversations per directory. A session resumed into a new agent
+  process starts from the default permission setting and mode again
+  (`CLAWO_ACP_PERMISSION`, `single`).
 
 `session/load` is not offered (`loadSession: false`): it requires replaying the
 earlier conversation to the client, and no engine returns its history in a form
@@ -151,20 +175,31 @@ permission is resolved once into engine CLI flags at session start, and
 `permissionPromptTool` routes to an MCP tool the caller hosts rather than back
 through the manager. Offering a prompt that cannot be honoured would be worse than
 saying so, so the choice is a session config option instead — which also suits
-`dsh-subagent-acp`, whose default is to auto-reject permission requests.
+`dsh-subagent-acp`, whose default is to auto-reject permission requests. Changing
+it restarts the underlying session on the same engine, which continues the
+conversation.
 
 ## Cancellation
 
-`session/cancel` settles the in-flight prompt as `cancelled` immediately, then tears
-the underlying session down and recreates it. The recreated session resumes the
-engine's conversation from the saved resume handle. Codex, codex-app, agy, cursor and
-opencode report theirs during a turn, so a cancel in the very first turn of a session
-can still start a fresh conversation. A cancel with **nothing in flight does
-nothing**.
+What `session/cancel` does depends on the mode:
+
+- **`single`** — the in-flight prompt settles as `cancelled` immediately. The
+  underlying session is torn down and recreated, and the recreated session
+  resumes the engine's conversation from the saved resume handle. The handle
+  exists only once the engine has reported it, so a cancel in the very first turn
+  of a session can leave the next prompt on a fresh conversation.
+- **`council`** — the council run is aborted, and the turn ends with the
+  council's status message and stop reason `end_turn` or `refusal`, not
+  `cancelled`.
+- **`ultraplan`** / **`ultrareview`** — the poll, which checks every 3 seconds,
+  stops at its next check and the prompt settles as `cancelled`; the run carries
+  on.
+
+A cancel with **nothing in flight does nothing**.
 
 The session layer has **no mid-turn cancel** — `stopSession()` is the only lever and
-it destroys the session rather than pausing the turn. So the ACP turn returns
-promptly while the engine subprocess may take a moment longer to die, and any
+it destroys the session rather than pausing the turn. So in `single` mode the ACP
+turn returns promptly while the engine subprocess may take a moment longer to die, and any
 partial work in that turn is lost.
 
 ## Use from `dsh`
@@ -178,14 +213,42 @@ needed:
   config:
     providerName: clawo
     command: npx
-    args: ['-y', '@enderfga/claw-orchestrator', 'acp']
+    args: ['-y', '-p', '@enderfga/claw-orchestrator', 'clawo-acp']
     permission: reject
 ```
+
+With a global install, `command: clawo-acp` and `args: []` does the same.
 
 That provider collects **only `agent_message_chunk` text** into its result — it
 ignores tool calls and other updates — and runs a fresh subprocess per run with no
 parent context. The adapter therefore keeps the text stream self-sufficient: an
 engine that never streams still gets its whole answer emitted as one final chunk.
+
+## The `acp` engine: driving other ACP agents
+
+In the other direction, `engine: 'acp'` starts an ACP agent as a session and drives
+it as a client. One wrapper covers every such agent, with no per-agent parsing:
+
+```bash
+clawo engines                                              # lists the bundled presets
+clawo session-start kimi -e acp --acp-agent kimi-code -d ./project
+clawo session-send kimi "Fix the failing test in tests/test_io.py"
+```
+
+- `acpAgent` names the agent: a bundled preset id (`kimi-code`, `dsh`), or, from a
+  local caller only, an inline config (`name`, `command`, and optionally
+  `commandEnv`, `args`, `env`, `contextWindow`, `pricing`).
+- One agent process per session; each send is one `session/prompt` on one ACP
+  session. The client advertises no `fs` or `terminal` capability, so the agent
+  reads, writes and runs commands with its own tools.
+- `session/request_permission` is answered at once from the session's permission
+  mode: `bypassPermissions`, `acceptEdits`, `auto` and `dontAsk` allow, any other
+  mode (such as `plan`) rejects.
+- A resumed session reattaches the agent's own session id with `session/resume`, or
+  `session/load` when that is all the agent offers.
+
+The full reference — turn outcomes, cost, each preset's environment — is in
+[multi-engine.md](./multi-engine.md#acp-agents-engine-acp).
 
 ## Development notes
 

@@ -5,10 +5,13 @@ fails, when to stop, and how to come back after the process dies.
 
 ## Every mode runs on it
 
-`council_start`, `fanout_start`, `ultraplan_start`, `ultrareview_start` and
-`autoloop_start` all create a kernel run. Their result shapes —
-`CouncilSession`, `FanoutSession`, `UltraplanResult`, `UltrareviewResult`,
-`AutoloopState` — are _projected_ from the run record.
+`workflow_start` runs a spec you write or a [built-in template](#built-in-templates);
+`clawo solve`, `clawo fanout` and `clawo goal` start the same templates from a
+terminal. The mode tools run on the same kernel: `council_start`, `fanout_start`,
+`ultraplan_start`, `ultrareview_start` and `autoloop_start` each create a kernel
+run, and so does an UltraApp build. The modes' result shapes — `CouncilSession`,
+`FanoutSession`, `UltraplanResult`, `UltrareviewResult`, `AutoloopState` — are
+_projected_ from the run record, so `workflow_list` lists every one of them.
 
 The mode engines (`Council`, `Fanout`, the autoloop planner/coder/reviewer
 dispatcher) do the work; the kernel owns lifecycle, persistence and listing. A
@@ -24,7 +27,8 @@ Every state transition is checkpointed **before the next step begins**:
   run.json          the mutable checkpoint, rewritten atomically (tmp + rename)
   events.jsonl      append-only audit + SSE source
   incarnation.json  which creation of this run id this is, and its fence counter
-  lease.json        who is executing it right now
+  lease.json        who is executing it right now (removed when the run ends)
+  lease.lock        the exclusive lock every write takes, present only while held
   .tx/              a committed batch awaiting application (see below)
   nodes/<id>/       per-node artifacts
   evidence/<id>/    evidence bundles
@@ -32,8 +36,11 @@ Every state transition is checkpointed **before the next step begins**:
 
 Splitting the immutable spec from the mutable checkpoint is what makes recovery
 total: if `run.json` is missing or half-written, state is rebuilt by replaying
-`events.jsonl` against `spec.json`. The atomic rewrite makes that path rare; the
-replay makes it survivable anyway.
+`events.jsonl` against `spec.json`: the run's state and outcome, and each node's
+state, attempts, visits, output preview and evidence id. Node payloads (`data`),
+cost, consensus votes, the base commit and the test snapshot are only in
+`run.json`. The atomic rewrite makes that path rare; the replay makes it
+survivable anyway.
 
 A kernel resumes at a **node boundary**, never mid-node, and at the node the run
 was on — not at the first pending node, since a node on a branch the run never
@@ -53,8 +60,14 @@ again after the resume.
 **This makes node execution at-least-once, not exactly-once.** There is no
 idempotency key and no side-effect commit marker, so a node that wrote files and
 then died before its checkpoint runs again from the top. Workflows whose nodes
-are not safe to repeat need to make them safe. Resume is also explicit —
-`workflow_resume` — not automatic.
+are not safe to repeat need to make them safe.
+
+Resume is explicit — `workflow_resume` or `clawo workflow resume` — not automatic.
+Resuming a run that already ended returns it unchanged. Custom-engine configs are
+never written to disk (they can carry credentials), so a run whose agents used one
+is resumed through `workflow_resume` with `agentCustomEngineRefs:
+{ "<agent>": "<REF>" }`, each config read as JSON from `CLAWO_CUSTOM_ENGINE_<REF>`
+(upper-cased) on the orchestrator's host.
 
 ### One owner, and one way to write
 
@@ -111,10 +124,11 @@ names four things, and all four are checked on every durable write:
   each has its own owner id, or both would read the other's claim as their own.
 - **Atomic acquisition.** The check and the write happen inside the lock, so two
   processes cannot both see "free" and both claim the run.
-- **An independent heartbeat.** Renewed on a timer, not only at checkpoints: a
-  run executing one long node makes no checkpoints, and must not look abandoned
-  for it. On the same host a live pid is the authority and is never judged stale
-  for going quiet; the heartbeat is the fallback for a holder on another machine.
+- **An independent heartbeat.** Renewed every 15 s on a timer, not only at
+  checkpoints: a run executing one long node makes no checkpoints, and must not
+  look abandoned for it. On the same host a live pid is the authority and is never
+  judged stale for going quiet; the heartbeat is the fallback for a holder on
+  another machine, whose lease goes stale after 60 s without a renewal.
 - **In-process too.** Starting a run whose id is already live retires the
   previous run first. A lease cannot see inside one process, and two live runs
   sharing an id would write over each other's checkpoints.
@@ -138,28 +152,69 @@ is unrecoverable and reads back as "not found".
 
 ## Node kinds
 
-| Kind         | Does                                                                                                                                                                                                                                                                |
-| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `agent`      | One session, one turn                                                                                                                                                                                                                                               |
-| `fanout`     | N agents in parallel, optional synthesis                                                                                                                                                                                                                            |
-| `council`    | The existing council engine, votes recorded as advisory                                                                                                                                                                                                             |
-| `verifier`   | Runs an acceptance contract, writes evidence — see [`verification.md`](./verification.md)                                                                                                                                                                           |
-| `human_gate` | Parks the run until a person answers                                                                                                                                                                                                                                |
-| `router`     | Picks the next node from declarative conditions; a backwards route is the loop                                                                                                                                                                                      |
-| `subflow`    | Runs another workflow as a step and adopts its verdict                                                                                                                                                                                                              |
-| `autoloop`   | A long-lived Planner / Coder / Reviewer loop; its executor is injected. On the node's first visit (`visits === 1`) the shared fresh-start boundary applies (dirty-worktree refusal + run-local `tasks/<config.runId>/.gitignore`); resume and later visits skip it. |
-| `goal`       | A Codex `/goal` on one `codex-app` thread, run until the goal finishes — see [below](#goal)                                                                                                                                                                         |
-| `ultraapp_*` | UltraApp's synth and deploy stages; their executors are injected too                                                                                                                                                                                                |
+| Kind                                | Does                                                                                                                                                                                                                                                                |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `agent`                             | One session, one turn. A new session per attempt unless `sessionName` pins one                                                                                                                                                                                      |
+| `fanout`                            | N agents in parallel on a shared prompt, optional synthesis pass. Succeeds when at least one agent does                                                                                                                                                             |
+| `council`                           | The council engine; its votes are recorded as advisory. Fails only when the council itself errors                                                                                                                                                                   |
+| `verifier`                          | Runs an acceptance contract, writes evidence — see [`verification.md`](./verification.md). With no contract it passes through and verifies nothing                                                                                                                  |
+| `human_gate`                        | Parks the run until a person answers; a rejection fails the run                                                                                                                                                                                                     |
+| `router`                            | Picks the next node from declarative conditions; a backwards route is the loop                                                                                                                                                                                      |
+| `subflow`                           | Runs another workflow as a child run and adopts its verdict                                                                                                                                                                                                         |
+| `autoloop`                          | A long-lived Planner / Coder / Reviewer loop; its executor is injected. On the node's first visit (`visits === 1`) the shared fresh-start boundary applies (dirty-worktree refusal + run-local `tasks/<config.runId>/.gitignore`); resume and later visits skip it. |
+| `goal`                              | A Codex `/goal` on one `codex-app` thread, run until the goal finishes — see [below](#goal)                                                                                                                                                                         |
+| `ultraapp_synth`, `ultraapp_deploy` | UltraApp's synth and deploy stages; their executors are injected too                                                                                                                                                                                                |
 
-Every node takes `retry: { max, backoffMs }`, `timeoutMs`, and
-`onFailure: 'fail' | 'continue'`.
+### Spec and node fields
 
-Direct agent bindings use the same optional `engine`, `model`, and `effort`
-fields. Fan-out and council entries configure them per agent; `effort` accepts
-`low`, `medium`, `high`, `xhigh`, `max`, `ultra`, or `auto`. Omission preserves
-the session default.
+A `WorkflowSpec` is `{ name, nodes, cwd?, contract?, maxNodeVisits? }`. `cwd` is
+the run's working directory (a start call's `cwd` overrides it), `contract` is the
+run-level acceptance contract, and `maxNodeVisits` (default 50) bounds every loop.
+A spec is checked before anything runs: a missing name, no nodes, a missing or
+duplicate node id, a `next`, route or `default` naming a node that does not exist,
+a route with no condition, a `retry.max` that is not a non-negative integer, a
+`timeoutMs` that is not a positive number, and a `maxNodeVisits` that is not a
+positive integer are all refused.
 
-Fan-out agents may also set `persona` for role instructions. When no non-empty
+With a run-level contract the kernel appends one more node, the verifier
+`__verify`, unless a node already declares `"contract": "run"`.
+
+Every node has an `id` and a `kind`, plus these optional fields:
+
+| Field       | Default                                      | Meaning                                                                                                       |
+| ----------- | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `next`      | the next node in `nodes` order               | Explicit successor; a router ignores it and uses `default`. The run ends after the last node in `nodes` order |
+| `retry`     | `{ "max": 0 }`                               | `max` extra attempts per visit, waiting `backoffMs` (default 1000) × the attempt number between them          |
+| `timeoutMs` | 30 min; none for `autoloop` and `goal` nodes | Wall clock for one attempt                                                                                    |
+| `onFailure` | `fail`                                       | `fail` ends the run; `continue` records the failure and moves on                                              |
+
+The kind-specific fields:
+
+| Kind                                | Fields                                                                                                                                                                                                                                                                                      |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `agent`                             | `prompt` (required); `engine`, `model`, `effort`, `acpAgent` (a bundled ACP preset id, for `engine: "acp"`); `cwd` (default: the run's); `sessionName`, to reuse one named session across nodes; `permissionMode` (default `bypassPermissions`)                                             |
+| `fanout`                            | `prompt` (required, the shared task) and `agents` (required); `synthesize`, `synthesisEngine` (default `claude`), `synthesisModel`, `synthesisAcpAgent`, `synthesisPermissionMode` (default `bypassPermissions`); `maxTurnsPerAgent` and `maxBudgetUsd`, per agent; `cwd`; `agentTimeoutMs` |
+| `council`                           | `task` (required) and `agents` (required); `projectDir` (default: the run's cwd); `maxRounds` (default 8); `maxTurnsPerAgent` and `maxBudgetUsd`, per agent; `defaultPermissionMode`; `agentTimeoutMs`                                                                                      |
+| `verifier`                          | `contract` (required): an inline contract, or `"run"` for the run-level one; `cwd` (default: the run's)                                                                                                                                                                                     |
+| `human_gate`                        | `prompt` (required)                                                                                                                                                                                                                                                                         |
+| `router`                            | `routes` (required): `[{ "when": <condition>, "to": <node id> }]`, first match wins; `default`, taken when nothing matches (omitted: fall through to the next node)                                                                                                                         |
+| `subflow`                           | `workflow` (required): an inline `WorkflowSpec`, or the id of an existing run, whose stored spec runs again as a new child run. Template names do not resolve here                                                                                                                          |
+| `goal`                              | `objective` (required); `cwd`, `model`, `effort`, `sandboxMode`, `launcher`, `threadId`, `tokenBudget`, `capacityRetry`, `stallMs` — see [Goal](#goal)                                                                                                                                      |
+| `autoloop`                          | `workspace` and `config` (the `autoloop_start` options). Started by `autoloop_start`                                                                                                                                                                                                        |
+| `ultraapp_synth`, `ultraapp_deploy` | `appRunId`, `runDir`, `slug`; the deploy stage adds `version` and `codebasePath`. Started by UltraApp builds                                                                                                                                                                                |
+
+An entry in a fan-out's or council's `agents` takes `name` (required), `engine`,
+`model`, `effort`, `acpAgent`, `persona`, `prompt`, `permissionMode` and `baseUrl`;
+a fan-out agent also takes `sandboxMode`, and a council agent `ultracode`. An agent
+node and each of these entries use `engine`, `model` and `effort` the same way;
+`effort` accepts `low`, `medium`, `high`, `xhigh`, `max`, `ultra`, or `auto`, and
+omitting any of them preserves the session default. `customEngine` is not a spec
+field — a spec is written to disk and a custom-engine config can carry
+credentials — so custom engines reach a run in memory, through `fanout_start` or
+`council_start`, and are re-supplied on resume as described above.
+
+A council agent's `persona` is its role; one with no `persona` uses its `prompt`
+instead. Fan-out agents may also set `persona` for role instructions. When no non-empty
 per-agent `prompt` exists, the executor sends the persona followed by a
 `## Shared task` section containing the node's shared prompt. A non-empty
 per-agent `prompt` remains a complete override and takes precedence over both
@@ -193,11 +248,18 @@ surface. These closed forms are evaluated and nothing else:
 { "type": "and",            "all": [ /* … */ ] }
 ```
 
-`and` is the only recursive one, and nesting is capped at six deep. Use it rather
-than chaining two routers: **a router whose routes all miss falls through to the
-next node**, so a gate that failed to match simply hands control to the router
-after it, which then matches on its own. Chaining reads as AND and behaves as
-"whatever the last router says".
+`node_failed` and `node_succeeded` read the named node's current state (a node
+that has not run is neither). `verified` holds when the named node produced
+evidence and the run's current verdict is `verified`. `visits_lt` counts how many
+times control has entered the node. Routes are tried in order and the first match
+wins.
+
+`and` is the only recursive one, and nesting is capped at six deep; an `and` with
+an empty `all` is false. Use it rather than chaining two routers: **a router whose
+routes all miss falls through to the next node** (or to its `default`), so a gate
+that failed to match simply hands control to the router after it, which then
+matches on its own. Chaining reads as AND and behaves as "whatever the last router
+says".
 
 `maxNodeVisits` (default 50) bounds every loop as a safety backstop. Budget loops
 with `visits_lt`.
@@ -209,7 +271,7 @@ with `visits_lt`.
   "name": "solve",
   "cwd": "/repo",
   "maxNodeVisits": 6,
-  "contract": { "checks": [{ "type": "command", "cmd": "npm", "args": ["test"] }] },
+  "contract": { "checks": [{ "spec": { "type": "command", "cmd": "npm", "args": ["test"] } }] },
   "nodes": [
     {
       "id": "triage",
@@ -243,6 +305,13 @@ with `visits_lt`.
 }
 ```
 
+A contract written inside a spec — the run-level `contract`, or a verifier's
+inline one — is used as written, so each check goes in the `{ "spec": { … } }`
+wrapper shown here, with `id` and `required` beside `spec`. The `contract` argument
+of `workflow_start` and `POST /workflow/new` is normalized first and also accepts
+bare checks (`{ "type": "command", … }`); when given, it replaces the spec's own.
+See [`verification.md`](./verification.md#the-one-rule-about-where-contracts-come-from).
+
 When the router sends control back to `implement`, the agent is told what the
 last verification found: each failing required check and the lines of its output
 that say why, framed as data, ahead of the node's own prompt. This applies to any
@@ -254,17 +323,28 @@ test suite would double the most expensive part of the run to learn nothing new.
 
 ## Built-in templates
 
-`workflow_start` accepts `template` instead of `spec`:
+`workflow_start` accepts `template` and `task` instead of `spec` (`template`
+defaults to `solve`); `clawo solve`, `clawo fanout` and `clawo goal` build the same
+specs and post them.
 
-- **`solve`** — the shape above: triage → (optional human gate) → implement →
-  (optional review) → verify → repair-until-green.
-- **`council`** — one council node, plus the implicit verifier when a contract is
-  declared.
-- **`fanout`** — one fan-out node.
-- **`goal`** — a `goal` node → verify → repair on the same thread; `task` is the
-  objective. See [below](#goal).
+| Template  | Nodes                                                                                                                                                                    | Arguments                                                                                                                                                                |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `solve`   | `triage` (fan-out) → `approve` (human gate, only with `humanGate`) → `implement` (agent) → `review` (fan-out, only with `reviewers`) → `verify` → `repair-gate` (router) | `agents` (the triage scouts; default one agent on the default engine), `implementer` (`engine`, `model`), `reviewers`, `humanGate`, `maxRepairs` (default 3), `contract` |
+| `council` | `council`, then `__verify` when a contract is declared                                                                                                                   | `agents`, `contract`                                                                                                                                                     |
+| `fanout`  | `fanout`, then `__verify` when a contract is declared                                                                                                                    | `agents`, `contract`                                                                                                                                                     |
+| `goal`    | `goal` → `verify` → `repair-gate` (router); `task` is the objective. See [below](#goal)                                                                                  | `model`, `tokenBudget`, `launcher`, `maxRepairs` (default 1), `contract`                                                                                                 |
 
-These are ordinary specs, not privileged paths.
+`solve` is the shape above: the triage and review fan-outs add a synthesis pass
+when they have two or more agents, `implement` and `review` continue on failure so
+the verifier always judges the tree, `verify` continues so a red result reaches
+`repair-gate`, and `maxNodeVisits` is `maxRepairs + 3`. Through `workflow_start` a `fanout` template synthesizes when it
+has two or more agents; `clawo fanout` synthesizes only with `--synthesize`.
+`clawo goal` also takes `--effort`, `--sandbox`, `--thread`, `--goal-timeout`,
+`--check-timeout` and `--objective-file`.
+
+These are ordinary specs, not privileged paths. UltraApp's builds run one more
+built-in, `ultraapp` (`synth` → `build`, a verifier → `deploy`, when there is
+somewhere to deploy to), which only UltraApp starts.
 
 ## Goal
 
@@ -280,6 +360,8 @@ by a usage limit. The node adds what an unattended run needs around that loop.
   "objective": "Reach the goal described in GOAL.md …",
   "cwd": "/work/task/ws",
   "model": "gpt-6.1-sol", // optional; codex's own default otherwise
+  "effort": "high", // optional reasoning effort
+  "sandboxMode": "workspace-write", // default; or "read-only" / "danger-full-access"
   "launcher": ["/work/goal/sandbox/sandbox.sh", "task", "0 1"], // optional argv prefix
   "threadId": "019c…", // optional: start on this existing thread, replacing its goal
   "tokenBudget": 50000000, // optional; the goal ends as budgetLimited past it
@@ -290,14 +372,15 @@ by a usage limit. The node adds what an unattended run needs around that loop.
 ```
 
 - **The objective fits Codex's limit.** Codex accepts at most 4,000 characters;
-  a longer objective fails the node before a session opens. Put a long brief in
-  a file in the working directory and name the file in the objective.
-- **The thread is checkpointed.** Node data holds `threadId`, `status`,
-  `tokensUsed`, `timeUsedSeconds`, `resumes`, `lastError`, the agent's last reply
-  (`lastMessage`, at most 4,000 characters) and the thread's spend
-  (`costUsd`), updated as the goal moves (progress at most every 10 s, status
-  changes at once). `workflow_status` and `clawo workflow show` read it while the
-  goal runs.
+  a longer objective fails the node before a session opens (and `clawo goal`
+  refuses it before starting a run). Put a long brief in a file in the working
+  directory and name the file in the objective.
+- **The thread is checkpointed.** Node data holds `threadId`, the `objective`
+  currently set, `status`, `tokensUsed`, `timeUsedSeconds`, `resumes`,
+  `lastError`, the agent's last reply (`lastMessage`, at most 4,000 characters)
+  and the thread's spend (`costUsd`), updated as the goal moves (progress at most
+  every 10 s, status changes at once). `workflow_status` and `clawo workflow show`
+  read it while the goal runs. The spend is added to the run's `costUsd`.
 - **Resume reattaches, it does not restart.** A resumed run hands the stored
   thread id to `thread/resume`; a goal that had not finished continues where it
   was. If the resume lands on a different thread the node fails rather than
@@ -305,11 +388,13 @@ by a usage limit. The node adds what an unattended run needs around that loop.
   the same thread the same way.
 - **Stalls are resumed within a bound.** A goal that is `usageLimited` or
   `paused`, or `active` with no turn running and either no news for `stallMs` or
-  an error the server will not retry (`serverOverloaded`, `usageLimitExceeded`,
-  `rateLimitExceeded`, a dropped connection), is set back to `active` after a
-  backoff that starts at `capacityRetry.backoffMs` and doubles to at most 15 min.
-  Every attempt counts before it is made, reopening a dead app-server included;
-  past `capacityRetry.max` the node fails.
+  a capacity error the server will not retry (`serverOverloaded`,
+  `usageLimitExceeded`, `rateLimitExceeded`, `internalServerError`,
+  `responseTooManyFailedAttempts`, or a failed or dropped connection), is set back
+  to `active` after a backoff that starts at `capacityRetry.backoffMs` and doubles
+  to at most 15 min. Every attempt counts before it is made, reopening a dead
+  app-server included; past `capacityRetry.max` the node fails. The count is part
+  of the checkpoint, so it carries across process restarts and repair visits.
 - **Repair on the same thread.** Revisited after a red verifier, the node clears
   the finished goal and sets a new objective on the same thread: the failing
   checks first (as diagnostic data, like an agent node's repair brief), then the
@@ -325,14 +410,21 @@ by a usage limit. The node adds what an unattended run needs around that loop.
   user input) is answered with an error at once; the sandbox mode is the
   boundary.
 - **Ends.** `complete` succeeds. `budgetLimited` and `blocked` fail with the
-  reason. Cancel interrupts the running turn and pauses the goal. Like
-  `autoloop`, the node has no default timeout.
+  reason. Cancel interrupts the running turn and pauses the goal, and so does a
+  `timeoutMs` that runs out. Like `autoloop`, the node has no default timeout.
 
 The `goal` template wraps this in `goal → verify → repair-gate`. The goal node
 continues on failure, so a goal that ran out of budget is still judged. The
-verifier's node timeout is sized from the contract (each check's timeout, at
-least 30 min), so a judge that takes hours is not cut off at the 30-minute node
-default. `maxRepairs` defaults to 1.
+verifier's node timeout is sized from the contract — the sum of every check's
+timeout (its default when unset), times one plus `fixOnFailureRounds`, plus five
+minutes, and never under 30 min — so a judge that takes hours is not cut off at
+the 30-minute node default. `maxRepairs` defaults to 1, and `maxNodeVisits` is
+`maxRepairs + 3`.
+
+```bash
+clawo goal "Make the failing tests in tests/ pass; the brief is in GOAL.md" \
+  -c "npm test" --check-timeout 20 --token-budget 50000000 --max-repairs 2 --wait
+```
 
 ## The verifier is a terminal barrier
 
@@ -344,7 +436,9 @@ may follow the verifier" would be the wrong rule anyway: what matters is not tha
 a node ran, but that the tree moved. So the kernel measures. Each evidence bundle
 records a content digest of the working tree (HEAD, the full `git diff HEAD`,
 and the path and bytes of every untracked file), and when the run ends, if any
-workspace-touching node ran after the verdict, the digest is recomputed.
+workspace-touching node ran after the verdict, the digest is recomputed in the
+directory the checks ran in. Every kind except `verifier`, `router` and
+`human_gate` counts as workspace-touching.
 
 If it moved, the outcome drops from `verified` to `unverified` with the reason
 recorded on the run. Not `refuted` — no check failed; we simply stopped knowing,
@@ -361,26 +455,49 @@ so anything the reviewers change is covered by the verdict.
 ## Completion
 
 `RunState` is `pending | running | awaiting_human | verifying | completed |
-failed | cancelled`. **`completed` is reachable only from `verifying`.**
+failed | cancelled`. `verifying` is the state while a verifier node runs; the run
+returns to `running` when it finishes, and ends in one of the last three.
 
 `RunOutcome` is `verified | unverified | refuted` and answers a different
-question: not "did it stop" but "did anything check it". A run with no contract
-completes as `unverified` — it says it does not know, which is not the same as
-success.
+question: not "did it stop" but "did anything check it". The outcome is the last
+verdict the run produced — each verifier visit replaces it, so a repair loop is
+judged by its last check — and a `refuted` run ends `failed`, never `completed`.
+A run with no contract completes as `unverified` — it says it does not know,
+which is not the same as success.
+
+The implicit `__verify` is the last node, and a run only ends `completed` after
+its last node has run, so every such path is checked. A spec that places its own
+`"contract": "run"` verifier gets no `__verify`, and must route every path through
+that node: a run whose path skips it ends `completed` / `unverified`, with no
+check run.
 
 ## Control
 
-| Action        | Tool               | HTTP                              | CLI                                    |
-| ------------- | ------------------ | --------------------------------- | -------------------------------------- |
-| Start         | `workflow_start`   | `POST /workflow/new`              | `clawo solve` / `fanout` / `goal`      |
-| Poll          | `workflow_status`  | `GET /workflow/<id>/state`        | `clawo workflow show <id>`             |
-| List          | `workflow_list`    | `GET /workflow/list`              | `clawo workflow list`                  |
-| Resume        | `workflow_resume`  | `POST /workflow/<id>/resume`      | `clawo workflow resume <id>`           |
-| Cancel        | `workflow_cancel`  | `POST /workflow/<id>/cancel`      | `clawo workflow cancel <id>`           |
-| Steer         | `workflow_steer`   | `POST /workflow/<id>/steer`       | `clawo workflow steer <id> "<text>"`   |
-| Answer a gate | `workflow_approve` | `POST /workflow/<id>/approve`     | `clawo workflow approve <id> [reject]` |
-| Evidence      | —                  | `GET /workflow/<id>/evidence`     | `clawo verify <id>`                    |
-| Live events   | —                  | `GET /workflow/<id>/events` (SSE) | —                                      |
+| Action        | Tool               | HTTP                              | CLI                                     |
+| ------------- | ------------------ | --------------------------------- | --------------------------------------- |
+| Start         | `workflow_start`   | `POST /workflow/new`              | `clawo solve` / `fanout` / `goal`       |
+| Poll          | `workflow_status`  | `GET /workflow/<id>/state`        | `clawo workflow show <id>`              |
+| List          | `workflow_list`    | `GET /workflow/list`              | `clawo workflow list`                   |
+| Resume        | `workflow_resume`  | `POST /workflow/<id>/resume`      | `clawo workflow resume <id>`            |
+| Cancel        | `workflow_cancel`  | `POST /workflow/<id>/cancel`      | `clawo workflow cancel <id>`            |
+| Steer         | `workflow_steer`   | `POST /workflow/<id>/steer`       | `clawo workflow steer <id> "<text>"`    |
+| Answer a gate | `workflow_approve` | `POST /workflow/<id>/approve`     | `clawo workflow approve <id> [reject]`  |
+| Evidence      | —                  | `GET /workflow/<id>/evidence`     | `clawo verify <id>`                     |
+| Live events   | —                  | `GET /workflow/<id>/events` (SSE) | `--wait` on `solve` / `fanout` / `goal` |
+
+`POST /workflow/new` takes `{ spec, cwd?, runId?, contract? }`; the templates are
+built by the tool and by the CLI, which posts the spec it built. `workflow_status`
+returns the run's state, outcome, current node, evidence id, cost, error, node
+records and consensus votes, plus its last N events with `events: N`;
+`GET /workflow/<id>/state` and `clawo workflow show <id> --json` return the whole
+record, including `outcomeReason`. The event stream opens with a `snapshot` (the
+run's `workflow_list` entry), then sends each kernel event as a `workflow-event`. `GET /workflow/list` and
+`workflow_list` filter by `workflow` and `state`, newest first, 25 by default.
+
+Cancel and steer reach a run only while it executes in this process. Answering a
+gate does not need that: a run parked by a process that has since exited is
+resumed with the answer attached. On the CLI, `reject`, `false` or `no` as the
+last argument of `clawo workflow approve` rejects; anything else approves.
 
 In a running `goal` node, steer text goes into the current turn (`turn/steer`).
 Otherwise, steer text is **prepended** to the next agent node's prompt: an instruction that
@@ -393,9 +510,11 @@ belong before the task.
   in-flight agent turn is owned by the session layer and finishes on its own
   schedule; the kernel does not pretend to kill it. The abandoned attempt keeps
   running, so agent nodes name their session per attempt
-  (`<runId>-<nodeId>-a<n>`) — otherwise the dying attempt's teardown would stop
-  the retry's session. A node that writes to a fixed path outside the run
-  directory can still race its own retry; scope such writes per attempt.
+  (`<runId>-<nodeId>-a<n>`, unless `sessionName` pins one) — otherwise the dying
+  attempt's teardown would stop the retry's session. A `goal` node is the
+  exception: it watches its signal, so a timeout interrupts its turn. A node that
+  writes to a fixed path outside the run directory can still race its own retry;
+  scope such writes per attempt.
 
   Because such an attempt can still write, a run about to report `verified`
   waits briefly for outstanding attempts to settle, and reports `unverified`
@@ -405,9 +524,11 @@ belong before the task.
 - Cancel and a node timeout are different things. A timeout is a node failure
   (it still gets its retries and still honours `onFailure`); cancelling ends the
   run.
-- Nothing prunes run directories. Delete them yourself
+- Nothing prunes run directories. Delete a run that is not executing yourself
   (`rm -rf ~/.claw-orchestrator/wf/<runId>`), or programmatically with
-  `SessionManager.workflowDelete(runId)`.
+  `SessionManager.workflowDelete(runId)`, which claims the run first. No tool or
+  CLI command deletes a workflow run; `POST /autoloop/<id>/delete` removes an
+  autoloop's.
 
 ## Related
 

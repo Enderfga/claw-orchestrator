@@ -10,6 +10,7 @@
  * whose owner SessionManager is dead.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { execFileSync, spawn } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -145,5 +146,69 @@ describe('SessionManager PID-file cross-process safety', () => {
     const after = JSON.parse(fs.readFileSync(PID_FILE, 'utf8'));
     expect(after['stale-session']).toBeUndefined();
     expect(mgr.listSessions().length).toBe(0);
+  });
+  // An ACP agent (`kimi acp`) or a custom engine runs a binary that is on no fixed
+  // list. The command line recorded with its pid is what identifies it later.
+  describe('an orphan whose binary is on no list', () => {
+    const deadOwner = (): number => {
+      let pid = 999999;
+      for (;;) {
+        try {
+          process.kill(pid, 0);
+          pid += 1;
+        } catch {
+          return pid;
+        }
+      }
+    };
+    const alive = (pid: number): boolean => {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    const orphan = () => {
+      const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)', 'clawo-orphan-probe'], {
+        detached: true,
+        stdio: 'ignore',
+      });
+      child.unref();
+      const pid = child.pid!;
+      const command = execFileSync('ps', ['-p', String(pid), '-o', 'command='], { encoding: 'utf8' }).trim();
+      return { pid, command };
+    };
+    const record = (pid: number, command: string) => {
+      fs.mkdirSync(path.dirname(PID_FILE), { recursive: true });
+      fs.writeFileSync(
+        PID_FILE,
+        JSON.stringify({ 'acp-session': { pid, ownerPid: deadOwner(), since: '2026-10-26T00:00:00Z', command } }),
+      );
+    };
+
+    it('is killed when it still runs the command recorded with its pid', async () => {
+      const { pid, command } = orphan();
+      try {
+        record(pid, command);
+        new SessionManager();
+        await new Promise((r) => setTimeout(r, 500));
+        expect(alive(pid)).toBe(false);
+      } finally {
+        if (alive(pid)) process.kill(pid, 'SIGKILL');
+      }
+    });
+
+    it('is left alone when the pid now runs something else', async () => {
+      const { pid } = orphan();
+      try {
+        record(pid, 'kimi acp');
+        new SessionManager();
+        await new Promise((r) => setTimeout(r, 500));
+        expect(alive(pid)).toBe(true);
+      } finally {
+        process.kill(pid, 'SIGKILL');
+      }
+    });
   });
 });

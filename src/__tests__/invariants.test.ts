@@ -445,6 +445,92 @@ describe('ultrareview is read-only', () => {
   });
 });
 
+// ─── 2b. An ACP agent reaches every surface that starts one ─────────────────
+
+describe('an ACP agent is named on every surface that can start one', () => {
+  const wait = (id: string) => (mgr as unknown as { kernel: { wait(id: string): Promise<unknown> } }).kernel.wait(id);
+
+  it('fan-out starts each worker and the synthesis pass with its own ACP agent', async () => {
+    const cwd = gitRepo();
+    const fan = await mgr.fanoutStart({
+      task: 'SHARED TASK',
+      projectDir: cwd,
+      agents: [
+        { name: 'kimi', engine: 'acp', acpAgent: 'kimi-code' },
+        { name: 'dsh', engine: 'acp', acpAgent: 'dsh' },
+      ],
+      synthesize: true,
+      synthesisEngine: 'acp',
+      synthesisAcpAgent: 'kimi-code',
+    });
+    await wait(fan.id);
+
+    expect(observed.find((o) => o.config.name?.endsWith('-kimi'))!.config).toMatchObject({
+      engine: 'acp',
+      acpAgent: 'kimi-code',
+    });
+    expect(observed.find((o) => o.config.name?.endsWith('-dsh'))!.config).toMatchObject({
+      engine: 'acp',
+      acpAgent: 'dsh',
+    });
+    expect(observed.find((o) => o.config.name?.endsWith('-synthesis'))!.config).toMatchObject({
+      engine: 'acp',
+      acpAgent: 'kimi-code',
+    });
+    fs.rmSync(cwd, { recursive: true, force: true });
+  });
+
+  it('a council agent starts its ACP agent', { timeout: 60_000 }, async () => {
+    const cwd = gitRepo();
+    const council = await mgr.councilStart('build it', {
+      agents: [{ name: 'kimi', emoji: '', persona: 'P', engine: 'acp', acpAgent: 'kimi-code' }],
+      maxRounds: 1,
+      projectDir: cwd,
+    });
+    await wait(council.id);
+    expect(observed.find((o) => o.config.name?.includes('kimi'))!.config).toMatchObject({
+      engine: 'acp',
+      acpAgent: 'kimi-code',
+    });
+    fs.rmSync(cwd, { recursive: true, force: true });
+  });
+
+  it('a workflow agent node starts its ACP agent', async () => {
+    const cwd = gitRepo();
+    const record = await mgr.workflowStart({
+      name: 'acp-node',
+      cwd,
+      nodes: [{ id: 'work', kind: 'agent', prompt: 'do it', engine: 'acp', acpAgent: 'dsh' }],
+    } as never);
+    await wait(record.runId);
+    expect(observed.find((o) => o.config.name?.includes('-work-'))!.config).toMatchObject({
+      engine: 'acp',
+      acpAgent: 'dsh',
+    });
+    fs.rmSync(cwd, { recursive: true, force: true });
+  });
+
+  it("solve's implementer carries its ACP agent into the implement node", async () => {
+    const { solveWorkflow } = await import('../kernel/templates/index.js');
+    const spec = solveWorkflow({
+      task: 't',
+      cwd: os.tmpdir(),
+      scouts: [{ name: 's', engine: 'acp', acpAgent: 'kimi-code' }],
+      implementer: { engine: 'acp', acpAgent: 'dsh' },
+    } as never);
+    const nodes = spec.nodes as Array<{ id: string; acpAgent?: string; agents?: Array<{ acpAgent?: string }> }>;
+    expect(nodes.find((n) => n.id === 'implement')!.acpAgent).toBe('dsh');
+    expect(nodes.find((n) => n.id === 'triage')!.agents![0]!.acpAgent).toBe('kimi-code');
+  });
+
+  it('ultrareview refuses acp before starting any reviewer', async () => {
+    const cwd = gitRepo();
+    await expect(mgr.ultrareviewStart(cwd, { engines: ['acp'] })).rejects.toThrow(/cannot use acp/);
+    expect(observed).toHaveLength(0);
+    fs.rmSync(cwd, { recursive: true, force: true });
+  });
+});
+
 // ─── 3. Secrets never reach disk ────────────────────────────────────────────
 
 describe('credentials stay in memory', () => {

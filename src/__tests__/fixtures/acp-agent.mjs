@@ -15,6 +15,8 @@ import * as acp from '@agentclientprotocol/sdk';
 
 const sessions = new Map();
 let next = 0;
+// FIXTURE_STDERR: a line the agent writes to stderr on start, as a failing CLI might.
+if (process.env.FIXTURE_STDERR) process.stderr.write(`${process.env.FIXTURE_STDERR}\n`);
 
 const app = acp
   .agent({ name: 'fixture-agent' })

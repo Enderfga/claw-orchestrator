@@ -49,8 +49,9 @@ This document tracks which Claude Code CLI version Claw Orchestrator is currentl
 When syncing to a new Claude Code CLI version:
 
 1. Run `claude --version` to confirm target version
-2. Check Claude Code changelog / release notes for new flags, events, env vars since the last tracked version
-3. Decide which features are valuable for programmatic/agent use (vs human-interactive only)
-4. Implement worthwhile features (add to `SessionConfig` → wire into `persistent-session.ts` → expose in tool schema → document)
-5. Update this file with the new version + notable integrations
-6. Update the engine tables in `AGENTS.md` and `README.md`
+2. Run `npx tsx scripts/sweep.ts` (or `--no-live` for versions and flags only) to see installed, pinned and upstream versions of every core engine, the flags each wrapper passes against the binary's `--help`, and one live turn per engine
+3. Check Claude Code changelog / release notes for new flags, events, env vars since the last tracked version
+4. Decide which features are valuable for programmatic/agent use (vs human-interactive only)
+5. Implement worthwhile features (add to `SessionConfig` → wire into `persistent-session.ts` → expose in tool schema → document)
+6. Update this file: the "Currently tracked" line and a new row with the version + notable integrations
+7. Update the tested versions: the engine table in `AGENTS.md` (the pins the sweep reads), the engine compatibility table in `README.md`, and the "Tested with" line of each engine in [multi-engine.md](./multi-engine.md)

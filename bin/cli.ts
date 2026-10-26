@@ -79,6 +79,12 @@ function fail(r: unknown): void {
   process.exitCode = 1;
 }
 
+/** A usage error: said on stderr, and a non-zero exit like every other failure. */
+function usage(message: string): void {
+  console.error(`Error: ${message}`);
+  process.exitCode = 1;
+}
+
 const program = new Command();
 program.name('clawo').description('Claw Orchestrator CLI').version(getCliVersion());
 
@@ -170,10 +176,7 @@ program
     'Start a persistent coding session (Claude Code, Codex, Antigravity, Grok Build, OpenCode, an ACP agent, or a custom engine preset)',
   )
   .option('-d, --cwd <dir>', 'Working directory')
-  .option(
-    '-e, --engine <engine>',
-    'Engine: claude (default), codex, codex-app, gemini, agy, cursor, grok, opencode, acp, or custom',
-  )
+  .option('-e, --engine <engine>', 'Engine: claude (default), codex, codex-app, agy, grok, opencode, acp, or custom')
   .option('-m, --model <model>', 'Model to use')
   .option('--permission-mode <mode>', 'Permission mode', 'acceptEdits')
   .option('--effort <level>', 'Effort level')
@@ -633,7 +636,7 @@ program
       return;
     }
 
-    if (!runId) return console.error('Error: runId is required for this action');
+    if (!runId) return usage('runId is required for this action');
 
     if (action === 'show') {
       const r = await api(`/workflow/${encodeURIComponent(runId)}/state`);
@@ -668,7 +671,7 @@ program
     }
 
     if (action === 'steer') {
-      if (!text) return console.error('Error: steer needs text');
+      if (!text) return usage('steer needs text');
       const r = await api(`/workflow/${encodeURIComponent(runId)}/steer`, 'POST', { text });
       if (!r.ok) return fail(r);
       console.log(r.steered ? 'Steer queued.' : 'Run is not live here; nothing queued.');
@@ -683,7 +686,7 @@ program
       return;
     }
 
-    console.error(`Unknown action '${action}'. Use list | show | cancel | resume | steer | approve.`);
+    usage(`unknown action '${action}'. Use list | show | cancel | resume | steer | approve.`);
   });
 
 program
@@ -704,9 +707,13 @@ program
 
 // ─── solve / fanout — start a built-in workflow from the terminal ───────────
 
-type AgentBindingArg = { name: string; engine?: string; model?: string };
+type AgentBindingArg = { name: string; engine?: string; model?: string; acpAgent?: string };
 
-/** `claude`, `codex:gpt-6.1-sol` → an agent binding. Names are made unique. */
+/**
+ * `claude`, `codex:gpt-6.1-sol` → an agent binding. Names are made unique. For
+ * `acp` the part after the colon names the agent rather than a model —
+ * `acp:kimi-code` — because an ACP agent picks its own model.
+ */
 function parseAgentList(list: string, seen = new Map<string, number>()): AgentBindingArg[] {
   return list
     .split(',')
@@ -715,10 +722,18 @@ function parseAgentList(list: string, seen = new Map<string, number>()): AgentBi
     .map((item) => {
       const i = item.indexOf(':');
       const engine = i === -1 ? item : item.slice(0, i);
-      const model = i === -1 ? undefined : item.slice(i + 1) || undefined;
-      const n = (seen.get(engine) ?? 0) + 1;
-      seen.set(engine, n);
-      return { name: n === 1 ? engine : `${engine}-${n}`, engine, ...(model ? { model } : {}) };
+      const rest = i === -1 ? undefined : item.slice(i + 1) || undefined;
+      const acpAgent = engine === 'acp' ? rest : undefined;
+      const model = engine === 'acp' ? undefined : rest;
+      const base = acpAgent ?? engine;
+      const n = (seen.get(base) ?? 0) + 1;
+      seen.set(base, n);
+      return {
+        name: n === 1 ? base : `${base}-${n}`,
+        engine,
+        ...(model ? { model } : {}),
+        ...(acpAgent ? { acpAgent } : {}),
+      };
     });
 }
 
@@ -727,10 +742,17 @@ async function enginesKnown(agents: AgentBindingArg[]): Promise<boolean> {
   const { ENGINE_TYPES } = await import('../src/types.js');
   const known = ENGINE_TYPES as readonly string[];
   const bad = agents.filter((a) => !a.engine || !known.includes(a.engine)).map((a) => a.engine || '(empty)');
-  if (!bad.length) return true;
-  console.error(`Error: unknown engine ${bad.join(', ')}. Known: ${known.join(', ')}`);
-  process.exitCode = 1;
-  return false;
+  if (bad.length) {
+    console.error(`Error: unknown engine ${bad.join(', ')}. Known: ${known.join(', ')}`);
+    process.exitCode = 1;
+    return false;
+  }
+  if (agents.some((a) => a.engine === 'acp' && !a.acpAgent)) {
+    console.error('Error: engine acp needs the agent: write acp:<preset>, e.g. acp:kimi-code (see `clawo engines`)');
+    process.exitCode = 1;
+    return false;
+  }
+  return true;
 }
 
 function collect(value: string, previous: string[]): string[] {
@@ -917,7 +939,11 @@ program
   .command('solve')
   .description('Fix something and have the runtime check it: triage → implement → verify → repair until green')
   .argument('<task>', 'What to do')
-  .option('-e, --engine <engine[:model]>', 'Implementer engine, optionally with a model', 'claude')
+  .option(
+    '-e, --engine <engine[:model]>',
+    'Implementer engine, optionally with a model; acp:<preset> for an ACP agent',
+    'claude',
+  )
   .option('--scouts <list>', 'Comma-separated triage agents, engine[:model] each (default: the implementer)')
   .option('--reviewers <list>', 'Comma-separated reviewers, engine[:model] each')
   .option(
@@ -943,7 +969,7 @@ program
       task,
       cwd,
       scouts: scouts as never,
-      implementer: { engine: implementer.engine as never, model: implementer.model },
+      implementer: { engine: implementer.engine as never, model: implementer.model, acpAgent: implementer.acpAgent },
       reviewers: reviewers as never,
       humanGate: opts.humanGate,
       maxRepairs: Math.max(0, parseInt(opts.maxRepairs, 10) || 0),
@@ -955,7 +981,11 @@ program
   .command('fanout')
   .description('Ask several engines the same thing in parallel, optionally with a synthesis pass')
   .argument('<task>', 'The prompt every agent gets')
-  .option('-e, --engines <list>', 'Comma-separated agents, engine[:model] each', 'claude,codex')
+  .option(
+    '-e, --engines <list>',
+    'Comma-separated agents, engine[:model] each; acp:<preset> for an ACP agent',
+    'claude,codex',
+  )
   .option('-s, --synthesize', 'Merge the answers in a final pass (needs two or more agents)')
   .option('-c, --check <command>', 'Acceptance check the runtime runs afterwards (repeatable)', collect, [])
   .option('--contract <file>', 'Acceptance contract JSON file (merged with --check)')
@@ -1040,4 +1070,6 @@ program
     await startWorkflow(spec, cwd, contract, opts);
   });
 
-program.parse();
+// An action that throws (an unreadable --message-file, a contract that is not
+// JSON) is reported like any other failure, not as a stack trace.
+program.parseAsync().catch((e: unknown) => fail(e instanceof Error ? e.message : e));

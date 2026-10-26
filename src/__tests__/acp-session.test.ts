@@ -37,6 +37,46 @@ afterEach(() => {
 });
 
 describe('acp engine', () => {
+  it('redacts secrets from what the agent writes to stderr', async () => {
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'clawo-acp-'));
+    const s = new PersistentAcpSession({
+      name: 'acp-test',
+      cwd,
+      acpAgent: agent({ FIXTURE_STDERR: 'login: ANTHROPIC_API_KEY=sk-ant-0123456789abcdef' }),
+    } as SessionConfig);
+    live.push(s);
+    const logs: string[] = [];
+    s.on('log', (line: string) => logs.push(line));
+    await s.start();
+    await turn(s, 'hello');
+    expect(logs.join('')).toContain('ANTHROPIC_API_KEY=***');
+    expect(logs.join('')).not.toContain('0123456789abcdef');
+  });
+
+  it('puts the system prompts at the top of the first message of a new session only', async () => {
+    const s = await open({ systemPrompt: 'SYS', appendSystemPrompt: 'CHARTER' });
+    const first = await turn(s, 'hello');
+    expect(first.text).toMatch(/^echo:SYS\n\nCHARTER\n\n---\n\nhello turn=1/);
+    const second = await turn(s, 'again');
+    expect(second.text).toMatch(/^echo:again turn=2/);
+  });
+
+  it('refuses sandboxMode read-only instead of running writable under that label', () => {
+    const cwd = os.tmpdir();
+    expect(
+      () => new PersistentAcpSession({ name: 'ro', cwd, acpAgent: agent(), sandboxMode: 'read-only' } as SessionConfig),
+    ).toThrow(/cannot be held to sandboxMode 'read-only'/);
+    expect(
+      () =>
+        new PersistentAcpSession({
+          name: 'ww',
+          cwd,
+          acpAgent: agent(),
+          sandboxMode: 'workspace-write',
+        } as SessionConfig),
+    ).not.toThrow();
+  });
+
   it('runs turns on one agent session and keeps its accounting', async () => {
     const s = await open();
     const chunks: string[] = [];
@@ -86,7 +126,8 @@ describe('acp engine', () => {
     const id = first.agentSessionId!;
     first.stop();
 
-    const again = await open({ resumeSessionId: id }, { FIXTURE_PRIOR_TURNS: '1' });
+    // A resumed conversation already holds its instructions: they are not sent again.
+    const again = await open({ resumeSessionId: id, appendSystemPrompt: 'CHARTER' }, { FIXTURE_PRIOR_TURNS: '1' });
     expect(again.agentSessionId).toBe(id);
     const r = await turn(again, 'two');
     expect(r.text).toBe(`echo:two turn=2 session=${id}`);
@@ -162,5 +203,12 @@ describe('acp presets and the HTTP rule', () => {
       /acpAgent may not be given/,
     );
     expect(rejectOverHttp({ engine: 'acp', acpAgent: 'kimi-code' })).toBeNull();
+    // A fan-out names its agents by preset id; the same rule lets those through.
+    expect(
+      rejectOverHttp({ agents: [{ name: 'k', engine: 'acp', acpAgent: 'kimi-code' }], synthesisAcpAgent: 'dsh' }),
+    ).toBeNull();
+    expect(rejectOverHttp({ agents: [{ name: 'k', engine: 'acp', acpAgent: { name: 'x', command: 'sh' } }] })).toMatch(
+      /acpAgent may not be given/,
+    );
   });
 });

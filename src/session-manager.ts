@@ -431,6 +431,15 @@ function readStoredAutoloopResumeContext(
   return { effectiveSendTimeoutMs, pendingDispatch };
 }
 
+/** A process's command line as `ps` prints it, or undefined when it cannot be read. */
+function processCommand(pid: number): string | undefined {
+  try {
+    return execFileSync('ps', ['-p', String(pid), '-o', 'command='], { encoding: 'utf8', timeout: 3_000 }).trim();
+  } catch {
+    return undefined;
+  }
+}
+
 function validateSendTimeoutIncrease(value: unknown, current: number): asserts value is number {
   validateAutoloopTimeoutConfig({ sendTimeoutMs: value as number });
   if ((value as number) <= current) {
@@ -553,6 +562,9 @@ function validateAutoloopRole(
     if (!customEngine) throw new Error(`${label} custom engine config is required`);
     validateAutoloopCustomEngine(role, customEngine);
   }
+  // An Autoloop role is configured by engine name alone and has no field for the
+  // agent an `acp` engine starts, so the session could only fail later.
+  if (resolved === 'acp') throw new Error(`${label} engine 'acp' is not supported by Autoloop`);
   return resolved;
 }
 
@@ -1018,6 +1030,12 @@ export class SessionManager {
   /** In-flight proxy startup, so concurrent callers share one server. */
   private _proxyStartPromise: Promise<number | null> | null = null;
   private _activePids = new Map<string, number>();
+  /**
+   * Each recorded pid's command line when it was recorded. An orphan is killed
+   * only if it is still that process: this is what lets cleanup recognise an
+   * ACP agent or a custom engine, whose binary is no fixed name.
+   */
+  private _pidCommands = new Map<number, string>();
   private _circuitBreaker = new CircuitBreaker();
   private _inbox = new InboxManager();
   /** cwd → detected language, so the manifest probe runs once per directory. */
@@ -1243,6 +1261,8 @@ export class SessionManager {
     // Track child process PID for orphan cleanup
     if (session.pid) {
       this._activePids.set(name, session.pid);
+      const command = processCommand(session.pid);
+      if (command) this._pidCommands.set(session.pid, command);
       this._savePids();
     }
 
@@ -1460,6 +1480,7 @@ export class SessionManager {
       message?: string;
       maxChars?: number;
       customEngine?: SessionConfig['customEngine'];
+      acpAgent?: SessionConfig['acpAgent'];
     },
   ): Promise<{
     name: string;
@@ -1507,6 +1528,7 @@ export class SessionManager {
       engine: opts.engine,
       ...(opts.model ? { model: opts.model } : {}),
       ...(opts.customEngine ? { customEngine: opts.customEngine } : {}),
+      ...(opts.acpAgent ? { acpAgent: opts.acpAgent } : {}),
     });
     const target = this._getSession(targetName);
     // The new session's record starts as the source's, so a second handoff from
@@ -1881,7 +1903,7 @@ export class SessionManager {
     managed.session.stop();
     this.sessions.delete(name);
     // Remove PID tracking
-    this._activePids.delete(name);
+    this._forgetPid(name);
     this._savePids();
     if (!opts.keepPersisted) {
       // Explicit stop = user intent to end session — remove from disk too.
@@ -2345,6 +2367,7 @@ export class SessionManager {
     this.sessions.clear();
     // Clear PID tracking
     this._activePids.clear();
+    this._pidCommands.clear();
     this._savePids();
     // Stop proxy server
     if (this._proxyServer) {
@@ -2896,6 +2919,12 @@ export class SessionManager {
 
   private static PID_FILE = path.join(os.homedir(), '.openclaw', 'session-pids.json');
 
+  private _forgetPid(name: string): void {
+    const pid = this._activePids.get(name);
+    if (pid !== undefined) this._pidCommands.delete(pid);
+    this._activePids.delete(name);
+  }
+
   private _savePids(): void {
     try {
       const dir = path.dirname(SessionManager.PID_FILE);
@@ -2911,7 +2940,7 @@ export class SessionManager {
       } catch {
         /* missing or malformed — start fresh */
       }
-      const merged: Record<string, { pid: number; ownerPid: number; since: string }> = {};
+      const merged: Record<string, { pid: number; ownerPid: number; since: string; command?: string }> = {};
       const now = new Date().toISOString();
       // Keep entries from OTHER LIVE owners untouched. Entries whose
       // ownerPid is a dead process are stale bookkeeping — drop them so
@@ -2921,7 +2950,7 @@ export class SessionManager {
       // before the first save).
       for (const [name, raw] of Object.entries(existing)) {
         if (typeof raw === 'number') continue; // legacy format — drop on first save
-        const entry = raw as { pid?: number; ownerPid?: number; since?: string };
+        const entry = raw as { pid?: number; ownerPid?: number; since?: string; command?: string };
         if (typeof entry.pid !== 'number' || typeof entry.ownerPid !== 'number') continue;
         if (entry.ownerPid === process.pid) continue; // ours; we're about to rewrite
         try {
@@ -2933,11 +2962,13 @@ export class SessionManager {
           pid: entry.pid,
           ownerPid: entry.ownerPid,
           since: entry.since ?? now,
+          ...(typeof entry.command === 'string' ? { command: entry.command } : {}),
         };
       }
       // Add OUR current entries
       for (const [name, pid] of this._activePids) {
-        merged[name] = { pid, ownerPid: process.pid, since: now };
+        const command = this._pidCommands.get(pid);
+        merged[name] = { pid, ownerPid: process.pid, since: now, ...(command ? { command } : {}) };
       }
       fs.writeFileSync(SessionManager.PID_FILE, JSON.stringify(merged));
     } catch {
@@ -2949,7 +2980,7 @@ export class SessionManager {
    * Verify that a PID belongs to a known coding CLI before killing it.
    * Prevents killing unrelated processes if the OS recycled the PID.
    */
-  private _isKnownCliProcess(pid: number): boolean {
+  private _isKnownCliProcess(pid: number, recordedCommand?: string): boolean {
     // Match known CLI binaries by basename to avoid false positives
     // (e.g., 'agent' must not match 'ssh-agent' or 'gpg-agent')
     // Anchor each name to executable/path position ((?:^|[/\s])name(?:[\s/]|$))
@@ -2964,15 +2995,12 @@ export class SessionManager {
       ...ENGINE_BINARY_NAMES.map((bin) => new RegExp(`(?:^|[/\\s])${bin}(?:[\\s/]|$)`)),
       /(?:^|\/)agent(?:[\s/]|$)/, // 'agent' only as executable/after a slash (not ssh-agent)
     ];
-    try {
-      const cmd = execFileSync('ps', ['-p', String(pid), '-o', 'command='], {
-        encoding: 'utf8',
-        timeout: 3_000,
-      }).trim();
-      return knownPatterns.some((pattern) => pattern.test(cmd));
-    } catch {
-      return false; // ps failed — process likely dead or not accessible
-    }
+    const cmd = processCommand(pid);
+    if (cmd === undefined) return false; // ps failed — process likely dead or not accessible
+    // The same command line as when it was recorded: the process itself, not a
+    // recycled pid — whatever binary it runs.
+    if (recordedCommand && cmd === recordedCommand) return true;
+    return knownPatterns.some((pattern) => pattern.test(cmd));
   }
 
   private _cleanupOrphanedPids(): void {
@@ -2983,14 +3011,16 @@ export class SessionManager {
         // Resolve entry shape: legacy = number; current = { pid, ownerPid, since }.
         let pid: number;
         let ownerPid: number | null;
+        let recordedCommand: string | undefined;
         if (typeof raw === 'number') {
           pid = raw;
           ownerPid = null; // unknown owner — treat conservatively (skip kill)
         } else if (raw && typeof raw === 'object') {
-          const e = raw as { pid?: number; ownerPid?: number };
+          const e = raw as { pid?: number; ownerPid?: number; command?: string };
           if (typeof e.pid !== 'number') continue;
           pid = e.pid;
           ownerPid = typeof e.ownerPid === 'number' ? e.ownerPid : null;
+          recordedCommand = typeof e.command === 'string' ? e.command : undefined;
         } else {
           continue;
         }
@@ -3020,7 +3050,7 @@ export class SessionManager {
         try {
           process.kill(pid, 0); // check if alive
           // Alive — but verify it's actually a coding CLI, not a recycled PID
-          if (!this._isKnownCliProcess(pid)) {
+          if (!this._isKnownCliProcess(pid, recordedCommand)) {
             this.logger.info(`PID ${pid} (session: ${name}) is alive but not a known CLI — skipping kill`);
             continue;
           }
@@ -3326,6 +3356,7 @@ export class SessionManager {
         synthesize: config.synthesize,
         synthesisEngine: config.synthesisEngine,
         synthesisModel: config.synthesisModel,
+        synthesisAcpAgent: config.synthesisAcpAgent,
         synthesisPermissionMode: config.synthesisPermissionMode,
         maxTurnsPerAgent: config.maxTurnsPerAgent,
         maxBudgetUsd: config.maxBudgetUsd,
@@ -3463,11 +3494,15 @@ export class SessionManager {
     // Every reviewer runs read-only (see below). A custom reviewer has no config
     // to start from, so it is turned away here instead of failing one reviewer
     // at a time. (grok was turned away too until its read-only mode moved onto
-    // grok's OS sandbox.)
+    // grok's OS sandbox.) An ACP agent cannot be held read-only at all: its tools
+    // run inside the agent, so the session would refuse to start.
     if ((opts?.engines ?? []).includes('custom')) {
       throw new Error(
         'ultrareview cannot use custom: reviewers run read-only, which a custom engine cannot be configured for here',
       );
+    }
+    if ((opts?.engines ?? []).includes('acp')) {
+      throw new Error('ultrareview cannot use acp: reviewers run read-only, which an ACP agent cannot be held to');
     }
     const id = `ultrareview-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
     const agentCount = Math.min(20, Math.max(1, opts?.agentCount || 5));
@@ -3622,9 +3657,10 @@ export class SessionManager {
       // Review is read-only: reviewers analyse and report without modifying the
       // very code they review. Unlike council, fan-out shares the project dir —
       // there is no worktree to contain an edit — so this has to hold on every
-      // engine. `plan` constrains Claude only; `sandboxMode: 'read-only'` is the
-      // engine-agnostic setting, which codex, agy and opencode map to their own
-      // read-only modes. Before it was set, a codex reviewer ran workspace-write.
+      // engine. `plan` reaches only the engines with a plan mode (Claude, Grok);
+      // `sandboxMode: 'read-only'` is the engine-agnostic setting, which codex,
+      // agy and opencode map to their own read-only modes. Before it was set, a
+      // codex reviewer ran workspace-write.
       permissionMode: 'plan',
       sandboxMode: 'read-only',
     }));
@@ -4505,7 +4541,7 @@ export class SessionManager {
         // owner. After an unclean exit `_cleanupOrphanedPids()` reads them back
         // and probes each one; a PID the OS has since recycled to a
         // coding-CLI-shaped process gets killed.
-        this._activePids.delete(name);
+        this._forgetPid(name);
         pidsChanged = true;
         // NOTE: do NOT delete from persistedSessions — idle cleanup is
         // in-memory only. Persisted entries survive for PERSIST_DISK_TTL_MS

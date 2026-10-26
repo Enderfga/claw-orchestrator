@@ -31,6 +31,7 @@ export async function executeCouncilNode(node: NodeSpec, ctx: NodeContext): Prom
         persona: a.persona ?? a.prompt ?? '',
         engine: a.engine,
         model: a.model,
+        acpAgent: a.acpAgent,
         baseUrl: a.baseUrl,
         permissionMode: a.permissionMode as never,
         effort: a.effort as never,

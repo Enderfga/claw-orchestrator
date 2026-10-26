@@ -48,9 +48,11 @@ export interface FanoutAgentSpec extends AgentBinding {
   customEngine?: CustomEngineConfig;
   permissionMode?: PermissionMode;
   /**
-   * The engine-agnostic sandbox. `permissionMode: 'plan'` constrains Claude only;
-   * `sandboxMode: 'read-only'` is what keeps an agent on any engine from writing,
-   * and it matters here because every agent shares the one project directory.
+   * The engine-agnostic sandbox. `permissionMode` goes to each engine's own
+   * permission handling (Claude and Grok have a plan mode; Codex, Antigravity and
+   * OpenCode ignore it), so `sandboxMode: 'read-only'` is what keeps an agent on
+   * any engine from writing — an engine that cannot hold it refuses to start. It
+   * matters here because every agent shares the one project directory.
    */
   sandboxMode?: 'read-only' | 'workspace-write' | 'danger-full-access';
 }
@@ -63,6 +65,8 @@ export interface FanoutConfig {
   synthesize?: boolean;
   synthesisModel?: string;
   synthesisEngine?: EngineType;
+  /** The ACP agent preset the synthesis pass starts when `synthesisEngine` is `acp`. */
+  synthesisAcpAgent?: string;
   /**
    * Permission mode for the synthesis pass. Defaults to `bypassPermissions`
    * like the agents do, but a read-only fan-out has to pass `plan` here too:
@@ -205,6 +209,7 @@ export class Fanout {
         maxTurns: this.config.maxTurnsPerAgent ?? DEFAULT_MAX_TURNS,
         maxBudgetUsd: this.config.maxBudgetUsd,
         customEngine: spec.customEngine,
+        ...(spec.acpAgent === undefined ? {} : { acpAgent: spec.acpAgent }),
       });
       const before = this._stats(sessionName);
       const result = await this.manager.sendMessage(sessionName, agentMessage(spec, this.config.task), {
@@ -279,6 +284,7 @@ export class Fanout {
         cwd: this.config.projectDir,
         engine: this.config.synthesisEngine || 'claude',
         model: this.config.synthesisModel,
+        ...(this.config.synthesisAcpAgent === undefined ? {} : { acpAgent: this.config.synthesisAcpAgent }),
         permissionMode: this.config.synthesisPermissionMode ?? 'bypassPermissions',
         maxTurns: this.config.maxTurnsPerAgent ?? DEFAULT_MAX_TURNS,
         maxBudgetUsd: this.config.maxBudgetUsd,

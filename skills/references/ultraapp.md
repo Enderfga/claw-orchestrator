@@ -37,16 +37,17 @@ interview ─► queued ─► building ─► build-complete ─► deploying �
 | `interview`      | AppSpec being filled by Q&A. Chat input goes to the interview agent (Claude Opus). |
 | `queued`         | Build accepted, waiting for a slot in the FIFO build queue.                        |
 | `building`       | Council writing code, fix-on-failure driving install/build/test.                   |
-| `build-complete` | Codebase ready, awaiting `deploy` step.                                            |
+| `build-complete` | Codebase ready. The resting state when no router is wired (see Runtime modes).     |
 | `deploying`      | Container/process being started, router map being updated.                         |
 | `done`           | App live at `/forge/<slug>/`. Chat input now goes to the done-mode classifier.     |
 | `failed`         | Council didn't reach consensus, or fix-on-failure couldn't get the build green.    |
+| `cancelled`      | The build was cancelled (`build/cancel` or `ultraapp_build_cancel`).               |
 
 ### The build is a workflow run
 
 Everything from `building` onward is a run on the durable kernel — the same one
 `council_start`, `fanout_start` and `autoloop_start` use. The workflow has three
-nodes:
+nodes (two when no router is wired — there is then nowhere to deploy):
 
 | Node     | Kind              | Does                                                         |
 | -------- | ----------------- | ------------------------------------------------------------ |
@@ -104,57 +105,76 @@ clawo serve --ultraapp-runtime docker  # opt-in
 Both modes allocate a backend port in `[19100, 19999]`. The reverse-
 proxy router runs at port `19000` (auto-fallback up to `19099` if
 taken) and maps `/forge/<slug>/*` to the right backend. Slug→port map
-persists to `~/.claw-orchestrator/_router.json`. Host-mode pid metadata
+persists to `~/.claw-orchestrator/ultraapps/_router.json`. Host-mode pid metadata
 persists to `~/.claw-orchestrator/host-procs.json`.
+
+The router is started by `clawo serve`. The OpenClaw plugin does not start one,
+and `clawo serve` runs without one when the router cannot start (for example,
+no free port in `19000`–`19099`): builds then stop at `build-complete` and are
+not deployed.
 
 ## File layout (per run)
 
 ```text
 ~/.claw-orchestrator/ultraapps/<runId>/
 ├── spec.json                  # current AppSpec (latest)
-├── spec.history.jsonl         # every accepted update_spec patch
+├── spec.history.jsonl         # the full spec after every write (interview update_spec or manual edit)
 ├── chat.jsonl                 # all chat turns (interview + done-mode)
-├── state.json                 # { runId, mode, createdAt, updatedAt }
+├── state.json                 # { runId, mode, createdAt, updatedAt, failure? }
 ├── examples/                  # uploaded sample files
 ├── data/                      # passed to host-mode app as DATA_DIR
+├── evidence/deploy-01/        # deploy-stage evidence (see Acceptance contract)
 ├── council-project/           # fresh git repo the council collaborates in
 │   ├── .worktrees/{agent-A,agent-B,agent-C}/
 │   └── (council code, merged to main on consensus)
 └── versions/
     ├── v1/
-    │   ├── codebase/          # snapshot of council main HEAD
-    │   └── artifact.json      # { worktreePath, builtAt, deploy: { url, port, … } }
+    │   ├── codebase/          # snapshot of council main HEAD, its own git repo
+    │   └── artifact.json      # { worktreePath, builtAt, deploy: { url, port, … }, deployedAt }
     └── v2/                    # patcher / spec-delta produces v2, v3, …
 ```
+
+Run ids have the form `ua-<timestamp>-<hex>`. The build queue
+(`build-queue.json`) and the router map (`_router.json`) sit beside the run
+directories, in `~/.claw-orchestrator/ultraapps/`.
 
 ## HTTP routes (drive headlessly)
 
 All routes are served by the embedded server (default `:18796`), under
-`Authorization: Bearer <token>` from `~/.openclaw/server-token`.
+`Authorization: Bearer <token>` from `~/.openclaw/server-token`. Request bodies
+are JSON (`Content-Type: application/json`) and capped at 5 MB.
 
-| Method + path                         | Purpose                                                                                                       |
-| ------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| `GET /ultraapp/list`                  | All runs with mode + createdAt.                                                                               |
-| `POST /ultraapp/new`                  | No body. Returns `{ runId }`.                                                                                 |
-| `GET /ultraapp/<id>`                  | Full snapshot: spec + chat + state.                                                                           |
-| `POST /ultraapp/<id>/answer`          | Body: `{ value, freeform? }`. Submit interview answer.                                                        |
-| `POST /ultraapp/<id>/spec-edit`       | Body: `{ patch: [...] }` (RFC 6902 ops). Edit the spec mid-interview.                                         |
-| `POST /ultraapp/<id>/files`           | JSON body `{ absolutePath }` (a file on the server host) or `{ filename, dataB64 }`. Copies into `examples/`. |
-| `GET /ultraapp/<id>/events`           | SSE stream of build/chat events (mode pill, narrator, council activity).                                      |
-| `POST /ultraapp/<id>/build`           | Validate spec strictly + enqueue.                                                                             |
-| `POST /ultraapp/<id>/build/cancel`    | Abort the active build.                                                                                       |
-| `GET /ultraapp/<id>/artifacts`        | List `versions/vN/`.                                                                                          |
-| `POST /ultraapp/<id>/start`           | Start the deployed container/process for the active version.                                                  |
-| `POST /ultraapp/<id>/stop`            | Stop without deleting.                                                                                        |
-| `POST /ultraapp/<id>/delete`          | Stop + remove all per-run state.                                                                              |
-| `POST /ultraapp/<id>/feedback`        | Body: `{ text }`. Done-mode classifier routes cosmetic / spec-delta / structural.                             |
-| `POST /ultraapp/<id>/promote-version` | Body: `{ version: "vN" }`. Atomically swap deployed version.                                                  |
+| Method + path                         | Purpose                                                                                                                                |
+| ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /ultraapp/list`                  | All runs (runId, title, mode, createdAt, updatedAt), newest first.                                                                     |
+| `POST /ultraapp/new`                  | No body. Returns `{ runId }`.                                                                                                          |
+| `GET /ultraapp/<id>`                  | Full snapshot: spec + chat + state.                                                                                                    |
+| `POST /ultraapp/<id>/answer`          | Body: `{ value, freeform? }`. Submit interview answer.                                                                                 |
+| `POST /ultraapp/<id>/spec-edit`       | Body: `{ patch: [...] }` (RFC 6902 ops). Edit the spec mid-interview.                                                                  |
+| `POST /ultraapp/<id>/files`           | Add an example file: body `{ filename, dataB64 }` or `{ absolutePath }` (below).                                                       |
+| `GET /ultraapp/<id>/events`           | SSE stream of `ultraapp` events: questions, spec updates, chat, completeness, interview completion, build events, the app URL, errors. |
+| `POST /ultraapp/<id>/build`           | Validate spec strictly + enqueue.                                                                                                      |
+| `POST /ultraapp/<id>/build/cancel`    | Cancel a queued or in-flight build.                                                                                                    |
+| `GET /ultraapp/<id>/artifacts`        | List `versions/vN/`.                                                                                                                   |
+| `POST /ultraapp/<id>/start`           | Start the deployed container/process of the latest version and re-register its route.                                                  |
+| `POST /ultraapp/<id>/stop`            | Stop without deleting; the route is deregistered until `start`.                                                                        |
+| `POST /ultraapp/<id>/delete`          | Stop, remove the image, and delete all per-run state.                                                                                  |
+| `POST /ultraapp/<id>/feedback`        | Body: `{ text }`. Done-mode classifier routes cosmetic / spec-delta / structural.                                                      |
+| `POST /ultraapp/<id>/promote-version` | Body: `{ version: "vN" }`. Atomically swap deployed version.                                                                           |
+
+`files` with `{ filename, dataB64 }` copies an upload into `examples/`; the 5 MB
+body cap applies to the base64 text. With `{ absolutePath }` it references a file
+on the server host in place; the path must be under `$HOME` or `/tmp`, with no
+dotfile segment and no symlink. `feedback` sent before the run reaches `done`
+goes to the interview as a free-form answer.
 
 ## MCP tools (14)
 
-Same surface as HTTP, callable from any Model Context Protocol host
+The same operations as HTTP, minus the SSE stream and the artifacts listing,
+plus a cheap `ultraapp_status`. Callable from any Model Context Protocol host
 (Claude Desktop, Hermes Agent, Cursor, Cline, Continue, Zed,
-Windsurf, Goose). Param schemas in [`tools.md`](./tools.md#ultraapp-14).
+Windsurf, Goose). `ultraapp_add_file` takes an `absolutePath` only; browser
+uploads go through the dashboard. Param schemas in [`tools.md`](./tools.md#ultraapp-14).
 
 ```text
 ultraapp_list           ultraapp_get             ultraapp_status
@@ -169,11 +189,11 @@ ultraapp_start_container ultraapp_stop_container ultraapp_delete
 After the run reaches `done`, chat input goes to a per-run Haiku
 classifier. Three classes:
 
-| Class        | Routes to         | Behaviour                                                                                                                                                                                                                                              |
-| ------------ | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `cosmetic`   | Patcher           | A Claude Opus session generates a unified diff against the deployed worktree → `applyUnifiedDiff` → validate via fix-on-failure → on success snapshot to `versions/vN+1/`, on any failure restore the snapshot atomically and post the reason to chat. |
-| `spec-delta` | Focused interview | Flips mode back to `interview` with a bootstrap message that names the field(s) being changed. Completion auto-triggers a fresh `startBuild`.                                                                                                          |
-| `structural` | Suggestion only   | Posts a narrator note: "this sounds like a different app — click + New".                                                                                                                                                                               |
+| Class        | Routes to         | Behaviour                                                                                                                                                                                                                                                               |
+| ------------ | ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cosmetic`   | Patcher           | A Claude Opus session generates a unified diff against the deployed worktree → `applyUnifiedDiff` → validate via fix-on-failure (up to 3 rounds) → on success snapshot to `versions/vN+1/`, on any failure restore the snapshot atomically and post the reason to chat. |
+| `spec-delta` | Focused interview | Flips mode back to `interview` with a bootstrap message that names the field(s) being changed. Completion auto-triggers a fresh `startBuild`.                                                                                                                           |
+| `structural` | Suggestion only   | Posts a narrator note: "this sounds like a different app — click + New".                                                                                                                                                                                                |
 
 To swap which version is live, use `promote-version` (HTTP) or
 `ultraapp_promote_version` (MCP) — the router map and host-procs map
@@ -186,11 +206,11 @@ output against drift:
 
 ```text
 src/__tests__/fixtures/ultraapp-traces/
-├── text-summariser.jsonl      (synthetic, simple text in/out)
-├── image-batch-resize.jsonl   (batch upload + Pillow + zip)
-├── vlog-cut.jsonl             (ffmpeg + whisper + branching DAG)
+├── text-summariser.jsonl      (hand-written; text in, one LLM step, text out)
+├── image-batch-resize.jsonl   (batch image upload, resize + watermark, zip out)
+├── vlog-cut.jsonl             (ffmpeg silence detection, cut + concat)
 ├── llm-agent-pipeline.jsonl   (BYOK, multi-step LLM)
-├── branching-dag.jsonl        (parallel paths converging)
+├── branching-dag.jsonl        (whisper transcript + ffmpeg keyframes, converging)
 ├── _format.md                 (trace JSONL schema)
 └── expected/<name>.appspec.json   (frozen target)
 ```
@@ -201,8 +221,10 @@ npx tsx scripts/test-ultraapp-integration.ts --trace=all
 ```
 
 The `spec-extraction-quality.test.ts` test replays each trace through
-the interview engine and asserts the resulting `AppSpec` matches the
-frozen snapshot — any future engine or skill drift fails this test.
+the interview engine, with the model's replies taken from the trace, and
+asserts the resulting `AppSpec` matches the frozen snapshot — a change in
+how replies are parsed or applied to the spec fails it. Because the replies
+are recorded, it does not exercise the live model or `SKILL.md`.
 
 ## Operator quick start
 
@@ -214,9 +236,9 @@ open "http://127.0.0.1:18796/dashboard?token=$(cat ~/.openclaw/server-token)"
 # 2. Forge tab → + New → walk through the interview
 
 # 3. After [Start Build] (or POST /ultraapp/<id>/build), watch:
-#      mode pill: queued → building → done
+#      mode pill: queued → building → build-complete → done
 #      narrator: short conversational chat updates
-#      Versions panel: v1, v2, … with Promote per row
+#      Versions panel: v1, v2, … with Promote on each deployed version
 
 # 4. Live URL appears in the share card. The deployed app is reachable at:
 curl http://127.0.0.1:19000/forge/<slug>/health
@@ -226,24 +248,29 @@ curl http://127.0.0.1:19000/forge/<slug>/health
 
 UltraApp is the one mode whose acceptance contract is on by default.
 
-**Build stage**, in the council's worktree:
+**Build stage**, in the consensus snapshot (`versions/v1/codebase/`):
 
 ```
 npm install → npm run build → npm test → [docker build] → npm run smoke
 ```
 
-A codebase without a working `scripts.smoke` fails its build (§4).
+`docker build` runs only in `docker` runtime mode. On a red check a repair
+session is started and the whole list re-runs, up to 5 times. A codebase
+without a working `scripts.smoke` fails its build (§4).
 
 **Deploy stage**, against the live URL: both §7g viewports (1440×900 and
 375×812) are captured by the orchestrator with headless Chrome and stored as run
 evidence.
 
-Evidence lands under the run directory:
+Evidence lands in two places. The build stage is an ordinary `verifier` node,
+so its bundle is in the workflow run's directory; the deploy stage writes its own
+into the app's run directory:
 
 ```
+~/.claw-orchestrator/wf/ultraapp-<runId>/evidence/
+  build-v01-01/   bundle.json, checks/*.log, diff.patch
 ~/.claw-orchestrator/ultraapps/<runId>/evidence/
-  build-01/    bundle.json, checks/*.log, diff.patch
-  deploy-01/   bundle.json, shot-desktop.png, shot-mobile.png
+  deploy-01/      bundle.json, shot-desktop.png, shot-mobile.png
 ```
 
 ### What the visual gate does and does not do
@@ -259,15 +286,23 @@ the usual macOS app paths, then `PATH`.
 
 ## Durable build queue
 
-The build queue is persisted to `<store>/build-queue.json` and restored on
-startup.
+The build queue is persisted to `~/.claw-orchestrator/ultraapps/build-queue.json`
+and restored on startup. Builds run one at a time, first in, first out. Only one
+process owns the queue: restoring it takes a lease, and a process that cannot
+take the lease starts with an empty queue.
 
-A build that was in flight when the process died is **re-queued, not resumed**,
-and goes to the front: each build starts from a fresh council worktree, so
-re-running is safe and continuing a half-built tree is not.
+A build that was in flight when the process died goes back to the **front** of
+the queue. When it runs again, its workflow run resumes from the last stage it
+finished (see [The build is a workflow run](#the-build-is-a-workflow-run)), so a
+finished council is not paid for twice. A build started again after it completed,
+failed or was cancelled is a fresh run under the same id.
 
 ## Known limitations
 
+- The interview, spec edits, file additions, builds, done-mode feedback and the
+  `events` stream work only on a run created by the running process. After a
+  restart they answer `unknown runId`; listing, reading, start / stop / delete
+  and promote still work.
 - The done-mode patcher loop occasionally hangs between
   feedback classification and the start of the patcher's Claude Opus session;
   cosmetic changes can be applied manually until the underlying race

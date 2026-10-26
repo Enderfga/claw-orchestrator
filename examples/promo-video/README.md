@@ -78,6 +78,12 @@ The five-column scene compresses the real timings: each chip changes state at th
 scaled to fit six seconds, and the scene states the factor. The verdicts themselves are held back to
 the same downbeat.
 
+The `clawo verify` and `clawo runs` panels are drawn by `index.html` from the JSON those commands
+print with `--json`, not captured from a terminal. The check ids, details, verdicts, models, turn
+counts and costs are the recorded values; the layout is the film's own. The verify panel leaves out
+the bundle's header lines and each check's type, and the ledger panel totals each engine's turns,
+where `clawo runs` prints one row per turn.
+
 ## Files
 
 | File | What it is |
@@ -96,10 +102,13 @@ contract and the checks were not up to it.
 
 ## Re-running it
 
-You need `clawo serve` running and the engine CLIs you want to compare installed and logged in.
+You need the engine CLIs you want to compare installed and logged in, and a `clawo serve` that
+writes its run records under `$DEMO/wf/` (`CLAWO_WF_DIR`), because `build-data.mjs` reads each
+run's event log and evidence from there.
 
 ```bash
-export DEMO=$PWD/demo
+export DEMO=$PWD/demo && mkdir -p $DEMO
+CLAWO_WF_DIR=$DEMO/wf clawo serve > $DEMO/serve.log 2>&1 &
 ./hero.sh                                   # the 15 runs (or edit the engine list)
 clawo runs --since 3h --json > $DEMO/json/ledger.json
 clawo verify <a refuted runId> --json > $DEMO/json/agy-2-evidence.json
@@ -107,10 +116,14 @@ node build-data.mjs                         # data/runs.js
 ```
 
 `build-data.mjs` quotes one refuted run (`json/hero/agy-2.json` in this recording) and reads the
-repair-loop recording from `cast/repair.cast` (`asciinema rec`); point those at your own runs.
+repair-loop recording from `cast/repair.cast` (`asciinema rec`); point those at your own runs. It
+takes the reason an errored run stopped from the server's log (`$DEMO/serve.log`), and OpenCode's
+model from opencode's session database through `sqlite3`; without the database, OpenCode's model
+shows as the ledger's `opencode-default`.
 
-To render, add `gsap.min.js` (GSAP 3.14) and the fonts the stylesheet names (Clash Display,
-JetBrains Mono, Archivo) next to `index.html`, then:
+To render, add `gsap.min.js` (GSAP 3.14) next to `index.html`, and the fonts the stylesheet names
+under `fonts/` (`ClashDisplay-500.woff2`, `ClashDisplay-600.woff2`, `ClashDisplay-700.woff2`,
+`JetBrainsMono.woff2`, `Archivo.woff2`), then:
 
 ```bash
 uv run --with numpy --with soundfile python music/score.py   # music/bgm.wav, beats.json

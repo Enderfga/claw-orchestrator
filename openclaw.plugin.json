@@ -1,7 +1,7 @@
 {
   "id": "claw-orchestrator",
   "name": "Claw Orchestrator",
-  "description": "Run Claude Code, Codex, Antigravity, Grok Build, OpenCode, any ACP agent and custom coding CLIs as one unified runtime. Persistent sessions, multi-engine orchestration, multi-agent council, worktree isolation, multi-model proxy, structured output, plan mode workflows.",
+  "description": "Run Claude Code, Codex, Antigravity, Grok Build, OpenCode, any ACP agent and custom coding CLIs as one unified runtime. Persistent sessions, multi-engine orchestration, multi-agent council, worktree isolation, durable workflows with acceptance contracts, multi-model proxy, structured output, plan mode.",
   "enabledByDefault": false,
   "configSchema": {
     "type": "object",
@@ -62,12 +62,12 @@
           "bigModel": {
             "type": "string",
             "default": "gemini-2.5-pro",
-            "description": "Default model for complex requests"
+            "description": "Accepted for existing configs; not read. The proxy routes each request by the model it names"
           },
           "smallModel": {
             "type": "string",
             "default": "gemini-2.5-flash",
-            "description": "Default model for fast requests"
+            "description": "Accepted for existing configs; not read. The proxy routes each request by the model it names"
           }
         }
       },

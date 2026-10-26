@@ -1,8 +1,8 @@
 # OpenAI-Compatible Bridge
 
-> **Cost note**: the bridge drives the Claude Code CLI, so usage counts against your Claude account. It does not bypass Anthropic's billing or subscription limits. Heavy agent traffic can consume extra-usage credits at API rates. Check your usage at [claude.ai/settings/usage](https://claude.ai/settings/usage).
+> **Cost note**: by default the bridge drives the Claude Code CLI, so usage counts against your Claude account. It does not bypass Anthropic's billing or subscription limits. Heavy agent traffic can consume extra-usage credits at API rates. Check your usage at [claude.ai/settings/usage](https://claude.ai/settings/usage).
 
-The embedded server exposes a drop-in OpenAI-compatible endpoint so any client that speaks `/v1/chat/completions` can talk to a persistent Claude Code (or Codex / Antigravity / Grok / OpenCode) session. The bridge is designed to serve **two kinds of clients as first-class citizens**:
+The embedded server (`clawo serve`, or the OpenClaw plugin) exposes a drop-in OpenAI-compatible endpoint so any client that speaks `/v1/chat/completions` can talk to a persistent Claude Code (or Codex / Antigravity / Grok Build) session; the request's `model` picks the engine — see [Model routing](#model-routing). The bridge is designed to serve **two kinds of clients as first-class citizens**:
 
 1. **Upstream agents** that maintain their own conversation state and forward only the latest user turn — OpenClaw's main agent loop, cron jobs, subagents, programmatic clients.
 2. **OpenAI-compatible webchat / labeling tools** that re-send the full transcript on every turn — ChatGPT-Next-Web, Open WebUI, LobeChat, data-labeling pipelines.
@@ -11,14 +11,41 @@ Both modes share the same wire protocol; the difference is how a "new conversati
 
 ## Endpoint
 
-|                         |                                                                                                                                                                                                                                                                          |
-| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **URL**                 | `http://127.0.0.1:18796/v1/chat/completions`                                                                                                                                                                                                                             |
-| **Models endpoint**     | `GET /v1/models`                                                                                                                                                                                                                                                         |
-| **Inspection endpoint** | `GET /v1/sessions` (lists active openai-compat sessions with caching stats)                                                                                                                                                                                              |
-| **Auth**                | `Authorization: Bearer <token>`. By default the server generates a token and writes it to `~/.openclaw/server-token` (mode 0600). Set `OPENCLAW_SERVER_TOKEN=<value>` to choose the token, or `OPENCLAW_SERVER_TOKEN=disabled` to turn auth off (single-user hosts only) |
-| **Wire format**         | OpenAI Chat Completions, both streaming (SSE) and non-streaming                                                                                                                                                                                                          |
-| **Default model**       | `claude-sonnet-4-6` when the request has no `model`                                                                                                                                                                                                                      |
+|                         |                                                                                                                                                                                                                                                                                                 |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **URL**                 | `http://127.0.0.1:18796/v1/chat/completions` (`clawo serve --port` / `--host`, or `OPENCLAW_SERVER_HOST`, change the address)                                                                                                                                                                   |
+| **Models endpoint**     | `GET /v1/models` — the model registry, as an OpenAI model list                                                                                                                                                                                                                                  |
+| **Inspection endpoint** | `GET /v1/sessions` (lists active openai-compat sessions with caching stats)                                                                                                                                                                                                                     |
+| **Auth**                | `Authorization: Bearer <token>`. By default the server reuses the token in `~/.openclaw/server-token`, or generates one and writes it there (mode 0600). Set `OPENCLAW_SERVER_TOKEN=<value>` to choose the token, or `OPENCLAW_SERVER_TOKEN=disabled` to turn auth off (single-user hosts only) |
+| **Wire format**         | OpenAI Chat Completions, both streaming (SSE) and non-streaming                                                                                                                                                                                                                                 |
+| **Default model**       | `claude-sonnet-4-6` when the request has no `model`                                                                                                                                                                                                                                             |
+
+The request fields the bridge reads are `model`, `messages`, `stream`, `user` and `tools`. `max_tokens` is
+validated (it must be a positive number) but does not limit the reply; `temperature` and other sampling fields are
+ignored — the CLI runs with its own settings.
+
+A streamed reply opens with a `role` chunk, sends a `: keepalive` comment every 30 seconds while the turn runs,
+ends with a chunk carrying `finish_reason` (and `usage`, when available), then `data: [DONE]`. When
+the request carries `tools`, the reply is held back until the turn finishes, so the tool calls can be parsed out of
+it, and then sent in one piece.
+
+## Model routing
+
+The `model` field picks the engine as well as the model, through the registry in `src/models.ts`:
+
+1. **`agy/<model>`** runs `<model>` on Antigravity (`agy`).
+2. **A registered id or alias** runs on the engine it is registered to — `opus`, `sonnet`, `haiku` and the
+   `claude-*` ids on `claude`, the `gpt-*` ids, `o3`, `o4-mini` and `codex-mini-latest` on `codex`, Antigravity's
+   Gemini ids on `agy`, `grok` and the `grok-*` ids on `grok`. `GET /v1/models` lists the current ones.
+3. **An unregistered name** falls back on its prefix: `gpt*`, `o3*`, `o4*` and `codex*` run on `codex`, `grok*` on
+   `grok`.
+4. **Anything else** — including vendor-prefixed names such as `anthropic/claude-sonnet-4-6` — runs on `claude`,
+   with the name passed through.
+
+Two legacy engines are still reachable this way: the registry's `gemini-*-preview` ids (aliases `gemini-pro`
+and `gemini-flash`) and any unregistered name containing `gemini` run on `gemini`, and `composer-*`, `cursor*`
+and `auto` run on `cursor`. Nothing else selects an engine, so `opencode`, `codex-app`, `acp` and custom
+engines are not reachable through the bridge.
 
 ## Session keying
 
@@ -26,8 +53,8 @@ Each request is mapped to a long-running session. Once a session exists, subsequ
 
 1. **`X-Session-Id` header** — explicit, highest precedence
 2. **`user` field in the request body** — OpenAI standard field, treated as a stable caller identifier
-3. **`sys-<sha1(model + systemPrompt)[0..12]>`** — automatic fallback so unkeyed callers don't all collapse onto a single shared session
-4. **`'default'`** — only when there is no system prompt AND no model (degenerate empty body)
+3. **`sys-<sha1(model + systemPrompt + tools)[0..12]>`** — automatic fallback so unkeyed callers don't all collapse onto a single shared session
+4. **`'default'`** — only when there is no system prompt, no model and no tools (degenerate empty body)
 
 Without the hash fallback, unkeyed callers (for example OpenClaw's main agent, cron jobs and subagents behind one gateway) would share one session: their requests would queue behind each other and could receive another caller's system prompt.
 
@@ -35,22 +62,43 @@ The model is mixed into the hash so that two callers with the same system prompt
 
 The full plugin-side session name is `openai-<key>`. The key becomes a directory
 name — the bridge starts each session in `os.tmpdir()/openclaw-compat-<name>` —
-so a key that is not already `[A-Za-z0-9._-]` is replaced by a hash of itself.
-An ordinary id is used unchanged; a key containing path separators cannot choose
-where the session runs.
+so a key that is not 1–64 characters of `[A-Za-z0-9._-]` without `..` is replaced
+by a hash of itself (`k-<16 hex>`). An ordinary id is used unchanged; a key
+containing path separators cannot choose where the session runs.
 
-The tool list is fingerprinted into the hash fallback by name, a description
-prefix, and the **parameter schema** (with object keys normalised, so a
-re-serialised identical schema still resolves to the same session). On the
-Claude engine the schemas are written into the session's system prompt when the
-session is created and are not re-sent per turn, so a changed schema has to
-resolve to a new session for the model to see it.
+The tool list is fingerprinted into the hash fallback by name, the first 64
+characters of the description, and the **parameter schema** (with object keys
+normalised, so a re-serialised identical schema still resolves to the same
+session). On the Claude engine the schemas are written into the session's system
+prompt when the session is created and are not re-sent per turn, so a changed
+schema has to resolve to a new session for the model to see it. An explicit key
+(`X-Session-Id` or `user`) carries no fingerprint — see
+[Known limitations](#known-limitations).
+
+### How a bridge session runs
+
+- **Working directory**: the empty temp directory above, so the CLI picks up no
+  project files, `CLAUDE.md` or git state from wherever the server was started.
+- **Permission mode**: `bypassPermissions`.
+- **On `claude`**: with `tools` in the request, the CLI's own built-in tools are
+  switched off (`--tools ""`) and its system prompt is replaced
+  (`--system-prompt`) by a preamble that says it has no tools of its own, the
+  tool definitions (sent in each message instead under
+  `OPENAI_COMPAT_TOOLS_PER_MESSAGE`), and the caller's system prompt. Without `tools`, the caller's
+  system prompt is appended (`--append-system-prompt`). Either is fixed when the
+  session is created.
+- **On the other engines**: the caller's system prompt and the tool definitions
+  travel in the message; see [Tool definitions](#tool-definitions-and-where-they-live).
+- **Compaction**: before a turn on an existing session whose context is over 80%
+  full, the bridge compacts it.
+- **Persistence**: bridge sessions are not written to the on-disk session
+  registry. An idle session is stopped when its TTL runs out and is not resumed.
 
 ## Operator modes
 
 ### Default mode — agent / programmatic clients
 
-When the env var is **not set**, the bridge assumes upstream callers maintain their own conversation transcript and only forward the latest user turn. Sessions are reused indefinitely. The only signal that starts a new conversation is the explicit reset header:
+When `OPENAI_COMPAT_NEW_CONVO_HEURISTIC` is **not `1`**, the bridge assumes upstream callers maintain their own conversation transcript and only forward the latest user turn. A session is reused for as long as it lives — until it sits idle past its TTL. The only signal that starts a new conversation is the explicit reset header:
 
 ```
 X-Session-Reset: 1
@@ -60,13 +108,15 @@ X-Session-Reset: 1
 
 When the header is present, the existing session for this key is stopped and a fresh one is created. Use this from a client that wants "new chat" semantics under your own control — e.g. when your UI's "Clear History" button is pressed.
 
+A turn treated as a new conversation (the reset header, or the webchat heuristic below) runs in a session that is stopped as soon as it has answered. The next request for the key starts another session and replays whatever earlier turns its `messages[]` carries (see [Conversation history](#conversation-history-on-the-way-in)). A client that forwards only its latest turn carries none, so the reset turn's exchange is not in that session.
+
 ### Webchat mode — `OPENAI_COMPAT_NEW_CONVO_HEURISTIC=1`
 
 When the env var is set to `1`, the bridge additionally restores a legacy heuristic: a request whose `messages` array contains exactly one non-system message (i.e. the conversation has no assistant turns yet) is treated as a fresh conversation. This is the only signal that webchat frontends (ChatGPT-Next-Web, Open WebUI, LobeChat) emit when the user clicks "New Chat" — they clear their UI transcript and post `[system, user]`.
 
 Without this flag, those frontends would silently continue the previous CLI session and surface stale context the user thought they had cleared.
 
-The env var is read on every request, so ops can flip it via `launchctl setenv` (or equivalent) without restarting the server.
+Set it in the server's environment. It is read per request, but a running process does not see a later `launchctl setenv` or shell export, so restart the server after changing it.
 
 | Mode              | Best for                                                    | New-conversation signals                            |
 | ----------------- | ----------------------------------------------------------- | --------------------------------------------------- |
@@ -75,26 +125,26 @@ The env var is read on every request, so ops can flip it via `launchctl setenv` 
 
 ## Status webhook
 
-When `OPENAI_COMPAT_STATUS_URL` is set (full HTTP URL), each chat completion sends best-effort `POST` requests with `Content-Type: application/json` and body:
+When `OPENAI_COMPAT_STATUS_URL` is set to a plain `http://` URL, each chat completion sends best-effort `POST` requests with `Content-Type: application/json` and body:
 
-| Field      | Type           | Meaning                                                                                               |
-| ---------- | -------------- | ----------------------------------------------------------------------------------------------------- |
-| `state`    | string         | `thinking` (turn started), `working` (a tool is running), or `idle` (turn finished or stream closed). |
-| `activity` | string         | Short human-readable line, e.g. `Processing request...`, `Reading: foo.ts`, `Running: npm test...`.   |
-| `tool`     | string \| null | Tool name when `state === working`, otherwise `null`.                                                 |
+| Field      | Type           | Meaning                                                                                                                     |
+| ---------- | -------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `state`    | string         | `thinking` (turn started), `working` (a tool is running), or `idle` (turn finished or failed).                              |
+| `activity` | string         | Short human-readable line, e.g. `Processing request...`, `Reading: foo.ts`, `Running: npm test`, `Ready`, `Request failed`. |
+| `tool`     | string \| null | Tool name when `state === working`, otherwise `null`.                                                                       |
 
-Failures are ignored (no retries). Use this from a small local HTTP handler that forwards status into your webchat UI.
+Each POST has a 2-second timeout; failures are ignored (no retries). `https://` URLs are not supported. Use this from a small local HTTP handler that forwards status into your webchat UI.
 
 ## Tool definitions and where they live
 
 When the request carries `tools`, the schemas have to reach the CLI somehow. Which
 mechanism is used depends on whether the engine keeps the conversation itself.
 
-| Engine                                          | Turn 1                                                        | Later turns                                                                                                                                           |
-| ----------------------------------------------- | ------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `claude`                                        | Schemas go into the session system prompt (`--system-prompt`) | Nothing injected — the system prompt persists                                                                                                         |
-| `codex`, `codex-app`, `agy`, `opencode`, `grok` | Full schema block prepended to the message                    | A short reminder of the calling convention, no schemas — but only once the conversation id has been captured; until then the full block is sent again |
-| `gemini`, one-shot `custom`                     | Full schema block prepended to the message                    | Full schema block again — these have no resume surface, so nothing persists between sends                                                             |
+| Engine                                       | Turn 1                                                        | Later turns                                                                                                                                           |
+| -------------------------------------------- | ------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `claude`                                     | Schemas go into the session system prompt (`--system-prompt`) | Nothing injected — the system prompt persists                                                                                                         |
+| `codex`, `agy`, `grok` (and legacy `cursor`) | Full schema block prepended to the message                    | A short reminder of the calling convention, no schemas — but only once the conversation id has been captured; until then the full block is sent again |
+| legacy `gemini`                              | Full schema block prepended to the message                    | Full schema block again — it has no resume surface, so nothing persists between sends                                                                 |
 
 The engines in the middle row resume a conversation by id, so everything injected
 stays in the transcript. Re-sending the full block each turn would grow the prompt
@@ -105,9 +155,10 @@ without it the CLI starts doing the work directly.
 
 A fresh session always gets the full block, so a thread is never created without
 the definitions — including when a session was evicted and is being recreated. A
-caller that changes its tool list mid-conversation also gets the full block,
-because the tool list is part of the session-name hash, so a different list
-resolves to a different session.
+caller keyed by the hash fallback that changes its tool list mid-conversation
+also gets the full block, because the tool list is part of that hash, so a
+different list resolves to a different session. With an explicit key it does
+not; see [Known limitations](#known-limitations).
 
 The caller's own system prompt follows exactly the same rule on these engines: it
 is prepended to the message, and skipped only while the conversation it was sent
@@ -115,18 +166,35 @@ to is still the one being resumed. A turn that creates a conversation always
 carries it — including a `X-Session-Reset: 1` turn, which stops the existing
 session and starts a new one. "The conversation is being resumed" means the
 engine has actually announced an id (codex's `thread.started`, agy's `init` event,
-cursor's, grok's and opencode's session id), not merely that the session is in the
-manager's map: a first turn that failed before announcing one leaves a session
-that resumes nothing, and later turns keep receiving the full prompt.
+grok's session id), not merely that the session is in the manager's map: a first
+turn that failed before announcing one leaves a session that resumes nothing, and
+later turns keep receiving the full prompt.
 
 See [Known limitations](#known-limitations) for the one request shape where
 `X-Session-Reset` is not honoured.
 
-`OPENAI_COMPAT_TOOLS_PER_MESSAGE=1` opts out: it re-sends the full block on every
+`OPENAI_COMPAT_TOOLS_PER_MESSAGE=1` (also `true` or `yes`) opts out: it re-sends the full block on every
 turn for `claude` too, which is what makes a changing tool set work inside one
 session (in that mode the tool list is deliberately left out of the session hash).
 It costs the per-turn growth described above — only use it if the tool set really
 does change mid-conversation.
+
+## Tool calls on the way out
+
+The tool block tells the model to answer a tool call with a JSON array wrapped in
+`<tool_calls>` tags, `[{"name": "…", "arguments": {…}}]`. When the request carries
+`tools`, the bridge parses every such block out of the reply:
+
+- Each call becomes an OpenAI `tool_calls` entry with a fresh `call_<id>`, and the
+  response's `finish_reason` is `tool_calls`. Arguments given as an object are
+  serialised to a JSON string; a string that is not valid JSON is wrapped as
+  `{"input": "<string>"}`.
+- Text outside the blocks becomes the message `content` (`null` when there is
+  none). A block that does not parse as JSON stays in the text.
+- `<tool_result>` / `<tool_results>` and `<conversation_history>` blocks the
+  model echoes back are stripped from the text.
+
+A request without `tools` gets the reply as plain text, unparsed.
 
 ## Conversation history on the way in
 
@@ -166,7 +234,7 @@ What goes into the block:
 
 Replayed text has the `<` of every structural tag escaped (`</user>` becomes `&lt;/user>`): the
 block's own `<conversation_history>` / `<user>` / `<assistant>`, and also `<tool_results>` /
-`<tool_result>`, `<system>` and `<tool_calls>`. Forms padded with invisible or zero-width
+`<tool_result>`, `<system>`, `<available_tools>` and `<tool_calls>`. Forms padded with invisible or zero-width
 characters (`</​user>`, `<user︀>`) are caught too. This stops a user message from closing its own
 turn or forging an `assistant` turn, a `<system>` block, a tool result, or a tool call. Limits:
 
@@ -198,22 +266,23 @@ With no block in front of it there is nothing to forge, so those turns go out un
   The most recent `user` turn in the block always keeps at least its first 200 characters, so the
   block is never left with only `assistant` turns.
 
-  The cap exists because most engines (`codex`, `agy`, `grok`, `opencode`, `cursor`, `gemini`,
-  one-shot `custom`) receive the prompt as a single command-line argument, and Linux limits one
-  argument to 128 KiB (`MAX_ARG_STRLEN`). Going over fails the request with a 500. The 5 MiB request
-  body limit does not protect against this. `claude`, `codex-app` and a persistent `custom` engine
-  write over stdin instead. The cap bounds only the part of the prompt that grows with the
-  transcript; the tool block, the system prompt and the caller's own turn are added on top.
+  The cap exists because `agy` and `grok` (and the legacy `gemini` and `cursor` engines) receive the
+  prompt as a single command-line argument, and Linux limits one argument to 128 KiB
+  (`MAX_ARG_STRLEN`). Going over fails the request with a 500. The 5 MiB request body limit does not
+  protect against this. `claude` and `codex` write the prompt over stdin instead. The cap bounds only
+  the part of the prompt that grows with the transcript; the tool block, the system prompt and the
+  caller's own turn are added on top.
 
 - **A send that threw records nothing.** The fingerprint is written only after the send returns. A
-  send that returns an error is answered with 502 and still records, since the CLI received the
-  prompt; only a thrown send leaves no record, so the next request replays the turns.
+  send that returns an error is answered with 502 (an SSE error frame when streaming) and still
+  records, since the CLI received the prompt; only a thrown send leaves no record, so the next request
+  replays the turns.
 - **A second request that arrives while the first is still in flight replays.** It sees no
   fingerprint yet, so the transcript goes out again into the session that already holds it: a
   duplicate rather than a loss, plus a lost cache prefix.
-- **Cost is O(n) per turn for engines that never resume.** `gemini` and one-shot custom engines have
-  no native conversation, so the block is rebuilt and sent on every turn (capped). The same applies
-  to any caller that creates a new session per turn.
+- **Cost is O(n) per turn for engines that never resume.** The legacy `gemini` engine has no native
+  conversation, so the block is rebuilt and sent on every turn (capped). The same applies to any
+  caller that creates a new session per turn.
 - **`X-Session-Reset` replays the transcript.** A reset turn means the engine holds nothing, so the
   history goes out in full. A client that sends the header on every request and also re-sends
   `messages[]` pays for the transcript every time.
@@ -227,7 +296,7 @@ different exchange. Three shapes where the two come apart, all reachable with de
 | shape                                                | what happens                                                                                                                            |
 | ---------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
 | a caller whose session key hashes its latest message | every repeat of the same short confirmation resolves to whichever session that phrase opened first — often a different subject entirely |
-| a caller that sends no `X-Session-Id` at all         | the key falls back to a hash of model + system prompt + tools, so all of that caller's concurrent chats share one name                  |
+| a caller that sends no `X-Session-Id` and no `user`  | the key falls back to a hash of model + system prompt + tools, so all of that caller's concurrent chats share one name                  |
 | `engine: 'claude'` — the default                     | `nativeThreadIsLive()` has no id to check and returns `true` for anything in the session map, so the name is the only evidence there is |
 
 So the bridge records, per session, a fingerprint of the `user` turns it has sent there, and
@@ -262,11 +331,10 @@ array:
 | **is** resuming a live conversation                                                                                                       | only the `tool` messages after the array's last `assistant` message — everything before it is already in the transcript |
 
 Whether the engine is resuming is resolved with the same `nativeThreadIsLive()` check as the
-middle row of [Tool definitions](#tool-definitions-and-where-they-live). Engines with no resume
-surface (`gemini`, one-shot `custom`) are never in the second row, because
-`engineHasNativeConversation()` gates the check. `claude` (and a persistent `custom` engine) holds
-its context in a live process and has no separate id to check, so it is in the second row whenever
-the session exists.
+middle row of [Tool definitions](#tool-definitions-and-where-they-live). The legacy `gemini` engine
+has no resume surface, so it is never in the second row: `engineHasNativeConversation()` gates the
+check. `claude` holds its context in a live process and has no separate id to check, so it is in the
+second row whenever the session exists.
 
 The trailing role of the array does not enter into it — `[..., tool]`, `[..., tool, user]` and
 `[..., tool, assistant]` are read the same way, and the caller's latest `user` text, when there is
@@ -309,22 +377,29 @@ sends one round at a time.
 - **`X-Session-Reset` is ignored on a request whose last non-system message is a `tool` result.** On
   that shape the reset stops nothing and creates nothing, and the turn is treated as a resumed one:
   the system prompt is skipped if the thread is live, and tool results are scoped as for a live
-  thread. Every other shape,
-  `[..., tool, user]` included, honours it. To reset in the middle of a tool loop, send the header on
-  a turn that ends in a `user` message.
+  thread. Every other shape, `[..., tool, user]` included, honours it. To reset in the middle of a
+  tool loop, send the header on a turn that ends in a `user` message.
+- **With an explicit key, a changed system prompt or tool list does not reach a live session.**
+  `X-Session-Id` and `user` are used as the key as they are, with no fingerprint of the system prompt
+  or the tools, so the request lands on the existing session. On `claude` both were fixed when that
+  session was created. On `codex`, `agy` and `grok`, once the thread is live, the system prompt is not
+  re-sent and the tools get only the short reminder. Send `X-Session-Reset: 1` with the changed
+  request, or use a new key. `OPENAI_COMPAT_TOOLS_PER_MESSAGE=1` re-sends the tool schemas every turn
+  instead; it does not change the system prompt.
 
 ## Environment variables
 
 | Variable                            | Default          | Purpose                                                                                                                                                                                                          |
 | ----------------------------------- | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `OPENCLAW_SERVER_TOKEN`             | (auto-generated) | Overrides the auto-generated bearer token; `disabled` turns auth off. The active token is written to `~/.openclaw/server-token` for the CLI.                                                                     |
+| `OPENCLAW_SERVER_TOKEN`             | (auto-generated) | Overrides the auto-generated bearer token; `disabled` turns auth off. Without it, the token in `~/.openclaw/server-token` is reused, or a new one is generated and written there for the CLI.                    |
+| `OPENCLAW_SERVER_HOST`              | `127.0.0.1`      | Bind address when `clawo serve --host` is not given. Use `0.0.0.0` for remote access.                                                                                                                            |
 | `OPENCLAW_RATE_LIMIT`               | `300`            | Max requests per IP per 60-second sliding window.                                                                                                                                                                |
 | `OPENCLAW_CORS_ORIGINS`             | (loopback only)  | Set to `*` to allow all origins (the `/v1/*` paths already do this).                                                                                                                                             |
 | `OPENAI_COMPAT_NEW_CONVO_HEURISTIC` | (unset)          | Set to `1` to enable webchat mode (see above).                                                                                                                                                                   |
 | `OPENAI_COMPAT_TOOLS_PER_MESSAGE`   | (unset)          | Set to `1` to re-send the full tool schemas on every turn (see [Tool definitions](#tool-definitions-and-where-they-live)). Needed only when the tool set changes mid-conversation; costs per-turn prompt growth. |
-| `OPENAI_COMPAT_STATUS_URL`          | (unset)          | If set, the bridge POSTs JSON status updates to this URL (fire-and-forget, 2s timeout). See [Status webhook](#status-webhook).                                                                                   |
-| `OPENCLAW_SERVE_MAX_SESSIONS`       | `32`             | Max concurrent OpenAI-compat sessions in serve mode. The plugin default is 5; serve mode raises it because each distinct caller gets its own `sys-<hash>` session.                                               |
-| `OPENCLAW_SERVE_TTL_MINUTES`        | `60`             | Idle TTL for OpenAI-compat sessions in serve mode. Idle sessions are reaped by a 60s background loop and are not resumed from disk.                                                                              |
+| `OPENAI_COMPAT_STATUS_URL`          | (unset)          | If set, the bridge POSTs JSON status updates to this `http://` URL (fire-and-forget, 2s timeout). See [Status webhook](#status-webhook).                                                                         |
+| `OPENCLAW_SERVE_MAX_SESSIONS`       | `32`             | Max concurrent sessions in `clawo serve`, bridge sessions included. The plugin default is 5; serve mode raises it because each distinct caller gets its own `sys-<hash>` session.                                |
+| `OPENCLAW_SERVE_TTL_MINUTES`        | `60`             | Idle TTL for sessions in `clawo serve` (the plugin default is 120). Idle sessions are reaped by a 60s background loop; bridge sessions are not resumed from disk.                                                |
 
 ## Inspection: `GET /v1/sessions`
 
@@ -345,7 +420,7 @@ Sample response:
       "key": "sys-a3f81c9d0b27",
       "session_name": "openai-sys-a3f81c9d0b27",
       "model": "claude-opus-5-5",
-      "cwd": "/home/user/projects",
+      "cwd": "/tmp/openclaw-compat-openai-sys-a3f81c9d0b27",
       "created": "2026-04-09T03:12:18.441Z",
       "turns": 68,
       "turns_succeeded": 14,
@@ -392,8 +467,8 @@ for M in opus sonnet; do
     -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
     -d "{\"model\":\"$M\",\"messages\":[{\"role\":\"system\",\"content\":\"SAME\"},{\"role\":\"user\",\"content\":\"hi\"}]}" > /dev/null
 done
-curl -s http://127.0.0.1:18796/v1/sessions -H "Authorization: Bearer $TOKEN" | jq '.data | length'
-# Expected: 2
+curl -s http://127.0.0.1:18796/v1/sessions -H "Authorization: Bearer $TOKEN" | jq '.data[] | {key, model}'
+# Expected: two new rows with distinct keys, one claude-opus-5-5 and one claude-sonnet-5-5.
 ```
 
 **3. `X-Session-Reset: 1` resets cleanly.**
@@ -428,25 +503,38 @@ done
 
 ## Error responses
 
-Errors use the OpenAI error envelope:
+Errors from the bridge itself use the OpenAI error envelope:
 
 ```json
 { "error": { "message": "...", "type": "invalid_request_error" } }
 ```
 
-| Status | When                                                                   |
-| ------ | ---------------------------------------------------------------------- |
-| 400    | `messages` empty/missing, no user message, invalid `max_tokens`        |
-| 413    | Request body over 5 MiB                                                |
-| 401    | Missing or wrong bearer token (when auth enabled)                      |
-| 415    | POST without `Content-Type: application/json`                          |
-| 429    | Rate limited (`OPENCLAW_RATE_LIMIT` exceeded)                          |
-| 503    | Failed to start a new session (model unavailable, CLI crashed at boot) |
-| 502    | The CLI finished the turn with an error (`type: upstream_error`)       |
-| 500    | Mid-turn failure                                                       |
+| Status | `type`                  | When                                                                                          |
+| ------ | ----------------------- | --------------------------------------------------------------------------------------------- |
+| 400    | `invalid_request_error` | `messages` empty/missing, no user message, invalid `max_tokens`                               |
+| 404    | `invalid_request_error` | Unknown `/v1/*` path                                                                          |
+| 503    | `server_error`          | Failed to start a new session (session limit reached, model unavailable, CLI crashed at boot) |
+| 502    | `upstream_error`        | The CLI finished the turn with an error                                                       |
+| 500    | `server_error`          | Mid-turn failure                                                                              |
+
+The checks that run before a request reaches the bridge answer in the server's own shape,
+`{ "ok": false, "error": "..." }`:
+
+| Status | When                                              |
+| ------ | ------------------------------------------------- |
+| 400    | Body is not valid JSON                            |
+| 401    | Missing or wrong bearer token (when auth enabled) |
+| 413    | Request body over 5 MiB                           |
+| 415    | POST without `Content-Type: application/json`     |
+| 429    | Rate limited (`OPENCLAW_RATE_LIMIT` exceeded)     |
+
+A streamed request has already received `200` by the time the turn runs, so a turn that ends in an error
+(`upstream_error`) or fails mid-turn (`server_error`) arrives as a `data: {"error": {...}}` frame followed by
+`data: [DONE]`.
 
 ## Related
 
 - [getting-started.md](./getting-started.md) — install + auth setup
 - [sessions.md](./sessions.md) — what a session is and how the lifecycle works under the hood
+- [multi-engine.md](./multi-engine.md) — the engines behind the model names, and how each CLI is invoked
 - [tools.md](./tools.md) — the full plugin tool surface (council, ultraplan, etc.)

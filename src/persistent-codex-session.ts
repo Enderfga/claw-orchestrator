@@ -22,6 +22,7 @@ import { join } from 'node:path';
 import type { GeneratedImage, SessionConfig, SessionSendOptions, StreamEvent, TurnResult } from './types.js';
 import { SESSION_EVENT } from './constants.js';
 import { BaseOneShotSession } from './base-oneshot-session.js';
+import { sanitizeSecrets } from './sanitize.js';
 
 // ─── Codex JSON event shapes (subset we consume) ────────────────────────────
 //
@@ -494,8 +495,9 @@ export class PersistentCodexSession extends BaseOneShotSession {
       });
 
       proc.stderr?.on('data', (data: Buffer) => {
-        stderr += data.toString();
-        this.emit(SESSION_EVENT.LOG, `[codex-stderr] ${data.toString()}`);
+        const sanitized = sanitizeSecrets(data.toString());
+        stderr += sanitized;
+        this.emit(SESSION_EVENT.LOG, `[codex-stderr] ${sanitized}`);
       });
 
       proc.on('close', (code) => {

@@ -333,6 +333,18 @@ describe('POST /autoloop/new', () => {
     expect(r.status).toBe(400);
   });
 
+  it('returns 400 when an autoloop role asks for engine acp', async () => {
+    vi.mocked(manager.autoloopStart).mockRejectedValueOnce(
+      new Error("Coder engine 'acp' is not supported by Autoloop"),
+    );
+    const r = await fetch(`http://127.0.0.1:${port}/autoloop/new`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ workspace: '/tmp', coder_engine: 'acp' }),
+    });
+    expect(r.status).toBe(400);
+  });
+
   it('returns 400 when autoloop role effort is invalid, including an empty value', async () => {
     vi.mocked(manager.autoloopStart).mockRejectedValueOnce(new Error("Planner effort '' is not supported"));
     const r = await fetch(`http://127.0.0.1:${port}/autoloop/new`, {

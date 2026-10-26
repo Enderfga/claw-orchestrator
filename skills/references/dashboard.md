@@ -5,9 +5,9 @@ HTTP server. It lets you **launch and observe** Council sessions, Autoloop
 runs and Forge (Ultraapp) builds, and browse durable workflow runs, from a
 browser — no CLI, no webchat, no plugin tool calls needed.
 
-URL: `http://127.0.0.1:18796/dash` (local) or whatever public hostname you
-front the embedded server with (the recommended setup uses a path-based
-reverse proxy, e.g. `https://<your-host>/dash`).
+URL: `http://127.0.0.1:18796/dash` (or `/dashboard`) locally, or whatever public
+hostname you front the embedded server with (the recommended setup uses a
+path-based reverse proxy, e.g. `https://<your-host>/dash`).
 
 ## Tabs
 
@@ -22,6 +22,17 @@ Autoloop, Council and Forge each have a `+ New` button in the sidebar; Runs is
 view-only (start runs with `workflow_start`). Council and Autoloop open a
 modal form (because they need workspace/task input); Forge POSTs an empty
 body and drops you into an interview (the spec is built conversationally).
+
+- The **Council** form takes a task, a project directory and an optional round
+  limit (default 15). It starts a fixed team of three Claude agents — a planner,
+  an implementer and a reviewer — with `bypassPermissions`. Use `council_start`
+  for your own personas, engines or models.
+- The **Autoloop** form takes a workspace and an optional Planner model; the run
+  id is generated. Other role choices are available through `POST /autoloop/new`
+  or `autoloop_start`.
+
+The header shows the spend recorded in the run ledger over the last 24 hours,
+across every engine, refreshed every 30 seconds.
 
 ## Standalone deployment
 
@@ -117,32 +128,36 @@ that both read the file always agree.
 
 ## Resuming a terminated autoloop run
 
-Opening a run whose `status` is `terminated` (because its process has
-exited, or because you're viewing it cross-process) fetches
-`/autoloop/<id>/chat_history`, replays the conversation into the Planner pane,
-and shows a green **Resume run** button in the topbar. The same button is shown
-for any live paused run, and it follows later SSE state: a pause adds it, and
-returning to an active status removes it. Timeout fields are included only when
-`pending_dispatch` exists; an ordinary or activity-lease pause resumes with
-an empty timeout body. Clicking it POSTs `/autoloop/<id>/resume`;
-the orchestrator re-attaches the Planner (reusing the persisted Claude
-session ID when available, so Claude's context picks up where it left
-off) and the dashboard reconnects to `/events` for live updates.
+Opening any autoloop run fetches `/autoloop/<id>/chat_history` and replays it
+into the three panes, so the conversation survives a page refresh. A green
+**Resume run** button appears in the topbar when the run is not live in this
+server's process (it has exited, or another process owns it), or when its status
+is `paused` or `terminated`. It follows later SSE state: a pause adds it, and
+returning to an active status removes it.
+
+Clicking it POSTs `/autoloop/<id>/resume`. Timeout fields are included only when
+`pending_dispatch` exists — the button then sends that dispatch's id with a
+send timeout one minute longer than the one that expired; an ordinary or
+activity-lease pause resumes with an empty timeout body. The orchestrator
+re-attaches the Planner (reusing its persisted conversation where the engine
+supports resume, so its context picks up where it left off) and the dashboard
+reconnects to `/events` for live updates.
 
 If the run used a **custom engine** for any role, the button first asks
 `/autoloop/<id>/resume-requirements` and prompts for one reference name per
 role — the name of a `CLAWO_CUSTOM_ENGINE_<NAME>` variable on the orchestrator
-host. The config itself is never stored and never sent; only the name is.
+host, whose value is the JSON custom-engine config. The config itself is never
+stored and never sent; only the name is.
 
 A run without a `chat.jsonl` or a persisted session still resumes, with a blank
-Planner pane and a fresh Claude context.
+Planner pane and a fresh Planner context.
 
 ## Cross-process visibility
 
 Every council, autoloop and workflow run is a durable kernel run stored under
-`~/.claw-orchestrator/wf/`, so the dashboard lists runs started by any process —
-the OpenClaw plugin, `clawo serve`, or the CLI — sorted newest-first, until the
-run records are deleted. Forge runs are read from
+`~/.claw-orchestrator/wf/` (or `$CLAWO_WF_DIR`), so the dashboard lists runs
+started by any process — the OpenClaw plugin, `clawo serve`, or the CLI — sorted
+newest-first, until the run records are deleted. Forge runs are read from
 `~/.claw-orchestrator/ultraapps/`.
 
 ## Reverse-proxy integration
@@ -172,11 +187,12 @@ launchctl kickstart -k "gui/$(id -u)/com.clawo.serve"
 
 ## Runs tab
 
-Lists durable workflow runs. Because runs are checkpointed to
+Lists the 50 most recent durable workflow runs. Because runs are checkpointed to
 disk, this sees runs started by other processes and by earlier sessions, not just
 what the current server started.
 
-Each row shows the run state and its verdict as one of three things:
+Each row shows the run state, its recorded cost when there is one, and its verdict
+as one of three things:
 
 - **verified** — an acceptance contract ran and passed.
 - **refuted** — a contract ran and a required check failed.

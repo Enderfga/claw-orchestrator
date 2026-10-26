@@ -40,6 +40,7 @@ import type {
   StreamEvent,
   TurnResult,
 } from './types.js';
+import { sanitizeSecrets } from './sanitize.js';
 
 const DEFAULT_TURN_TIMEOUT_MS = 600_000;
 
@@ -58,6 +59,14 @@ export class PersistentAcpSession extends EventEmitter implements ISession {
   private _startTime: string | null = null;
   private _history: Array<{ time: string; type: string; event: unknown }> = [];
   private _requests = 0;
+
+  /**
+   * `systemPrompt` and `appendSystemPrompt`, waiting for the first prompt of a new
+   * session. ACP has no system-prompt channel, so they go at the top of the first
+   * message, as the one-shot engines do it — a council seat's charter travels this
+   * way. A resumed session already holds them.
+   */
+  private pendingInstructions?: string;
 
   /** The turn in flight: its text so far and how to fail it if the process dies. */
   private turnText = '';
@@ -84,6 +93,15 @@ export class PersistentAcpSession extends EventEmitter implements ISession {
     super();
     const agent = resolveAcpAgent(config.acpAgent);
     if (!agent) throw new Error("engine 'acp' needs `acpAgent`: a bundled preset id or an inline config");
+    // The agent's tools run inside the agent process; this client only sees the
+    // permission requests the agent chooses to send. Nothing here can stop a write,
+    // so a read-only session is refused rather than run writable under that label.
+    if (config.sandboxMode === 'read-only') {
+      throw new Error(
+        `ACP agent '${agent.name}' cannot be held to sandboxMode 'read-only': its tools run inside the agent. ` +
+          "permissionMode 'plan' rejects the permission requests it sends, for agents that ask.",
+      );
+    }
     this.agent = agent;
     this.options = { ...config, permissionMode: config.permissionMode || 'bypassPermissions' };
   }
@@ -122,7 +140,9 @@ export class PersistentAcpSession extends EventEmitter implements ISession {
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     this.proc = proc;
-    proc.stderr?.on('data', (d: Buffer) => this.emit(SESSION_EVENT.LOG, `[acp:${this.agent.name}] ${d.toString()}`));
+    proc.stderr?.on('data', (d: Buffer) =>
+      this.emit(SESSION_EVENT.LOG, `[acp:${this.agent.name}] ${sanitizeSecrets(d.toString())}`),
+    );
     const exited = new Promise<never>((_, reject) => {
       proc.once('error', (err) => reject(new Error(`could not start ${command}: ${err.message}`)));
       proc.once('exit', (code, signal) => {
@@ -192,6 +212,11 @@ export class PersistentAcpSession extends EventEmitter implements ISession {
         exited,
       ]);
       this.acpSessionId = created.sessionId;
+      const instructions = [this.options.systemPrompt, this.options.appendSystemPrompt]
+        .map((t) => t?.trim())
+        .filter(Boolean)
+        .join('\n\n');
+      this.pendingInstructions = instructions || undefined;
     }
 
     this.sessionId = `acp-${this.agent.name}-${Date.now().toString(36)}`;
@@ -233,7 +258,11 @@ export class PersistentAcpSession extends EventEmitter implements ISession {
   ): Promise<TurnResult | { requestId: number; sent: boolean }> {
     if (!this._isReady || !this.conn || !this.acpSessionId) throw new Error('Session not ready. Call start() first.');
     if (this._isBusy) throw new Error('A turn is already running on this ACP session');
-    const text = typeof message === 'string' ? message : JSON.stringify(message);
+    let text = typeof message === 'string' ? message : JSON.stringify(message);
+    if (this.pendingInstructions) {
+      text = `${this.pendingInstructions}\n\n---\n\n${text}`;
+      this.pendingInstructions = undefined;
+    }
     const id = ++this._requests;
     if (!options.waitForComplete) {
       this._turn(text, options).catch((err) => this._emitError(err as Error));

@@ -113,6 +113,15 @@ describe('applyPlannerToolCalls', () => {
     expect(r.emitted_messages).toEqual([]);
   });
 
+  it('refuses a spawn that asks for engine acp', async () => {
+    const { fx, calls } = makeMockEffects();
+    const r = await applyPlannerToolCalls([{ tool: 'spawn_subagents', args: { coder_engine: 'acp' } }], fx, 0);
+
+    expect(r.errors).toHaveLength(1);
+    expect(r.errors[0].error).toContain("coder_engine 'acp' is not supported by Autoloop");
+    expect(calls).toEqual([]);
+  });
+
   it('does not spawn or emit a directive when artifact materialization fails', async () => {
     const harness = makeMockEffects();
     harness.fx.writePlanFiles = async (batch) => {

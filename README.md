@@ -125,7 +125,7 @@ const result = await manager.sendMessage('fix-tests', 'Fix the failing tests');
 
 From an MCP host, ask for `workflow_start` with template `solve`, a task, and a contract such as
 `{"checks":[{"type":"command","cmd":"npm","args":["test"]}]}`. In an ACP editor, the model selector is grouped by
-engine, so one dropdown switches between Claude, Codex and Grok models mid-session.
+engine, so one dropdown switches between Claude, Codex, Antigravity and Grok models mid-session.
 
 ## Engine compatibility
 
@@ -148,8 +148,8 @@ subprocess can be wired up as a [custom engine](./skills/references/multi-engine
 
 The versions above are what the weekly sweep last ran. `scripts/sweep.ts` measures each core engine's installed,
 pinned and upstream version, diffs the flags the wrapper passes against the binary's `--help`, runs one live turn
-**through the real wrapper class**, smokes the ACP and MCP entry points, and checks `src/models.ts` against both
-vendors' published price tables. It contains no model call, so the check that reports a wrapper as broken does not
+**through the real wrapper class**, smokes the ACP and MCP entry points, and checks `src/models.ts` against the
+OpenAI, Anthropic and xAI published price tables. It contains no model call, so the check that reports a wrapper as broken does not
 share the wrapper's failure modes.
 
 `scripts/sweep-workflow.json` wraps the same script as a durable run on this project's own kernel: verifier → router
@@ -174,7 +174,7 @@ orchestrator does not edit its own code unattended.
 | **ultracode**               | `session_start({ ultracode: true })` lets Claude orchestrate a dynamic workflow of subagents.                                 | [`tools.md`](./skills/references/tools.md)                  |
 | **Run ledger, spend caps**  | Every turn on every engine in one JSONL ledger (`clawo runs`), and a `maxBudgetUsd` cap enforced on every engine.             | [`observability.md`](./skills/references/observability.md)  |
 | **OpenAI-compatible proxy** | `POST /v1/chat/completions` routed to persistent sessions on the engine the model name selects, streamed back in OpenAI shape. | [`openai-compat.md`](./skills/references/openai-compat.md) |
-| **Dashboard**               | Autoloop, Council and Forge tabs with lifecycle controls and live event streams.                                              | [`dashboard.md`](./skills/references/dashboard.md)          |
+| **Dashboard**               | Autoloop, Council and Forge tabs with lifecycle controls and live event streams, and a Runs tab of durable workflow runs.      | [`dashboard.md`](./skills/references/dashboard.md)          |
 
 ## Built on Claw Orchestrator
 

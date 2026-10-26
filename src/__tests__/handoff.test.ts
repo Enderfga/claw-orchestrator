@@ -248,6 +248,14 @@ async function startWithHistory(): Promise<void> {
 }
 
 describe('handoffSession', () => {
+  it('starts the named ACP agent when the target engine is acp', async () => {
+    await startWithHistory();
+    const out = await manager.handoffSession('a', { engine: 'acp', acpAgent: 'kimi-code' });
+
+    expect(out.engine).toBe('acp');
+    expect(configs.get('a-acp')).toMatchObject({ engine: 'acp', acpAgent: 'kimi-code' });
+  });
+
   it('starts the target engine in the same place with only the engine-neutral settings', async () => {
     await startWithHistory();
     const out = await manager.handoffSession('a', { engine: 'codex' });

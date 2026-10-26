@@ -1,7 +1,7 @@
 {
   "name": "@enderfga/claw-orchestrator",
   "version": "7.14.0",
-  "description": "Claw Orchestrator — run Claude Code, Codex, Antigravity, Grok Build, OpenCode, any ACP agent and custom coding CLIs as one unified runtime. Drop into Hermes Agent, Claude Desktop, Cursor, Cline, Continue, Zed, Windsurf, Goose or any Model Context Protocol (MCP) host, install as an OpenClaw plugin, or run standalone. Persistent sessions, multi-agent council, ultraplan, ultrareview, autoloop, tool orchestration.",
+  "description": "Claw Orchestrator — run Claude Code, Codex, Antigravity, Grok Build, OpenCode, any ACP agent and custom coding CLIs as one unified runtime. Drop into Hermes Agent, Claude Desktop, Cursor, Cline, Continue, Zed, Windsurf, Goose or any Model Context Protocol (MCP) host, serve editors as an ACP agent, install as an OpenClaw plugin, or run standalone. Persistent sessions, durable resumable workflows, acceptance checks the runtime runs itself, fan-out, multi-agent council, Codex /goal runs, autoloop, ultraplan, ultrareview, and a per-turn cost ledger with spend caps.",
   "type": "module",
   "main": "./dist/src/index.js",
   "types": "./dist/src/index.d.ts",
@@ -48,8 +48,10 @@
     "claude-code",
     "codex",
     "cursor",
-    "cursor-agent",
     "opencode",
+    "grok",
+    "grok-build",
+    "kimi-code",
     "coding-agent",
     "ai-agent",
     "agent-orchestration",
@@ -85,7 +87,13 @@
     "neovim",
     "antigravity",
     "coding-agent-protocol",
-    "deepseek-harness"
+    "deepseek-harness",
+    "durable-workflow",
+    "verification",
+    "acceptance-tests",
+    "fan-out",
+    "codex-goal",
+    "cost-tracking"
   ],
   "author": "enderfga",
   "repository": {

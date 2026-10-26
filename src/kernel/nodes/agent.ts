@@ -60,6 +60,7 @@ export async function executeAgentNode(node: NodeSpec, ctx: NodeContext): Promis
       engine: spec.engine,
       model: spec.model,
       effort: spec.effort as never,
+      ...(spec.acpAgent === undefined ? {} : { acpAgent: spec.acpAgent }),
       permissionMode: (spec.permissionMode as never) ?? 'bypassPermissions',
     },
   });

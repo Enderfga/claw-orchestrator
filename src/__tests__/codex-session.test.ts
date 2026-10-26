@@ -103,6 +103,28 @@ describe('PersistentCodexSession', () => {
     expect(existsSync(schemaPath)).toBe(false);
   });
 
+  it('redacts secrets from stderr in its log lines and in the error a failed turn rejects with', async () => {
+    const session = new PersistentCodexSession({ name: 'test', cwd: '/tmp' });
+    const logs: string[] = [];
+    session.on('log', (line: string) => logs.push(line));
+    await session.start();
+
+    const sendPromise = session.send('hi', { waitForComplete: true });
+    setTimeout(() => {
+      mockProc.stderr.emit('data', Buffer.from('auth failed: OPENAI_API_KEY=sk-live-0123456789abcdef\n'));
+      mockProc.stdout.push(null);
+      mockProc.emit('close', 1);
+    }, 10);
+    const err = await sendPromise.then(
+      () => undefined,
+      (e: Error) => e,
+    );
+
+    expect(logs.join('')).toContain('OPENAI_API_KEY=***');
+    expect(logs.join('')).not.toContain('0123456789abcdef');
+    expect(err?.message ?? '').not.toContain('0123456789abcdef');
+  });
+
   it('omits --output-schema when no jsonSchema is configured', async () => {
     const session = new PersistentCodexSession({ name: 'test', cwd: '/tmp' });
     await session.start();

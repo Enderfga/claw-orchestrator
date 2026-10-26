@@ -43,6 +43,7 @@ beforeAll(async () => {
       res.setHeader('content-type', 'application/json');
       if (req.url === '/session/send') res.end(JSON.stringify({ ok: true, output: 'DONE', sessionId: 'sid-1' }));
       else if (req.url === '/session/status') res.end(JSON.stringify({ ok: true, stats: { turns: 1, toolCalls: 3 } }));
+      else if (req.url === '/workflow/new') res.end(JSON.stringify({ ok: true, runId: 'run-1' }));
       else res.end(JSON.stringify({ ok: false, error: 'no such route' }));
     });
   });
@@ -70,6 +71,27 @@ describe('session CLI for scripts', () => {
     const r = await run(['session-status', 's', '--json']);
     expect(r.code).toBe(0);
     expect(JSON.parse(r.stdout.trim().split('\n').pop()!).stats.toolCalls).toBe(3);
+  }, 30_000);
+
+  it('names an ACP agent as acp:<preset> in an agent list', async () => {
+    const r = await run(['fanout', 'task', '-e', 'claude,acp:kimi-code,acp:dsh', '--json']);
+    expect(r.code).toBe(0);
+    const spec = bodies.find((b) => b.path === '/workflow/new')!.spec as {
+      nodes: Array<{ agents?: Array<Record<string, unknown>> }>;
+    };
+    expect(spec.nodes[0]!.agents).toEqual([
+      { name: 'claude', engine: 'claude' },
+      { name: 'kimi-code', engine: 'acp', acpAgent: 'kimi-code' },
+      { name: 'dsh', engine: 'acp', acpAgent: 'dsh' },
+    ]);
+  }, 30_000);
+
+  it('refuses engine acp without the agent, before calling the server', async () => {
+    const before = bodies.length;
+    const r = await run(['solve', 'task', '-e', 'acp']);
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain('acp:<preset>');
+    expect(bodies.length).toBe(before);
   }, 30_000);
 
   it('exits 1 when the server cannot be reached', async () => {

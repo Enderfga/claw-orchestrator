@@ -62,6 +62,12 @@ export interface AgentBinding {
   engine?: EngineType;
   model?: string;
   effort?: EffortLevel;
+  /**
+   * The agent an `acp` engine starts: a bundled preset id (`clawo engines`). Only
+   * the id travels here — a stored workflow spec is written to disk, and an inline
+   * config can carry an environment; `session_start` takes inline configs.
+   */
+  acpAgent?: string;
 }
 
 /**

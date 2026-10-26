@@ -45,6 +45,7 @@ import type {
 } from './types.js';
 import { getModelPricing, resolveAlias, getContextWindow } from './models.js';
 import { SESSION_EVENT, MAX_HISTORY_ITEMS, DEFAULT_HISTORY_LIMIT } from './constants.js';
+import { sanitizeSecrets } from './sanitize.js';
 
 // ─── Hand-translated protocol types (subset we use) ────────────────────────
 //
@@ -245,7 +246,7 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
     this._rl.on('line', (line) => this._handleLine(line));
 
     this.proc.stderr?.on('data', (data: Buffer) => {
-      this.emit(SESSION_EVENT.LOG, `[codex-app-stderr] ${data.toString()}`);
+      this.emit(SESSION_EVENT.LOG, `[codex-app-stderr] ${sanitizeSecrets(data.toString())}`);
     });
 
     this.proc.on('exit', (code) => {

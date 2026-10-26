@@ -338,6 +338,15 @@ describe('ClaudeAgentDispatcher — role engine configuration', () => {
     expect(calls.startSession).not.toHaveBeenCalled();
   });
 
+  it('rejects an acp role before startSession: a role cannot name the ACP agent', async () => {
+    const { dispatcher, calls } = makeDispatcher({ plannerEngine: 'acp' });
+
+    await expect(dispatcher.deliver(Msg.chat(0, { text: 'hello' }))).rejects.toThrow(
+      "Planner engine 'acp' is not supported by Autoloop",
+    );
+    expect(calls.startSession).not.toHaveBeenCalled();
+  });
+
   it('applies spawn engine overrides and recomputes implicit model defaults', async () => {
     const { dispatcher, calls } = makeDispatcher({ reviewerEngine: 'gemini', reviewerModel: 'gemini-explicit' });
 
