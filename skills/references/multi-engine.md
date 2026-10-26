@@ -524,6 +524,8 @@ Two protocol modes:
 - **Persistent** (`persistent: true`) — long-running subprocess with stream-json I/O over stdin/stdout (like Claude Code). It keeps the conversation; `args.resume` passes `resumeSessionId` when a session is restarted
 - **One-shot** (`persistent: false`, default) — new process spawned per `send()`, with the message on the command line right after `args.print`. Nothing carries over between sends. On Windows, a CLI that runs through `cmd.exe` (an npm `.cmd` shim) cannot take a message containing a newline or an unbalanced double quote this way; use persistent mode
 
+`appendSystemPrompt` goes through `args.appendSystemPrompt` when the config maps it. Without that flag it is put at the top of the first message of a conversation: every message in one-shot mode, the first one in persistent mode unless the session resumed through `args.resume`.
+
 `sandboxMode: 'read-only'` needs both `args.permissionMode` and a `permissionModes` entry for the session's permission mode that maps to the CLI's read-only or plan value. Without them the CLI is never run writable: a persistent session refuses to start, and a one-shot session refuses every send.
 
 ### CustomEngineConfig
@@ -559,7 +561,7 @@ unregistered model, and only when that fallback rate has been overridden to zero
 | `permissionMode`         | `"--permission-mode"`          | Permission mode flag                       |
 | `model`                  | `"--model"`                    | Model selection flag                       |
 | `systemPrompt`           | `"--system-prompt"`            | System prompt override flag                |
-| `appendSystemPrompt`     | `"--append-system-prompt"`     | Append system prompt (persistent only)     |
+| `appendSystemPrompt`     | `"--append-system-prompt"`     | Append system prompt flag                  |
 | `maxTurns`               | `"--max-turns"`                | Max agent turns flag                       |
 | `resume`                 | `"--resume"`                   | Session resume flag (persistent only)      |
 | `verbose`                | `"--verbose"`                  | Verbose output flag (persistent only)      |

@@ -88,6 +88,8 @@ export class PersistentCustomSession extends EventEmitter implements ISession {
   private _rl: readline.Interface | null = null;
   private _streamCallbacks: StreamCallbacks | null = null;
   private _contextHighFired = false;
+  /** Set when `appendSystemPrompt` has no flag and must lead the first message. */
+  private _instructionsPending = false;
 
   // One-shot mode state
   private currentProc: ChildProcess | null = null;
@@ -206,6 +208,9 @@ export class PersistentCustomSession extends EventEmitter implements ISession {
     if (this.options.appendSystemPrompt && a.appendSystemPrompt) {
       args.push(a.appendSystemPrompt, this.options.appendSystemPrompt);
     }
+    // A resumed conversation already carries the instructions.
+    const resumed = !!(this.options.resumeSessionId && a.resume);
+    this._instructionsPending = !a.appendSystemPrompt && !resumed && !!this.options.appendSystemPrompt?.trim();
 
     // Limits
     if (this.options.maxTurns && a.maxTurns) {
@@ -376,6 +381,13 @@ export class PersistentCustomSession extends EventEmitter implements ISession {
     const requestId = ++this.currentRequestId;
 
     let finalMessage = typeof message === 'string' ? message : message;
+    if (this._instructionsPending) {
+      this._instructionsPending = false;
+      finalMessage =
+        typeof finalMessage === 'string'
+          ? this._withAppendedInstructions(finalMessage)
+          : [{ type: 'text', text: this.options.appendSystemPrompt!.trim() }, ...finalMessage];
+    }
     if (typeof finalMessage === 'string') {
       if (options.effort === 'high' || options.effort === 'max') {
         finalMessage = `ultrathink\n\n${finalMessage}`;
@@ -444,9 +456,11 @@ export class PersistentCustomSession extends EventEmitter implements ISession {
     const a = this.engineConfig.args;
     const args: string[] = [];
 
-    // Print mode + message
+    // Print mode + message. Nothing carries over between sends, so instructions
+    // the CLI has no flag for lead every message.
+    const prompt = a.appendSystemPrompt ? message : this._withAppendedInstructions(message);
     if (a.print) args.push(a.print);
-    args.push(message);
+    args.push(prompt);
 
     // Output format
     if (a.outputFormat && a.outputFormatValue) args.push(a.outputFormat, a.outputFormatValue);
@@ -465,6 +479,9 @@ export class PersistentCustomSession extends EventEmitter implements ISession {
     // System prompts
     if (this.options.systemPrompt && a.systemPrompt) {
       args.push(a.systemPrompt, this.options.systemPrompt);
+    }
+    if (this.options.appendSystemPrompt && a.appendSystemPrompt) {
+      args.push(a.appendSystemPrompt, this.options.appendSystemPrompt);
     }
 
     // Max turns
@@ -560,7 +577,7 @@ export class PersistentCustomSession extends EventEmitter implements ISession {
         this._stats.lastActivity = now;
 
         if (!gotUsageFromEvents && resultText.value.length > 0) {
-          this._stats.tokensIn += estimateTokens(message);
+          this._stats.tokensIn += estimateTokens(prompt);
           this._stats.tokensOut += estimateTokens(resultText.value);
           this._updateCost();
           this._stats.tokensEstimated = true;
@@ -1061,6 +1078,17 @@ export class PersistentCustomSession extends EventEmitter implements ISession {
   }
 
   // ─── Private ─────────────────────────────────────────────────────────────
+
+  /**
+   * Put `appendSystemPrompt` at the top of a message, for a CLI that maps no
+   * flag for it — the channel the built-in engines without one use. A user turn
+   * binds less firmly than a system prompt, but a council seat's charter would
+   * otherwise not arrive at all.
+   */
+  private _withAppendedInstructions(message: string): string {
+    const instructions = this.options.appendSystemPrompt?.trim();
+    return instructions ? `${instructions}\n\n---\n\n${message}` : message;
+  }
 
   private _appendPermissionArgs(args: string[]): void {
     const a = this.engineConfig.args;
