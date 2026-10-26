@@ -17,7 +17,8 @@ Both modes share the same wire protocol; the difference is how a "new conversati
 | **Models endpoint**     | `GET /v1/models`                                                                                                                                                                                                                                                         |
 | **Inspection endpoint** | `GET /v1/sessions` (lists active openai-compat sessions with caching stats)                                                                                                                                                                                              |
 | **Auth**                | `Authorization: Bearer <token>`. By default the server generates a token and writes it to `~/.openclaw/server-token` (mode 0600). Set `OPENCLAW_SERVER_TOKEN=<value>` to choose the token, or `OPENCLAW_SERVER_TOKEN=disabled` to turn auth off (single-user hosts only) |
-| **Wire format**         | OpenAI Chat Completions, both streaming (SSE) and non-streaming                                                                                                                                                                                                          |
+| **Wire format**         | OpenAI Chat Completions, both streaming (SSE) and non-streaming. With `tools`, a streamed reply is held until the turn ends and then sent as `tool_calls` chunks (finish reason `tool_calls`) or as one content chunk                                                    |
+| **Usage**               | `usage` (on the final chunk when streaming) counts this request's tokens — what the turn added to the session's running totals, which `GET /v1/sessions` reports                                                                                                         |
 | **Default model**       | `claude-sonnet-4-6` when the request has no `model`                                                                                                                                                                                                                      |
 
 ## Session keying
@@ -66,7 +67,7 @@ When the env var is set to `1`, the bridge additionally restores a legacy heuris
 
 Without this flag, those frontends would silently continue the previous CLI session and surface stale context the user thought they had cleared.
 
-The env var is read on every request, so ops can flip it via `launchctl setenv` (or equivalent) without restarting the server.
+The env var is read on every request, but from the server's own environment: a `launchctl setenv` (or equivalent) does not reach a process that is already running, so restart the server after changing it.
 
 | Mode              | Best for                                                    | New-conversation signals                            |
 | ----------------- | ----------------------------------------------------------- | --------------------------------------------------- |
@@ -83,7 +84,7 @@ When `OPENAI_COMPAT_STATUS_URL` is set (full HTTP URL), each chat completion sen
 | `activity` | string         | Short human-readable line, e.g. `Processing request...`, `Reading: foo.ts`, `Running: npm test...`.   |
 | `tool`     | string \| null | Tool name when `state === working`, otherwise `null`.                                                 |
 
-Failures are ignored (no retries). Use this from a small local HTTP handler that forwards status into your webchat UI.
+Failures are ignored (no retries) and never affect the completion: a request the endpoint has not answered within 2 s is dropped, and a URL the bridge cannot POST to — anything but `http://`, or malformed — sends nothing. Use this from a small local HTTP handler that forwards status into your webchat UI.
 
 ## Tool definitions and where they live
 
@@ -105,9 +106,10 @@ without it the CLI starts doing the work directly.
 
 A fresh session always gets the full block, so a thread is never created without
 the definitions — including when a session was evicted and is being recreated. A
-caller that changes its tool list mid-conversation also gets the full block,
-because the tool list is part of the session-name hash, so a different list
-resolves to a different session.
+caller with no explicit key (no `X-Session-Id`, no `user`) that changes its tool
+list mid-conversation also gets the full block, because the tool list is part of
+the hashed key, so a different list resolves to a different session. With an
+explicit key it does not — see [Known limitations](#known-limitations).
 
 The caller's own system prompt follows exactly the same rule on these engines: it
 is prepended to the message, and skipped only while the conversation it was sent
@@ -312,6 +314,12 @@ sends one round at a time.
   thread. Every other shape,
   `[..., tool, user]` included, honours it. To reset in the middle of a tool loop, send the header on
   a turn that ends in a `user` message.
+- **A changed tool list does not reach a session named by an explicit key.** `X-Session-Id` and
+  `user` name the session by themselves, so a request with a different `tools` list lands on the same
+  session: on `claude` the schemas stay the ones written into its system prompt at create, and a
+  resumed `codex`, `codex-app`, `agy`, `cursor`, `opencode` or `grok` conversation gets only the
+  short reminder. Send `X-Session-Reset: 1` with the new list, or set
+  `OPENAI_COMPAT_TOOLS_PER_MESSAGE=1`.
 
 ## Environment variables
 

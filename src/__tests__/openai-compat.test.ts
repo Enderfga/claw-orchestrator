@@ -4,6 +4,8 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as path from 'node:path';
+import * as http from 'node:http';
+import * as net from 'node:net';
 import {
   resolveSessionKey,
   sessionNameFromKey,
@@ -2673,6 +2675,220 @@ describe('handleChatCompletion — streaming an engine that does not emit deltas
     );
 
     expect(contentOf(written)).toBe('the whole answer');
+  });
+
+  it('parses tool calls out of the returned output when nothing streamed', async () => {
+    // With `tools` the path buffers the deltas to parse them, and an engine with no delta channel
+    // leaves that buffer empty — the reply has to be read from the return value instead.
+    const manager = {
+      startSession: async (c: Record<string, unknown>) => ({ name: c.name as string }),
+      sendMessage: async () => ({
+        output: '<tool_calls>\n[{"name": "get_weather", "arguments": {"city": "Tokyo"}}]\n</tool_calls>',
+        events: [],
+      }),
+      stopSession: async () => {},
+      listSessions: () => [],
+      getStatus: () => ({ stats: { tokensIn: 1, tokensOut: 1, contextPercent: 1 } }),
+      compactSession: async () => ({}),
+    };
+    const { res, written } = recordingRes();
+
+    await handleChatCompletion(
+      manager as never,
+      {
+        model: 'opencode/x',
+        stream: true,
+        messages: [{ role: 'user', content: 'weather in Tokyo?' }],
+        tools: [
+          {
+            type: 'function',
+            function: { name: 'get_weather', description: 'Weather', parameters: { type: 'object' } },
+          },
+        ],
+      },
+      {},
+      res,
+    );
+
+    const frames = sseFrames({ sse: written }) as Array<{
+      choices?: Array<{
+        delta?: { content?: string; tool_calls?: Array<{ function: { name: string; arguments: string } }> };
+        finish_reason?: string | null;
+      }>;
+    }>;
+    const calls = frames.flatMap((f) => f.choices?.[0]?.delta?.tool_calls ?? []);
+    expect(calls.map((c) => c.function.name)).toEqual(['get_weather']);
+    expect(JSON.parse(calls[0].function.arguments)).toEqual({ city: 'Tokyo' });
+    expect(frames.at(-1)?.choices?.[0]?.finish_reason).toBe('tool_calls');
+    expect(contentOf(written)).not.toContain('<tool_calls>');
+  });
+});
+
+// ── The status webhook is best-effort: a URL it cannot POST to must not fail the completion.
+//
+//    `http.request` throws synchronously on an `https://` or malformed URL, and the first status
+//    report sits inside the same try block as the send.
+describe('handleChatCompletion — an unusable OPENAI_COMPAT_STATUS_URL', () => {
+  let saved: string | undefined;
+  beforeEach(() => {
+    __resetSeededConversations();
+    saved = process.env.OPENAI_COMPAT_STATUS_URL;
+  });
+  afterEach(() => {
+    if (saved === undefined) delete process.env.OPENAI_COMPAT_STATUS_URL;
+    else process.env.OPENAI_COMPAT_STATUS_URL = saved;
+  });
+
+  for (const url of ['https://127.0.0.1:1/status', 'not a url']) {
+    it(`answers a non-streaming request with ${JSON.stringify(url)} set`, async () => {
+      process.env.OPENAI_COMPAT_STATUS_URL = url;
+      const { manager, sent } = fakeManager();
+      const { res, seen } = recordingRes();
+
+      await handleChatCompletion(
+        manager,
+        { model: 'gpt-5.5', messages: [{ role: 'user', content: 'hello' }] },
+        { 'x-session-id': 'demo' },
+        res,
+      );
+
+      expect(sent).toHaveLength(1);
+      expect(seen.status).toBe(200);
+      expect(JSON.parse(seen.body).choices[0].message.content).toBe('ok');
+    });
+
+    it(`answers a streaming request with ${JSON.stringify(url)} set`, async () => {
+      process.env.OPENAI_COMPAT_STATUS_URL = url;
+      const { manager, sent } = fakeManager();
+      const { res, seen } = recordingRes();
+
+      await handleChatCompletion(
+        manager,
+        streamingBody([{ role: 'user', content: 'hello' }]),
+        { 'x-session-id': 'demo' },
+        res,
+      );
+
+      expect(sent).toHaveLength(1);
+      const frames = sseFrames(seen);
+      expect(frames.some((f) => f.error)).toBe(false);
+      expect(frames.map((f) => f.choices?.[0]?.delta?.content ?? '').join('')).toBe('ok');
+    });
+  }
+
+  it('drops a status request the endpoint never answers once the 2s timeout passes', async () => {
+    // The `timeout` option only emits an event; without a handler that destroys the request, every
+    // report to a hung endpoint holds a socket open for as long as the endpoint does.
+    const opened: net.Socket[] = [];
+    const closed: net.Socket[] = [];
+    const server = http.createServer(() => {
+      /* never answers */
+    });
+    server.on('connection', (socket) => {
+      opened.push(socket);
+      socket.on('close', () => closed.push(socket));
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    process.env.OPENAI_COMPAT_STATUS_URL = `http://127.0.0.1:${(server.address() as net.AddressInfo).port}/status`;
+    try {
+      const { manager } = fakeManager();
+      const { res, seen } = recordingRes();
+      await handleChatCompletion(
+        manager,
+        { model: 'gpt-5.5', messages: [{ role: 'user', content: 'hello' }] },
+        { 'x-session-id': 'demo' },
+        res,
+      );
+      expect(seen.status).toBe(200);
+      await new Promise((resolve) => setTimeout(resolve, 2_600));
+      expect(opened.length).toBeGreaterThan(0);
+      expect(closed).toHaveLength(opened.length);
+    } finally {
+      server.closeAllConnections();
+      server.close();
+    }
+  }, 10_000);
+});
+
+// ── `usage` is this request's, not the session's running total.
+//
+//    Every engine's stats accumulate over the session, so on a persistent session the totals read
+//    after a send include every earlier turn, and prompt_tokens grew on every request. The send's
+//    own tokens come back on its result, measured by the manager inside its per-session chain.
+describe('handleChatCompletion — usage is per request', () => {
+  beforeEach(__resetSeededConversations);
+
+  /**
+   * A manager whose stats are running totals, the way every engine keeps them, and whose send
+   * reports what it added, the way SessionManager does. Turn k costs k×100 in, k×10 out.
+   */
+  function cumulativeManager() {
+    const totals = new Map<string, { tokensIn: number; tokensOut: number; turns: number }>();
+    return {
+      startSession: async (c: Record<string, unknown>) => {
+        totals.set(c.name as string, { tokensIn: 0, tokensOut: 0, turns: 0 });
+        return { name: c.name as string };
+      },
+      sendMessage: async (name: string) => {
+        const t = totals.get(name)!;
+        t.turns += 1;
+        t.tokensIn += t.turns * 100;
+        t.tokensOut += t.turns * 10;
+        return { output: 'ok', events: [], usage: { tokensIn: t.turns * 100, tokensOut: t.turns * 10 } };
+      },
+      stopSession: async (name: string) => {
+        totals.delete(name);
+      },
+      listSessions: () => [...totals.keys()].map((name) => ({ name })),
+      getStatus: (name: string) => {
+        const t = totals.get(name);
+        if (!t) throw new Error('session is gone');
+        return { stats: { tokensIn: t.tokensIn, tokensOut: t.tokensOut, contextPercent: 1 } };
+      },
+      compactSession: async () => ({}),
+    };
+  }
+
+  type Usage = { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+
+  it('non-streaming reports the tokens of this turn alone', async () => {
+    const manager = cumulativeManager();
+    const usages: Usage[] = [];
+    for (let i = 0; i < 3; i++) {
+      const { res, seen } = recordingRes();
+      await handleChatCompletion(
+        manager,
+        { model: 'gpt-5.5', messages: [{ role: 'user', content: `turn ${i}` }] },
+        { 'x-session-id': 'usage-ns' },
+        res,
+      );
+      usages.push((JSON.parse(seen.body) as { usage: Usage }).usage);
+    }
+    expect(usages).toEqual([
+      { prompt_tokens: 100, completion_tokens: 10, total_tokens: 110 },
+      { prompt_tokens: 200, completion_tokens: 20, total_tokens: 220 },
+      { prompt_tokens: 300, completion_tokens: 30, total_tokens: 330 },
+    ]);
+  });
+
+  it('streaming reports the tokens of this turn alone', async () => {
+    const manager = cumulativeManager();
+    const usages: Array<Usage | undefined> = [];
+    for (let i = 0; i < 3; i++) {
+      const { res, seen } = recordingRes();
+      await handleChatCompletion(
+        manager,
+        streamingBody([{ role: 'user', content: `turn ${i}` }]),
+        { 'x-session-id': 'usage-st' },
+        res,
+      );
+      usages.push((sseFrames(seen).at(-1) as { usage?: Usage }).usage);
+    }
+    expect(usages).toEqual([
+      { prompt_tokens: 100, completion_tokens: 10, total_tokens: 110 },
+      { prompt_tokens: 200, completion_tokens: 20, total_tokens: 220 },
+      { prompt_tokens: 300, completion_tokens: 30, total_tokens: 330 },
+    ]);
   });
 });
 

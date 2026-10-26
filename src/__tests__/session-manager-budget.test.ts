@@ -190,6 +190,23 @@ describe('run ledger integration', () => {
     await mgr.shutdown();
   });
 
+  it("returns each send's own tokens, including a send queued behind another", async () => {
+    // The engine's stats are running totals. A caller that reads them around its own sendMessage()
+    // charges a queued send for the turn it waited behind; the manager measures inside the chain.
+    const mgr = makeManager();
+    await mgr.startSession({ name: 'usage-a', engine: 'codex', cwd: tmpDir });
+
+    const results = await Promise.all([mgr.sendMessage('usage-a', 'first'), mgr.sendMessage('usage-a', 'second')]);
+    const third = await mgr.sendMessage('usage-a', 'third');
+
+    expect([...results, third].map((r) => r.usage)).toEqual([
+      { tokensIn: 100, tokensOut: 40 },
+      { tokensIn: 100, tokensOut: 40 },
+      { tokensIn: 100, tokensOut: 40 },
+    ]);
+    await mgr.shutdown();
+  });
+
   it('records a failed turn with ok:false and the error text', async () => {
     const mgr = makeManager();
     await mgr.startSession({ name: 'ledger-fail', engine: 'codex', cwd: tmpDir });
