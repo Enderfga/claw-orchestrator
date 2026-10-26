@@ -547,12 +547,15 @@ export interface SessionStats {
   /**
    * How full the context is (0-100). Two different readings, by engine:
    *
-   * - one-shot engines (4.11.0) and codex (4.12.1): the last turn's prompt over
-   *   the window the engine enforces, so it rises and falls with the conversation.
-   * - `claude` and persistent `custom`: cumulative `tokensIn + tokensOut` over the
-   *   model's registry window, so it only grows and overcounts a conversation
-   *   whose history is replayed each turn. `getContextWindow()` falls back to
-   *   200,000 for a model that is not in the registry.
+   * - every engine but persistent `custom`: the last turn's prompt over the window
+   *   the engine reports it enforces (`claude`, `codex`, `codex-app`, `acp`), else
+   *   the model's registry window (the agent preset's window for `acp`). It rises
+   *   and falls with the conversation. For `claude` the prompt includes cached
+   *   reads and cache writes. `getContextWindow()` falls back to 200,000 for a
+   *   model that is not in the registry.
+   * - persistent `custom`: cumulative `tokensIn + tokensOut` over the engine
+   *   config's `contextWindow` (200,000 when unset), so it only grows and
+   *   overcounts a conversation whose history is replayed each turn.
    *
    * Distinct in either case from `tokensIn`, which is total billed input tokens.
    */

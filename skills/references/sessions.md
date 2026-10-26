@@ -39,7 +39,7 @@ Key options:
 | `maxBudgetUsd`       | Spend cap in USD, checked before every send on every engine; once spend reaches it, further sends are refused                                                                                                                                                                                                                                                                       |
 | `bare`               | Claude Code: skip hooks, LSP, auto-memory, CLAUDE.md                                                                                                                                                                                                                                                                                                                                |
 | `worktree`           | Claude Code: run in an isolated git worktree                                                                                                                                                                                                                                                                                                                                        |
-| `appendSystemPrompt` | Append custom instructions to the system prompt. Claude Code and Grok take it natively; Codex, Antigravity and OpenCode have no such flag and receive it at the top of the first message of a conversation, as does `codex-app` on a new thread and an `acp` session on a new session                                                                                                            |
+| `appendSystemPrompt` | Append custom instructions to the system prompt. Claude Code and Grok take it natively; Codex, Antigravity and OpenCode have no such flag and receive it at the top of the first message of a conversation, as does `codex-app` on a new thread and an `acp` session on a new session                                                                                               |
 
 ### Sending Messages
 
@@ -208,10 +208,10 @@ console.log(`Context: ${status.stats.contextPercent}%`);
 `contextPercent` is how full the live context is right now — the current turn's
 prompt over the window the engine actually enforces — so it rises and falls with
 the conversation. A persistent `custom` engine is the exception: there it is the
-session's cumulative tokens over the model's registered window, so it only grows
-(and a one-shot `custom` engine reports 0). `stats.tokensIn` is the different
-question of how many input tokens the session has been billed for in total, which
-only ever grows.
+session's cumulative tokens over the engine config's `contextWindow` (200,000 when
+unset), so it only grows (and a one-shot `custom` engine reports 0).
+`stats.tokensIn` is the different question of how many input tokens the session
+has been billed for in total, which only ever grows.
 
 `compactSession()` runs `/compact` (with the optional summary) on `claude` and a
 persistent `custom` engine, and starts the thread's own compaction on `codex-app`.
