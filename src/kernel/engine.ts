@@ -382,7 +382,7 @@ function normalizeSpecContracts(spec: WorkflowSpec, override: unknown): Workflow
           ? { ...n, contract: usable(n.contract, `Verifier '${n.id}': its contract`) }
           : n,
       )
-    : spec.nodes;
+    : spec?.nodes;
   return { ...spec, contract, nodes };
 }
 
@@ -1254,9 +1254,10 @@ export class RunKernel extends EventEmitter {
   }
 
   /**
-   * Node kinds that can move the workspace; routers and gates cannot. `sideEffectSeq` counts them, and
-   * `_verdictWentStale` uses "nothing ran since" as a git-free early exit — so a
-   * kind missing here lets a verdict stand over a tree it no longer describes.
+   * Node kinds that can move the workspace; routers and gates cannot.
+   * `sideEffectSeq` counts them, and `_verdictWentStale` uses "nothing ran
+   * since" as a git-free early exit — so a kind missing here lets a verdict
+   * stand over a tree it no longer describes.
    * `ultraapp_synth` writes an entire codebase and `ultraapp_deploy` writes
    * local build artifacts; the built-in template happens not to place either
    * after a verdict, but nothing stops a composed workflow from doing so.
