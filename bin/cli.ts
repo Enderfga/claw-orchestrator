@@ -88,12 +88,11 @@ function usage(message: string): void {
 const program = new Command();
 program.name('clawo').description('Claw Orchestrator CLI').version(getCliVersion());
 
-// Serve (standalone mode — no OpenClaw needed)
-// `clawo acp` is a thin alias for the `clawo-acp` binary. It exists so the
+// `clawo acp` runs the `clawo-acp` entry point in this process. It exists so the
 // server is discoverable from `clawo --help`, and so an ACP client can be
-// configured with a single command name. It re-execs rather than booting
-// in-process because the ACP entry point must own stdout from its first line —
-// anything this file printed first would land inside the protocol stream.
+// configured with a single command name. The ACP entry point must own stdout
+// from its first line, so nothing in this file may print before this action
+// runs — anything printed first would land inside the protocol stream.
 program
   .command('acp')
   .description('Run as an Agent Client Protocol agent over stdio (for Zed, JetBrains, dsh, …)')
@@ -102,6 +101,7 @@ program
     await import('./acp-server.js');
   });
 
+// Serve (standalone mode — no OpenClaw needed)
 program
   .command('serve')
   .description('Start standalone embedded server (for use without OpenClaw)')
@@ -155,18 +155,27 @@ program
 
     const server = new EmbeddedServer(manager, parseInt(opts.port), opts.host);
     const port = await server.start();
-    if (port) {
-      console.log(`Standalone server running on http://127.0.0.1:${port}`);
-      console.log('Press Ctrl+C to stop');
-      const shutdown = async () => {
-        await server.stop();
-        if (routerStartedPort !== null) await router.stop().catch(() => {});
-        await manager.shutdown();
-        process.exit(0);
-      };
-      process.on('SIGINT', shutdown);
-      process.on('SIGTERM', shutdown);
+    // start() resolves 0 when the port is taken, which lets the plugin defer to
+    // a server already running. Here nothing else would serve, and the router
+    // and the manager's timer would keep the process alive doing nothing.
+    if (!port) {
+      console.error(
+        `Error: port ${opts.port} is already in use; stop the server holding it or pick another port with -p`,
+      );
+      if (routerStartedPort !== null) await router.stop().catch(() => {});
+      await manager.shutdown();
+      process.exit(1);
     }
+    console.log(`Standalone server running on http://127.0.0.1:${port}`);
+    console.log('Press Ctrl+C to stop');
+    const shutdown = async () => {
+      await server.stop();
+      if (routerStartedPort !== null) await router.stop().catch(() => {});
+      await manager.shutdown();
+      process.exit(0);
+    };
+    process.on('SIGINT', shutdown);
+    process.on('SIGTERM', shutdown);
   });
 
 // Session commands
@@ -295,7 +304,9 @@ program
   .option('--effort <level>', 'Effort level')
   .option('--plan', 'Plan mode')
   .option('-t, --timeout <ms>', 'Timeout', '300000')
-  .option('-s, --stream', 'Collect streaming chunks and include in output')
+  // Kept so scripts that pass it still parse: /session/send answers when the
+  // turn ends and has no streamed form.
+  .option('-s, --stream', 'No effect: the reply arrives when the turn ends')
   .option('--json', 'Print the whole result as JSON')
   .action(async (name, messageArg, opts) => {
     const message = opts.messageFile ? fs.readFileSync(opts.messageFile, 'utf-8') : messageArg;
@@ -309,16 +320,12 @@ program
       effort: opts.effort,
       plan: opts.plan,
       timeout: parseInt(opts.timeout),
-      stream: opts.stream || undefined,
     });
     if (opts.json) {
       console.log(JSON.stringify(result));
       if (!result.ok) process.exitCode = 1;
     } else if (result.ok) {
       console.log(result.output);
-      if (opts.stream && Array.isArray(result.chunks) && result.chunks.length > 0) {
-        console.log(`\n[${result.chunks.length} streaming chunks collected]`);
-      }
     } else fail(result.error);
   });
 

@@ -667,6 +667,20 @@ describe('EmbeddedServer', () => {
       expect((res.body as Record<string, string>).error).toBe('Session failed');
     });
 
+    // Both refusals are about the caller's workspace, and the same request
+    // succeeds once the workspace is fixed — not a server fault.
+    it.each([
+      'Autoloop workspace has uncommitted changes; commit or stash them before starting',
+      'Autoloop could not isolate the run ledger from Git',
+    ])('answers 409 when autoloop refuses the workspace: %s', async (message) => {
+      (manager as unknown as Record<string, unknown>).autoloopStart = vi.fn().mockRejectedValue(new Error(message));
+      await server.start();
+
+      const res = await request(port, '/autoloop/new', { method: 'POST', body: { workspace: os.tmpdir() } });
+      expect(res.status).toBe(409);
+      expect((res.body as Record<string, string>).error).toBe(message);
+    });
+
     it('returns 400 for invalid JSON body', async () => {
       await server.start();
 
@@ -771,5 +785,76 @@ describe('EmbeddedServer — autoloop runs that are not running here', () => {
     const malformed = await request(port, '/autoloop/bad..id/chat', { method: 'POST', body: { text: 'hi' } });
     expect(malformed.status).toBe(404);
     expect((malformed.body as { error: string }).error).toBe("Autoloop run 'bad..id' not found");
+  });
+});
+
+describe('EmbeddedServer — workflow event stream', () => {
+  let server: EmbeddedServer;
+  let manager: SessionManager;
+  let port: number;
+
+  beforeEach(async () => {
+    process.env.OPENCLAW_SERVER_TOKEN = 'disabled';
+    delete process.env.OPENCLAW_RATE_LIMIT;
+    delete process.env.OPENCLAW_CORS_ORIGINS;
+    manager = createMockManager();
+    port = await getFreePort();
+    server = new EmbeddedServer(manager, port);
+  });
+
+  afterAll(() => {
+    delete process.env.OPENCLAW_SERVER_TOKEN;
+  });
+
+  afterEach(async () => {
+    await server.stop();
+  });
+
+  /** What an SSE stream that never ends has sent within `ms`. */
+  function readStream(path: string, ms = 500): Promise<string> {
+    return new Promise((resolve, reject) => {
+      let text = '';
+      const req = http.get({ hostname: '127.0.0.1', port, path }, (res) => {
+        res.on('data', (chunk) => (text += chunk));
+      });
+      req.on('error', reject);
+      setTimeout(() => {
+        req.destroy();
+        resolve(text);
+      }, ms);
+    });
+  }
+
+  it('opens with the snapshot of a run older than any listing window', async () => {
+    const m = manager as unknown as Record<string, unknown>;
+    // A listing is newest first and capped; this run is not in it.
+    m.workflowList = vi.fn((q: { limit?: number } = {}) =>
+      Array.from({ length: q.limit ?? 25 }, (_, i) => ({ runId: `newer-${i}`, state: 'succeeded' })),
+    );
+    m.workflowStatus = vi.fn((runId: string) => {
+      if (runId !== 'old-run') throw new Error(`Workflow run '${runId}' not found`);
+      return {
+        runId: 'old-run',
+        workflow: 'solve',
+        state: 'running',
+        cwd: '/tmp',
+        createdAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:00:01.000Z',
+        currentNode: 'agent',
+        nodes: {},
+      };
+    });
+    m.onWorkflowEvent = vi.fn().mockReturnValue(() => {});
+    await server.start();
+
+    const text = await readStream('/workflow/old-run/events');
+    expect(text).toContain('event: snapshot');
+    const data = JSON.parse(text.slice(text.indexOf('data: ') + 6, text.indexOf('\n\n')));
+    expect(data).toMatchObject({ runId: 'old-run', state: 'running', currentNode: 'agent' });
+    // A summary, like the listing's rows, not the whole record.
+    expect(data).not.toHaveProperty('nodes');
+
+    const unknown = await readStream('/workflow/nope/events');
+    expect(unknown).not.toContain('event: snapshot');
   });
 });

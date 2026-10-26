@@ -15,6 +15,7 @@ import * as crypto from 'node:crypto';
 import { SessionManager } from './session-manager.js';
 import { sanitizeCwd, validateRegex } from './validation.js';
 import { resolveSecretRefs } from './kernel/secrets.js';
+import { summarize, type RunSummary } from './kernel/store.js';
 import { validateAutoloopTimeoutConfig } from './autoloop/types.js';
 import { isUnconfirmedChatNotice } from './autoloop/dispatcher.js';
 import { boundedErrorReason } from './sanitize.js';
@@ -40,6 +41,10 @@ function autoloopErrorStatus(error: unknown): number {
   if (/^Autoloop run '.+' not found in registry$/.test(message)) return 404;
   if (/^Autoloop with id '.+' (?:already exists|is being deleted|is still starting)$/.test(message)) return 409;
   if (/^Autoloop session name '.+' is already in use$/.test(message)) return 409;
+  // The caller's workspace refuses the start; the same request succeeds once
+  // the worktree is clean and the run ledger can be ignored.
+  if (/^Autoloop workspace has uncommitted changes\b/.test(message)) return 409;
+  if (/^Autoloop could not isolate the run ledger from Git$/.test(message)) return 409;
   if (/^(?:Planner|Coder|Reviewer) engine '.+' is not supported(?: by Autoloop)?$/.test(message)) return 400;
   if (/^(?:Planner|Coder|Reviewer) effort\b/.test(message)) return 400;
   // Any custom-engine config complaint is caller error, not a server fault.
@@ -918,7 +923,14 @@ export class EmbeddedServer {
             Connection: 'keep-alive',
           });
           const send = sseSender(res);
-          const snapshot = this.manager.workflowList({ limit: 1000 }).find((r) => r.runId === runId);
+          // Read the named run itself: a listing is capped and newest first, so
+          // an older run would open with no snapshot.
+          let snapshot: RunSummary | undefined;
+          try {
+            snapshot = summarize(this.manager.workflowStatus(runId));
+          } catch {
+            // Unknown or unreadable run — the stream opens without a snapshot.
+          }
           if (snapshot) send('snapshot', snapshot);
           const unsubscribe = this.manager.onWorkflowEvent((e) => {
             if (e.runId === runId) send('workflow-event', e.event);

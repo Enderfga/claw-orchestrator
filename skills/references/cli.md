@@ -14,7 +14,7 @@ The CLI is an HTTP client that talks to the Claw Orchestrator embedded server. U
 clawo serve [-p, --port <port>] [-H, --host <host>] [--ultraapp-runtime host|docker]
 ```
 
-Start the standalone embedded server (default port 18796, bound to `127.0.0.1`, or `OPENCLAW_SERVER_HOST` when set; pass `-H 0.0.0.0` for remote access). `--ultraapp-runtime` selects how ultraapp builds run: `host` (default, spawns Node directly) or `docker`. The server also starts the ultraapp reverse-proxy router on port 19000 (or the next free port); if the router cannot start, ultraapp deploys are skipped and the server runs without it.
+Start the standalone embedded server (default port 18796, bound to `127.0.0.1`, or `OPENCLAW_SERVER_HOST` when set; pass `-H 0.0.0.0` for remote access). `--ultraapp-runtime` selects how ultraapp builds run: `host` (default, spawns Node directly) or `docker`. The server also starts the ultraapp reverse-proxy router on port 19000 (or the next free port); if the router cannot start, ultraapp deploys are skipped and the server runs without it. If the server's port is already in use, `clawo serve` prints an error and exits 1.
 
 Under `clawo serve` the session manager allows 32 concurrent sessions and unloads a session after 60 idle minutes (the plugin defaults are 5 and 120). Override with `OPENCLAW_SERVE_MAX_SESSIONS` and `OPENCLAW_SERVE_TTL_MINUTES`.
 

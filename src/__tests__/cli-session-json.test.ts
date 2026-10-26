@@ -1,5 +1,5 @@
 /**
- * The session CLI as a script drives it: `--message-file`, `--json`, and a
+ * The CLI as a script drives it: `--message-file`, `--json`, and a
  * failure's exit status. Runs bin/cli.ts against a stub HTTP server.
  */
 
@@ -7,7 +7,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import http from 'node:http';
-import type { AddressInfo } from 'node:net';
+import net, { type AddressInfo } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -67,6 +67,18 @@ describe('session CLI for scripts', () => {
     });
   }, 30_000);
 
+  // The server returns a reply when the turn ends and has no streamed form of
+  // /session/send, so the flag stays only so existing scripts still parse.
+  it('accepts --stream, says it has no effect, and sends nothing for it', async () => {
+    const before = bodies.length;
+    const r = await run(['session-send', 's', 'hi', '--stream']);
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain('DONE');
+    expect(bodies.slice(before).find((b) => b.path === '/session/send')).not.toHaveProperty('stream');
+    const help = await run(['session-send', '--help']);
+    expect(help.stdout).toMatch(/-s, --stream\s+No effect/);
+  }, 30_000);
+
   it('prints the status as JSON', async () => {
     const r = await run(['session-status', 's', '--json']);
     expect(r.code).toBe(0);
@@ -98,5 +110,36 @@ describe('session CLI for scripts', () => {
     const r = await run(['session-list'], 'http://127.0.0.1:1');
     expect(r.stderr).toContain('Failed: Cannot connect');
     expect(r.code).toBe(1);
+  }, 30_000);
+});
+
+describe('clawo serve', () => {
+  it('exits 1 with a message when its port is already taken', async () => {
+    const holder = net.createServer();
+    await new Promise<void>((r) => holder.listen(0, '127.0.0.1', r));
+    const port = (holder.address() as AddressInfo).port;
+    try {
+      // Its own process group: tsx runs the script in a child process, which
+      // killing tsx alone would leave behind.
+      const child = spawn(TSX, [CLI, 'serve', '-p', String(port)], { env: process.env, detached: true });
+      let stderr = '';
+      child.stderr.on('data', (d) => (stderr += d));
+      // A serve that cannot bind and does not exit keeps running forever, so
+      // give it a deadline rather than wait for a close that never comes.
+      const code = await new Promise<number | null>((resolve) => {
+        const deadline = setTimeout(() => {
+          process.kill(-child.pid!, 'SIGKILL');
+          resolve(null);
+        }, 20_000);
+        child.on('close', (c) => {
+          clearTimeout(deadline);
+          resolve(c);
+        });
+      });
+      expect(code).toBe(1);
+      expect(stderr).toContain(`port ${port} is already in use`);
+    } finally {
+      holder.close();
+    }
   }, 30_000);
 });
