@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `CITATION.cff` and a Citation section in the README, with the research built on this runtime.
+
 ## [7.14.0] - 2026-10-25
 
 ### Added
