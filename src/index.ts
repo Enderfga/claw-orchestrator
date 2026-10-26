@@ -1781,15 +1781,17 @@ const plugin = {
 
     registerTool({
       name: 'council_abort',
-      description: 'Abort a running council, stopping all agent sessions and removing the worktrees it created',
+      description:
+        'Abort a council running in this process, stopping all agent sessions and removing the worktrees it created. A council that is not running here is left alone and the call returns ok: false.',
       parameters: {
         type: 'object',
         properties: { id: { type: 'string', description: 'Council session ID' } },
         required: ['id'],
       },
       execute: async (_id, args) => {
-        getManager().councilAbort(args.id as string);
-        return { ok: true };
+        const result = getManager().councilAbort(args.id as string);
+        if (!result.aborted) return { ok: false, aborted: false, state: result.state, error: result.reason };
+        return { ok: true, aborted: true };
       },
     });
 

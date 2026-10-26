@@ -427,6 +427,32 @@ describe('plugin tool registration', () => {
       else process.env.CLAWO_NO_EMBEDDED_SERVER = previousNoServer;
     }
   });
+
+  it('council_abort reports ok: false when nothing was running to abort', async () => {
+    const registration = collectRegistration();
+    const tool = registration.tools.find((candidate) => candidate.name === 'council_abort')!;
+    const abort = vi
+      .spyOn(SessionManager.prototype, 'councilAbort')
+      .mockReturnValueOnce({ aborted: false, state: 'completed', reason: 'not running in this process' })
+      .mockReturnValueOnce({ aborted: true });
+    const previousNoServer = process.env.CLAWO_NO_EMBEDDED_SERVER;
+    process.env.CLAWO_NO_EMBEDDED_SERVER = '1';
+    const details = async (id: string) => ((await tool.execute(id, { id })) as { details: unknown }).details;
+    try {
+      expect(await details('c1')).toEqual({
+        ok: false,
+        aborted: false,
+        state: 'completed',
+        error: 'not running in this process',
+      });
+      expect(await details('c2')).toEqual({ ok: true, aborted: true });
+    } finally {
+      registration.services[0]?.stop();
+      abort.mockRestore();
+      if (previousNoServer === undefined) delete process.env.CLAWO_NO_EMBEDDED_SERVER;
+      else process.env.CLAWO_NO_EMBEDDED_SERVER = previousNoServer;
+    }
+  });
 });
 
 // The OpenClaw plugin manifest declares the tool contract separately from the
