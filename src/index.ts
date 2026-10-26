@@ -1566,7 +1566,11 @@ const plugin = {
             type: 'string',
             description: 'Commit to measure the change against. Without it, diff_policy sees untracked files only.',
           },
-          label: { type: 'string', description: 'Name for the stored evidence (defaults to a generated one).' },
+          label: {
+            type: 'string',
+            description:
+              'Name for the stored evidence (defaults to a generated one). Must not be the id of an existing workflow run.',
+          },
           contract: {
             type: 'object',
             description:

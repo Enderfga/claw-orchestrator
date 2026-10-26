@@ -877,7 +877,8 @@ same as a failure).
 
 Run an acceptance contract against a directory outside any workflow — for a plain
 `session_send` that edited a repo, say. `{ cwd, contract, baseSha?, label? }` →
-the evidence bundle.
+the evidence bundle, stored under `~/.claw-orchestrator/wf/<label>/evidence/`. A
+`label` that is the id of an existing workflow run is refused.
 
 Without `baseSha`, `diff_policy` sees untracked files only. `verify_run` has no record of
 the tree before the work, so `protectTests` does not apply to it.

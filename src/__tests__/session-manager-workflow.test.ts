@@ -127,6 +127,16 @@ describe('verifyRun', () => {
     expect(bundle.results).toHaveLength(2);
   });
 
+  it('refuses a label that names an existing workflow run, and writes nothing into it', async () => {
+    const kernel = stubAgents(manager);
+    const rec = await manager.workflowStart({ name: 'x', cwd: tmp, nodes: [{ id: 'a', kind: 'agent', prompt: 'go' }] });
+    await kernel.wait(rec.runId);
+    await expect(
+      manager.verifyRun({ cwd: tmp, label: rec.runId, contract: { checks: [{ type: 'command', cmd: 'true' }] } }),
+    ).rejects.toThrow(/workflow run/);
+    expect(fs.existsSync(path.join(tmp, 'wf', rec.runId, 'evidence'))).toBe(false);
+  });
+
   it('refuses a contract with nothing recognisable in it', async () => {
     await expect(manager.verifyRun({ cwd: tmp, contract: { checks: [{ type: 'rm_rf' }] } })).rejects.toThrow(
       /at least one recognised check/,
