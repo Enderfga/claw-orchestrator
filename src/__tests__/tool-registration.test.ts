@@ -355,6 +355,97 @@ describe('plugin tool registration', () => {
     });
   });
 
+  it('exposes permissionMode and sandboxMode on fanout_start agents with session_start enums', () => {
+    const sessionProps = (byName.get('session_start')!.parameters.properties ?? {}) as Record<
+      string,
+      Record<string, unknown>
+    >;
+    const fanoutProps = (
+      byName.get('fanout_start')!.parameters as {
+        properties: {
+          agents: {
+            items: {
+              properties: Record<string, { type?: string; enum?: string[]; description?: string }>;
+            };
+          };
+        };
+      }
+    ).properties.agents.items.properties;
+
+    expect(fanoutProps.permissionMode?.enum).toEqual(sessionProps.permissionMode?.enum);
+    expect(fanoutProps.sandboxMode?.enum).toEqual(sessionProps.sandboxMode?.enum);
+
+    const agentsDescription = String(
+      (byName.get('fanout_start')!.parameters as { properties: { agents: { description?: string } } }).properties.agents
+        .description,
+    );
+    const permissionDescription = String(fanoutProps.permissionMode?.description ?? '');
+    const sandboxDescription = String(fanoutProps.sandboxMode?.description ?? '');
+
+    // Wording must track session_start per-engine handling — not Claude-only plan
+    // claims or a universal engine-agnostic sandbox guarantee.
+    expect(permissionDescription).toMatch(/session_start/i);
+    expect(permissionDescription).toMatch(/engine/i);
+    expect(permissionDescription).not.toMatch(/plan binds Claude only/i);
+    expect(sandboxDescription).toMatch(/session_start/i);
+    expect(sandboxDescription).toMatch(/read-only/i);
+    expect(sandboxDescription).toMatch(/per-engine|same values/i);
+    expect(sandboxDescription).not.toMatch(/engine-agnostic/i);
+    expect(agentsDescription).toMatch(/permissionMode/i);
+    expect(agentsDescription).toMatch(/sandboxMode/i);
+    expect(agentsDescription).toMatch(/read-only/i);
+    expect(agentsDescription).toMatch(/sandboxMode uses the same values and per-engine behavior as session_start/i);
+    expect(agentsDescription).not.toMatch(/plan binds Claude only/i);
+    expect(agentsDescription).not.toMatch(/sandboxMode is engine-agnostic/i);
+  });
+
+  it('fanout_start execute forwards per-agent permissionMode and sandboxMode', async () => {
+    const registration = collectRegistration();
+    const tool = registration.tools.find((candidate) => candidate.name === 'fanout_start');
+    expect(tool).toBeDefined();
+    const start = vi.spyOn(SessionManager.prototype, 'fanoutStart').mockResolvedValue({
+      id: 'fanout-perm',
+      status: 'running',
+      results: [],
+    } as never);
+    const previousNoServer = process.env.CLAWO_NO_EMBEDDED_SERVER;
+    process.env.CLAWO_NO_EMBEDDED_SERVER = '1';
+    const projectDir = fs.realpathSync(os.tmpdir());
+    try {
+      await tool!.execute('fanout-perm-contract', {
+        task: 'answer once',
+        projectDir,
+        agents: [
+          {
+            name: 'ro',
+            engine: 'codex',
+            permissionMode: 'plan',
+            sandboxMode: 'read-only',
+          },
+        ],
+      });
+      expect(start).toHaveBeenCalledWith(
+        expect.objectContaining({
+          task: 'answer once',
+          projectDir,
+          agents: [
+            expect.objectContaining({
+              name: 'ro',
+              engine: 'codex',
+              permissionMode: 'plan',
+              sandboxMode: 'read-only',
+            }),
+          ],
+        }),
+      );
+    } finally {
+      registration.services[0]?.stop();
+      start.mockRestore();
+      if (previousNoServer === undefined) delete process.env.CLAWO_NO_EMBEDDED_SERVER;
+      else process.env.CLAWO_NO_EMBEDDED_SERVER = previousNoServer;
+    }
+  });
+
   it('lets every surface that offers engine acp name the ACP agent, and no other surface offer it', () => {
     type Props = Record<string, { type?: string; enum?: string[]; items?: { properties?: Props; enum?: string[] } }>;
     const props = (name: string) => (byName.get(name)!.parameters.properties ?? {}) as Props;

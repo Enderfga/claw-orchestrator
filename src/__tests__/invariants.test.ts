@@ -371,6 +371,100 @@ describe('the legacy API contract survives the adapter', () => {
     fs.rmSync(cwd, { recursive: true, force: true });
   });
 
+  it('fan-out forwards per-agent sandboxMode read-only for agy, codex, cursor, and claude', async () => {
+    const cwd = gitRepo();
+    const agents = [
+      { name: 'agy-ro', engine: 'agy' as const, sandboxMode: 'read-only' as const },
+      { name: 'codex-ro', engine: 'codex' as const, sandboxMode: 'read-only' as const },
+      { name: 'cursor-ro', engine: 'cursor' as const, sandboxMode: 'read-only' as const },
+      { name: 'claude-ro', engine: 'claude' as const, sandboxMode: 'read-only' as const },
+    ];
+    const fan = await mgr.fanoutStart({
+      task: 'SHARED TASK',
+      projectDir: cwd,
+      agents,
+    });
+    await (mgr as unknown as { kernel: { wait(id: string): Promise<unknown> } }).kernel.wait(fan.id);
+
+    for (const agent of agents) {
+      const started = observed.find((o) => o.config.name?.endsWith(`-${agent.name}`))!;
+      expect(started.config).toMatchObject({
+        engine: agent.engine,
+        sandboxMode: 'read-only',
+      });
+    }
+
+    fs.rmSync(cwd, { recursive: true, force: true });
+  });
+
+  it('fan-out keeps bypassPermissions and omits sandboxMode when both fields are omitted', async () => {
+    const cwd = gitRepo();
+    const fan = await mgr.fanoutStart({
+      task: 'SHARED TASK',
+      projectDir: cwd,
+      agents: [
+        { name: 'agy-def', engine: 'agy' },
+        { name: 'codex-def', engine: 'codex' },
+        { name: 'cursor-def', engine: 'cursor' },
+        { name: 'claude-def', engine: 'claude' },
+      ],
+    });
+    await (mgr as unknown as { kernel: { wait(id: string): Promise<unknown> } }).kernel.wait(fan.id);
+
+    for (const suffix of ['agy-def', 'codex-def', 'cursor-def', 'claude-def']) {
+      const started = observed.find((o) => o.config.name?.endsWith(`-${suffix}`))!;
+      expect(started.config.permissionMode).toBe('bypassPermissions');
+      expect(started.config.sandboxMode).toBeUndefined();
+    }
+
+    fs.rmSync(cwd, { recursive: true, force: true });
+  });
+
+  it('a resumed fan-out replays per-agent sandboxMode and permissionMode from its stored spec', async () => {
+    const cwd = gitRepo();
+    const fan = await mgr.fanoutStart({
+      task: 'SHARED TASK',
+      projectDir: cwd,
+      agents: [
+        {
+          name: 'ro-agent',
+          engine: 'codex',
+          permissionMode: 'plan',
+          sandboxMode: 'read-only',
+        },
+      ],
+    });
+    const kernel = (mgr as unknown as { kernel: { wait(id: string): Promise<unknown> } }).kernel;
+    await kernel.wait(fan.id);
+
+    const first = observed.find((o) => o.config.name?.endsWith('-ro-agent'))!;
+    expect(first.config).toMatchObject({ permissionMode: 'plan', sandboxMode: 'read-only' });
+
+    const { acquireLease, commit, loadRun, releaseLease } = await import('../kernel/store.js');
+    const record = loadRun(fan.id)!;
+    const nodeId = Object.keys(record.nodes)[0]!;
+    record.state = 'running';
+    record.endedAt = undefined;
+    record.currentNode = nodeId;
+    record.nodes[nodeId]!.state = 'running';
+    record.nodes[nodeId]!.output = undefined;
+    record.nodes[nodeId]!.data = undefined;
+    const crashed = acquireLease(fan.id, 'crashed-process');
+    expect(commit(crashed, { record }).outcome).toBe('committed');
+    expect(releaseLease(crashed)).toBe('released');
+
+    await mgr.shutdown();
+    mgr = makeManager();
+    await mgr.workflowResume(fan.id);
+    await (mgr as unknown as { kernel: { wait(id: string): Promise<unknown> } }).kernel.wait(fan.id);
+
+    const replays = observed.filter((o) => o.config.name?.endsWith('-ro-agent'));
+    expect(replays).toHaveLength(2);
+    expect(replays[1]!.config).toMatchObject({ permissionMode: 'plan', sandboxMode: 'read-only' });
+
+    fs.rmSync(cwd, { recursive: true, force: true });
+  });
+
   it('council delivers persona, engine, model, effort, and budget', { timeout: 60_000 }, async () => {
     const cwd = gitRepo();
     const council = await mgr.councilStart('build it', {

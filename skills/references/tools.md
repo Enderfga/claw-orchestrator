@@ -370,22 +370,30 @@ Run one task across N engine/model agents **in parallel** and collect their answ
 
 ### `fanout_start`
 
-| Parameter                            | Type    | Required | Description                                                                                                                                                                                                                       |
-| ------------------------------------ | ------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `task`                               | string  | yes      | Shared task sent to every agent, optionally after its `persona`.                                                                                                                                                                  |
-| `projectDir`                         | string  | yes      | Working directory all agents run in.                                                                                                                                                                                              |
-| `agents`                             | array   | yes      | Up to 16 specs: `{ name, engine?, model?, effort?, prompt?, persona?, baseUrl?, permissionMode?, customEngine?, acpAgent? }`. Names must be unique (each forms a session name); `permissionMode` defaults to `bypassPermissions`. |
-| `synthesize`                         | boolean |          | Run a final synthesis pass over the successful results (needs ≥2).                                                                                                                                                                |
-| `synthesisModel` / `synthesisEngine` | string  |          | Model/engine for the synthesis pass (default engine `claude`).                                                                                                                                                                    |
-| `synthesisAcpAgent`                  | string  |          | With `synthesisEngine: 'acp'`: the ACP agent preset the synthesis pass starts.                                                                                                                                                    |
-| `agentTimeoutMs`                     | number  |          | Per-agent timeout (default 600000).                                                                                                                                                                                               |
-| `maxTurnsPerAgent`                   | number  |          | Max agent loop turns (default 30).                                                                                                                                                                                                |
-| `maxBudgetUsd`                       | number  |          | Per-agent spend cap.                                                                                                                                                                                                              |
+| Parameter                            | Type    | Required | Description                                                                                                                                                                                                                                         |
+| ------------------------------------ | ------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `task`                               | string  | yes      | Shared task sent to every agent, optionally after its `persona`.                                                                                                                                                                                    |
+| `projectDir`                         | string  | yes      | Working directory all agents run in.                                                                                                                                                                                                                |
+| `agents`                             | array   | yes      | Up to 16 specs: `{ name, engine?, model?, effort?, prompt?, persona?, baseUrl?, permissionMode?, sandboxMode?, customEngine?, acpAgent? }`. Names must be unique (each forms a session name); `permissionMode` defaults to `bypassPermissions`. |
+| `synthesize`                         | boolean |          | Run a final synthesis pass over the successful results (needs ≥2).                                                                                                                                                                                  |
+| `synthesisModel` / `synthesisEngine` | string  |          | Model/engine for the synthesis pass (default engine `claude`).                                                                                                                                                                                      |
+| `synthesisAcpAgent`                  | string  |          | With `synthesisEngine: 'acp'`: the ACP agent preset the synthesis pass starts.                                                                                                                                                                      |
+| `agentTimeoutMs`                     | number  |          | Per-agent timeout (default 600000).                                                                                                                                                                                                                 |
+| `maxTurnsPerAgent`                   | number  |          | Max agent loop turns (default 30).                                                                                                                                                                                                                  |
+| `maxBudgetUsd`                       | number  |          | Per-agent spend cap.                                                                                                                                                                                                                                |
 
 Runs in the background; returns `{ ok, id, status, ... }`. Poll with `fanout_status`.
 Each agent's optional `effort` accepts `low`, `medium`, `high`, `xhigh`, `max`,
 `ultra`, or `auto`. Omit it to keep the session default. The engine applies or
 clamps the value as documented for `session_start`.
+
+Per-agent `permissionMode` uses the same enum and each engine's own permission
+handling as `session_start`. Workers that must not write should set
+`sandboxMode` to `read-only`. Per-agent `sandboxMode` (`read-only` \|
+`workspace-write` \| `danger-full-access`) uses the same values and per-engine
+behavior as `session_start` (omit to keep the session default). These worker
+fields do not constrain optional synthesis, and `fanout_start` does not expose a
+synthesis permission override.
 
 Per-agent `persona` provides role instructions without replacing the shared
 task. Fan-out sends `<persona>\n\n## Shared task\n\n<task>`. A non-empty

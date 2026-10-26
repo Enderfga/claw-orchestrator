@@ -1214,7 +1214,7 @@ const plugin = {
             type: 'array',
             maxItems: 16,
             description:
-              'Agent specs: { name, engine?, model?, effort?, prompt?, persona?, baseUrl?, permissionMode?, customEngine?, acpAgent? }.',
+              "Agent specs: { name, engine?, model?, effort?, prompt?, persona?, baseUrl?, permissionMode?, sandboxMode?, customEngine?, acpAgent? }. permissionMode uses each engine's own permission handling as in session_start; workers that must not write should set sandboxMode to read-only. sandboxMode uses the same values and per-engine behavior as session_start.",
             items: {
               type: 'object',
               properties: {
@@ -1235,6 +1235,18 @@ const plugin = {
                     'Per-agent role instructions prepended to the shared task when no non-empty prompt is supplied.',
                 },
                 baseUrl: { type: 'string' },
+                permissionMode: {
+                  type: 'string',
+                  enum: ['acceptEdits', 'bypassPermissions', 'default', 'manual', 'dontAsk', 'plan', 'auto'],
+                  description:
+                    "Per-agent permission mode (same values as session_start). Passed through to that engine's own permission handling; see session_start for per-engine mapping.",
+                },
+                sandboxMode: {
+                  type: 'string',
+                  enum: ['read-only', 'workspace-write', 'danger-full-access'],
+                  description:
+                    'Same values and per-engine behavior as session_start. Use read-only for workers that must not write.',
+                },
                 acpAgent: ACP_AGENT_ID_SCHEMA,
               },
               required: ['name'],
