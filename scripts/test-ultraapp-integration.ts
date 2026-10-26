@@ -24,6 +24,10 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const TRACES_DIR = path.join(ROOT, 'src/__tests__/fixtures/ultraapp-traces');
 
 interface Args {
   trace?: string;
@@ -44,17 +48,12 @@ function parseArgs(argv: string[]): Args {
 }
 
 async function runReplay(trace: string): Promise<void> {
-  const { replayTrace, stripVolatile } = await import(
-    './src/__tests__/ultraapp/trace-replayer.js'
-  );
+  const { replayTrace, stripVolatile } = await import('../src/__tests__/ultraapp/trace-replayer.js');
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), `ua-int-${trace}-`));
   try {
-    const file = path.join('src/__tests__/fixtures/ultraapp-traces', `${trace}.jsonl`);
+    const file = path.join(TRACES_DIR, `${trace}.jsonl`);
     if (!fs.existsSync(file)) throw new Error(`trace fixture missing: ${file}`);
-    const expectedFile = path.join(
-      'src/__tests__/fixtures/ultraapp-traces/expected',
-      `${trace}.appspec.json`,
-    );
+    const expectedFile = path.join(TRACES_DIR, 'expected', `${trace}.appspec.json`);
     if (!fs.existsSync(expectedFile)) {
       throw new Error(`expected snapshot missing: ${expectedFile}`);
     }
@@ -71,9 +70,8 @@ async function runReplay(trace: string): Promise<void> {
 }
 
 function listTraces(): string[] {
-  const dir = 'src/__tests__/fixtures/ultraapp-traces';
   return fs
-    .readdirSync(dir)
+    .readdirSync(TRACES_DIR)
     .filter((f) => f.endsWith('.jsonl') && !f.startsWith('_'))
     .map((f) => f.replace(/\.jsonl$/, ''));
 }
