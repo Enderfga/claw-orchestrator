@@ -7,8 +7,17 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { councilWorkflow, fanoutWorkflow, solveWorkflow } from '../../kernel/templates/index.js';
+import { execSync } from 'node:child_process';
+import {
+  councilNodeBudget,
+  councilWorkflow,
+  fanoutWorkflow,
+  legacyCouncilWorkflow,
+  solveWorkflow,
+} from '../../kernel/templates/index.js';
 import { prepareSpec, IMPLICIT_VERIFIER_ID, RunKernel } from '../../kernel/engine.js';
+import { executeCouncilNode } from '../../kernel/nodes/council.js';
+import { DEFAULT_MAX_ROUNDS } from '../../constants.js';
 import { executeRouterNode } from '../../kernel/nodes/router.js';
 import { executeVerifierNode } from '../../kernel/nodes/verifier.js';
 import { repairBrief } from '../../kernel/nodes/agent.js';
@@ -77,6 +86,71 @@ describe('council workflow', () => {
   it('has no verifier at all without a contract, so the run stays unverified', () => {
     const prepared = prepareSpec(councilWorkflow({ task: 't', agents }));
     expect(prepared.nodes.some((n) => n.kind === 'verifier')).toBe(false);
+  });
+
+  it('defaults to the same round count as council_start, and the budget is sized for it', () => {
+    const node = councilWorkflow({ task: 't', agents }).nodes[0];
+    expect(node).toMatchObject({ maxRounds: DEFAULT_MAX_ROUNDS });
+    expect(node.timeoutMs).toBe(councilNodeBudget(agents.length, DEFAULT_MAX_ROUNDS));
+  });
+});
+
+/**
+ * The council node, run for real against a scratch repository. The manager is a
+ * fake that records what each seat was started with and votes YES at once.
+ */
+describe('council node', () => {
+  let repo: string;
+  let charters: string[];
+
+  const manager = {
+    startSession: async (cfg: { cwd?: string; appendSystemPrompt?: string }) => {
+      charters.push(cfg.appendSystemPrompt ?? '');
+      return { name: 'seat', created: new Date().toISOString(), cwd: cfg.cwd ?? '', paused: false, stats: {} };
+    },
+    sendMessage: async () => ({ output: 'Done. '.repeat(40) + '[CONSENSUS: YES]', events: [] }),
+    stopSession: async () => {},
+  };
+
+  beforeEach(() => {
+    charters = [];
+    repo = fs.mkdtempSync(path.join(os.tmpdir(), 'clawo-council-node-'));
+    execSync('git init -q -b main', { cwd: repo });
+    execSync('git config user.email t@t.com && git config user.name T', { cwd: repo });
+    fs.writeFileSync(path.join(repo, 'a.txt'), 'hi\n');
+    execSync('git add -A && git commit -q -m init', { cwd: repo });
+  });
+
+  afterEach(() => {
+    fs.rmSync(repo, { recursive: true, force: true });
+  });
+
+  async function runCouncil(spec: ReturnType<typeof councilWorkflow>) {
+    const kernel = new RunKernel({ nodeTimeoutMs: 30_000, manager: manager as never });
+    kernel.setExecutor('council', executeCouncilNode);
+    const started = await kernel.start(spec);
+    const done = (await kernel.wait(started.runId))!;
+    return done.nodes[spec.nodes[0].id].data as { maxRounds: number; compactContext?: string };
+  }
+
+  it("carries each agent's emoji into its charter", async () => {
+    await runCouncil(
+      legacyCouncilWorkflow({
+        task: 'do the thing',
+        cwd: repo,
+        agents: [{ name: 'alice', emoji: '🔵', persona: 'p' }],
+        maxRounds: 1,
+      }),
+    );
+    expect(charters).toHaveLength(1);
+    expect(charters[0]).toContain('**🔵 alice**');
+  });
+
+  it('runs DEFAULT_MAX_ROUNDS when the spec names no round count', async () => {
+    const data = await runCouncil(councilWorkflow({ task: 'do the thing', cwd: repo, agents: [{ name: 'alice' }] }));
+    expect(data.maxRounds).toBe(DEFAULT_MAX_ROUNDS);
+    // Read off the council itself, not the node's own bookkeeping.
+    expect(data.compactContext).toContain(`/ max ${DEFAULT_MAX_ROUNDS}`);
   });
 });
 

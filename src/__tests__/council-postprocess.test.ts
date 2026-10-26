@@ -461,7 +461,7 @@ describe('Council git identity', () => {
 
   const runOnce = async (projectDir: string): Promise<void> => {
     const config: CouncilConfig = { ...getDefaultCouncilConfig(projectDir), maxRounds: 1 };
-    const council = new Council(config, mockManager as Parameters<(typeof Council)['prototype']['constructor']>[1]);
+    const council = new Council(config, mockManager as never);
     await council.run('do the thing');
   };
   const localConfig = (cwd: string, key: string): string =>

@@ -28,6 +28,7 @@ import {
   RATE_LIMIT_MAX_REQUESTS,
   RATE_LIMIT_WINDOW_MS,
   OPENAI_COMPAT_SESSION_PREFIX,
+  DEFAULT_MAX_ROUNDS,
 } from './constants.js';
 
 // Grace period for server.close() to drain connections before lingering
@@ -856,7 +857,7 @@ export class EmbeddedServer {
               model: 'claude-opus-4-7',
             },
           ],
-          maxRounds: (body as { maxRounds?: number }).maxRounds ?? 15,
+          maxRounds: (body as { maxRounds?: number }).maxRounds ?? DEFAULT_MAX_ROUNDS,
           defaultPermissionMode: 'bypassPermissions',
         });
         json(200, { ok: true, id: session.id, status: session.status });

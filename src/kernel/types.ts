@@ -120,11 +120,17 @@ export interface FanoutNode extends NodeBase {
   agentTimeoutMs?: number;
 }
 
+/** One council seat: a fan-out agent plus the emoji its charter and transcript show. */
+export interface CouncilAgentSpec extends FanoutAgentSpec {
+  emoji?: string;
+}
+
 export interface CouncilNode extends NodeBase {
   kind: 'council';
   task: string;
-  agents: FanoutAgentSpec[];
+  agents: CouncilAgentSpec[];
   projectDir?: string;
+  /** Omitted means `DEFAULT_MAX_ROUNDS`, the same default `council_start` uses. */
   maxRounds?: number;
   maxTurnsPerAgent?: number;
   maxBudgetUsd?: number;

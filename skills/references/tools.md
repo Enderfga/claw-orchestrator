@@ -868,6 +868,7 @@ survives a process restart and can be resumed.
 | `reviewers`   | array                                      | `solve` only — up to 8, same agent binding, for final reviewers                                               |
 | `implementer` | object                                     | `solve` only — `{ engine?, model?, acpAgent? }` for the agent that writes the change                          |
 | `humanGate`   | boolean                                    | `solve` only — park for approval before anything is written                                                   |
+| `maxRounds`   | number                                     | `council` only — max collaboration rounds, default 15                                                         |
 | `maxRepairs`  | number                                     | `solve` / `goal` — repair attempts, default 3 for `solve`, 1 for `goal`                                       |
 | `model`       | string                                     | `goal` only — Codex model (default: Codex's own)                                                              |
 | `tokenBudget` | number                                     | `goal` only — tokens the goal may spend                                                                       |

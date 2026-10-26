@@ -399,6 +399,34 @@ describe('plugin tool registration', () => {
       else process.env.CLAWO_NO_EMBEDDED_SERVER = previousNoServer;
     }
   });
+
+  it('forwards maxRounds to the council template of workflow_start', async () => {
+    const registration = collectRegistration();
+    const tool = registration.tools.find((candidate) => candidate.name === 'workflow_start')!;
+    const properties = (tool.parameters.properties ?? {}) as Record<string, Record<string, unknown>>;
+    expect(properties.maxRounds?.type).toBe('number');
+
+    const start = vi
+      .spyOn(SessionManager.prototype, 'workflowStart')
+      .mockResolvedValue({ runId: 'r', workflow: 'council', state: 'pending', nodes: {} } as never);
+    const previousNoServer = process.env.CLAWO_NO_EMBEDDED_SERVER;
+    process.env.CLAWO_NO_EMBEDDED_SERVER = '1';
+    try {
+      await tool.execute('council-rounds', {
+        template: 'council',
+        task: 'do the thing',
+        agents: [{ name: 'a' }, { name: 'b' }],
+        maxRounds: 3,
+      });
+      const spec = start.mock.calls[0][0] as { nodes: Array<{ maxRounds?: number }> };
+      expect(spec.nodes[0].maxRounds).toBe(3);
+    } finally {
+      registration.services[0]?.stop();
+      start.mockRestore();
+      if (previousNoServer === undefined) delete process.env.CLAWO_NO_EMBEDDED_SERVER;
+      else process.env.CLAWO_NO_EMBEDDED_SERVER = previousNoServer;
+    }
+  });
 });
 
 // The OpenClaw plugin manifest declares the tool contract separately from the

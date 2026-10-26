@@ -10,12 +10,14 @@
 
 import type { NodeContext, NodeResult } from '../engine.js';
 import { parseConsensusWithSource } from '../../consensus.js';
+import { DEFAULT_MAX_ROUNDS } from '../../constants.js';
 import type { CouncilNode, NodeSpec } from '../types.js';
 import type { ConsensusVote } from '../types.js';
 
 export async function executeCouncilNode(node: NodeSpec, ctx: NodeContext): Promise<NodeResult> {
   const spec = node as CouncilNode;
   if (!ctx.manager) return { ok: false, error: 'council node requires a session manager' };
+  const maxRounds = spec.maxRounds ?? DEFAULT_MAX_ROUNDS;
 
   // Same story as the fan-out node: forward every field. Dropping
   // `customEngine` here did not merely lose configuration — a council agent on a
@@ -27,7 +29,7 @@ export async function executeCouncilNode(node: NodeSpec, ctx: NodeContext): Prom
       runId: ctx.runId,
       agents: spec.agents.map((a) => ({
         name: a.name,
-        emoji: '',
+        emoji: a.emoji ?? '',
         persona: a.persona ?? a.prompt ?? '',
         engine: a.engine,
         model: a.model,
@@ -38,7 +40,7 @@ export async function executeCouncilNode(node: NodeSpec, ctx: NodeContext): Prom
         ultracode: a.ultracode,
         customEngine: customEngines[a.name] as never,
       })),
-      maxRounds: spec.maxRounds ?? 8,
+      maxRounds,
       projectDir: spec.projectDir || ctx.cwd,
       agentTimeoutMs: spec.agentTimeoutMs ?? spec.timeoutMs,
       maxTurnsPerAgent: spec.maxTurnsPerAgent,
@@ -65,7 +67,7 @@ export async function executeCouncilNode(node: NodeSpec, ctx: NodeContext): Prom
         finalSummary: live.finalSummary,
         compactContext: live.compactContext,
         agents: spec.agents,
-        maxRounds: spec.maxRounds ?? 8,
+        maxRounds,
         projectDir: spec.projectDir || ctx.cwd,
       });
     }
@@ -96,7 +98,7 @@ export async function executeCouncilNode(node: NodeSpec, ctx: NodeContext): Prom
       finalSummary: session.finalSummary,
       compactContext: session.compactContext,
       agents: spec.agents,
-      maxRounds: spec.maxRounds ?? 8,
+      maxRounds,
       projectDir: spec.projectDir || ctx.cwd,
     },
   };

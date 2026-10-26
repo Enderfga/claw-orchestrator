@@ -13,7 +13,15 @@ import {
   DEFAULT_SCREENSHOT_TIMEOUT_MS,
   type AcceptanceContract,
 } from '../../verify/contract.js';
-import type { CouncilNode, FanoutAgentSpec, FanoutNode, GoalNode, NodeSpec, WorkflowSpec } from '../types.js';
+import type {
+  CouncilAgentSpec,
+  CouncilNode,
+  FanoutAgentSpec,
+  FanoutNode,
+  GoalNode,
+  NodeSpec,
+  WorkflowSpec,
+} from '../types.js';
 import { DEFAULT_AGENT_TIMEOUT_MS as FANOUT_AGENT_TIMEOUT_MS } from '../../fanout.js';
 import {
   DEFAULT_AGENT_TIMEOUT_MS as COUNCIL_AGENT_TIMEOUT_MS,
@@ -64,7 +72,8 @@ export interface CommonArgs {
 }
 
 export interface CouncilArgs extends CommonArgs {
-  agents: FanoutAgentSpec[];
+  agents: CouncilAgentSpec[];
+  /** Default `DEFAULT_MAX_ROUNDS`, as for `council_start`. */
   maxRounds?: number;
 }
 
@@ -77,6 +86,7 @@ export interface CouncilArgs extends CommonArgs {
  * recorded on the run.
  */
 export function councilWorkflow(args: CouncilArgs): WorkflowSpec {
+  const maxRounds = args.maxRounds ?? DEFAULT_MAX_ROUNDS;
   return {
     name: 'council',
     cwd: args.cwd,
@@ -88,9 +98,9 @@ export function councilWorkflow(args: CouncilArgs): WorkflowSpec {
         task: args.task,
         agents: args.agents,
         projectDir: args.cwd,
-        maxRounds: args.maxRounds,
+        maxRounds,
         agentTimeoutMs: COUNCIL_AGENT_TIMEOUT_MS,
-        timeoutMs: councilNodeBudget(args.agents.length, args.maxRounds),
+        timeoutMs: councilNodeBudget(args.agents.length, maxRounds),
       },
     ],
   };
