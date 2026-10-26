@@ -116,6 +116,8 @@ interface ActiveRun {
       to click Start Build (which would be redundant for a focused
       spec-delta rerun). Cleared after the auto-build kicks off. */
   deltaPending?: boolean;
+  /** Settles once the interview session exists in this process. See {@link UltraappManager.ensureSession}. */
+  session?: Promise<void>;
 }
 
 const SESSION_KICKOFF = 'Begin the ultraapp interview now. Ask the first question per the skill contract.';
@@ -217,16 +219,8 @@ export class UltraappManager {
 
   async createRun(): Promise<string> {
     const runId = await this.opts.store.createRun();
-    const sessionName = `ultraapp-${runId}`;
-    await this.opts.sessionManager.startSession({
-      name: sessionName,
-      engine: 'claude',
-      model: 'opus',
-      cwd: process.cwd(),
-      systemPrompt: this.skillContent,
-      permissionMode: 'bypassPermissions',
-    });
-    const run: ActiveRun = { runId, sessionName, emitter: new EventEmitter() };
+    const run: ActiveRun = { runId, sessionName: `ultraapp-${runId}`, emitter: new EventEmitter() };
+    await this.ensureSession(run);
     this.runs.set(runId, run);
     this.fireDriveTurn(run, SESSION_KICKOFF);
     return runId;
@@ -396,8 +390,7 @@ export class UltraappManager {
   /** Best-effort narrator startup; its failure must not sink a build. */
   private async startNarrator(runId: string): Promise<void> {
     const language = detectLanguage(await this.opts.store.readChat(runId));
-    const run = this.runs.get(runId);
-    if (!run) return;
+    const run = this.requireRun(runId);
     const n = new Narrator({
       runId,
       sessionManager: this.opts.sessionManager,
@@ -759,6 +752,7 @@ export class UltraappManager {
   /** Used by spec-delta to push a system-style bootstrap into the run session. */
   async injectSystemMessage(runId: string, text: string): Promise<void> {
     const run = this.requireRun(runId);
+    await this.ensureSession(run);
     await this.opts.sessionManager.sendMessage(run.sessionName, `[system] ${text}`);
   }
 
@@ -894,6 +888,7 @@ export class UltraappManager {
 
   private async driveTurn(run: ActiveRun, message: string): Promise<void> {
     try {
+      await this.ensureSession(run);
       const { output } = await this.opts.sessionManager.sendMessage(run.sessionName, message);
       // Debug capture for trace authoring: when UA_DEBUG_TURNS=<dir> is set,
       // append every turn's (in, out) pair to <dir>/<runId>.turns.jsonl. No
@@ -1020,10 +1015,53 @@ export class UltraappManager {
     run.emitter.emit('event', ev);
   }
 
+  /**
+   * The in-memory handle for a run, created from the store on first use.
+   *
+   * Runs live on disk; this map holds only what this process has touched, so a
+   * run created before a restart is picked up here rather than reported unknown.
+   * Its interview session is not started until a turn needs it.
+   */
   private requireRun(runId: string): ActiveRun {
-    const r = this.runs.get(runId);
-    if (!r) throw new Error(`unknown runId: ${runId}`);
-    return r;
+    const existing = this.runs.get(runId);
+    if (existing) return existing;
+    let onDisk = false;
+    try {
+      onDisk = fs.existsSync(path.join(this.opts.store.runDirAbsolute(runId), 'state.json'));
+    } catch {
+      /* malformed id */
+    }
+    if (!onDisk) throw new Error(`unknown runId: ${runId}`);
+    const run: ActiveRun = { runId, sessionName: `ultraapp-${runId}`, emitter: new EventEmitter() };
+    this.runs.set(runId, run);
+    return run;
+  }
+
+  /**
+   * Make sure the run's interview session exists in this process.
+   *
+   * Started by name, so for a run picked up after a restart the session manager
+   * resumes the conversation it persisted under that name. A failed start is not
+   * remembered; the next turn tries again.
+   */
+  private ensureSession(run: ActiveRun): Promise<void> {
+    run.session ??= this.opts.sessionManager
+      .startSession({
+        name: run.sessionName,
+        engine: 'claude',
+        model: 'opus',
+        cwd: process.cwd(),
+        systemPrompt: this.skillContent,
+        permissionMode: 'bypassPermissions',
+      })
+      .then(
+        () => undefined,
+        (err: unknown) => {
+          run.session = undefined;
+          throw err;
+        },
+      );
+    return run.session;
   }
 }
 

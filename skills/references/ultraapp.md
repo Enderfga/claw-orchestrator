@@ -127,6 +127,11 @@ persists to `~/.claw-orchestrator/host-procs.json`.
     └── v2/                    # patcher / spec-delta produces v2, v3, …
 ```
 
+A run is read back from this directory on first use, so every route works on a
+run started before the orchestrator restarted. Its interview session is
+restarted by name on the run's next turn, which resumes the persisted
+conversation.
+
 ## HTTP routes (drive headlessly)
 
 All routes are served by the embedded server (default `:18796`), under

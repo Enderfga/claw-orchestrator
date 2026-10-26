@@ -116,6 +116,29 @@ describe('UltraappManager', () => {
     expect(questions.length).toBe(2);
   });
 
+  it('picks up a run created by an earlier process', async () => {
+    const first = new UltraappManager({ store, sessionManager: fakeSessionManager(questionReply()) as never });
+    const id = await first.createRun();
+    await first.waitForIdle();
+
+    // A restarted orchestrator: the same store on disk, nothing in memory.
+    const sm = fakeSessionManager(questionReply());
+    const mgr = new UltraappManager({ store, sessionManager: sm as never });
+    activeMgr = mgr;
+    const events: Array<{ type: string }> = [];
+    mgr.subscribe(id, (ev) => events.push(ev));
+    await mgr.submitAnswer(id, { value: 'a' });
+    await mgr.applySpecEdit(id, [{ op: 'replace', path: '/meta/name', value: 'after-restart' }]);
+    await mgr.waitForIdle();
+
+    // The interview session is started by name, which resumes its conversation.
+    expect(sm.startSession).toHaveBeenCalledWith(expect.objectContaining({ name: `ultraapp-${id}` }));
+    expect(sm._session.send).toHaveBeenCalledWith('I picked: a');
+    expect(events.map((e) => e.type)).toEqual(expect.arrayContaining(['question', 'spec-updated']));
+    expect((await store.readSpec(id)).meta.name).toBe('after-restart');
+    await expect(mgr.submitAnswer('ua-0-missing', { value: 'a' })).rejects.toThrow(/unknown runId/);
+  });
+
   it('applySpecEdit updates spec and emits spec-updated event', async () => {
     const sm = fakeSessionManager(questionReply());
     const mgr = new UltraappManager({ store, sessionManager: sm as never });
