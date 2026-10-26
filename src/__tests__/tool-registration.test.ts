@@ -3,9 +3,10 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import plugin from '../index.js';
 import { SessionManager } from '../session-manager.js';
-import { ENGINE_TYPES } from '../types.js';
+import { ENGINE_TYPES, EFFORT_LEVELS } from '../types.js';
 import { __rejectCustomEngineOverHttpForTest as rejectCustomEngineOverHttp } from '../embedded-server.js';
-import type { PluginConfig, PermissionMode, EffortLevel } from '../types.js';
+import { TOOL_ANNOTATIONS } from '../mcp-annotations.js';
+import type { PluginConfig, PermissionMode, EffortLevel, ProxyConfig } from '../types.js';
 
 interface RegisteredTool {
   name: string;
@@ -22,7 +23,7 @@ interface RegisteredService {
   stop: () => void;
 }
 
-function collectRegistration(): {
+function collectRegistration(pluginConfig: Record<string, unknown> = {}): {
   tools: RegisteredTool[];
   routes: RegisteredRoute[];
   services: RegisteredService[];
@@ -32,7 +33,7 @@ function collectRegistration(): {
   const services: RegisteredService[] = [];
   // Minimal stub PluginAPI — just enough to capture registration calls.
   const fakeApi = {
-    pluginConfig: {},
+    pluginConfig,
     logger: { info: () => {}, error: () => {}, warn: () => {} },
     registerTool: (def: RegisteredTool) => {
       tools.push(def);
@@ -162,6 +163,18 @@ describe('plugin tool registration', () => {
     >;
     expect(properties.restricted?.type).toBe('boolean');
     expect(properties.ignoreUserConfig?.type).toBe('boolean');
+  });
+
+  it('declares the other SessionConfig fields session_start honours', () => {
+    const properties = (byName.get('session_start')!.parameters.properties ?? {}) as Record<
+      string,
+      Record<string, unknown>
+    >;
+    // `restricted` keeps the command-running tools that `tools` names.
+    expect(properties.tools).toMatchObject({ type: ['string', 'array'], items: { type: 'string' } });
+    expect(properties.addDir).toMatchObject({ type: 'array', items: { type: 'string' } });
+    expect(properties.pluginUrl).toMatchObject({ type: ['string', 'array'], items: { type: 'string' } });
+    expect(properties.launcher).toMatchObject({ type: 'array', items: { type: 'string' } });
   });
 
   it('exposes sandboxMode on session_start for cross-engine read-only sessions', () => {
@@ -361,6 +374,88 @@ describe('plugin tool registration', () => {
     }
   });
 
+  // These three reach `_createSession`, which expands a string through
+  // resolveCustomEngine. A host that validates arguments against the schema
+  // refuses `customEngine: "zcode"` when the schema says object only.
+  it('accepts a preset id or an inline config for customEngine where a preset id is resolved', () => {
+    type Schema = { type?: string; oneOf?: Schema[]; required?: string[]; items?: { properties?: Props } };
+    type Props = Record<string, Schema>;
+    const props = (name: string) => (byName.get(name)!.parameters.properties ?? {}) as Props;
+    const branches = (s: Schema) => s.oneOf ?? [s];
+
+    for (const [where, schema] of [
+      ['session_start', props('session_start').customEngine],
+      ['session_handoff', props('session_handoff').customEngine],
+      ['council_start agents', props('council_start').agents!.items!.properties!.customEngine],
+    ] as const) {
+      expect(
+        branches(schema!).some((b) => b.type === 'string'),
+        where,
+      ).toBe(true);
+      expect(branches(schema!).find((b) => b.type === 'object')?.required, where).toEqual(['name', 'bin', 'args']);
+    }
+  });
+
+  // Both lists come from disk — the resume registry and the durable run store —
+  // so a process that has run no other tool yet still has them to report.
+  it('session_list and autoloop_list report persisted state on a fresh process', async () => {
+    // One registration each: the first call through either one starts its manager.
+    const forSessions = collectRegistration();
+    const forLoops = collectRegistration();
+    const tool = (registration: typeof forSessions, name: string) => registration.tools.find((t) => t.name === name)!;
+    const persisted = vi
+      .spyOn(SessionManager.prototype, 'listPersistedSessions')
+      .mockReturnValue([{ name: 'kept' }] as never);
+    const runs = vi.spyOn(SessionManager.prototype, 'autoloopList').mockReturnValue([{ runId: 'loop-1' }] as never);
+    const previousNoServer = process.env.CLAWO_NO_EMBEDDED_SERVER;
+    process.env.CLAWO_NO_EMBEDDED_SERVER = '1';
+    try {
+      expect(await tool(forSessions, 'session_list').execute('l', {})).toMatchObject({
+        details: { ok: true, sessions: [], persisted: [{ name: 'kept' }] },
+      });
+      expect(await tool(forLoops, 'autoloop_list').execute('a', {})).toMatchObject({
+        details: { ok: true, runs: [{ runId: 'loop-1' }] },
+      });
+    } finally {
+      forSessions.services[0]?.stop();
+      forLoops.services[0]?.stop();
+      persisted.mockRestore();
+      runs.mockRestore();
+      if (previousNoServer === undefined) delete process.env.CLAWO_NO_EMBEDDED_SERVER;
+      else process.env.CLAWO_NO_EMBEDDED_SERVER = previousNoServer;
+    }
+  });
+
+  // A pass the tree moved away from ends `unverified`, which otherwise reads as
+  // "no contract was declared"; the reason is what tells the two apart.
+  it('workflow_status reports why the outcome is what it is, and the verdict in force', async () => {
+    const registration = collectRegistration();
+    const reason = 'evidence ev-1 passed, but the working tree changed afterwards';
+    const verdict = { node: 'verify', evidenceId: 'ev-1', treeFingerprint: 'abc', sideEffectSeq: 2 };
+    const status = vi.spyOn(SessionManager.prototype, 'workflowStatus').mockReturnValue({
+      runId: 'wf-1',
+      workflow: 'solve',
+      state: 'completed',
+      outcome: 'unverified',
+      outcomeReason: reason,
+      verdict,
+      nodes: {},
+    } as never);
+    const previousNoServer = process.env.CLAWO_NO_EMBEDDED_SERVER;
+    process.env.CLAWO_NO_EMBEDDED_SERVER = '1';
+    try {
+      const result = await registration.tools
+        .find((t) => t.name === 'workflow_status')!
+        .execute('s', { runId: 'wf-1' });
+      expect(result).toMatchObject({ details: { outcome: 'unverified', outcomeReason: reason, verdict } });
+    } finally {
+      registration.services[0]?.stop();
+      status.mockRestore();
+      if (previousNoServer === undefined) delete process.env.CLAWO_NO_EMBEDDED_SERVER;
+      else process.env.CLAWO_NO_EMBEDDED_SERVER = previousNoServer;
+    }
+  });
+
   it('session_handoff and fanout_start forward the ACP agent they are given', async () => {
     const registration = collectRegistration();
     const tool = (name: string) => registration.tools.find((t) => t.name === name)!;
@@ -527,12 +622,37 @@ describe('openclaw.plugin.json parity', () => {
       'plan',
       'auto',
     ];
-    const effortLevels: EffortLevel[] = ['low', 'medium', 'high', 'xhigh', 'max', 'auto'];
+    // The runtime list rather than a copy, which falls behind when a level is added.
+    const effortLevels: readonly EffortLevel[] = EFFORT_LEVELS;
 
     expect([...(manifest.configSchema.properties.defaultPermissionMode.enum ?? [])].sort()).toEqual(
       [...permissionModes].sort(),
     );
     expect([...(manifest.configSchema.properties.defaultEffort.enum ?? [])].sort()).toEqual([...effortLevels].sort());
+  });
+
+  // The host fills declared defaults into the config before register() sees it,
+  // so a `proxy` block that leaves `enabled` out arrives carrying the manifest's
+  // default. That has to do what no `proxy` block at all does, or adding any
+  // other proxy key would switch the routes off.
+  it('declares the proxy default the plugin applies, and only the proxy fields it reads', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { fileURLToPath } = await import('node:url');
+    const { dirname, join } = await import('node:path');
+    const here = dirname(fileURLToPath(import.meta.url));
+    const manifest = JSON.parse(readFileSync(join(here, '../../openclaw.plugin.json'), 'utf8')) as {
+      configSchema: { properties: { proxy: { properties: Record<string, { default?: unknown }> } } };
+    };
+    const declared = manifest.configSchema.properties.proxy.properties;
+    const routesWith = (pluginConfig: Record<string, unknown>) =>
+      collectRegistration(pluginConfig)
+        .routes.map((r) => r.path)
+        .sort();
+
+    expect(routesWith({ proxy: { enabled: declared.enabled?.default } })).toEqual(routesWith({}));
+
+    const read: Record<keyof ProxyConfig, true> = { enabled: true };
+    expect(Object.keys(declared).sort()).toEqual(Object.keys(read).sort());
   });
 
   // A host echoes the tool list back inside its request, so every schema this
@@ -561,5 +681,28 @@ describe('openclaw.plugin.json parity', () => {
     } finally {
       registration.services[0]?.stop();
     }
+  });
+});
+
+// `clawo-mcp` advertises these to every MCP host. A tool without an entry gets
+// the protocol's defaults — not read-only, possibly destructive, open-world — so
+// a status poll looks as dangerous as a delete to a host deciding what may run
+// unprompted.
+describe('MCP tool annotations', () => {
+  it('annotate every registered tool, and only registered tools', () => {
+    const registered = collectRegistration().tools.map((t) => t.name);
+    expect(Object.keys(TOOL_ANNOTATIONS).sort()).toEqual([...registered].sort());
+  });
+});
+
+describe('SDK entry', () => {
+  it('exports the session class of every documented engine, and names ACP agents in the plugin description', async () => {
+    const sdk: Record<string, unknown> = await import('../index.js');
+    const { PersistentAcpSession } = await import('../persistent-acp-session.js');
+    const { PersistentCodexAppServerSession } = await import('../persistent-codex-app-session.js');
+
+    expect(sdk.PersistentAcpSession).toBe(PersistentAcpSession);
+    expect(sdk.PersistentCodexAppServerSession).toBe(PersistentCodexAppServerSession);
+    expect(plugin.description).toContain('any ACP agent');
   });
 });

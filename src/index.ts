@@ -42,12 +42,14 @@ export { SessionManager } from './session-manager.js';
 export { PersistentClaudeSession } from './persistent-session.js';
 export { BaseOneShotSession, type OneShotEngineConfig } from './base-oneshot-session.js';
 export { PersistentCodexSession } from './persistent-codex-session.js';
+export { PersistentCodexAppServerSession } from './persistent-codex-app-session.js';
 export { PersistentGeminiSession } from './persistent-gemini-session.js';
 export { PersistentAgySession } from './persistent-agy-session.js';
 export { PersistentCursorSession } from './persistent-cursor-session.js';
 export { PersistentGrokSession } from './persistent-grok-session.js';
 export { PersistentOpencodeSession } from './persistent-opencode-session.js';
 export { PersistentCustomSession } from './persistent-custom-session.js';
+export { PersistentAcpSession } from './persistent-acp-session.js';
 export { Council, getDefaultCouncilConfig } from './council.js';
 export { AutoloopRunner } from './autoloop/runner.js';
 export { ClaudeAgentDispatcher } from './autoloop/dispatcher.js';
@@ -194,13 +196,25 @@ const CUSTOM_ENGINE_SCHEMA = {
 } as const;
 
 /**
+ * `customEngine` on the surfaces that also take a preset id: session_start,
+ * session_handoff and council agents all reach `_createSession`, which expands a
+ * string through resolveCustomEngine. Autoloop roles validate an inline config
+ * and take CUSTOM_ENGINE_SCHEMA itself.
+ */
+const CUSTOM_ENGINE_OR_PRESET_SCHEMA = {
+  description:
+    'Custom engine (required when engine is "custom"): the id of a bundled preset (`clawo engines`), or, from a local caller only, an inline config.',
+  oneOf: [{ type: 'string', description: 'Preset id, e.g. "zcode"' }, CUSTOM_ENGINE_SCHEMA],
+};
+
+/**
  * OpenClaw plugin object — standard format
  */
 const plugin = {
   id: 'claw-orchestrator',
   name: 'Claw Orchestrator',
   description:
-    'Run Claude Code, Codex, Antigravity, Grok Build, OpenCode and custom coding CLIs as one unified runtime — persistent sessions, multi-agent council, worktree isolation, multi-model proxy',
+    'Run Claude Code, Codex, Antigravity, Grok Build, OpenCode, any ACP agent and custom coding CLIs as one unified runtime — persistent sessions, multi-agent council, worktree isolation, multi-model proxy',
 
   register(api: PluginAPI): void {
     const rawConfig = (api.pluginConfig || {}) as Partial<PluginConfig>;
@@ -318,6 +332,18 @@ const plugin = {
             description: 'Tools to auto-approve',
           },
           disallowedTools: { type: 'array', maxItems: 200, items: { type: 'string' }, description: 'Tools to deny' },
+          tools: {
+            type: ['string', 'array'],
+            items: { type: 'string' },
+            description:
+              'Claude engine only. The built-in tool set (`--tools`): names such as ["Bash", "Edit", "Read"], "" for none, or "default".',
+          },
+          addDir: {
+            type: 'array',
+            items: { type: 'string' },
+            description:
+              'Directories the session may use besides cwd (`--add-dir`). Claude and Codex; a resumed Codex thread keeps the directories its first turn opened.',
+          },
           maxTurns: { type: 'number', description: 'Max agent loop turns' },
           maxBudgetUsd: { type: 'number', description: 'Max API spend (USD)' },
           autoCompactPercent: {
@@ -349,6 +375,11 @@ const plugin = {
             description: 'MCP server config file(s)',
           },
           settings: { type: 'string', description: 'Settings.json path or inline JSON' },
+          pluginUrl: {
+            type: ['string', 'array'],
+            items: { type: 'string' },
+            description: 'Claude engine only. Plugin .zip URL(s) fetched for this session only (`--plugin-url`).',
+          },
           ultracode: {
             type: 'boolean',
             description:
@@ -359,6 +390,12 @@ const plugin = {
             enum: ['read-only', 'workspace-write', 'danger-full-access'],
             description:
               'Sandbox policy. Codex supports all values (default workspace-write). read-only is enforced on claude, agy, grok and opencode through their own plan/read-only modes; a custom engine must map it via permissionModes or the session refuses to start. The acp engine refuses read-only, because the agent runs its own tools; its permission answers follow permissionMode.',
+          },
+          launcher: {
+            type: 'array',
+            items: { type: 'string' },
+            description:
+              'Argv prefix every engine process of this session runs under, e.g. a sandbox wrapper: ["/opt/sandbox.sh", "task"]. Any engine. It runs with your authority, like a contract command check.',
           },
           codexProfile: {
             type: 'string',
@@ -455,7 +492,7 @@ const plugin = {
             description:
               'AWS Bedrock service tier (sets ANTHROPIC_BEDROCK_SERVICE_TIER). Only effective when routing through Bedrock.',
           },
-          customEngine: CUSTOM_ENGINE_SCHEMA,
+          customEngine: CUSTOM_ENGINE_OR_PRESET_SCHEMA,
           acpAgent: ACP_AGENT_SCHEMA,
           resumeSessionId: {
             type: 'string',
@@ -552,7 +589,7 @@ const plugin = {
             description:
               'Upper bound on the carried history, in characters (default 240000, minimum 4000). When the conversation is longer, the opening request and the newest turns are kept and the turns between them are left out.',
           },
-          customEngine: CUSTOM_ENGINE_SCHEMA,
+          customEngine: CUSTOM_ENGINE_OR_PRESET_SCHEMA,
           acpAgent: ACP_AGENT_SCHEMA,
         },
         required: ['name', 'engine'],
@@ -592,11 +629,12 @@ const plugin = {
 
     registerTool({
       name: 'session_list',
-      description: 'List all active coding sessions',
+      description:
+        'List the active coding sessions, and the persisted ones that a session_start under the same name resumes',
       parameters: { type: 'object', properties: {} },
       execute: async (_id) => {
-        if (!manager) return { ok: true, sessions: [], persisted: [] };
-        return { ok: true, sessions: manager.listSessions(), persisted: manager.listPersistedSessions() };
+        const m = getManager();
+        return { ok: true, sessions: m.listSessions(), persisted: m.listPersistedSessions() };
       },
     });
 
@@ -1472,7 +1510,7 @@ const plugin = {
     registerTool({
       name: 'workflow_status',
       description:
-        'Poll a workflow run. Returns state, per-node status, and the outcome: `verified` (a contract passed), `refuted` (it failed), or `unverified` (none was declared — nothing checked the work).',
+        'Poll a workflow run. Returns state, per-node status, and the outcome: `verified` (a contract passed), `refuted` (it failed), or `unverified` (nothing checked the work: none was declared, or a pass no longer stands, in which case `outcomeReason` says why).',
       parameters: {
         type: 'object',
         properties: {
@@ -1490,6 +1528,8 @@ const plugin = {
           workflow: record.workflow,
           state: record.state,
           outcome: record.outcome,
+          outcomeReason: record.outcomeReason,
+          verdict: record.verdict,
           currentNode: record.currentNode,
           evidenceId: record.evidenceId,
           costUsd: record.costUsd,
@@ -1716,7 +1756,7 @@ const plugin = {
                 },
                 model: { type: 'string', description: 'Model to use' },
                 baseUrl: { type: 'string', description: 'Custom API endpoint (for proxy)' },
-                customEngine: { type: 'object', description: 'Custom engine config (when engine="custom")' },
+                customEngine: CUSTOM_ENGINE_OR_PRESET_SCHEMA,
                 acpAgent: ACP_AGENT_ID_SCHEMA,
                 effort: {
                   type: 'string',
@@ -2180,10 +2220,7 @@ const plugin = {
       name: 'autoloop_list',
       description: 'List the v2 autoloop runs recorded on this machine, running and finished, newest first.',
       parameters: { type: 'object', properties: {} },
-      execute: async () => {
-        if (!manager) return { ok: true, runs: [] };
-        return { ok: true, runs: getManager().autoloopList() };
-      },
+      execute: async () => ({ ok: true, runs: getManager().autoloopList() }),
     });
 
     // ─── Tool: autoloop_reset_agent ──────────────────────────────

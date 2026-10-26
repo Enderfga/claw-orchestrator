@@ -309,7 +309,8 @@ export interface SessionConfig {
   // Tool control
   allowedTools?: string[];
   disallowedTools?: string[];
-  tools?: string[];
+  /** Claude Code's built-in tool set (`--tools`): names, `''` for none, or `'default'`. */
+  tools?: string | string[];
   // Limits
   maxTurns?: number;
   maxBudgetUsd?: number;
@@ -845,9 +846,8 @@ export interface PluginConfig {
 }
 
 export interface ProxyConfig {
+  /** Register the proxy routes on the gateway. On unless this is `false`. */
   enabled: boolean;
-  bigModel: string;
-  smallModel: string;
 }
 
 // ─── Inbox Types ────────────────────────────────────────────────────────────
