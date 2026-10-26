@@ -409,9 +409,9 @@ engine: `launcher: ['/opt/task/sandbox.sh', 'task', '0 1']` spawns
 the agent inside its own sandbox (bubblewrap, a container entry point, `taskset`)
 without a custom engine. The launcher is the caller's own command, at the same
 trust level as a contract's command check, which the HTTP API also accepts: set
-it through the SessionManager API, `/session/start` or a workflow spec (the `goal`
-node's `launcher`, which `workflow_start` and `clawo goal --launcher` also take). It
-is not a parameter of the `session_start` tool.
+it through the SessionManager API, the `session_start` tool, `/session/start` or a
+workflow spec (the `goal` node's `launcher`, which `workflow_start` and
+`clawo goal --launcher` also take).
 
 ## ISession Interface
 

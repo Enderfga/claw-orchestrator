@@ -164,6 +164,18 @@ describe('plugin tool registration', () => {
     expect(properties.ignoreUserConfig?.type).toBe('boolean');
   });
 
+  it('declares the other SessionConfig fields session_start honours', () => {
+    const properties = (byName.get('session_start')!.parameters.properties ?? {}) as Record<
+      string,
+      Record<string, unknown>
+    >;
+    // `restricted` keeps the command-running tools that `tools` names.
+    expect(properties.tools).toMatchObject({ type: ['string', 'array'], items: { type: 'string' } });
+    expect(properties.addDir).toMatchObject({ type: 'array', items: { type: 'string' } });
+    expect(properties.pluginUrl).toMatchObject({ type: ['string', 'array'], items: { type: 'string' } });
+    expect(properties.launcher).toMatchObject({ type: 'array', items: { type: 'string' } });
+  });
+
   it('exposes sandboxMode on session_start for cross-engine read-only sessions', () => {
     const tool = byName.get('session_start');
     expect(tool).toBeDefined();

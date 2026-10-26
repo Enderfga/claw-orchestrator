@@ -330,6 +330,18 @@ const plugin = {
             description: 'Tools to auto-approve',
           },
           disallowedTools: { type: 'array', maxItems: 200, items: { type: 'string' }, description: 'Tools to deny' },
+          tools: {
+            type: ['string', 'array'],
+            items: { type: 'string' },
+            description:
+              'Claude engine only. The built-in tool set (`--tools`): names such as ["Bash", "Edit", "Read"], "" for none, or "default".',
+          },
+          addDir: {
+            type: 'array',
+            items: { type: 'string' },
+            description:
+              'Directories the session may use besides cwd (`--add-dir`). Claude and Codex; a resumed Codex thread keeps the directories its first turn opened.',
+          },
           maxTurns: { type: 'number', description: 'Max agent loop turns' },
           maxBudgetUsd: { type: 'number', description: 'Max API spend (USD)' },
           autoCompactPercent: {
@@ -361,6 +373,11 @@ const plugin = {
             description: 'MCP server config file(s)',
           },
           settings: { type: 'string', description: 'Settings.json path or inline JSON' },
+          pluginUrl: {
+            type: ['string', 'array'],
+            items: { type: 'string' },
+            description: 'Claude engine only. Plugin .zip URL(s) fetched for this session only (`--plugin-url`).',
+          },
           ultracode: {
             type: 'boolean',
             description:
@@ -371,6 +388,12 @@ const plugin = {
             enum: ['read-only', 'workspace-write', 'danger-full-access'],
             description:
               'Sandbox policy. Codex supports all values (default workspace-write). read-only is enforced on claude, agy, grok and opencode through their own plan/read-only modes; a custom engine must map it via permissionModes or the session refuses to start. The acp engine refuses read-only, because the agent runs its own tools; its permission answers follow permissionMode.',
+          },
+          launcher: {
+            type: 'array',
+            items: { type: 'string' },
+            description:
+              'Argv prefix every engine process of this session runs under, e.g. a sandbox wrapper: ["/opt/sandbox.sh", "task"]. Any engine. It runs with your authority, like a contract command check.',
           },
           codexProfile: {
             type: 'string',
