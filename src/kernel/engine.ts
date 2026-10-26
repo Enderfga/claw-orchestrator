@@ -350,9 +350,42 @@ export interface StartOptions {
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 /**
- * Append the implicit terminal verifier when a run-level contract exists and the
- * author did not already place one. This is what makes `completed` mean "checked".
+ * Put every contract a spec carries through `normalizeContract`: the run-level
+ * one (`override`, the `contract` start option, when given; else `spec.contract`)
+ * and each verifier's inline one. The runner reads only the normalised shape,
+ * and hand-written checks usually omit the `{ spec }` wrapper.
+ *
+ * A contract with no recognised check is refused rather than dropped. Dropped,
+ * the run would complete `unverified`: a caller who asked to be checked would
+ * be told nothing had checked, for a typo they never saw.
  */
+function normalizeSpecContracts(spec: WorkflowSpec, override: unknown): WorkflowSpec {
+  const usable = (raw: unknown, what: string): AcceptanceContract => {
+    const contract = normalizeContract(raw);
+    if (!contract) {
+      throw new Error(
+        `${what} has no recognised checks. Every check needs a \`type\` of ` +
+          'command | http | screenshot | diff_policy | file, and a `command` check needs `cmd`.',
+      );
+    }
+    return contract;
+  };
+  const contract =
+    override !== undefined
+      ? usable(override, 'The supplied acceptance contract')
+      : spec?.contract != null
+        ? usable(spec.contract, "The workflow's acceptance contract")
+        : undefined;
+  const nodes = Array.isArray(spec?.nodes)
+    ? spec.nodes.map((n) =>
+        n?.kind === 'verifier' && n.contract !== 'run'
+          ? { ...n, contract: usable(n.contract, `Verifier '${n.id}': its contract`) }
+          : n,
+      )
+    : spec?.nodes;
+  return { ...spec, contract, nodes };
+}
+
 /**
  * Reject a spec that cannot execute correctly, before anything runs.
  *
@@ -404,6 +437,10 @@ export function validateSpec(spec: WorkflowSpec): void {
   }
 }
 
+/**
+ * Append the implicit terminal verifier when a run-level contract exists and the
+ * author did not already place one. This is what makes `completed` mean "checked".
+ */
 export function prepareSpec(spec: WorkflowSpec): WorkflowSpec {
   if (!spec.contract) return spec;
   const hasRunVerifier = spec.nodes.some((n) => n.kind === 'verifier' && n.contract === 'run');
@@ -517,21 +554,7 @@ export class RunKernel extends EventEmitter {
   // ─── Lifecycle ────────────────────────────────────────────────────────────
 
   async start(rawSpec: WorkflowSpec, opts: StartOptions = {}): Promise<RunRecord> {
-    let contract = rawSpec.contract;
-    if (opts.contract !== undefined) {
-      contract = normalizeContract(opts.contract);
-      // A contract that survives normalisation with nothing in it used to leave
-      // the run with no contract at all, which then completed `unverified` — a
-      // caller who asked to be checked was told nothing had checked, and the
-      // reason was a typo they never saw.
-      if (!contract) {
-        throw new Error(
-          'The supplied acceptance contract has no recognised checks. Every check needs a `type` of ' +
-            'command | http | screenshot | diff_policy | file, and a `command` check needs `cmd`.',
-        );
-      }
-    }
-    const spec = prepareSpec({ ...rawSpec, contract });
+    const spec = prepareSpec(normalizeSpecContracts(rawSpec, opts.contract));
     validateSpec(spec);
     const runId = opts.runId || `wf-${Date.now().toString(36)}-${crypto.randomBytes(3).toString('hex')}`;
     // Validated here as well as in the store: failing before any directory is
@@ -1259,11 +1282,11 @@ export class RunKernel extends EventEmitter {
     return approved;
   }
 
-  /** Node kinds that can change the workspace. Routers and gates cannot. */
   /**
-   * Node kinds that can move the workspace. `sideEffectSeq` counts them, and
-   * `_verdictWentStale` uses "nothing ran since" as a git-free early exit — so a
-   * kind missing here lets a verdict stand over a tree it no longer describes.
+   * Node kinds that can move the workspace; routers and gates cannot.
+   * `sideEffectSeq` counts them, and `_verdictWentStale` uses "nothing ran
+   * since" as a git-free early exit — so a kind missing here lets a verdict
+   * stand over a tree it no longer describes.
    * `ultraapp_synth` writes an entire codebase and `ultraapp_deploy` writes
    * local build artifacts; the built-in template happens not to place either
    * after a verdict, but nothing stops a composed workflow from doing so.
@@ -1417,7 +1440,33 @@ export class RunKernel extends EventEmitter {
       this._setRunState(handle, 'failed', error ?? 'acceptance contract was not satisfied');
       return;
     }
+    const unchecked = this._runContractUnchecked(txn.record);
+    if (unchecked) {
+      this._setRunState(handle, 'failed', unchecked);
+      return;
+    }
     this._setRunState(handle, 'completed');
+  }
+
+  /**
+   * Why a run that declares a run-level contract may not complete, or undefined
+   * if it may.
+   *
+   * `prepareSpec` guarantees that a `contract: 'run'` verifier exists, not that
+   * control reaches it: a router can route past it, and the run would end with
+   * the declared contract never run. Another verifier's pass does not stand in
+   * for it — the caller declared this contract. The outcome stays `unverified`,
+   * not `refuted`: nothing ran, so nothing failed.
+   */
+  private _runContractUnchecked(record: RunRecord): string | undefined {
+    if (!record.spec.contract) return undefined;
+    const ran =
+      record.verdict !== undefined &&
+      record.spec.nodes.some((n) => {
+        const node = record.nodes[n.id];
+        return n.kind === 'verifier' && n.contract === 'run' && !!node?.evidenceId && node.state !== 'pending';
+      });
+    return ran ? undefined : 'the workflow declares an acceptance contract, but the run ended without running it';
   }
 
   /**

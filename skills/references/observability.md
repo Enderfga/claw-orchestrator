@@ -112,8 +112,12 @@ Notes:
 - `session_list` / `GET /session/list` expose `costUsd`, and `budgetUsd` and
   `budgetExhausted` when a cap is set, so a stalled session shows _why_ it stopped
   taking turns.
-- `maxBudgetUsd` does not bound a `goal` node: its turns never pass the per-send
-  check. Its `tokenBudget` and `timeoutMs` do.
+- The turns a Codex `/goal` runs on its own (a `goal` workflow node, or a goal
+  set with `codex_goal_set`) are not sends: they write no ledger row, and the cap
+  does not stop a goal while it runs. Their spend does count toward the session's
+  total, so the next send on that session is gated by it; a `goal` node's spend
+  is added to its run's `costUsd`, and `tokenBudget` and `timeoutMs` are the goal's
+  own limits.
 
 ### Zeroing a model's pricing
 

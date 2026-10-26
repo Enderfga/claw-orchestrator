@@ -157,10 +157,10 @@ is unrecoverable and reads back as "not found".
 | `agent`                             | One session, one turn. A new session per attempt unless `sessionName` pins one                                                                                                                                                                                      |
 | `fanout`                            | N agents in parallel on a shared prompt, optional synthesis pass. Succeeds when at least one agent does                                                                                                                                                             |
 | `council`                           | The council engine; its votes are recorded as advisory. Fails only when the council itself errors                                                                                                                                                                   |
-| `verifier`                          | Runs an acceptance contract, writes evidence — see [`verification.md`](./verification.md). With no contract it passes through and verifies nothing                                                                                                                  |
+| `verifier`                          | Runs an acceptance contract, writes evidence — see [`verification.md`](./verification.md). `"contract": "run"` with no run-level contract passes through and verifies nothing; an inline contract with no recognised check is refused at start                   |
 | `human_gate`                        | Parks the run until a person answers; a rejection fails the run                                                                                                                                                                                                     |
 | `router`                            | Picks the next node from declarative conditions; a backwards route is the loop                                                                                                                                                                                      |
-| `subflow`                           | Runs another workflow as a child run and adopts its verdict                                                                                                                                                                                                         |
+| `subflow`                           | Runs another workflow as a child run and adopts its verdict, with the tree digest the verdict was taken against; a child that ends `unverified` hands up no verdict                                                                                                 |
 | `autoloop`                          | A long-lived Planner / Coder / Reviewer loop; its executor is injected. On the node's first visit (`visits === 1`) the shared fresh-start boundary applies (dirty-worktree refusal + run-local `tasks/<config.runId>/.gitignore`); resume and later visits skip it. |
 | `goal`                              | A Codex `/goal` on one `codex-app` thread, run until the goal finishes — see [below](#goal)                                                                                                                                                                         |
 | `ultraapp_synth`, `ultraapp_deploy` | UltraApp's synth and deploy stages; their executors are injected too                                                                                                                                                                                                |
@@ -386,7 +386,9 @@ by a usage limit. The node adds what an unattended run needs around that loop.
   thread id to `thread/resume`; a goal that had not finished continues where it
   was. If the resume lands on a different thread the node fails rather than
   starting the objective over. An app-server that exits mid-goal is reopened on
-  the same thread the same way.
+  the same thread the same way. A goal that had already ended (`complete`,
+  `budgetLimited`, `blocked`) when the process died ends the node with that
+  result on resume; it is not set again.
 - **Stalls are resumed within a bound.** A goal that is `usageLimited` or
   `paused`, or `active` with no turn running and either no news for `stallMs` or
   a capacity error the server will not retry (`serverOverloaded`,
@@ -396,7 +398,8 @@ by a usage limit. The node adds what an unattended run needs around that loop.
   to at most 15 min. Every attempt counts before it is made, reopening a dead
   app-server included; past `capacityRetry.max` the node fails. The count is part
   of the checkpoint, so it carries across process restarts and repair visits.
-- **Repair on the same thread.** Revisited after a red verifier, the node clears
+- **Repair on the same thread.** Revisited after a red verifier — a red verdict
+  other than the one in force when its current objective was set — the node clears
   the finished goal and sets a new objective on the same thread: the failing
   checks first (as diagnostic data, like an agent node's repair brief), then the
   original objective. The agent keeps its context. The original objective is
@@ -472,6 +475,14 @@ its last node has run, so every such path is checked. A spec that places its own
 that node: a run whose path skips it ends `completed` / `unverified`, with no
 check run.
 
+A run whose spec declares a run-level `contract` cannot complete without having
+run it. The kernel appends a terminal verifier unless the spec places its own
+`contract: "run"` verifier, but a router can still send control past that
+verifier; a run that ends with no verdict from a `contract: "run"` verifier ends
+`failed`, with outcome `unverified` (nothing ran, so nothing was refuted). A
+pass from a verifier with an inline contract does not stand in for the declared
+one.
+
 ## Control
 
 | Action        | Tool               | HTTP                              | CLI                                     |
@@ -511,11 +522,12 @@ belong before the task.
   in-flight agent turn is owned by the session layer and finishes on its own
   schedule; the kernel does not pretend to kill it. The abandoned attempt keeps
   running, so agent nodes name their session per attempt
-  (`<runId>-<nodeId>-a<n>`, unless `sessionName` pins one) — otherwise the dying
-  attempt's teardown would stop the retry's session. A `goal` node is the
-  exception: it watches its signal, so a timeout interrupts its turn. A node that
-  writes to a fixed path outside the run directory can still race its own retry;
-  scope such writes per attempt.
+  (`<runId>-<nodeId>-a<n>`, unless `sessionName` pins one), and a verifier names
+  its fixer sessions per visit and attempt (`<runId>-<nodeId>-v<visit>a<n>-fix-<round>`)
+  — otherwise the dying attempt's teardown would stop the retry's session. A
+  `goal` node is the exception: it watches its signal, so a timeout interrupts its
+  turn. A node that writes to a fixed path outside the run directory can still race
+  its own retry; scope such writes per attempt.
 
   Because such an attempt can still write, a run about to report `verified`
   waits briefly for outstanding attempts to settle, and reports `unverified`

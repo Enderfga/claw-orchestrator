@@ -135,7 +135,7 @@ import { detectRepoLang } from './kernel/repo.js';
 import { RunKernel, runDir as kernelRunDir } from './kernel/engine.js';
 import { registerDefaultExecutors } from './kernel/nodes/index.js';
 import { autoloopStateFromRecord, makeAutoloopExecutor, type AutoloopHandle } from './kernel/nodes/autoloop.js';
-import { isValidRunId, loadRun, readNodeOutput, type RunSummary } from './kernel/store.js';
+import { isValidRunId, loadRun, readNodeOutput, runExists, type RunSummary } from './kernel/store.js';
 import {
   LEGACY_NODE,
   joinFindings,
@@ -1876,6 +1876,11 @@ export class SessionManager {
     const contract = normalizeContract(args.contract);
     if (!contract) throw new Error('verifyRun requires a contract with at least one recognised check');
     const runId = args.label || `verify-${Date.now().toString(36)}`;
+    // The bundle goes under the run store, keyed by the label. A label naming a
+    // workflow run would plant this evidence in that run's directory.
+    if (runExists(runId)) {
+      throw new Error(`verify_run label '${runId}' names an existing workflow run; choose another label`);
+    }
     const dir = kernelRunDir(runId);
     const evidenceId = 'verify-01';
     const { results, rounds } = await runContract(contract, {

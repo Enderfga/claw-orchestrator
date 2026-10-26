@@ -240,6 +240,47 @@ describe('attempt isolation', () => {
     expect(new Set(names).size).toBe(names.length);
     expect(names.at(-1)).toMatch(/-a3$/);
   });
+
+  it('gives each verifier attempt and visit its own fixer session', async () => {
+    // Same hazard one layer down: an abandoned verifier attempt is still inside
+    // its fixer, and a retry or a repair-loop revisit naming the same fixer
+    // session would have its session stopped by the dying one.
+    const work = fs.mkdtempSync(path.join(tmp, 'fixers-'));
+    const fixers: string[] = [];
+    const manager = {
+      async startSession(config: { name?: string }) {
+        fixers.push(String(config.name));
+        return { name: config.name } as never;
+      },
+      async sendMessage() {
+        return { output: 'tried' } as never;
+      },
+      async stopSession() {},
+    };
+    const kernel = registerDefaultExecutors(new RunKernel({ manager, nodeTimeoutMs: 8000 }));
+    const rec = await kernel.start({
+      name: 'fixers',
+      cwd: work,
+      nodes: [
+        {
+          id: 'verify',
+          kind: 'verifier',
+          retry: { max: 1, backoffMs: 1 },
+          onFailure: 'continue',
+          contract: { fixOnFailureRounds: 1, checks: [{ spec: { type: 'file', path: 'never-there.txt' } }] },
+        },
+        {
+          id: 'again',
+          kind: 'router',
+          routes: [{ when: { type: 'visits_lt', node: 'verify', n: 2 }, to: 'verify' }],
+        },
+      ],
+    });
+    await kernel.wait(rec.runId);
+    // Two visits × two attempts, one fixer round each.
+    expect(fixers).toHaveLength(4);
+    expect(new Set(fixers).size).toBe(4);
+  }, 20_000);
 });
 
 describe('subflow', () => {
@@ -291,6 +332,77 @@ describe('subflow', () => {
     expect(childRecord?.state).not.toBe('completed');
     expect(childAgentRuns).toBeLessThanOrEqual(1);
   });
+
+  const initRepo = (name: string): string => {
+    const repo = path.join(tmp, name);
+    fs.mkdirSync(repo, { recursive: true });
+    execSync('git init -q -b main', { cwd: repo, stdio: 'pipe' });
+    execSync('git config user.email t@t.com', { cwd: repo, stdio: 'pipe' });
+    execSync('git config user.name T', { cwd: repo, stdio: 'pipe' });
+    fs.writeFileSync(path.join(repo, 'seed.txt'), 'seed\n');
+    execSync('git add -A && git commit -qm init', { cwd: repo, stdio: 'pipe' });
+    return repo;
+  };
+
+  it("adopts the child's tree digest with its verdict, so a later node is measured, not distrusted", async () => {
+    const repo = initRepo('sub-repo');
+
+    const run = async (edit: boolean) => {
+      const kernel = registerDefaultExecutors(new RunKernel({ nodeTimeoutMs: 20_000 }));
+      kernel.setExecutor('agent', async () => {
+        if (edit) fs.writeFileSync(path.join(repo, 'after.txt'), 'edited\n');
+        return { ok: true };
+      });
+      const child: WorkflowSpec = {
+        name: 'child',
+        nodes: [{ id: 'check', kind: 'verifier', contract: { checks: [{ spec: { type: 'command', cmd: 'true' } }] } }],
+      };
+      const rec = await kernel.start({
+        name: 'parent',
+        cwd: repo,
+        nodes: [
+          { id: 'sub', kind: 'subflow', workflow: child },
+          { id: 'after', kind: 'agent', prompt: 'x' },
+        ],
+      });
+      return (await kernel.wait(rec.runId))!;
+    };
+
+    const untouched = await run(false);
+    expect(untouched.outcomeReason).toBeUndefined();
+    expect(untouched.outcome).toBe('verified');
+    // And measuring still catches a real edit after the child's checks.
+    const edited = await run(true);
+    expect(edited.outcome).toBe('unverified');
+    expect(edited.outcomeReason).toMatch(/changed afterwards/);
+  }, 30_000);
+
+  it('does not turn a child whose verdict expired into a refuted parent', async () => {
+    // The child's checks passed and its tree moved afterwards: `unverified`, not
+    // `refuted`. Adopting that as a failed verdict claims a check failed.
+    const repo = initRepo('stale-child');
+    const kernel = registerDefaultExecutors(new RunKernel({ nodeTimeoutMs: 20_000 }));
+    kernel.setExecutor('agent', async () => {
+      fs.writeFileSync(path.join(repo, 'after.txt'), 'edited\n');
+      return { ok: true };
+    });
+    const child: WorkflowSpec = {
+      name: 'child',
+      nodes: [
+        { id: 'check', kind: 'verifier', contract: { checks: [{ spec: { type: 'command', cmd: 'true' } }] } },
+        { id: 'edit', kind: 'agent', prompt: 'x' },
+      ],
+    };
+    const rec = await kernel.start({
+      name: 'parent',
+      cwd: repo,
+      nodes: [{ id: 'sub', kind: 'subflow', workflow: child }],
+    });
+    const done = (await kernel.wait(rec.runId))!;
+    expect(loadRun(done.nodes.sub.childRunId!)?.outcome).toBe('unverified');
+    expect(done.outcome).toBe('unverified');
+    expect(done.state).toBe('completed');
+  }, 30_000);
 
   it('hands the parent secrets down to the child', async () => {
     // Secrets are the custom-engine configs the spec deliberately cannot carry;

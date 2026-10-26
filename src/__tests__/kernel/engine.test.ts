@@ -13,6 +13,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { prepareSpec, RunKernel, IMPLICIT_VERIFIER_ID } from '../../kernel/engine.js';
 import type { NodeExecutor, NodeResult } from '../../kernel/engine.js';
+import { registerDefaultExecutors } from '../../kernel/nodes/index.js';
 import { loadRun, readEvents } from '../../kernel/store.js';
 import type { WorkflowSpec } from '../../kernel/types.js';
 
@@ -165,6 +166,51 @@ describe('honesty about verification', () => {
     expect(done!.error).toContain('npm test');
   });
 
+  it('does not complete a run whose router skipped the verifier of its declared contract', async () => {
+    let checked = 0;
+    const { kernel } = makeKernel({
+      verifier: async (): Promise<NodeResult> => {
+        checked++;
+        return { ok: false, passed: false, evidenceId: 'v-01', error: 'red' };
+      },
+    });
+    const started = await kernel.start({
+      name: 'skips-the-gate',
+      contract: { checks: [{ spec: { type: 'command', cmd: 'false' }, required: true }] },
+      nodes: [
+        { id: 'a', kind: 'agent', prompt: 'a' },
+        { id: 'skip', kind: 'router', routes: [], default: 'b' },
+        { id: 'verify', kind: 'verifier', contract: 'run' },
+        { id: 'b', kind: 'agent', prompt: 'b' },
+      ],
+    });
+    const done = await kernel.wait(started.runId);
+    expect(checked).toBe(0);
+    expect(done!.state).toBe('failed');
+    // Not `refuted`: no check ran, so none failed.
+    expect(done!.outcome).toBe('unverified');
+    expect(done!.error).toMatch(/acceptance contract/);
+  });
+
+  it("does not let another verifier's pass stand in for the declared contract", async () => {
+    const { kernel } = makeKernel({
+      verifier: async (node): Promise<NodeResult> => ({ ok: true, passed: true, evidenceId: `${node.id}-01` }),
+    });
+    const started = await kernel.start({
+      name: 'wrong-gate',
+      contract: { checks: [{ spec: { type: 'command', cmd: 'false' }, required: true }] },
+      nodes: [
+        { id: 'inline', kind: 'verifier', contract: { checks: [{ spec: { type: 'command', cmd: 'true' } }] } },
+        { id: 'skip', kind: 'router', routes: [], default: 'b' },
+        { id: 'verify', kind: 'verifier', contract: 'run' },
+        { id: 'b', kind: 'agent', prompt: 'b' },
+      ],
+    });
+    const done = await kernel.wait(started.runId);
+    expect(done!.nodes.verify.state).toBe('pending');
+    expect(done!.state).toBe('failed');
+  });
+
   it('records consensus votes without letting them decide anything', async () => {
     const { kernel } = makeKernel({
       council: async (): Promise<NodeResult> => ({
@@ -222,6 +268,47 @@ describe('contract provenance', () => {
     await kernel.wait(started.runId);
     expect(received).toMatchObject({ checks: [{ spec: { type: 'command', cmd: 'npm' } }] });
     expect(JSON.stringify(received)).not.toContain('rm -rf');
+  });
+
+  it("normalizes spec.contract and a verifier's inline contract the same way", async () => {
+    // Bare checks, as a hand-written spec carries them. Unnormalised, the runner
+    // reads `check.spec.type` and the verifier dies on it.
+    const work = fs.mkdtempSync(path.join(os.tmpdir(), 'clawo-engine-work-'));
+    try {
+      const kernel = registerDefaultExecutors(new RunKernel({ nodeTimeoutMs: 8000 }));
+      kernel.setExecutor('agent', async () => ({ ok: true }));
+      const started = await kernel.start({
+        name: 'bare',
+        cwd: work,
+        contract: { checks: [{ type: 'command', cmd: 'true', shell: 'rm -rf /' }] } as never,
+        nodes: [
+          { id: 'a', kind: 'agent', prompt: 'a' },
+          { id: 'inline', kind: 'verifier', contract: { checks: [{ type: 'file', path: '.' }] } as never },
+        ],
+      });
+      const done = await kernel.wait(started.runId);
+      expect(done!.nodes.inline.error).toBeUndefined();
+      expect(done!.nodes.inline.state).toBe('succeeded');
+      expect(done!.nodes[IMPLICIT_VERIFIER_ID].state).toBe('succeeded');
+      expect(done!.state).toBe('completed');
+      expect(done!.outcome).toBe('verified');
+      expect(JSON.stringify(done!.spec)).not.toContain('rm -rf');
+    } finally {
+      fs.rmSync(work, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a spec contract or an inline contract with no recognised checks', async () => {
+    const { kernel } = makeKernel();
+    await expect(kernel.start({ ...linear, contract: { checks: [{ type: 'nonsense' }] } as never })).rejects.toThrow(
+      /no recognised checks/,
+    );
+    await expect(
+      kernel.start({
+        ...linear,
+        nodes: [...linear.nodes, { id: 'v', kind: 'verifier', contract: { checks: [{ type: 'command' }] } as never }],
+      }),
+    ).rejects.toThrow(/Verifier 'v'.*no recognised checks/);
   });
 });
 

@@ -18,7 +18,8 @@ import { registerDefaultExecutors } from '../../kernel/nodes/index.js';
 import { composeObjective, GOAL_OBJECTIVE_MAX_CHARS } from '../../kernel/nodes/goal.js';
 import type { GoalSnapshot, GoalStatus, GoalNodeData } from '../../kernel/nodes/goal.js';
 import { goalWorkflow } from '../../kernel/templates/index.js';
-import type { WorkflowSpec } from '../../kernel/types.js';
+import { acquireLease, commit, loadRun, releaseLease } from '../../kernel/store.js';
+import type { RunRecord, WorkflowSpec } from '../../kernel/types.js';
 
 let tmp: string;
 const saved = process.env.CLAWO_WF_DIR;
@@ -367,6 +368,96 @@ describe('goal workflow', () => {
     const verify = spec.nodes.find((n) => n.id === 'verify')!;
     expect(verify.timeoutMs).toBeGreaterThanOrEqual(6 * 3600_000);
     expect(spec.nodes.find((n) => n.id === 'goal')!.timeoutMs).toBeUndefined();
+  });
+});
+
+describe('goal node after a crash', () => {
+  /** Rewrite a finished run's checkpoint to what a process that died at `goal` left behind. */
+  async function crashedInGoal(runId: string, edit: (r: RunRecord) => void = () => undefined) {
+    const record = loadRun(runId)!;
+    record.state = 'running';
+    record.endedAt = undefined;
+    record.nodes.goal.state = 'running';
+    record.currentNode = 'goal';
+    edit(record);
+    const crashed = acquireLease(runId, 'crashed-process');
+    commit(crashed, { record });
+    releaseLease(crashed);
+  }
+
+  /** The resumed process: any goal it is asked to set completes, so a restart shows up as a session. */
+  const finishesAnyGoal = (thread: string) =>
+    fakeManager(() => {
+      const s = new FakeGoalSession(thread);
+      s.onSet = (_p, self) => self.move('complete');
+      return s;
+    });
+
+  it('finishes a goal that completed before its result was committed, instead of running it again', async () => {
+    const m = fakeManager(() => {
+      const s = new FakeGoalSession('thread-C');
+      s.onSet = (_p, self) => self.move('complete', { tokensUsed: 50 });
+      return s;
+    });
+    const kernel = kernelWith(m);
+    const first = await kernel.start(oneGoal());
+    expect((await kernel.wait(first.runId))!.nodes.goal.state).toBe('succeeded');
+    // The goal reached `complete` and the checkpoint said so; the process died
+    // before the node's result landed.
+    await crashedInGoal(first.runId);
+
+    const m2 = finishesAnyGoal('thread-C');
+    const kernel2 = kernelWith(m2);
+    await kernel2.resume(first.runId);
+    const done = await kernel2.wait(first.runId);
+    expect(m2.starts).toHaveLength(0);
+    expect(done!.nodes.goal.state).toBe('succeeded');
+    expect(done!.state).toBe('completed');
+  });
+
+  it('finishes a repair pass that completed, rather than repairing the same red verdict again', async () => {
+    const cwd = path.join(tmp, 'repo');
+    fs.mkdirSync(cwd);
+    const m = fakeManager(() => {
+      const s = new FakeGoalSession('thread-P');
+      s.onSet = (p, self) => {
+        if (p.objective?.includes('did not pass the acceptance checks'))
+          fs.writeFileSync(path.join(cwd, 'done.txt'), 'x');
+        self.move('complete');
+      };
+      return s;
+    });
+    const contract = {
+      checks: [
+        {
+          id: 'done-file',
+          type: 'command' as const,
+          cmd: process.execPath,
+          args: ['-e', "process.exit(require('fs').existsSync('done.txt') ? 0 : 1)"],
+        },
+      ],
+    };
+    const kernel = kernelWith(m);
+    const first = await kernel.start(goalWorkflow({ task: 'create done.txt', cwd, contract, maxRepairs: 1 }));
+    const finished = (await kernel.wait(first.runId))!;
+    expect(finished.outcome).toBe('verified');
+    // Put the run back to the moment the repair goal had completed: the first,
+    // red verdict still in force, the second verification not yet run.
+    const red = 'verify-v01-01';
+    await crashedInGoal(first.runId, (r) => {
+      r.outcome = 'refuted';
+      r.evidenceId = red;
+      r.verdict = { node: 'verify', evidenceId: red, sideEffectSeq: 1 };
+      r.nodes.verify.state = 'failed';
+      r.nodes.verify.evidenceId = red;
+    });
+
+    const m2 = finishesAnyGoal('thread-P');
+    const kernel2 = kernelWith(m2);
+    await kernel2.resume(first.runId);
+    const done = await kernel2.wait(first.runId);
+    expect(m2.starts).toHaveLength(0);
+    expect(done!.outcome).toBe('verified');
   });
 });
 

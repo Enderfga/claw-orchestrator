@@ -23,6 +23,12 @@ refused before the run starts. That argument takes each check bare,
 A contract written inside a spec — `spec.contract`, or a verifier's inline
 `contract` — is used as written, so its checks must be in the wrapped form.
 
+A workflow start normalises every contract the run carries the same way: the
+`contract` start option, the spec's own `contract`, and each verifier node's
+inline `contract`. A check may be written bare (`{ "type": "command", "cmd": … }`)
+or wrapped (`{ "spec": { … }, "required": … }`) in any of them. A contract in
+which no check is recognised is refused at start rather than dropped.
+
 Concretely: there is no shell string anywhere. A `command` check is argv.
 
 ## Check types
@@ -226,8 +232,9 @@ A run ends `verified`, `refuted`, or `unverified`.
 is not a failure and it is not a pass. `clawo runs` prints it as `—` and
 `clawo workflow list` as `unchecked`, and the `clawo runs` summary line says so in
 words, because collapsing it into either bucket would let an unchecked run read
-as a checked one. A verdict that expired (see below), and a run whose path never
-reached its verifier, also read `unverified`.
+as a checked one. A verdict that expired (see below) also reads `unverified`, and
+so does a run that declared a contract and ended without running it — that run
+ends `failed`.
 
 ## What the guarantee is, precisely
 
@@ -237,8 +244,9 @@ reached its verifier, also read `unverified`.
   ends `completed` / `verified` only when every required check of its last
   verification passed. A run-level contract appends the terminal verifier
   `__verify`, which every completed run passes through; a spec that places its own
-  `"contract": "run"` verifier has to route every path through it (see
-  [`workflow.md`](./workflow.md#completion)).
+  `"contract": "run"` verifier has to route every path through it — a run that a
+  router steered past it ends `failed` (outcome `unverified`), see
+  [`workflow.md`](./workflow.md#completion).
 - If anything that can touch the workspace runs after the checks and the tree's
   **content** changes, the verdict expires: the outcome drops to `unverified`
   with the reason recorded. Not `refuted` — no check failed.
