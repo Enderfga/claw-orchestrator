@@ -70,6 +70,8 @@ export interface AgentNode extends NodeBase, AgentBinding {
   /** Reuse a named session across nodes; omitted means one session per attempt. */
   sessionName?: string;
   permissionMode?: string;
+  /** Standing instructions for the session, appended to its system prompt. */
+  appendSystemPrompt?: string;
 }
 
 /**

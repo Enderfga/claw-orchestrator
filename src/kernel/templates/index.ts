@@ -468,6 +468,7 @@ export function legacyUltraplanWorkflow(args: LegacyUltraplanArgs): WorkflowSpec
         model: args.model,
         permissionMode: 'plan' as PermissionMode,
         effort: 'max' as EffortLevel,
+        appendSystemPrompt: ULTRAPLAN_SYSTEM_PROMPT,
         timeoutMs: args.timeoutMs,
         prompt:
           `# Ultraplan Task\n\n${args.task}\n\nExplore the project, understand the codebase, analyze ` +

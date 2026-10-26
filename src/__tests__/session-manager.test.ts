@@ -1247,6 +1247,16 @@ describe('SessionManager', () => {
     });
   });
 
+  // Through the real agent node: a spec field the executor drops would pass a
+  // spec-level assertion and still reach the session without it.
+  it('gives the ultraplan session the plan-only instruction', async () => {
+    const result = await mgr.ultraplanStart('plan task', { cwd: '/tmp' });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (mgr as any).kernel.wait(result.id);
+    expect(createdConfigs).toHaveLength(1);
+    expect(createdConfigs[0].appendSystemPrompt).toContain('plan only');
+  });
+
   // ─── Health ─────────────────────────────────────────────────────────
 
   describe('health', () => {
