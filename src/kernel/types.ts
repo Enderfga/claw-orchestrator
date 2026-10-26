@@ -350,7 +350,10 @@ export interface RunRecord {
   baseSha?: string;
   /**
    * The test files and test configuration as the run found them, for the
-   * protected-tests check. Taken only when the spec has a verifier or a subflow.
+   * protected-tests check. Taken only when the run-level contract or a
+   * verifier's inline contract has a `command` check and does not set
+   * `protectTests: false`, or the spec has a subflow (`needsTestSnapshot`). A
+   * subflow child uses its parent's, when the parent has one.
    */
   baseTests?: TestSnapshot;
   /** Recorded for the record. Never consulted to decide completion. */
@@ -375,9 +378,10 @@ export interface RunRecord {
     sideEffectSeq: number;
   };
   /**
-   * Count of completed nodes that can touch the workspace (`agent`, `fanout`,
-   * `council`, `subflow`). Compared against the value stored on the verdict, so
-   * the kernel knows whether anything ran after the checks at all.
+   * Count of node results absorbed from kinds that can touch the workspace —
+   * every kind but `verifier`, `router` and `human_gate` (`SIDE_EFFECT_KINDS` in
+   * the engine). Compared against the value stored on the verdict, so the
+   * kernel knows whether anything ran after the checks at all.
    */
   sideEffectSeq?: number;
 }

@@ -135,7 +135,7 @@ export interface SolveArgs extends CommonArgs {
 }
 
 /**
- * The flagship: triage → (gate) → implement → verify → repair-until-green → review.
+ * The flagship: triage → (gate) → implement → (review) → verify → repair-until-green.
  *
  * The repair loop is the part that needs the kernel rather than a prompt: the
  * router sends control back to the implementer while the verifier is red and the

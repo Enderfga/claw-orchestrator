@@ -75,14 +75,14 @@ export interface RunLedgerRow {
    *
    * Not written at turn time, and deliberately so: a turn finishes before the
    * verifier runs, so stamping a verdict there would be inventing one. It is
-   * filled in by `annotateVerdicts()` at read time from the run record, or
-   * written directly by a standalone `verify_run`.
+   * filled in by `annotateVerdicts()` at read time from the run record. A
+   * standalone `verify_run` writes an evidence bundle, not a ledger row.
    */
   verified?: boolean;
   /** Evidence bundle id under the run directory, when a contract ran. */
   evidenceId?: string;
   contractId?: string;
-  /** Kernel node kind this turn belonged to (`agent`, `council`, `verifier`, …). */
+  /** The kind of node this turn belonged to, when the caller said. Only fan-out does (`fanout`). */
   nodeKind?: string;
   /** Primary language detected from the repo's manifest. Detected, never guessed from prose. */
   repoLang?: string;

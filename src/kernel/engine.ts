@@ -1253,9 +1253,8 @@ export class RunKernel extends EventEmitter {
     return approved;
   }
 
-  /** Node kinds that can change the workspace. Routers and gates cannot. */
   /**
-   * Node kinds that can move the workspace. `sideEffectSeq` counts them, and
+   * Node kinds that can move the workspace; routers and gates cannot. `sideEffectSeq` counts them, and
    * `_verdictWentStale` uses "nothing ran since" as a git-free early exit — so a
    * kind missing here lets a verdict stand over a tree it no longer describes.
    * `ultraapp_synth` writes an entire codebase and `ultraapp_deploy` writes

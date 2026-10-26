@@ -220,8 +220,8 @@ either would make the ledger useless for the thing it is for.
 `verified` is **not written at turn time**, deliberately. The turns that produce
 the work all finish before the verifier that judges it, so stamping a verdict on
 them as they are written would be inventing one. It is joined in at read time
-from the run record via the row's `parent`, by `annotateVerdicts()`. The exception
-is a standalone `verify_run`, which writes its verdict directly.
+from the run record via the row's `parent`, by `annotateVerdicts()`. A standalone
+`verify_run` writes an evidence bundle and no ledger row.
 
 Two consequences worth knowing:
 
@@ -235,7 +235,7 @@ Two consequences worth knowing:
 | Field                      | Source                                                                                                                                                          |
 | -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `evidenceId`, `contractId` | Joined from the run record                                                                                                                                      |
-| `nodeKind`                 | The kernel node the turn belonged to (`agent`, `council`, `verifier`, …)                                                                                        |
+| `nodeKind`                 | The kind of node the turn belonged to, when the caller passes it; fan-out agent turns carry `fanout`, other turns leave it unset                                |
 | `repoLang`                 | Detected from a manifest (`package.json`, `pyproject.toml`, `go.mod`, …). Never guessed — a wrong label would corrupt the comparison the field exists to enable |
 | `taskKind`                 | Caller-declared only. Never inferred from the prompt                                                                                                            |
 

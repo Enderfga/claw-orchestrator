@@ -3,7 +3,7 @@
  *
  * A workflow spec can arrive from a tool call, which means it can arrive from an
  * agent. If routing accepted a JS expression the kernel would be an arbitrary
- * code execution surface. These five closed forms cover the branching the six
+ * code execution surface. These six closed forms cover the branching the six
  * built-in modes actually do (retry-on-red, loop-while-under-N, skip-if-verified)
  * and nothing else is evaluated.
  */
