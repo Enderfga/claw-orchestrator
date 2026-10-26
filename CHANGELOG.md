@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `acp` but had nowhere to name the agent, so its session could only fail at start. They take a
   preset id only, because a run's spec is written to disk; inline ACP configs stay on
   `session_start`.
+- **`workflow_status` returns `outcomeReason` and `verdict`**, so a pass downgraded to
+  `unverified` says why.
+- **The SDK exports `PersistentAcpSession` and `PersistentCodexAppServerSession`.**
 - **`session_send` returns the turn's `usage`** (`{ tokensIn, tokensOut }`, this turn alone).
 - **The `council` workflow template takes `maxRounds`.**
 - `CITATION.cff` and a Citation section in the README, with the research built on this runtime.
@@ -47,6 +50,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`customEngine` accepts a preset id in the tool schemas** of `session_start`,
+  `session_handoff` and council agents, so a host that validates arguments accepts
+  `customEngine: "zcode"`; `session_start` declares `tools`, `addDir`, `pluginUrl` and `launcher`,
+  which it already honoured.
+- **The plugin manifest declares the multi-model proxy on by default**, as the plugin applies
+  it, so a `proxy` block without `enabled` no longer turns the routes off; the unread
+  `proxy.bigModel` / `proxy.smallModel` fields are gone (configs that still carry them load
+  unchanged). The manifest accepts `defaultEffort: "ultra"`.
+- **`session_list` and `autoloop_list` report persisted sessions and recorded autoloop runs** on a
+  process that has not run another tool yet.
+- **`clawo-mcp` advertises annotations for every tool.**
 - **Starting a council no longer overwrites the project repository's git identity.** A local
   identity is set only when none is configured at any level.
 - **`council_accept` and `council_reject` are recorded on the run**, so `council_status` reports
