@@ -13,6 +13,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { prepareSpec, RunKernel, IMPLICIT_VERIFIER_ID } from '../../kernel/engine.js';
 import type { NodeExecutor, NodeResult } from '../../kernel/engine.js';
+import { registerDefaultExecutors } from '../../kernel/nodes/index.js';
 import { loadRun, readEvents } from '../../kernel/store.js';
 import type { WorkflowSpec } from '../../kernel/types.js';
 
@@ -222,6 +223,47 @@ describe('contract provenance', () => {
     await kernel.wait(started.runId);
     expect(received).toMatchObject({ checks: [{ spec: { type: 'command', cmd: 'npm' } }] });
     expect(JSON.stringify(received)).not.toContain('rm -rf');
+  });
+
+  it("normalizes spec.contract and a verifier's inline contract the same way", async () => {
+    // Bare checks, as a hand-written spec carries them. Unnormalised, the runner
+    // reads `check.spec.type` and the verifier dies on it.
+    const work = fs.mkdtempSync(path.join(os.tmpdir(), 'clawo-engine-work-'));
+    try {
+      const kernel = registerDefaultExecutors(new RunKernel({ nodeTimeoutMs: 8000 }));
+      kernel.setExecutor('agent', async () => ({ ok: true }));
+      const started = await kernel.start({
+        name: 'bare',
+        cwd: work,
+        contract: { checks: [{ type: 'command', cmd: 'true', shell: 'rm -rf /' }] } as never,
+        nodes: [
+          { id: 'a', kind: 'agent', prompt: 'a' },
+          { id: 'inline', kind: 'verifier', contract: { checks: [{ type: 'file', path: '.' }] } as never },
+        ],
+      });
+      const done = await kernel.wait(started.runId);
+      expect(done!.nodes.inline.error).toBeUndefined();
+      expect(done!.nodes.inline.state).toBe('succeeded');
+      expect(done!.nodes[IMPLICIT_VERIFIER_ID].state).toBe('succeeded');
+      expect(done!.state).toBe('completed');
+      expect(done!.outcome).toBe('verified');
+      expect(JSON.stringify(done!.spec)).not.toContain('rm -rf');
+    } finally {
+      fs.rmSync(work, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a spec contract or an inline contract with no recognised checks', async () => {
+    const { kernel } = makeKernel();
+    await expect(kernel.start({ ...linear, contract: { checks: [{ type: 'nonsense' }] } as never })).rejects.toThrow(
+      /no recognised checks/,
+    );
+    await expect(
+      kernel.start({
+        ...linear,
+        nodes: [...linear.nodes, { id: 'v', kind: 'verifier', contract: { checks: [{ type: 'command' }] } as never }],
+      }),
+    ).rejects.toThrow(/Verifier 'v'.*no recognised checks/);
   });
 });
 

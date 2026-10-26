@@ -15,6 +15,12 @@ node's result, and `normalizeContract()` drops anything it does not recognise, s
 a contract that arrived through a tool call carries no fields the executor did
 not model.
 
+A workflow start normalises every contract the run carries the same way: the
+`contract` start option, the spec's own `contract`, and each verifier node's
+inline `contract`. A check may be written bare (`{ "type": "command", "cmd": … }`)
+or wrapped (`{ "spec": { … }, "required": … }`) in any of them. A contract in
+which no check is recognised is refused at start rather than dropped.
+
 Concretely: there is no shell string anywhere. A `command` check is argv.
 
 ## Check types

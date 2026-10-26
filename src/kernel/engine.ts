@@ -350,9 +350,42 @@ export interface StartOptions {
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 /**
- * Append the implicit terminal verifier when a run-level contract exists and the
- * author did not already place one. This is what makes `completed` mean "checked".
+ * Put every contract a spec carries through `normalizeContract`: the run-level
+ * one (`override`, the `contract` start option, when given; else `spec.contract`)
+ * and each verifier's inline one. The runner reads only the normalised shape,
+ * and hand-written checks usually omit the `{ spec }` wrapper.
+ *
+ * A contract with no recognised check is refused rather than dropped. Dropped,
+ * the run would complete `unverified`: a caller who asked to be checked would
+ * be told nothing had checked, for a typo they never saw.
  */
+function normalizeSpecContracts(spec: WorkflowSpec, override: unknown): WorkflowSpec {
+  const usable = (raw: unknown, what: string): AcceptanceContract => {
+    const contract = normalizeContract(raw);
+    if (!contract) {
+      throw new Error(
+        `${what} has no recognised checks. Every check needs a \`type\` of ` +
+          'command | http | screenshot | diff_policy | file, and a `command` check needs `cmd`.',
+      );
+    }
+    return contract;
+  };
+  const contract =
+    override !== undefined
+      ? usable(override, 'The supplied acceptance contract')
+      : spec?.contract != null
+        ? usable(spec.contract, "The workflow's acceptance contract")
+        : undefined;
+  const nodes = Array.isArray(spec?.nodes)
+    ? spec.nodes.map((n) =>
+        n?.kind === 'verifier' && n.contract !== 'run'
+          ? { ...n, contract: usable(n.contract, `Verifier '${n.id}': its contract`) }
+          : n,
+      )
+    : spec.nodes;
+  return { ...spec, contract, nodes };
+}
+
 /**
  * Reject a spec that cannot execute correctly, before anything runs.
  *
@@ -404,6 +437,10 @@ export function validateSpec(spec: WorkflowSpec): void {
   }
 }
 
+/**
+ * Append the implicit terminal verifier when a run-level contract exists and the
+ * author did not already place one. This is what makes `completed` mean "checked".
+ */
 export function prepareSpec(spec: WorkflowSpec): WorkflowSpec {
   if (!spec.contract) return spec;
   const hasRunVerifier = spec.nodes.some((n) => n.kind === 'verifier' && n.contract === 'run');
@@ -517,21 +554,7 @@ export class RunKernel extends EventEmitter {
   // ─── Lifecycle ────────────────────────────────────────────────────────────
 
   async start(rawSpec: WorkflowSpec, opts: StartOptions = {}): Promise<RunRecord> {
-    let contract = rawSpec.contract;
-    if (opts.contract !== undefined) {
-      contract = normalizeContract(opts.contract);
-      // A contract that survives normalisation with nothing in it used to leave
-      // the run with no contract at all, which then completed `unverified` — a
-      // caller who asked to be checked was told nothing had checked, and the
-      // reason was a typo they never saw.
-      if (!contract) {
-        throw new Error(
-          'The supplied acceptance contract has no recognised checks. Every check needs a `type` of ' +
-            'command | http | screenshot | diff_policy | file, and a `command` check needs `cmd`.',
-        );
-      }
-    }
-    const spec = prepareSpec({ ...rawSpec, contract });
+    const spec = prepareSpec(normalizeSpecContracts(rawSpec, opts.contract));
     validateSpec(spec);
     const runId = opts.runId || `wf-${Date.now().toString(36)}-${crypto.randomBytes(3).toString('hex')}`;
     // Validated here as well as in the store: failing before any directory is
