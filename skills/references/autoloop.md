@@ -348,9 +348,13 @@ compact, through the app-server's own thread compaction.
 Subprocess deaths (Claude session lost), failed `git commit` in an iter, and
 other phase-bound failures surface as `phase_error` messages instead of
 silently masquerading as a "clarification request". An empty or whitespace-only
-Coder reply is also a phase error. Only a non-empty reply without
-`iter_complete` is treated as a clarification request. The runner counts
-consecutive `phase_error`s and:
+Coder reply is also a phase error. A non-empty Coder reply without a valid
+`iter_complete` returns `directive_ack` (`understood: false`) without review or
+iteration advance. Structured `request_clarification` keeps a short
+`clarification` question. Any other incomplete turn puts fixed status/decision
+wording, a labelled sanitized truncated reply tail, and a write-time persisted
+path (`iter/<n>/coder_reply_<dispatch_id>.txt`) or generic not-persisted result
+into `clarification`. The runner counts consecutive `phase_error`s and:
 
 1. Fires `on_phase_error` on each one (defaults to error / both channels).
 2. After `phaseErrorCircuit` consecutive errors (default **3**) emits a
