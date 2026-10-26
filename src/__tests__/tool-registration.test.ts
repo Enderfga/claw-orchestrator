@@ -628,3 +628,15 @@ describe('openclaw.plugin.json parity', () => {
     }
   });
 });
+
+describe('SDK entry', () => {
+  it('exports the session class of every documented engine, and names ACP agents in the plugin description', async () => {
+    const sdk: Record<string, unknown> = await import('../index.js');
+    const { PersistentAcpSession } = await import('../persistent-acp-session.js');
+    const { PersistentCodexAppServerSession } = await import('../persistent-codex-app-session.js');
+
+    expect(sdk.PersistentAcpSession).toBe(PersistentAcpSession);
+    expect(sdk.PersistentCodexAppServerSession).toBe(PersistentCodexAppServerSession);
+    expect(plugin.description).toContain('any ACP agent');
+  });
+});

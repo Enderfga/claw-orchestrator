@@ -42,12 +42,14 @@ export { SessionManager } from './session-manager.js';
 export { PersistentClaudeSession } from './persistent-session.js';
 export { BaseOneShotSession, type OneShotEngineConfig } from './base-oneshot-session.js';
 export { PersistentCodexSession } from './persistent-codex-session.js';
+export { PersistentCodexAppServerSession } from './persistent-codex-app-session.js';
 export { PersistentGeminiSession } from './persistent-gemini-session.js';
 export { PersistentAgySession } from './persistent-agy-session.js';
 export { PersistentCursorSession } from './persistent-cursor-session.js';
 export { PersistentGrokSession } from './persistent-grok-session.js';
 export { PersistentOpencodeSession } from './persistent-opencode-session.js';
 export { PersistentCustomSession } from './persistent-custom-session.js';
+export { PersistentAcpSession } from './persistent-acp-session.js';
 export { Council, getDefaultCouncilConfig } from './council.js';
 export { AutoloopRunner } from './autoloop/runner.js';
 export { ClaudeAgentDispatcher } from './autoloop/dispatcher.js';
@@ -212,7 +214,7 @@ const plugin = {
   id: 'claw-orchestrator',
   name: 'Claw Orchestrator',
   description:
-    'Run Claude Code, Codex, Antigravity, Grok Build, OpenCode and custom coding CLIs as one unified runtime — persistent sessions, multi-agent council, worktree isolation, multi-model proxy',
+    'Run Claude Code, Codex, Antigravity, Grok Build, OpenCode, any ACP agent and custom coding CLIs as one unified runtime — persistent sessions, multi-agent council, worktree isolation, multi-model proxy',
 
   register(api: PluginAPI): void {
     const rawConfig = (api.pluginConfig || {}) as Partial<PluginConfig>;
