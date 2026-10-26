@@ -282,9 +282,29 @@ describe('PersistentCustomSession pricing — the guard as shipped, not a copy o
     warnSpy.mockRestore();
   });
 
-  it('an unregistered model with no override prices at the default list rate, not the engine rate', () => {
+  // `pricing` is the rate for what the registry cannot price. The registry
+  // falls back to the default list rate rather than to zero, so testing for a
+  // zero rate never found such a model and the engine rate went unused.
+  it('an unregistered model with no override prices at the engine rate', () => {
+    expect(rateOf('my-cli-native')).toEqual({ inputPer1M: 12, outputPer1M: 60 });
+  });
+
+  it('a session that names no model prices at the engine rate', () => {
+    expect(rateOf(undefined)).toEqual({ inputPer1M: 12, outputPer1M: 60 });
+  });
+
+  it('a registered model keeps its registry rate, and an engine with no rate keeps the default', () => {
+    expect(rateOf('claude-opus-5-5')).toEqual({ inputPer1M: 4, outputPer1M: 20, cachedPer1M: 0.2 });
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    expect(rateOf('my-cli-native')).toEqual({ inputPer1M: 3, outputPer1M: 15, cachedPer1M: 0.3 });
+    const unpriced = new PersistentCustomSession({
+      name: 'custom-unpriced',
+      cwd: TMP_HOME,
+      engine: 'custom',
+      permissionMode: 'acceptEdits',
+      model: 'my-cli-native',
+      customEngine: { name: 'my-cli', bin: 'my-cli', args: {} },
+    }).getCost().pricing;
+    expect(unpriced).toEqual({ inputPer1M: 3, outputPer1M: 15, cachedPer1M: 0.3 });
     warnSpy.mockRestore();
   });
 

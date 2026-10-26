@@ -549,8 +549,9 @@ Two protocol modes:
 
 Cost is the reported tokens priced at the registry rate for the session's `model`,
 or at its `pricingOverrides` entry when it has one. An unregistered model, or no
-model, is priced at the `claude-sonnet-4-6` rate, so `pricing` applies only to an
-unregistered model, and only when that fallback rate has been overridden to zero.
+model, is priced at `pricing`, and at the `claude-sonnet-4-6` rate when the engine
+sets none. With no model, a `pricingOverrides` entry for `claude-sonnet-4-6` still
+takes precedence over `pricing`.
 
 ### args field
 

@@ -718,6 +718,16 @@ export function hasPricingOverride(model?: string, defaultModel = 'claude-sonnet
   return _pricingOverrides.has(pricingKey(model || defaultModel));
 }
 
+/**
+ * Whether this model has a price of its own — a registry entry or a runtime
+ * override — rather than the default model's, which getModelPricing() falls
+ * back to. An engine with its own rate for models the registry cannot price
+ * asks this, since the fallback rate is never zero and cannot be told apart.
+ */
+export function hasOwnPricing(model?: string): boolean {
+  return !!model && effectivePricing(pricingKey(model)) !== undefined;
+}
+
 /** Mutable pricing table for runtime overrides (backward compat). */
 const _pricingOverrides = new Map<string, ModelPricing>();
 
