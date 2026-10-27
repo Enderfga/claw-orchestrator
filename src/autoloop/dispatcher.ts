@@ -57,7 +57,14 @@ import {
   type PlannerToolEffects,
   type SpawnSubagentsArgs,
 } from './planner-tools.js';
-import { extractIterComplete, extractLogMessages, extractReviewComplete, parseAgentReply } from './agent-tools.js';
+import {
+  extractClarification,
+  extractIterComplete,
+  extractLogMessages,
+  extractReviewComplete,
+  parseAgentReply,
+} from './agent-tools.js';
+import { sanitizeSecrets } from '../sanitize.js';
 
 /**
  * Character budget for the replayed transcript handed to engines without native
@@ -65,6 +72,16 @@ import { extractIterComplete, extractLogMessages, extractReviewComplete, parseAg
  * long run keeps the recent context instead of growing the prompt forever.
  */
 const REPLAY_CHAR_BUDGET = 24_000;
+
+/** Sanitize, then keep ≤500 chars (prefix or tail). Null if empty/disallowed controls remain. */
+function handoffExcerpt(text: string, fromEnd: boolean): string | null {
+  let t = sanitizeSecrets(text);
+  if (t.length > 500) t = fromEnd ? t.slice(-500) : t.slice(0, 500);
+  t = t.replace(/\s+/g, ' ').trim();
+  if (/[\uD800-\uDBFF]$/.test(t)) t = t.slice(0, -1);
+  if (!t || /[\p{Cc}\p{Cf}]/u.test(t)) return null;
+  return t;
+}
 
 /**
  * Files inside <ledger>/reviewer_sandbox/ that survive `stageReviewSandbox`.
@@ -1279,15 +1296,41 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
 
     const ic = extractIterComplete(parsed.calls);
     if (!ic) {
-      // No iter_complete emitted — could be a clarification request. Return a
-      // directive_ack so Planner sees it next turn.
+      // Write-time incomplete handoff: reply is in hand; no later evidence reread.
       await this.maybeCompact('coder', this.coderName);
-      return [
-        Msg.directiveAck(env.iter, {
-          understood: false,
-          clarification: parsed.cleaned_reply.slice(0, 500),
-        }),
-      ];
+      const clarificationQ = extractClarification(parsed.calls);
+      if (clarificationQ) {
+        if (!parsed.cleaned_reply) {
+          this.appendChatEntry({ who: 'coder', text: clarificationQ, ts: new Date().toISOString() });
+        }
+        const q = handoffExcerpt(clarificationQ, false);
+        if (q) return [Msg.directiveAck(env.iter, { understood: false, clarification: q })];
+      }
+      const body = clarificationQ || parsed.cleaned_reply || replyText;
+      if (!parsed.cleaned_reply && !clarificationQ) {
+        this.appendChatEntry({ who: 'coder', text: replyText, ts: new Date().toISOString() });
+      }
+      const rel = path.join('tasks', this.config.runId, 'iter', String(env.iter), `coder_reply_${dispatchId}.txt`);
+      let persistedRel: string | null = null;
+      try {
+        fs.mkdirSync(path.dirname(path.join(this.config.workspace, rel)), { recursive: true });
+        fs.writeFileSync(path.join(this.config.workspace, rel), body);
+        persistedRel = rel;
+      } catch {
+        /* write failure → report not persisted; do not probe */
+      }
+      const tail = handoffExcerpt(body, true);
+      const clarification = [
+        `Coder turn ended without a valid iter_complete (iter=${env.iter}). No review was requested and the iteration was not advanced.`,
+        'You may: (1) send_directive for the same iteration to continue the existing Coder, (2) ask the user, or (3) stop.',
+        tail
+          ? `Coder reply tail (bounded, truncated excerpt): ${tail}`
+          : 'Coder reply tail omitted (disallowed form after sanitization).',
+        persistedRel
+          ? `Full coder reply persisted at handoff: ${persistedRel}`
+          : 'Full coder reply was not persisted (write failed).',
+      ].join('\n');
+      return [Msg.directiveAck(env.iter, { understood: false, clarification })];
     }
 
     // Persist eval output to ledger.

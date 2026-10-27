@@ -1134,3 +1134,159 @@ describe('ClaudeAgentDispatcher — evicted role sessions', () => {
     expect([starts('coder'), starts('reviewer')]).toEqual([2, 2]);
   });
 });
+
+describe('ClaudeAgentDispatcher — partial Coder terminal handoff', () => {
+  const MARKER = 'TERMINAL_PARTIAL_NO_FREEZE_CONCLUSION_UNIQUE_9f3c';
+  const longReply = () => `${'A'.repeat(520)}\n${MARKER}\nend`;
+  const d0 = (goal: string) => Msg.directive(0, { goal, constraints: [], success_criteria: [], max_attempts: 1 });
+  const plannerPrompts = (c: StubCalls) =>
+    c.sendMessage.mock.calls.filter((x) => x[0] === 'autoloop-r1-planner').map((x) => x[1] as string);
+  const replyPath = (text: string) => text.match(/persisted at handoff:\s+([^\s"]+\.txt)/)?.[1];
+
+  it('G1: incomplete turn exposes status, terminal tail and persisted path', async () => {
+    const reply = longReply();
+    expect(reply.indexOf(MARKER)).toBeGreaterThan(500);
+    const { dispatcher, calls, workspace } = makeDispatcher({}, { sendOutput: reply });
+    await dispatcher.spawnSubagents();
+    const acks = await dispatcher.deliver(d0('g'));
+    const clarification = (acks[0] as { payload: { clarification: string } }).payload.clarification;
+    expect(acks[0]).toMatchObject({ type: 'directive_ack', payload: { understood: false } });
+    expect(clarification).toMatch(/without (a )?valid iter_complete/i);
+    expect(clarification).toMatch(/send_directive[\s\S]*ask (the )?user[\s\S]*\bstop\b/i);
+    expect(clarification).toContain(MARKER);
+    const rel = replyPath(clarification);
+    expect(rel && fs.readFileSync(path.join(workspace, rel), 'utf8')).toContain(MARKER);
+    await dispatcher.deliver(acks[0]);
+    expect(plannerPrompts(calls).at(-1) ?? '').toContain(MARKER);
+  });
+
+  it('G2: valid iter_complete emits iter_artifacts', async () => {
+    const ic = plannerControl('iter_complete', {
+      summary: 'ok',
+      eval_output: { metric: 1 },
+      files_changed: [],
+    });
+    const { dispatcher, workspace } = makeDispatcher({}, { sendOutput: `done\n${ic}` });
+    const { execFileSync } = await import('node:child_process');
+    for (const args of [
+      ['init'],
+      ['config', 'user.email', 't@e'],
+      ['config', 'user.name', 't'],
+      ['commit', '--allow-empty', '-m', 'b'],
+    ]) {
+      execFileSync('git', args, { cwd: workspace });
+    }
+    await dispatcher.spawnSubagents();
+    const out = await dispatcher.deliver(d0('g'));
+    expect(out.some((m) => m.type === 'iter_artifacts')).toBe(true);
+    expect(out.some((m) => m.type === 'directive_ack')).toBe(false);
+  });
+
+  it('G3: short clarification ack (multiline normalized)', async () => {
+    const q = 'Line one?\nLine two about eval?';
+    const { dispatcher, calls } = makeDispatcher(
+      {},
+      { sendOutput: `Need a decision.\n${plannerControl('request_clarification', { question: q })}` },
+    );
+    await dispatcher.spawnSubagents();
+    const acks = await dispatcher.deliver(d0('g'));
+    expect(acks[0]).toMatchObject({
+      type: 'directive_ack',
+      payload: { understood: false, clarification: 'Line one? Line two about eval?' },
+    });
+    await dispatcher.deliver(acks[0]);
+    const prompt = plannerPrompts(calls).at(-1) ?? '';
+    expect(prompt).toContain('Line one? Line two about eval?');
+    expect(prompt).not.toMatch(/without (a )?valid iter_complete/i);
+  });
+
+  it('G4: real Planner two-directive batch keeps distinct handoffs without review/advance', async () => {
+    const { manager, calls } = makeStubManager();
+    const workspace = tmpRoot;
+    const dispatcher = new ClaudeAgentDispatcher({ manager, runId: 'r1', workspace });
+    let coderTurns = 0;
+    let plannerTurns = 0;
+    const directiveBatch = ['first', 'second']
+      .map((goal) => plannerControl('send_directive', { goal, constraints: [], success_criteria: [], max_attempts: 1 }))
+      .join('\n');
+    calls.sendMessage.mockImplementation(async (name: string) => {
+      if (name === 'autoloop-r1-coder') {
+        coderTurns += 1;
+        const tag = coderTurns === 1 ? 'FIRST_QUEUED_REPLY' : 'SECOND_QUEUED_REPLY';
+        return { output: `${'P'.repeat(800)}${tag}`, error: undefined };
+      }
+      if (name === 'autoloop-r1-planner') {
+        plannerTurns += 1;
+        return { output: plannerTurns === 1 ? directiveBatch : 'ack', error: undefined };
+      }
+      return { output: '', error: undefined };
+    });
+    const types: string[] = [];
+    const runner = new AutoloopRunner({
+      run_id: 'r1',
+      workspace,
+      ledger_dir: path.join(workspace, 'tasks', 'r1'),
+      dispatcher,
+      notifyUser: vi.fn(async () => undefined),
+      stallCheckIntervalMs: 86_400_000,
+    });
+    runner.on('message', (env: AnyAutoloopMessage) => types.push(env.type));
+    await runner.start();
+    await dispatcher.spawnSubagents();
+    try {
+      await runner.chat('two explicit directives');
+      expect(coderTurns).toBe(2);
+      expect(runner.state.iter).toBe(0);
+      expect(types.some((t) => t === 'review_request' || t === 'iter_artifacts' || t === 'iter_done')).toBe(false);
+      const handoffs = plannerPrompts(calls).filter((p) => /without (a )?valid iter_complete/i.test(p));
+      expect(handoffs).toHaveLength(2);
+      expect(handoffs[0]).toContain('FIRST_QUEUED_REPLY');
+      expect(handoffs[0]).not.toContain('SECOND_QUEUED_REPLY');
+      expect(handoffs[1]).toContain('SECOND_QUEUED_REPLY');
+      const refs = handoffs.map((p) => replyPath(p)!);
+      expect(refs[0]).not.toBe(refs[1]);
+      expect(fs.readFileSync(path.join(workspace, refs[0]), 'utf8')).toContain('FIRST_QUEUED_REPLY');
+      expect(fs.readFileSync(path.join(workspace, refs[1]), 'utf8')).toContain('SECOND_QUEUED_REPLY');
+    } finally {
+      runner.stop();
+    }
+  });
+
+  it('G5: oversized/control tails stay bounded; write failure reports not persisted', async () => {
+    for (const output of [`${'A'.repeat(12_000)}SAFE_TAIL_END`, `${'A'.repeat(12_000)}\u0007BAD`]) {
+      const { dispatcher } = makeDispatcher({}, { sendOutput: output });
+      await dispatcher.spawnSubagents();
+      const acks = await dispatcher.deliver(d0('g'));
+      const q = (acks[0] as { payload: { clarification: string } }).payload.clarification;
+      expect(q.length).toBeLessThan(1100);
+      expect(q).not.toContain('A'.repeat(501));
+      expect(q).not.toContain('\u0007');
+      if (output.includes('SAFE_TAIL_END')) expect(q).toContain('SAFE_TAIL_END');
+      else expect(q).toMatch(/tail omitted|disallowed form/i);
+    }
+
+    const originalWrite = fsDefault.writeFileSync;
+    fsDefault.writeFileSync = ((
+      file: fs.PathLike | number,
+      data: string | NodeJS.ArrayBufferView,
+      options?: fs.WriteFileOptions,
+    ) => {
+      if (typeof file === 'string' && String(file).includes('coder_reply_')) throw new Error('EACCES');
+      return originalWrite(file, data, options);
+    }) as typeof fs.writeFileSync;
+    syncBuiltinESMExports();
+    try {
+      const { dispatcher, calls } = makeDispatcher({}, { sendOutput: longReply() });
+      await dispatcher.spawnSubagents();
+      const acks = await dispatcher.deliver(d0('g'));
+      await dispatcher.deliver(acks[0]);
+      const p = plannerPrompts(calls).at(-1) ?? '';
+      expect(p).toMatch(/not persisted/i);
+      expect(p).toContain(MARKER);
+      expect(p).not.toMatch(/persisted at handoff:/);
+    } finally {
+      fsDefault.writeFileSync = originalWrite;
+      syncBuiltinESMExports();
+    }
+  });
+});
