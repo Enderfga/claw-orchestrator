@@ -527,7 +527,8 @@ export class Council extends EventEmitter {
   ): Promise<AgentResponse> {
     this.emitEvent({ type: 'agent-start', sessionId, round, agent: agent.name });
 
-    const sessionName = `council-${sessionId.slice(0, 8)}-${agent.name}-r${round}`;
+    // Full run id — truncating to 8 chars made every manager id share `council-`.
+    const sessionName = `${sessionId}-${agent.name}-r${round}`;
     this._activeSessions.add(sessionName);
 
     let content = '';

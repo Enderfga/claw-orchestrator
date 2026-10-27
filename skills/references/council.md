@@ -229,6 +229,17 @@ The charter is each seat's only instruction channel, and it reaches every engine
 natively on Claude Code and Grok, as the top of the seat's first message on Codex, Antigravity and OpenCode.
 Nothing is written into the worktrees.
 
+## Member session names
+
+Each council member starts an internal `SessionManager` session named
+`{councilRunId}-{memberName}-r{round}` (for example
+`council-m1abc2de-9f3c1a2b-Architect-r1`). The name carries the complete council
+run id so two concurrent councils that share a member name and round do not
+reuse one engine session, working directory, or cleanup target. `sessionKey` on
+each agent response is that opaque name; callers should treat it as an opaque
+handle, not parse it. `parentRunId` on ledger turns remains the full council run
+id.
+
 ## Transcript Logging
 
 All council sessions save transcripts to `~/.openclaw/council-logs/council-<timestamp>.md`. Transcripts are for humans to read; nothing parses them. Completed councils stay queryable via `council_status` indefinitely — the run record is on disk.
