@@ -427,17 +427,27 @@ With `"engine": "claude"` the same node drives Claude Code's `/goal` (CLI
 goal notifications, so the adapter reads the goal from what the CLI does in
 stream-json mode:
 
-- `/goal <objective>` sets the goal and starts working. A Stop hook judges the
-  condition after every turn and feeds the turn back while it does not hold, all
-  inside one send; one `result` arrives when the goal is met, and the goal clears
-  itself.
+- `/goal <objective>` sets the goal and starts working. A Stop hook — a separate
+  model judging the condition against the session — runs after every turn and
+  feeds the turn back while the condition does not hold, all inside one send;
+  one `result` arrives when the goal is met, and the goal clears itself.
 - A bare `/goal` answers at once, without a model turn — `Goal active: …` or
-  `No goal set.` After each goal turn ends the adapter asks: no goal means
-  `complete`; a goal still set means `paused`, which the node resumes within its
-  bound by sending a short "continue" message.
+  `No goal set.` A failed turn clears the goal too, so a gone goal is not proof:
+  the goal is `complete` only when a turn that started with it set ended without
+  an error and it is gone after. A goal still set with nothing driving it, a
+  failed turn, and a reopened session whose goal is gone are `paused`, which the
+  node resumes within its bound. Resuming sends a short "continue" message when
+  the goal is still set and sets it again (`/goal <objective>`) when it is not,
+  so a goal that was already met costs one turn to confirm.
 - A failed turn is read from its text: usage limits become `usageLimited`,
   overloaded and 5xx errors the matching transient codes, so the node backs off
-  and resumes as it does for Codex.
+  and resumes as it does for Codex. A failed login is `blocked` at once.
+- When the Stop hook blocks the agent's stop nine times running, the CLI ends
+  the turn anyway and says so; the goal is then `blocked` (the agent keeps
+  asking to stop, and continuing only repeats that). The template's verifier
+  still judges the tree. Write the objective as a condition the agent can show
+  it met from inside the session; one that depends on something after the
+  agent stops can never be met.
 - The session id is the thread id. A new session is started with
   `--session-id` so it is known before the goal is set, and the session is kept
   out of the registry with `skipPersistence` (not `noSessionPersistence`, which

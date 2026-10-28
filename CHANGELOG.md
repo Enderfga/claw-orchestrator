@@ -23,8 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Claude Code's `/goal` instead of a Codex thread. The node is the same — checkpointed
   session id, reattach after a restart (`--resume`), bounded resume of a usage-limited or
   stalled goal, repair on the same session, live steers, verdict from the contract — and
-  `ClaudeGoalSession` reads the goal's state from the CLI's stream-json behaviour.
-  Codex stays the default.
+  `ClaudeGoalSession` reads the goal's state from the CLI's stream-json behaviour: a goal
+  is `complete` only when a turn that started with it set ended cleanly and it is gone, a
+  goal dropped by a failed turn is set again on resume, and a failed login or a turn the
+  CLI had to end over the Stop hook is `blocked`. Codex stays the default.
 - **`fanout_start` agents declare `permissionMode` and `sandboxMode`.** Same enums as
   `session_start`. `permissionMode` uses each engine's own permission handling as in
   `session_start`; workers that must not write should set `sandboxMode` to `read-only`.

@@ -136,7 +136,7 @@ describe('ClaudeGoalSession', () => {
     expect(g.status).toBe('paused');
   });
 
-  it('reads a reopened thread: a goal still set is paused, a cleared one is complete', async () => {
+  it('reads a reopened thread as paused, goal set or not, and re-arms a goal the CLI dropped', async () => {
     const host = new FakeClaudeHost();
     host.probe = 'Goal active: make it faster (not yet evaluated)';
     const open = { threadId: 'sess-9', resumed: true, objective: 'make it faster (2x)' };
@@ -146,8 +146,68 @@ describe('ClaudeGoalSession', () => {
     // The checkpointed objective wins over the probe's rendering of it.
     expect(g?.objective).toBe('make it faster (2x)');
 
-    const done = new ClaudeGoalSession(new FakeClaudeHost(), open);
-    expect((await done.getGoal())?.status).toBe('complete');
+    // Gone on a reopened thread: met, or dropped by a failed turn. Not seen to be met, so not complete.
+    const goneHost = new FakeClaudeHost();
+    const gone = new ClaudeGoalSession(goneHost, open);
+    expect((await gone.getGoal())?.status).toBe('paused');
+    await gone.setGoal({ status: 'active' });
+    expect(goneHost.sent.at(-1)).toEqual({ text: '/goal make it faster (2x)', wait: false });
+  });
+
+  it('does not take a goal dropped by a failed turn for a met one', async () => {
+    const host = new FakeClaudeHost();
+    const s = new ClaudeGoalSession(host);
+    const seen = updates(s);
+    host.probe = 'Goal active: x';
+    await s.setGoal({ objective: 'x' });
+    // A usage limit ends the turn, and the CLI drops the goal with it.
+    host.probe = 'No goal set. Usage: `/goal <condition>`';
+    host.end({ subtype: 'success', is_error: true, result: 'Claude AI usage limit reached|1793190600' });
+    await tick();
+    expect(seen.at(-1)?.status).toBe('usageLimited');
+    expect(await s.getGoal()).toMatchObject({ status: 'usageLimited' });
+
+    // Resuming sets the goal again instead of chatting on without one.
+    await s.setGoal({ status: 'active' });
+    expect(host.sent.at(-1)).toEqual({ text: '/goal x', wait: false });
+    host.end({ subtype: 'success', result: 'done' });
+    await tick();
+    expect(seen.at(-1)?.status).toBe('complete');
+  });
+
+  it('blocks a goal whose turn the CLI had to end over the Stop hook, instead of continuing it', async () => {
+    const host = new FakeClaudeHost();
+    const s = new ClaudeGoalSession(host);
+    host.probe = 'Goal active: x';
+    await s.setGoal({ objective: 'x' });
+    const notice =
+      'A hook blocked the turn from ending 9 consecutive times — overriding and ending turn. For Stop/SubagentStop hooks, check stop_hook_active.';
+    host.emit('system', { type: 'system', subtype: 'informational', content: notice, level: 'warning' });
+    host.end({ subtype: 'success', result: 'I cannot get the harness verdict from here.' });
+    await tick();
+    expect(s.goal?.status).toBe('blocked');
+    expect(s.lastError?.message).toContain('9 consecutive times');
+
+    // Without that notice, a turn that ended with the goal still set is only paused.
+    const quiet = new ClaudeGoalSession(new FakeClaudeHost());
+    (quiet as unknown as { host: FakeClaudeHost }).host.probe = 'Goal active: y';
+    await quiet.setGoal({ objective: 'y' });
+    (quiet as unknown as { host: FakeClaudeHost }).host.end({ subtype: 'success', result: 'r' });
+    await tick();
+    expect(quiet.goal?.status).toBe('paused');
+  });
+
+  it('blocks on a failed login instead of retrying it', async () => {
+    const host = new FakeClaudeHost();
+    const s = new ClaudeGoalSession(host);
+    const errors: Array<{ code: string | null }> = [];
+    s.on('codex:error', (e) => errors.push(e as { code: string | null }));
+    await s.setGoal({ objective: 'x' });
+    host.end({ subtype: 'success', is_error: true, result: 'Not logged in · Please run /login' });
+    await tick();
+    expect(errors[0].code).toBe('unauthorized');
+    expect(s.goal?.status).toBe('blocked');
+    expect((await s.getGoal())?.status).toBe('blocked');
   });
 
   it('has no goal on a new thread nobody set one on', async () => {
@@ -206,6 +266,7 @@ describe('ClaudeGoalSession', () => {
     const s = new ClaudeGoalSession(host);
     s.detach();
     expect(host.listenerCount('result')).toBe(0);
+    expect(host.listenerCount('system')).toBe(0);
     expect(host.listenerCount('text')).toBe(0);
     expect(host.listenerCount('close')).toBe(0);
   });
@@ -229,5 +290,7 @@ describe('classifyClaudeError', () => {
     expect(classifyClaudeError('API Error: 529 {"type":"overloaded_error"}')).toBe('serverOverloaded');
     expect(classifyClaudeError('API Error: 500 Internal server error')).toBe('internalServerError');
     expect(classifyClaudeError('the model refused')).toBeNull();
+    expect(classifyClaudeError('Not logged in · Please run /login')).toBe('unauthorized');
+    expect(classifyClaudeError('', 401)).toBe('unauthorized');
   });
 });
