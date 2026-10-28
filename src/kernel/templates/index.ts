@@ -253,13 +253,15 @@ export function solveWorkflow(args: SolveArgs): WorkflowSpec {
 }
 
 export interface GoalArgs extends CommonArgs {
-  /** Model for the `codex-app` thread; omitted means codex's own default. */
+  /** Who runs the goal: a Codex `codex-app` thread (default) or a Claude Code session. */
+  engine?: GoalNode['engine'];
+  /** Model for the goal's thread; omitted means the engine's own default. */
   model?: string;
   effort?: string;
   sandboxMode?: GoalNode['sandboxMode'];
-  /** Argv prefix codex runs under, e.g. a sandbox wrapper. */
+  /** Argv prefix the engine runs under, e.g. a sandbox wrapper. */
   launcher?: string[];
-  /** Start on this existing codex-app thread (its goal is replaced). */
+  /** Start on this existing thread or Claude session (its goal is replaced). */
   threadId?: string;
   tokenBudget?: number;
   /** Wall-clock budget for one goal pass. Omitted means none. */
@@ -269,12 +271,12 @@ export interface GoalArgs extends CommonArgs {
 }
 
 /**
- * A Codex `/goal` judged by checks it did not write: goal → verify → repair.
+ * A `/goal` judged by checks it did not write: goal → verify → repair.
  *
- * The goal runs on one `codex-app` thread until Codex calls it complete. That
- * is the agent's opinion; the verifier's contract is the verdict. On red, the
- * router sends control back to the same thread with the failing checks while
- * repair budget remains.
+ * The goal runs on one thread — a Codex `codex-app` thread, or a Claude Code
+ * session — until the agent calls it complete. That is the agent's opinion;
+ * the verifier's contract is the verdict. On red, the router sends control
+ * back to the same thread with the failing checks while repair budget remains.
  */
 export function goalWorkflow(args: GoalArgs): WorkflowSpec {
   const maxRepairs = args.maxRepairs ?? 1;
@@ -282,6 +284,7 @@ export function goalWorkflow(args: GoalArgs): WorkflowSpec {
     id: 'goal',
     kind: 'goal',
     objective: args.task,
+    ...(args.engine ? { engine: args.engine } : {}),
     cwd: args.cwd,
     model: args.model,
     effort: args.effort,

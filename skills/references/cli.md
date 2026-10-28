@@ -263,34 +263,36 @@ clawo fanout "<task>" [--engines <list>] [--synthesize] [--check "<command>"]...
 
 ## `clawo goal`
 
-Run a Codex `/goal` on one `codex-app` thread, then have the runtime check the
-result: goal → verify → repair on the same thread. See [workflow.md](./workflow.md#goal).
+Run a `/goal` on one thread — a Codex `codex-app` thread, or a Claude Code
+session with `--engine claude` — then have the runtime check the result: goal →
+verify → repair on the same thread. See [workflow.md](./workflow.md#goal).
 
 ```bash
 clawo goal "<objective>" | --objective-file <file>
            [--check "<command>"]... [--contract <file>] [--check-timeout <minutes>]
-           [--launcher <arg>]... [--model <model>] [--effort <level>] [--sandbox <mode>] [--thread <id>]
+           [--engine codex|claude] [--launcher <arg>]... [--model <model>] [--effort <level>] [--sandbox <mode>] [--thread <id>]
            [--token-budget N] [--goal-timeout <minutes>] [--max-repairs N]
            [--cwd <dir>] [--wait] [--json]
 ```
 
-| Option             | Default           | Notes                                                                                                               |
-| ------------------ | ----------------- | ------------------------------------------------------------------------------------------------------------------- |
-| `--objective-file` | —                 | Read the objective from a file instead of the argument. Codex accepts at most 4,000 characters                      |
-| `-c, --check`      | —                 | A command check, repeatable, run after the goal. Split on whitespace; quote-needing commands go in `--contract`     |
-| `--contract`       | —                 | A contract JSON file; `--check` entries are appended to it                                                          |
-| `--check-timeout`  | 10                | Minutes for each `--check` (at least 1). The verifier's node timeout is sized from the checks                       |
-| `--launcher`       | —                 | Run codex under this command, one argv element per flag: `--launcher ./sandbox.sh --launcher task --launcher "0 1"` |
-| `-m, --model`      | codex's own       | Codex model                                                                                                         |
-| `--effort`         | codex's own       | Codex reasoning effort                                                                                              |
-| `--sandbox`        | `workspace-write` | Codex's own sandbox mode. With an outer sandbox as the boundary, `danger-full-access`                               |
-| `--thread`         | —                 | Start on this existing codex thread: its goal is replaced, its history kept                                         |
-| `--token-budget`   | —                 | The goal stops as `budgetLimited` past this                                                                         |
-| `--goal-timeout`   | none              | Wall-clock minutes for one goal pass                                                                                |
-| `--max-repairs`    | `1`               | Times a red verdict sends the goal back to the same thread                                                          |
-| `--cwd`            | current directory | Project directory                                                                                                   |
-| `-w, --wait`       | off               | Follow the run; exit `0` only if it completes                                                                       |
-| `--json`           | off               | Print `{ runId, state }`, or with `--wait` the final run record                                                     |
+| Option             | Default           | Notes                                                                                                                    |
+| ------------------ | ----------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `--objective-file` | —                 | Read the objective from a file instead of the argument. A goal accepts at most 4,000 characters                          |
+| `-e, --engine`     | `codex`           | Who runs the goal: `codex` (a `codex-app` thread) or `claude` (a Claude Code session)                                    |
+| `-c, --check`      | —                 | A command check, repeatable, run after the goal. Split on whitespace; quote-needing commands go in `--contract`          |
+| `--contract`       | —                 | A contract JSON file; `--check` entries are appended to it                                                               |
+| `--check-timeout`  | 10                | Minutes for each `--check` (at least 1). The verifier's node timeout is sized from the checks                            |
+| `--launcher`       | —                 | Run the engine under this command, one argv element per flag: `--launcher ./sandbox.sh --launcher task --launcher "0 1"` |
+| `-m, --model`      | the engine's own  | Model                                                                                                                    |
+| `--effort`         | the engine's own  | Reasoning effort                                                                                                         |
+| `--sandbox`        | `workspace-write` | Codex's own sandbox mode (claude has none). With an outer sandbox as the boundary, `danger-full-access`                  |
+| `--thread`         | —                 | Start on this existing codex thread or claude session: its goal is replaced, its history kept                            |
+| `--token-budget`   | —                 | The goal stops as `budgetLimited` past this                                                                              |
+| `--goal-timeout`   | none              | Wall-clock minutes for one goal pass                                                                                     |
+| `--max-repairs`    | `1`               | Times a red verdict sends the goal back to the same thread                                                               |
+| `--cwd`            | current directory | Project directory                                                                                                        |
+| `-w, --wait`       | off               | Follow the run; exit `0` only if it completes                                                                            |
+| `--json`           | off               | Print `{ runId, state }`, or with `--wait` the final run record                                                          |
 
 `clawo workflow show <runId>` prints the goal's status, tokens, time, resume
 attempts and thread id while it runs; `clawo workflow steer <runId> "<text>"`

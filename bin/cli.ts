@@ -1019,19 +1019,25 @@ program
 
 program
   .command('goal')
-  .description('Run a Codex /goal on one codex-app thread, then have the runtime check it: goal → verify → repair')
-  .argument('[objective]', 'What Codex should achieve (or use --objective-file)')
+  .description(
+    'Run a /goal on one thread (Codex or Claude Code), then have the runtime check it: goal → verify → repair',
+  )
+  .argument('[objective]', 'What the agent should achieve (or use --objective-file)')
   .option('--objective-file <file>', 'Read the objective from a file')
-  .option('-m, --model <model>', "Codex model (default: codex's own)")
+  .option('-e, --engine <engine>', 'Who runs the goal: codex | claude', 'codex')
+  .option('-m, --model <model>', "Model (default: the engine's own)")
   .option('--effort <level>', 'Reasoning effort')
   .option('--sandbox <mode>', "Codex's own sandbox: read-only | workspace-write | danger-full-access")
   .option(
     '--launcher <arg>',
-    'Run codex under this command, one argv element per flag, e.g. --launcher ./sandbox.sh --launcher task --launcher "0 1"',
+    'Run the engine under this command, one argv element per flag, e.g. --launcher ./sandbox.sh --launcher task --launcher "0 1"',
     collect,
     [],
   )
-  .option('--thread <id>', 'Start on this existing codex thread: its goal is replaced, its history kept')
+  .option(
+    '--thread <id>',
+    'Start on this existing codex thread or claude session: its goal is replaced, its history kept',
+  )
   .option('--token-budget <n>', 'Tokens the goal may spend before it stops as budgetLimited')
   .option('--goal-timeout <minutes>', 'Wall-clock budget for one goal pass (default: none)')
   .option('-c, --check <command>', 'Acceptance check the runtime runs after the goal (repeatable)', collect, [])
@@ -1044,6 +1050,11 @@ program
   .action(async (objectiveArg: string | undefined, opts) => {
     const { goalWorkflow } = await import('../src/kernel/templates/index.js');
     const { GOAL_OBJECTIVE_MAX_CHARS } = await import('../src/kernel/nodes/goal.js');
+    if (opts.engine !== 'codex' && opts.engine !== 'claude') {
+      console.error(`Error: --engine must be codex or claude, not ${opts.engine}`);
+      process.exitCode = 1;
+      return;
+    }
     const objective = opts.objectiveFile ? fs.readFileSync(opts.objectiveFile, 'utf-8').trim() : objectiveArg?.trim();
     if (!objective) {
       console.error('Error: give an objective, or --objective-file');
@@ -1052,7 +1063,7 @@ program
     }
     if ([...objective].length > GOAL_OBJECTIVE_MAX_CHARS) {
       console.error(
-        `Error: the objective is ${[...objective].length} characters; Codex accepts at most ${GOAL_OBJECTIVE_MAX_CHARS}. ` +
+        `Error: the objective is ${[...objective].length} characters; a goal accepts at most ${GOAL_OBJECTIVE_MAX_CHARS}. ` +
           'Put the full brief in a file in the working directory and name that file in the objective.',
       );
       process.exitCode = 1;
@@ -1065,6 +1076,7 @@ program
       task: objective,
       cwd,
       contract: contract as never,
+      engine: opts.engine,
       model: opts.model,
       effort: opts.effort,
       sandboxMode: opts.sandbox,

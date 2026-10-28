@@ -796,6 +796,28 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
     return { requestId, sent: true };
   }
 
+  /**
+   * Stop the running turn: stream-json's `interrupt` control request, the same
+   * one the SDK sends. The CLI answers with a `control_response`, then ends the
+   * turn with an `error_during_execution` result; an active `/goal` stays set.
+   *
+   * Not named `interrupt`: SessionManager reads a method of that name as the
+   * mark of a codex-app session.
+   */
+  interruptTurn(): boolean {
+    const stdin = this.proc?.stdin;
+    if (!this._isReady || !stdin || stdin.writable === false) return false;
+    const payload = {
+      type: 'control_request',
+      request_id: `interrupt-${randomUUID()}`,
+      request: { subtype: 'interrupt' },
+    };
+    stdin.write(JSON.stringify(payload) + '\n', (err) => {
+      if (err) this.emit(SESSION_EVENT.ERROR, new Error(`Failed to write to stdin: ${err.message}`));
+    });
+    return true;
+  }
+
   // ─── Wait for Turn Complete ──────────────────────────────────────────────
 
   /**

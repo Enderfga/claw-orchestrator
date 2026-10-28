@@ -157,12 +157,12 @@ is unrecoverable and reads back as "not found".
 | `agent`                             | One session, one turn. A new session per attempt unless `sessionName` pins one                                                                                                                                                                                      |
 | `fanout`                            | N agents in parallel on a shared prompt, optional synthesis pass. Succeeds when at least one agent does                                                                                                                                                             |
 | `council`                           | The council engine; its votes are recorded as advisory. Fails only when the council itself errors                                                                                                                                                                   |
-| `verifier`                          | Runs an acceptance contract, writes evidence — see [`verification.md`](./verification.md). `"contract": "run"` with no run-level contract passes through and verifies nothing; an inline contract with no recognised check is refused at start                   |
+| `verifier`                          | Runs an acceptance contract, writes evidence — see [`verification.md`](./verification.md). `"contract": "run"` with no run-level contract passes through and verifies nothing; an inline contract with no recognised check is refused at start                      |
 | `human_gate`                        | Parks the run until a person answers; a rejection fails the run                                                                                                                                                                                                     |
 | `router`                            | Picks the next node from declarative conditions; a backwards route is the loop                                                                                                                                                                                      |
 | `subflow`                           | Runs another workflow as a child run and adopts its verdict, with the tree digest the verdict was taken against; a child that ends `unverified` hands up no verdict                                                                                                 |
 | `autoloop`                          | A long-lived Planner / Coder / Reviewer loop; its executor is injected. On the node's first visit (`visits === 1`) the shared fresh-start boundary applies (dirty-worktree refusal + run-local `tasks/<config.runId>/.gitignore`); resume and later visits skip it. |
-| `goal`                              | A Codex `/goal` on one `codex-app` thread, run until the goal finishes — see [below](#goal)                                                                                                                                                                         |
+| `goal`                              | A `/goal` on one Codex `codex-app` thread or Claude Code session, run until the goal finishes — see [below](#goal)                                                                                                                                                  |
 | `ultraapp_synth`, `ultraapp_deploy` | UltraApp's synth and deploy stages; their executors are injected too                                                                                                                                                                                                |
 
 ### Spec and node fields
@@ -194,12 +194,12 @@ The kind-specific fields:
 | ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `agent`                             | `prompt` (required); `engine`, `model`, `effort`, `acpAgent` (a bundled ACP preset id, for `engine: "acp"`); `cwd` (default: the run's); `sessionName`, to reuse one named session across nodes; `permissionMode` (default `bypassPermissions`); `appendSystemPrompt`, standing instructions for the session |
 | `fanout`                            | `prompt` (required, the shared task) and `agents` (required); `synthesize`, `synthesisEngine` (default `claude`), `synthesisModel`, `synthesisAcpAgent`, `synthesisPermissionMode` (default `bypassPermissions`); `maxTurnsPerAgent` and `maxBudgetUsd`, per agent; `cwd`; `agentTimeoutMs`                  |
-| `council`                           | `task` (required) and `agents` (required); `projectDir` (default: the run's cwd); `maxRounds` (default 15, as for `council_start`); `maxTurnsPerAgent` and `maxBudgetUsd`, per agent; `defaultPermissionMode`; `agentTimeoutMs`                                                             |
+| `council`                           | `task` (required) and `agents` (required); `projectDir` (default: the run's cwd); `maxRounds` (default 15, as for `council_start`); `maxTurnsPerAgent` and `maxBudgetUsd`, per agent; `defaultPermissionMode`; `agentTimeoutMs`                                                                              |
 | `verifier`                          | `contract` (required): an inline contract, or `"run"` for the run-level one; `cwd` (default: the run's)                                                                                                                                                                                                      |
 | `human_gate`                        | `prompt` (required)                                                                                                                                                                                                                                                                                          |
 | `router`                            | `routes` (required): `[{ "when": <condition>, "to": <node id> }]`, first match wins; `default`, taken when nothing matches (omitted: fall through to the next node)                                                                                                                                          |
 | `subflow`                           | `workflow` (required): an inline `WorkflowSpec`, or the id of an existing run, whose stored spec runs again as a new child run. Template names do not resolve here                                                                                                                                           |
-| `goal`                              | `objective` (required); `cwd`, `model`, `effort`, `sandboxMode`, `launcher`, `threadId`, `tokenBudget`, `capacityRetry`, `stallMs` — see [Goal](#goal)                                                                                                                                                       |
+| `goal`                              | `objective` (required); `engine`, `cwd`, `model`, `effort`, `sandboxMode`, `launcher`, `threadId`, `tokenBudget`, `capacityRetry`, `stallMs` — see [Goal](#goal)                                                                                                                                             |
 | `autoloop`                          | `workspace` and `config` (the `autoloop_start` options). Started by `autoloop_start`                                                                                                                                                                                                                         |
 | `ultraapp_synth`, `ultraapp_deploy` | `appRunId`, `runDir`, `slug`; the deploy stage adds `version` and `codebasePath`. Started by UltraApp builds                                                                                                                                                                                                 |
 
@@ -333,7 +333,7 @@ specs and post them.
 | `solve`   | `triage` (fan-out) → `approve` (human gate, only with `humanGate`) → `implement` (agent) → `review` (fan-out, only with `reviewers`) → `verify` → `repair-gate` (router) | `agents` (the triage scouts; default one agent on the default engine), `implementer` (`engine`, `model`), `reviewers`, `humanGate`, `maxRepairs` (default 3), `contract` |
 | `council` | `council`, then `__verify` when a contract is declared                                                                                                                   | `agents`, `maxRounds` (default 15), `contract`                                                                                                                           |
 | `fanout`  | `fanout`, then `__verify` when a contract is declared                                                                                                                    | `agents`, `contract`                                                                                                                                                     |
-| `goal`    | `goal` → `verify` → `repair-gate` (router); `task` is the objective. See [below](#goal)                                                                                  | `model`, `tokenBudget`, `launcher`, `maxRepairs` (default 1), `contract`                                                                                                 |
+| `goal`    | `goal` → `verify` → `repair-gate` (router); `task` is the objective. See [below](#goal)                                                                                  | `engine` (`codex` default, or `claude`), `model`, `tokenBudget`, `launcher`, `maxRepairs` (default 1), `contract`                                                        |
 
 `solve` is the shape above: the triage and review fan-outs add a synthesis pass
 when they have two or more agents, `implement` and `review` continue on failure so
@@ -349,16 +349,19 @@ somewhere to deploy to), which only UltraApp starts.
 
 ## Goal
 
-A `goal` node runs one Codex `/goal` on one `codex-app` thread. Codex's
-app-server runs the goal itself: `thread/goal/set` starts its turn loop, which
-keeps going until the goal is `complete`, out of budget, `blocked`, or stopped
-by a usage limit. The node adds what an unattended run needs around that loop.
+A `goal` node runs one `/goal` on one thread: a Codex `codex-app` thread by
+default, or a Claude Code session with `"engine": "claude"` (see
+[On Claude Code](#on-claude-code)). Codex's app-server runs the goal itself:
+`thread/goal/set` starts its turn loop, which keeps going until the goal is
+`complete`, out of budget, `blocked`, or stopped by a usage limit. The node adds
+what an unattended run needs around that loop.
 
 ```jsonc
 {
   "id": "goal",
   "kind": "goal",
   "objective": "Reach the goal described in GOAL.md …",
+  "engine": "codex", // default; or "claude"
   "cwd": "/work/task/ws",
   "model": "gpt-6.1-sol", // optional; codex's own default otherwise
   "effort": "high", // optional reasoning effort
@@ -416,6 +419,47 @@ by a usage limit. The node adds what an unattended run needs around that loop.
 - **Ends.** `complete` succeeds. `budgetLimited` and `blocked` fail with the
   reason. Cancel interrupts the running turn and pauses the goal, and so does a
   `timeoutMs` that runs out. Like `autoloop`, the node has no default timeout.
+
+### On Claude Code
+
+With `"engine": "claude"` the same node drives Claude Code's `/goal` (CLI
+2.1.139 or later) through `ClaudeGoalSession`. Claude Code has no goal RPCs or
+goal notifications, so the adapter reads the goal from what the CLI does in
+stream-json mode:
+
+- `/goal <objective>` sets the goal and starts working. A Stop hook — a separate
+  model judging the condition against the session — runs after every turn and
+  feeds the turn back while the condition does not hold, all inside one send;
+  one `result` arrives when the goal is met, and the goal clears itself.
+- A bare `/goal` answers at once, without a model turn — `Goal active: …` or
+  `No goal set.` A failed turn clears the goal too, so a gone goal is not proof:
+  the goal is `complete` only when a turn that started with it set ended without
+  an error and it is gone after. A goal still set with nothing driving it, a
+  failed turn, and a reopened session whose goal is gone are `paused`, which the
+  node resumes within its bound. Resuming sends a short "continue" message when
+  the goal is still set and sets it again (`/goal <objective>`) when it is not,
+  so a goal that was already met costs one turn to confirm.
+- A failed turn is read from its text: usage limits become `usageLimited`,
+  overloaded and 5xx errors the matching transient codes, so the node backs off
+  and resumes as it does for Codex. A failed login is `blocked` at once.
+- When the Stop hook blocks the agent's stop nine times running, the CLI ends
+  the turn anyway and says so; the goal is then `blocked` (the agent keeps
+  asking to stop, and continuing only repeats that). The template's verifier
+  still judges the tree. Write the objective as a condition the agent can show
+  it met from inside the session; one that depends on something after the
+  agent stops can never be met.
+- The session id is the thread id. A new session is started with
+  `--session-id` so it is known before the goal is set, and the session is kept
+  out of the registry with `skipPersistence` (not `noSessionPersistence`, which
+  would stop the CLI writing the transcript `--resume` needs). A reopened
+  process resumes it with `--resume`; the goal is still set there, so the node
+  continues it at once.
+- Steers are written into the running turn, which the CLI folds in. Cancel and
+  pause send stream-json's `interrupt` control request; the goal stays set.
+- `tokensUsed` counts the session's input, output and cache-read tokens, and is
+  carried across reopened processes. `tokenBudget` counts from when the current
+  objective was set; past it the turn is interrupted and the goal ends
+  `budgetLimited`. `sandboxMode` does not apply; put the boundary in `launcher`.
 
 The `goal` template wraps this in `goal → verify → repair-gate`. The goal node
 continues on failure, so a goal that ran out of budget is still judged. The

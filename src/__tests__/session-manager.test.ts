@@ -367,6 +367,23 @@ describe('SessionManager', () => {
       expect(internals._activePids.has('idle-one')).toBe(false);
     });
 
+    it('idle cleanup detaches the goal adapter listening to the session', async () => {
+      await mgr.startSession({ name: 'idle-goal', cwd: '/tmp' });
+      const internals = mgr as unknown as {
+        sessions: Map<string, { lastActivity: number }>;
+        _claudeGoals: Map<string, { detach(): void }>;
+        _cleanupIdleSessions(): void;
+      };
+      const detach = vi.fn();
+      internals._claudeGoals.set('idle-goal', { detach });
+      internals.sessions.get('idle-goal')!.lastActivity = 0;
+
+      internals._cleanupIdleSessions();
+
+      expect(detach).toHaveBeenCalledOnce();
+      expect(internals._claudeGoals.has('idle-goal')).toBe(false);
+    });
+
     it('idle cleanup leaves a live session and its PID alone', async () => {
       await mgr.startSession({ name: 'busy-one', cwd: '/tmp' });
       const internals = mgr as unknown as {
