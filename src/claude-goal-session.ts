@@ -128,8 +128,13 @@ export class ClaudeGoalSession extends EventEmitter implements GoalSession {
     if (this._goal) this.emit('goal:updated', this._snapshot());
     this.emit(SESSION_EVENT.CLOSE, ...args);
   };
+  /** `_settle` reading why the last turn ended; nothing else may probe meanwhile. */
+  private _settling: Promise<void> | null = null;
   private readonly _onResult = (...args: unknown[]) => {
-    void this._settle(args[0] as Record<string, unknown> | undefined);
+    const settling = this._settle(args[0] as Record<string, unknown> | undefined).finally(() => {
+      if (this._settling === settling) this._settling = null;
+    });
+    this._settling = settling;
   };
   private readonly _onSystem = (...args: unknown[]) => {
     const e = args[0] as { subtype?: unknown; content?: unknown } | undefined;
@@ -195,6 +200,7 @@ export class ClaudeGoalSession extends EventEmitter implements GoalSession {
       if (this._turnActive) this._interrupt();
       this._setStatus('paused');
     } else if (p.status === 'active') {
+      await this._settling;
       if (!this._goal) throw new Error('no goal to resume: set an objective first');
       this._setStatus('active');
       if (!this._turnActive) {
@@ -208,6 +214,11 @@ export class ClaudeGoalSession extends EventEmitter implements GoalSession {
   }
 
   async getGoal(): Promise<GoalSnapshot | null> {
+    if (this._settling) {
+      // A turn just ended and its own probe decides the status: a second `/goal` would race it.
+      await this._settling;
+      return this._goal ? this._snapshot() : null;
+    }
     if (this._turnActive) {
       this._enforceBudget();
       return this._snapshot();

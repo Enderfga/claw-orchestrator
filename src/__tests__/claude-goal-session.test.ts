@@ -24,11 +24,14 @@ class FakeClaudeHost extends EventEmitter {
   interrupts = 0;
   /** What a bare `/goal` answers right now. */
   probe = 'No goal set. Usage: `/goal <condition>`';
+  /** When set, a bare `/goal` answers only once this resolves. */
+  hold?: Promise<void>;
   stats = { tokensIn: 0, tokensOut: 0, cachedTokens: 0 };
 
   async send(text: string, options: { waitForComplete?: boolean } = {}): Promise<unknown> {
     this.sent.push({ text, wait: !!options.waitForComplete });
     if (text === '/goal') {
+      if (this.hold) await this.hold;
       const result = { type: 'result', subtype: 'success', result: this.probe };
       this.emit('result', result);
       return { text: this.probe, event: result };
@@ -81,6 +84,25 @@ describe('ClaudeGoalSession', () => {
     // The goal turn's result is passed on; the probe's is not.
     expect(results).toHaveLength(1);
     expect((results[0] as { result: string }).result).toBe('all green');
+  });
+
+  it('lets the ended turn decide the status when the node polls while its probe is out', async () => {
+    const host = new FakeClaudeHost();
+    const s = new ClaudeGoalSession(host);
+    const seen = updates(s);
+    await s.setGoal({ objective: 'tests pass' });
+
+    let answer!: () => void;
+    host.hold = new Promise((r) => (answer = r));
+    host.end({ subtype: 'success', result: 'all green' });
+    const polled = s.getGoal();
+    await tick();
+    answer();
+
+    expect((await polled)?.status).toBe('complete');
+    expect(seen.at(-1)?.status).toBe('complete');
+    // One probe, the ended turn's own: a second would race it on the same stream.
+    expect(host.sent.filter((m) => m.text === '/goal')).toHaveLength(1);
   });
 
   it('reads a goal still set after its turn ended as paused, and continues it on active', async () => {
