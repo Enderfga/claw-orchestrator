@@ -7,14 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-
-- **Incomplete Coder turns without `iter_complete` hand off explicitly to Planner.** The
-  acknowledgement states the turn finished incomplete, that review/iteration did not
-  advance, and the choices to `send_directive` for the same iteration / ask the user /
-  stop; includes a labelled sanitized truncated reply tail and a write-time persisted
-  `iter/<n>/coder_reply_<dispatch_id>.txt` path or generic not-persisted wording.
-  Structured `request_clarification` keeps the short clarification ack.
+## [7.16.0] - 2026-10-28
 
 ### Added
 
@@ -32,6 +25,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `session_start`; workers that must not write should set `sandboxMode` to `read-only`.
   Per-engine sandbox behavior matches `session_start`. Synthesis is unchanged and is
   not constrained by these worker fields.
+
+### Fixed
+
+- **Incomplete Coder turns without `iter_complete` hand off explicitly to Planner.** The
+  acknowledgement states the turn finished incomplete, that review/iteration did not
+  advance, and the choices to `send_directive` for the same iteration / ask the user /
+  stop; includes a labelled sanitized truncated reply tail and a write-time persisted
+  `iter/<n>/coder_reply_<dispatch_id>.txt` path or generic not-persisted wording.
+  Structured `request_clarification` keeps the short clarification ack.
 
 ## [7.15.0] - 2026-10-26
 
