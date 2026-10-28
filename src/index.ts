@@ -29,6 +29,7 @@ import {
   fanoutWorkflow,
   goalWorkflow,
   solveWorkflow,
+  type GoalArgs,
   type SolveArgs,
 } from './kernel/templates/index.js';
 import { readEvents as readKernelEvents } from './kernel/store.js';
@@ -1332,7 +1333,7 @@ const plugin = {
             type: 'string',
             enum: ['solve', 'council', 'fanout', 'goal'],
             description:
-              'Build a built-in workflow instead of supplying `spec`. `solve` = triage → implement → review → verify → repair-until-green. `goal` = a Codex /goal on one codex-app thread (`task` is the objective) → verify → repair on the same thread.',
+              'Build a built-in workflow instead of supplying `spec`. `solve` = triage → implement → review → verify → repair-until-green. `goal` = a /goal on one Codex thread or Claude Code session (`task` is the objective) → verify → repair on the same thread.',
           },
           task: { type: 'string', description: 'Task text, when using `template`.' },
           agents: {
@@ -1385,13 +1386,18 @@ const plugin = {
             type: 'number',
             description: '`solve` / `goal`: repair attempts allowed (default 3 for solve, 1 for goal).',
           },
-          model: { type: 'string', description: "`goal` only: Codex model (default: codex's own)." },
+          engine: {
+            type: 'string',
+            enum: ['codex', 'claude'],
+            description: '`goal` only: who runs the goal (default codex).',
+          },
+          model: { type: 'string', description: "`goal` only: model (default: the engine's own)." },
           tokenBudget: { type: 'number', description: '`goal` only: tokens the goal may spend.' },
           launcher: {
             type: 'array',
             items: { type: 'string' },
             description:
-              '`goal` only: argv prefix codex runs under, e.g. a sandbox wrapper. It runs with your authority, like a contract command check.',
+              '`goal` only: argv prefix the engine runs under, e.g. a sandbox wrapper. It runs with your authority, like a contract command check.',
           },
           cwd: { type: 'string', description: 'Working directory for the run.' },
           runId: { type: 'string', description: 'Explicit run id (defaults to a generated one).' },
@@ -1486,6 +1492,7 @@ const plugin = {
               task,
               cwd,
               contract: args.contract as never,
+              engine: args.engine as GoalArgs['engine'],
               model: args.model as string | undefined,
               tokenBudget: args.tokenBudget as number | undefined,
               launcher: args.launcher as string[] | undefined,

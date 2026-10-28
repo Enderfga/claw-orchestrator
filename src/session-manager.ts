@@ -182,6 +182,7 @@ import { PersistentGeminiSession } from './persistent-gemini-session.js';
 import { PersistentCodexSession } from './persistent-codex-session.js';
 import { PersistentCodexAppServerSession, type ThreadGoal } from './persistent-codex-app-session.js';
 import type { GoalSession } from './kernel/nodes/goal.js';
+import { ClaudeGoalSession, type ClaudeGoalOpen } from './claude-goal-session.js';
 import { PersistentCursorSession } from './persistent-cursor-session.js';
 import { PersistentGrokSession } from './persistent-grok-session.js';
 import { PersistentOpencodeSession } from './persistent-opencode-session.js';
@@ -1025,6 +1026,8 @@ function readClosedLedgerRestore(ledgerDir: string): ClosedLedgerRestore | null 
 
 export class SessionManager {
   private sessions = new Map<string, ManagedSession>();
+  /** Goal adapters over `claude` sessions, by session name; dropped when the session stops. */
+  private _claudeGoals = new Map<string, ClaudeGoalSession>();
   private _pendingSessions = new Map<string, Promise<SessionInfo>>();
   /**
    * Starts that passed the capacity check and are not in `sessions` yet. The
@@ -1935,6 +1938,8 @@ export class SessionManager {
 
   async stopSession(name: string, opts: { keepPersisted?: boolean } = {}): Promise<void> {
     const managed = this._getSession(name);
+    this._claudeGoals.get(name)?.detach();
+    this._claudeGoals.delete(name);
     managed.session.stop();
     this.sessions.delete(name);
     // Remove PID tracking
@@ -2403,6 +2408,8 @@ export class SessionManager {
       this.logger.info(`Stopped session: ${name}`);
     }
     this.sessions.clear();
+    for (const adapter of this._claudeGoals.values()) adapter.detach();
+    this._claudeGoals.clear();
     // Clear PID tracking
     this._activePids.clear();
     this._pidCommands.clear();
@@ -2423,6 +2430,28 @@ export class SessionManager {
   codexGoalSession(name: string): GoalSession | undefined {
     const session = this.sessions.get(name)?.session;
     return session instanceof PersistentCodexAppServerSession ? session : undefined;
+  }
+
+  /**
+   * The goal surface of the session behind `name`: a `codex-app` session as it
+   * is, a `claude` session through `ClaudeGoalSession` (one per session, made on
+   * first use with what the node knows of the thread). Other engines have none.
+   */
+  goalSession(name: string, open?: ClaudeGoalOpen): GoalSession | undefined {
+    const session = this.sessions.get(name)?.session;
+    if (session instanceof PersistentCodexAppServerSession) return session;
+    if (!(session instanceof PersistentClaudeSession)) return undefined;
+    let adapter = this._claudeGoals.get(name);
+    // A session replaced under the same name (model switch, tool update) gets a new adapter.
+    if (adapter && adapter.host !== session) {
+      adapter.detach();
+      adapter = undefined;
+    }
+    if (!adapter) {
+      adapter = new ClaudeGoalSession(session, open);
+      this._claudeGoals.set(name, adapter);
+    }
+    return adapter;
   }
 
   /**

@@ -1,10 +1,13 @@
 /**
- * `goal` node — a Codex `/goal` run on one `codex-app` thread.
+ * `goal` node — a `/goal` run on one thread: a Codex `codex-app` thread, or a
+ * Claude Code session (`engine: 'claude'`).
  *
  * Codex's app-server runs a goal itself: `thread/goal/set` starts its turn loop,
  * which keeps going until the goal is `complete`, out of budget, blocked, or
- * stopped by a usage limit. What the kernel adds is what a long unattended run
- * needs around that loop:
+ * stopped by a usage limit. Claude Code's `/goal` keeps a session working the
+ * same way, through a Stop hook; `ClaudeGoalSession` puts it behind the same
+ * surface, so everything below holds for both. What the kernel adds is what a
+ * long unattended run needs around that loop:
  *
  *  - **Reattach, never restart.** The thread id is checkpointed as soon as the
  *    session opens. A resumed run hands it to `thread/resume`, and a resume
@@ -22,6 +25,7 @@
  *    `turn/steer`; with no turn running it waits for the next one.
  */
 
+import { randomUUID } from 'node:crypto';
 import { SESSION_EVENT } from '../../constants.js';
 import type { NodeContext, NodeResult } from '../engine.js';
 import type { GoalNode, NodeSpec } from '../types.js';
@@ -37,7 +41,11 @@ export interface GoalSnapshot {
   timeUsedSeconds: number;
 }
 
-/** The `codex-app` surface this node drives. `PersistentCodexAppServerSession` implements it. */
+/**
+ * The goal surface this node drives. `PersistentCodexAppServerSession`
+ * implements it for Codex, `ClaudeGoalSession` for Claude Code; `codexThreadId`
+ * is the Claude session id there.
+ */
 export interface GoalSession {
   readonly codexThreadId: string | undefined;
   readonly goal: GoalSnapshot | null;
@@ -125,13 +133,17 @@ const POLL_EVERY_MS = 60_000;
 export async function executeGoalNode(node: NodeSpec, ctx: NodeContext): Promise<NodeResult> {
   const spec = node as GoalNode;
   const manager = ctx.manager;
-  if (!manager?.codexGoalSession) return { ok: false, error: 'goal node requires a session manager' };
+  if (!manager?.goalSession && !manager?.codexGoalSession) {
+    return { ok: false, error: 'goal node requires a session manager' };
+  }
+  const claude = spec.engine === 'claude';
+  const engineName = claude ? 'claude' : 'codex-app';
   if (!spec.objective?.trim()) return { ok: false, error: `goal node '${spec.id}' has no objective` };
   if (chars(spec.objective) > GOAL_OBJECTIVE_MAX_CHARS) {
     return {
       ok: false,
       error:
-        `goal node '${spec.id}': the objective is ${chars(spec.objective)} characters and Codex accepts at most ` +
+        `goal node '${spec.id}': the objective is ${chars(spec.objective)} characters and a goal accepts at most ` +
         `${GOAL_OBJECTIVE_MAX_CHARS}; put the full brief in a file in the working directory and name that file in the objective`,
     };
   }
@@ -303,28 +315,46 @@ export async function executeGoalNode(node: NodeSpec, ctx: NodeContext): Promise
     const visit = ctx.record.nodes[spec.id]?.visits ?? 1;
     sessionName = `${ctx.runId}-${spec.id}-v${visit}a${ctx.attempt}${opened > 0 ? `-r${opened}` : ''}`;
     opened += 1;
+    // Claude reports its session id only with a turn's `init`, so a new session
+    // is given one up front: the thread is known before the goal is set.
+    const claudeId = claude && !threadId ? randomUUID() : undefined;
     try {
       await manager.startSession({
         name: sessionName,
-        engine: 'codex-app',
+        engine: engineName,
         cwd: spec.cwd || ctx.cwd,
         model: spec.model,
         effort: spec.effort as never,
-        sandboxMode: spec.sandboxMode,
+        ...(claude ? {} : { sandboxMode: spec.sandboxMode }),
         launcher: spec.launcher,
         permissionMode: 'bypassPermissions',
         // The node checkpoints the thread id itself; a registry entry would only
         // let a later session of the same name pick the thread up behind its back.
-        noSessionPersistence: true,
+        // On claude, `noSessionPersistence` also stops the CLI writing the
+        // transcript, and a transcript is what `--resume` reattaches.
+        ...(claude ? { skipPersistence: true } : { noSessionPersistence: true }),
         ...(threadId ? { resumeSessionId: threadId } : {}),
+        ...(claudeId ? { customSessionId: claudeId } : {}),
       });
     } catch (err) {
-      return `could not start the codex-app session: ${(err as Error).message}`;
+      return `could not start the ${engineName} session: ${(err as Error).message}`;
     }
-    const live = manager.codexGoalSession?.(sessionName);
-    if (!live?.codexThreadId) return 'the codex-app session has no thread';
+    const opening = {
+      threadId: threadId ?? claudeId,
+      resumed: !!threadId,
+      objective: data.objective,
+      tokensUsed: data.tokensUsed,
+      timeUsedSeconds: data.timeUsedSeconds,
+    };
+    const live = manager.goalSession
+      ? manager.goalSession(sessionName, opening)
+      : claude
+        ? undefined
+        : manager.codexGoalSession?.(sessionName);
+    if (!live) return `the ${engineName} session has no goal surface`;
+    if (!live.codexThreadId) return `the ${engineName} session has no thread`;
     if (threadId && live.codexThreadId !== threadId) {
-      return `could not resume codex thread ${threadId} (got ${live.codexThreadId}); refusing to start the goal over`;
+      return `could not resume ${claude ? 'claude session' : 'codex thread'} ${threadId} (got ${live.codexThreadId}); refusing to start the goal over`;
     }
     session = live;
     closed = false;
@@ -398,9 +428,9 @@ export async function executeGoalNode(node: NodeSpec, ctx: NodeContext): Promise
       }
 
       if (closed) {
-        // The app-server is gone; the thread is on disk. Reattach after a backoff.
+        // The engine process is gone; the thread is on disk. Reattach after a backoff.
         if (retryAt === null) {
-          const stop = spendRecovery('the codex app-server exited');
+          const stop = spendRecovery(claude ? 'the claude process exited' : 'the codex app-server exited');
           if (stop) return stop;
         }
         if (Date.now() >= (retryAt ?? 0)) {

@@ -18,6 +18,7 @@
 import type { Logger } from '../logger.js';
 import type { SendOptions, SendResult, SessionConfig, SessionInfo, SessionStats } from '../types.js';
 import type { GoalSession } from './nodes/goal.js';
+import type { ClaudeGoalOpen as GoalSessionOpen } from '../claude-goal-session.js';
 
 /** Structural SessionManager surface. Declared once here; the four private copies are gone. */
 export interface SessionManagerLike {
@@ -28,6 +29,11 @@ export interface SessionManagerLike {
   getStatus?(name: string): SessionInfo & { stats: SessionStats };
   /** The live `codex-app` session behind `name`, for the `goal` node. */
   codexGoalSession?(name: string): GoalSession | undefined;
+  /**
+   * The goal surface of the session behind `name`, `codex-app` or `claude`.
+   * `open` is what the node knows about the thread; Codex keeps that itself.
+   */
+  goalSession?(name: string, open?: GoalSessionOpen): GoalSession | undefined;
 }
 
 export interface AgentStepArgs {

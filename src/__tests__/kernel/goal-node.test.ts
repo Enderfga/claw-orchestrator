@@ -552,3 +552,114 @@ describe('goal objective limit', () => {
     expect((done!.nodes.goal.data as GoalNodeData).threadId).toBe('thread-2');
   });
 });
+
+/**
+ * The same node on Claude Code. The manager hands out the goal surface through
+ * `goalSession(name, open)`; the fake stands in for `ClaudeGoalSession`, whose
+ * thread is the session id the node chose (`open.threadId`).
+ */
+function claudeManager(script: (s: FakeGoalSession, n: number) => void) {
+  const base = fakeManager(() => new FakeGoalSession(''));
+  const opens: Array<Record<string, unknown>> = [];
+  const sessions = new Map<string, FakeGoalSession>();
+  const manager = {
+    ...base,
+    opens,
+    sessions,
+    async startSession(config: Record<string, unknown>) {
+      base.starts.push(config);
+      return { name: config.name } as never;
+    },
+    goalSession(name: string, open: Record<string, unknown> = {}) {
+      let s = sessions.get(name);
+      if (!s) {
+        opens.push(open);
+        s = new FakeGoalSession(String(open.threadId ?? ''));
+        sessions.set(name, s);
+        script(s, opens.length);
+      }
+      return s as never;
+    },
+  };
+  return manager;
+}
+
+describe('goal node on claude', () => {
+  it('opens a claude session with its own id and a transcript it can resume, then completes', async () => {
+    const m = claudeManager((s) => {
+      s.onSet = (_p, self) => self.move('complete', { tokensUsed: 42 });
+    });
+    const kernel = kernelWith(m as never);
+    const run = await kernel.start(
+      oneGoal({ engine: 'claude', sandboxMode: 'danger-full-access', launcher: ['/opt/sandbox.sh', 'llava', '0 1'] }),
+    );
+    const done = await kernel.wait(run.runId);
+
+    expect(done!.nodes.goal.state).toBe('succeeded');
+    const start = m.starts[0];
+    expect(start).toMatchObject({
+      engine: 'claude',
+      skipPersistence: true,
+      launcher: ['/opt/sandbox.sh', 'llava', '0 1'],
+      permissionMode: 'bypassPermissions',
+    });
+    // `noSessionPersistence` would stop claude writing the transcript `--resume` needs.
+    expect(start.noSessionPersistence).toBeUndefined();
+    expect(start.sandboxMode).toBeUndefined();
+    expect(start.customSessionId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(m.opens[0]).toMatchObject({ threadId: start.customSessionId, resumed: false });
+    expect((done!.nodes.goal.data as GoalNodeData).threadId).toBe(start.customSessionId);
+  });
+
+  it('resumes the same claude session after the process exits, handing over what it spent', async () => {
+    const m = claudeManager((s, n) => {
+      if (n === 1) {
+        s.onSet = (_p, self) => {
+          self.move('active', { tokensUsed: 700, timeUsedSeconds: 30 });
+          setTimeout(() => self.emit('close', 1), 10);
+        };
+      } else {
+        s.goal = {
+          objective: 'make it faster',
+          status: 'active',
+          tokenBudget: null,
+          tokensUsed: 700,
+          timeUsedSeconds: 30,
+        };
+        setTimeout(() => s.move('complete', { tokensUsed: 900 }), 10);
+      }
+    });
+    const kernel = kernelWith(m as never);
+    const done = await kernel.wait(
+      (await kernel.start(oneGoal({ engine: 'claude', capacityRetry: { max: 3, backoffMs: 5 } }))).runId,
+    );
+
+    expect(done!.nodes.goal.state).toBe('succeeded');
+    expect(m.starts).toHaveLength(2);
+    const first = m.starts[0].customSessionId;
+    expect(m.starts[1].resumeSessionId).toBe(first);
+    expect(m.starts[1].customSessionId).toBeUndefined();
+    expect(m.opens[1]).toMatchObject({
+      threadId: first,
+      resumed: true,
+      objective: 'make it faster',
+      tokensUsed: 700,
+      timeUsedSeconds: 30,
+    });
+  });
+
+  it('fails clearly when the manager has no goal surface for claude', async () => {
+    const m = fakeManager(() => new FakeGoalSession('t'));
+    const kernel = kernelWith(m);
+    const done = await kernel.wait((await kernel.start(oneGoal({ engine: 'claude' }))).runId);
+    expect(done!.nodes.goal.state).toBe('failed');
+    expect(done!.nodes.goal.error).toContain('the claude session has no goal surface');
+  });
+
+  it('carries the engine through the goal template, and leaves codex the default', () => {
+    const claude = goalWorkflow({ task: 'x', cwd: tmp, engine: 'claude' });
+    expect(claude.nodes[0]).toMatchObject({ kind: 'goal', engine: 'claude' });
+    const codex = goalWorkflow({ task: 'x', cwd: tmp });
+    expect('engine' in codex.nodes[0]).toBe(false);
+  });
+});

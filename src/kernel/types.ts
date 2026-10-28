@@ -202,8 +202,9 @@ export interface AutoloopNode extends NodeBase {
 }
 
 /**
- * A Codex `/goal`: one `codex-app` thread working on one objective, turn after
- * turn on its own, until the goal leaves `active`.
+ * A `/goal`: one thread working on one objective, turn after turn on its own,
+ * until the goal leaves `active`. A Codex `codex-app` thread by default, or a
+ * Claude Code session with `engine: 'claude'`.
  *
  * The thread id is checkpointed on the node, so a resumed run reattaches the
  * same thread rather than starting the objective over. A revisit after a red
@@ -214,11 +215,14 @@ export interface AutoloopNode extends NodeBase {
 export interface GoalNode extends NodeBase {
   kind: 'goal';
   objective: string;
+  /** Who runs the goal. Default `codex`. */
+  engine?: 'codex' | 'claude';
   cwd?: string;
   model?: string;
   effort?: string;
+  /** Codex's own sandbox; Claude Code has no equivalent and ignores it. */
   sandboxMode?: 'read-only' | 'workspace-write' | 'danger-full-access';
-  /** Argv prefix codex runs under, e.g. a sandbox wrapper. Caller-authored. */
+  /** Argv prefix the engine runs under, e.g. a sandbox wrapper. Caller-authored. */
   launcher?: string[];
   /**
    * Start on this existing codex-app thread instead of a new one: its goal is

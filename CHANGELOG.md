@@ -18,6 +18,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A `goal` can run on Claude Code.** `clawo goal --engine claude`, `engine: 'claude'` on a
+  `goal` node, and `engine` on `workflow_start`'s `goal` template run the goal with
+  Claude Code's `/goal` instead of a Codex thread. The node is the same — checkpointed
+  session id, reattach after a restart (`--resume`), bounded resume of a usage-limited or
+  stalled goal, repair on the same session, live steers, verdict from the contract — and
+  `ClaudeGoalSession` reads the goal's state from the CLI's stream-json behaviour.
+  Codex stays the default.
 - **`fanout_start` agents declare `permissionMode` and `sandboxMode`.** Same enums as
   `session_start`. `permissionMode` uses each engine's own permission handling as in
   `session_start`; workers that must not write should set `sandboxMode` to `read-only`.
