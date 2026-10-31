@@ -28,6 +28,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Concurrent councils with the same member name no longer share one internal
+  session.** Member session names keep the complete council run id
+  (`{runId}-{member}-r{round}`) instead of an 8-character prefix that collapsed every
+  manager-minted id to `council-`. Engines, working directories, outputs and cleanup
+  stay per run; `sessionKey` remains an opaque handle and `parentRunId` is unchanged.
 - **Incomplete Coder turns without `iter_complete` hand off explicitly to Planner.** The
   acknowledgement states the turn finished incomplete, that review/iteration did not
   advance, and the choices to `send_directive` for the same iteration / ask the user /
