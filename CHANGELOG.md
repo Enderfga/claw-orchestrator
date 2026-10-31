@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`autoloop_resume` native tool.** One plugin/MCP registration that forwards
+  caller `run_id`, optional `send_timeout_ms` / `pending_dispatch_id`, and optional
+  `*CustomEngineRef` names once to `SessionManager.autoloopResume`. Omission stays
+  omission; live/cold validation and audit remain manager-owned. Distinct from
+  `workflow_resume`.
+
+### Fixed
+
+- **`autoloop_resume` public help distinguishes live vs cold timeout resume.**
+  Tool description and tools reference no longer state the live pending-ID pair
+  as a universal requirement; cold omission/reconstruction and timeout-only
+  increase without pending are documented explicitly. Runtime behavior unchanged.
+
 ## [7.16.1] - 2026-10-31
 
 ### Added
