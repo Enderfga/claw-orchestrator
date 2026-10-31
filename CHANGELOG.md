@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [7.16.1] - 2026-10-31
+
+### Added
+
+- **Antigravity sessions take `settings`.** It is passed as `agy --settings` (agy 1.4.12): settings.json
+  keys as inline JSON or a file path, for that run only. agy refuses a key it does not know.
+- **GPT-6.1 Terra** is registered for Codex (listed by Codex 0.165.0), at $1 / $5 per million input /
+  output tokens and $0.05 cached.
+
+### Fixed
+
+- **Concurrent councils with the same member name no longer share one internal
+  session.** Member session names keep the complete council run id
+  (`{runId}-{member}-r{round}`) instead of an 8-character prefix that collapsed every
+  manager-minted id to `council-`. Engines, working directories, outputs and cleanup
+  stay per run; `sessionKey` remains an opaque handle and `parentRunId` is unchanged.
+
+### Changed
+
+- Tested with Claude Code 2.1.316, Codex 0.166.0, Antigravity 1.4.12 and OpenCode 1.19.5 (Grok Build
+  1.0.70 unchanged): one live turn on each through its wrapper, and the model registry matches the
+  OpenAI, Anthropic and xAI published prices.
+
 ## [7.16.0] - 2026-10-28
 
 ### Added
@@ -28,11 +51,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Concurrent councils with the same member name no longer share one internal
-  session.** Member session names keep the complete council run id
-  (`{runId}-{member}-r{round}`) instead of an 8-character prefix that collapsed every
-  manager-minted id to `council-`. Engines, working directories, outputs and cleanup
-  stay per run; `sessionKey` remains an opaque handle and `parentRunId` is unchanged.
 - **Incomplete Coder turns without `iter_complete` hand off explicitly to Planner.** The
   acknowledgement states the turn finished incomplete, that review/iteration did not
   advance, and the choices to `send_directive` for the same iteration / ask the user /
