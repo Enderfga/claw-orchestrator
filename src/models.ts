@@ -304,6 +304,14 @@ const MODELS: ModelDef[] = [
     pricing: { input: 2, output: 10, cached: 0.1 },
     contextWindow: 1_050_000,
   },
+  // Codex 0.166.0 lists GPT-6.1 Terra, at half of Sol's list price throughout.
+  {
+    id: 'gpt-6.1-terra',
+    engine: 'codex',
+    provider: 'openai',
+    pricing: { input: 1, output: 5, cached: 0.05 },
+    contextWindow: 1_050_000,
+  },
   {
     id: 'gpt-6-luna',
     engine: 'codex',

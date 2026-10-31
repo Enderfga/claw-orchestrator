@@ -127,6 +127,18 @@ describe('PersistentAgySession', () => {
       expect(spawnArgs).toContain('--model');
       expect(spawnArgs).toContain('gemini-3.5-flash');
       expect(spawnArgs).toContain('--log-file');
+      expect(spawnArgs).not.toContain('--settings');
+    });
+
+    it('passes settings through as --settings', async () => {
+      const settings = '{"autoUpdates":false}';
+      const session = new PersistentAgySession({ name: 'test', cwd: '/tmp', settings } as never);
+      await session.start();
+      const sendPromise = session.send('hello', { waitForComplete: true });
+      setTimeout(() => succeedProc(mockProc), 10);
+      await sendPromise;
+      const spawnArgs = mockSpawn.mock.calls[0][1] as string[];
+      expect(spawnArgs[spawnArgs.indexOf('--settings') + 1]).toBe(settings);
     });
 
     it('uses plan mode for read-only sessions', async () => {

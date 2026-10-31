@@ -208,6 +208,10 @@ export class PersistentAgySession extends BaseOneShotSession {
 
     if (this.agyConversationId) args.push('--conversation', this.agyConversationId);
 
+    // agy 1.4.12 takes the same `settings` value as Claude Code: inline JSON or a
+    // file path, applied to this run only and never saved.
+    if (this.options.settings) args.push('--settings', this.options.settings);
+
     // 1.2.6 changed the default for a headless run from 5 minutes to unlimited,
     // so passing this is also what keeps a stuck turn from running forever.
     args.push('--print-timeout', `${agyPrintTimeoutSec(timeoutMs)}s`);
