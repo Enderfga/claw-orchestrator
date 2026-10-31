@@ -306,11 +306,11 @@ with `visits_lt`.
 }
 ```
 
-A contract written inside a spec — the run-level `contract`, or a verifier's
-inline one — is used as written, so each check goes in the `{ "spec": { … } }`
-wrapper shown here, with `id` and `required` beside `spec`. The `contract` argument
-of `workflow_start` and `POST /workflow/new` is normalized first and also accepts
-bare checks (`{ "type": "command", … }`); when given, it replaces the spec's own.
+Every contract a run carries — the run-level `contract`, a verifier's inline one,
+and the `contract` argument of `workflow_start` and `POST /workflow/new` — is
+normalized at start, so a check may be written bare (`{ "type": "command", … }`) or
+in the `{ "spec": { … } }` wrapper shown here, with `id` and `required` beside
+`spec`. The `contract` argument, when given, replaces the spec's own.
 See [`verification.md`](./verification.md#the-one-rule-about-where-contracts-come-from).
 
 When the router sends control back to `implement`, the agent is told what the
@@ -516,8 +516,8 @@ which is not the same as success.
 The implicit `__verify` is the last node, and a run only ends `completed` after
 its last node has run, so every such path is checked. A spec that places its own
 `"contract": "run"` verifier gets no `__verify`, and must route every path through
-that node: a run whose path skips it ends `completed` / `unverified`, with no
-check run.
+that node: a run whose path skips it ends `failed` / `unverified`, with no check
+run (see below).
 
 A run whose spec declares a run-level `contract` cannot complete without having
 run it. The kernel appends a terminal verifier unless the spec places its own

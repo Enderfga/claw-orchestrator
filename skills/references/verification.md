@@ -20,8 +20,6 @@ goes through `normalizeContract()`, which drops anything it does not recognise, 
 it carries no fields the executor did not model; one with no recognised check is
 refused before the run starts. That argument takes each check bare,
 `{ "type": "command", … }`, or wrapped, `{ "id"?, "spec": { … }, "required"? }`.
-A contract written inside a spec — `spec.contract`, or a verifier's inline
-`contract` — is used as written, so its checks must be in the wrapped form.
 
 A workflow start normalises every contract the run carries the same way: the
 `contract` start option, the spec's own `contract`, and each verifier node's
