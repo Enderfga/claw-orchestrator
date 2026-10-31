@@ -2295,6 +2295,95 @@ const plugin = {
       },
     });
 
+    // ─── Tool: autoloop_resume ────────────────────────────────────
+    //
+    // Thin native facade over SessionManager.autoloopResume. Caller options are
+    // mapped once; omission stays omission. Validation, audit and live/cold
+    // semantics stay in the manager. Local catch replaces thrown errors with a
+    // fixed message — normalizeToolResult only wraps successful results.
+
+    registerTool({
+      name: 'autoloop_resume',
+      description:
+        'Resume a v2 autoloop run. Ordinary and activity-lease pauses resume with no timeout fields. Live send-timeout pending: omitting timeout fields is a no-op (pending is not cleared); advancing it needs an explicit send_timeout_ms increase and the matching pending_dispatch_id. Cold resume: omission still follows manager reconstruction even when a pending dispatch was stored; pending_dispatch_id is required only when an increase and pending coexist; a cold timeout-only increase without pending remains supported. Optional *CustomEngineRef names resolve against CLAWO_CUSTOM_ENGINE_<REF> on the orchestrator host for cold custom-engine runs. Returns { ok, state }; a paused or terminated state is not completed project work.',
+      parameters: {
+        type: 'object',
+        properties: {
+          run_id: { type: 'string', description: 'Run id from autoloop_start' },
+          send_timeout_ms: {
+            type: 'number',
+            minimum: 5_000,
+            maximum: 7_200_000,
+            description:
+              'Optional send-timeout increase in ms (inclusive 5000–7200000). Omission preserves the historical resume path; when supplied it must be a strict increase over the run’s effective value (manager-enforced).',
+          },
+          pending_dispatch_id: {
+            type: 'string',
+            description:
+              'Optional exact pending dispatch id. Required by the manager only when increasing the timeout while a pending dispatch exists (live or cold); omit for ordinary resume and for cold timeout-only increase without pending.',
+          },
+          plannerCustomEngineRef: {
+            type: 'string',
+            description:
+              'Secret reference name for the Planner custom engine (CLAWO_CUSTOM_ENGINE_<REF>). Supply only when the stored run used engine "custom" for that role.',
+          },
+          coderCustomEngineRef: {
+            type: 'string',
+            description:
+              'Secret reference name for the Coder custom engine (CLAWO_CUSTOM_ENGINE_<REF>). Supply only when the stored run used engine "custom" for that role.',
+          },
+          reviewerCustomEngineRef: {
+            type: 'string',
+            description:
+              'Secret reference name for the Reviewer custom engine (CLAWO_CUSTOM_ENGINE_<REF>). Supply only when the stored run used engine "custom" for that role.',
+          },
+        },
+        required: ['run_id'],
+      },
+      execute: async (_id, args) => {
+        try {
+          const runId = args.run_id;
+          if (typeof runId !== 'string' || runId.length === 0) {
+            throw new Error('run_id must be a non-empty string');
+          }
+          for (const key of [
+            'pending_dispatch_id',
+            'plannerCustomEngineRef',
+            'coderCustomEngineRef',
+            'reviewerCustomEngineRef',
+          ] as const) {
+            if (!Object.prototype.hasOwnProperty.call(args, key)) continue;
+            const value = args[key];
+            if (typeof value !== 'string' || value.length === 0) {
+              throw new Error(`${key} must be a non-empty string when provided`);
+            }
+          }
+
+          const resumeOptions: NonNullable<Parameters<SessionManager['autoloopResume']>[1]> = {
+            ...(resolveSecretRefs({
+              plannerCustomEngine: args.plannerCustomEngineRef as string | undefined,
+              coderCustomEngine: args.coderCustomEngineRef as string | undefined,
+              reviewerCustomEngine: args.reviewerCustomEngineRef as string | undefined,
+            }) as Pick<
+              NonNullable<Parameters<SessionManager['autoloopResume']>[1]>,
+              'plannerCustomEngine' | 'coderCustomEngine' | 'reviewerCustomEngine'
+            >),
+          };
+          if (Object.prototype.hasOwnProperty.call(args, 'send_timeout_ms')) {
+            resumeOptions.sendTimeoutMs = args.send_timeout_ms as number;
+          }
+          if (Object.prototype.hasOwnProperty.call(args, 'pending_dispatch_id')) {
+            resumeOptions.pendingDispatchId = args.pending_dispatch_id as string;
+          }
+
+          const state = await getManager().autoloopResume(runId, resumeOptions);
+          return { ok: true, state };
+        } catch {
+          throw new Error('Autoloop resume failed');
+        }
+      },
+    });
+
     // ─── ultraapp (read-only) ─────────────────────────────────────────────
 
     registerTool({

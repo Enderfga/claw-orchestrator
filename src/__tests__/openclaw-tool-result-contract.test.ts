@@ -104,8 +104,53 @@ describe('OpenClaw tool result contract', () => {
   });
 
   it('registers only the namespaced Codex thread-listing tool', () => {
-    expect(registration.tools).toHaveLength(78);
+    expect(registration.tools).toHaveLength(79);
     expect(registration.tools.has('codex_thread_list')).toBe(true);
     expect(registration.tools.has('codex_threads')).toBe(false);
+    expect(registration.tools.has('autoloop_resume')).toBe(true);
+  });
+
+  it('autoloop_resume normalizes {ok,state} by identity and masks thrown manager errors', async () => {
+    const state = {
+      run_id: 'resume-contract',
+      status: 'paused',
+      iter: 1,
+      subagents_spawned: true,
+      started_at: '2026-10-29T00:00:00.000Z',
+      workspace: '/tmp',
+      ledger_dir: '/tmp/tasks/resume-contract',
+      push_log_count: 0,
+      status_reason: 'awaiting_resume',
+      consecutive_phase_errors: 0,
+      recent_phase_errors: [],
+      metric_history: [],
+      last_activity_at: 0,
+    };
+    const resume = vi.spyOn(SessionManager.prototype, 'autoloopResume').mockResolvedValue(state as never);
+    try {
+      const result = (await registration.tools.get('autoloop_resume')!.execute('resume-ok', {
+        run_id: 'resume-contract',
+      })) as AgentToolResult;
+      const payload = { ok: true as const, state };
+      expect(result.details).toEqual(payload);
+      expect((result.details as { state: unknown }).state).toBe(state);
+      expect(result.content[0]?.type).toBe('text');
+      expect(result.content[0]?.text).toContain('"ok": true');
+
+      const sentinel = 'SECRET_SENTINEL_CONTRACT';
+      resume.mockRejectedValueOnce(new Error(`manager boom ${sentinel}`));
+      let caught: unknown;
+      try {
+        await registration.tools.get('autoloop_resume')!.execute('resume-err', { run_id: 'resume-contract' });
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught).toBeInstanceOf(Error);
+      expect((caught as Error).message).toBe('Autoloop resume failed');
+      expect(String(caught)).not.toContain(sentinel);
+      expect(resume).toHaveBeenCalledTimes(2);
+    } finally {
+      resume.mockRestore();
+    }
   });
 });

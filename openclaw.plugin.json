@@ -157,6 +157,7 @@
       "autoloop_list",
       "autoloop_reset_agent",
       "autoloop_stop",
+      "autoloop_resume",
       "session_send_to",
       "session_inbox",
       "session_deliver_inbox",

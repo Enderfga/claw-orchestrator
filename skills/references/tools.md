@@ -1,6 +1,6 @@
 # Tools Reference
 
-All 78 tools are registered as OpenClaw plugin tools and exposed over MCP by `clawo-mcp` (see [mcp.md](./mcp.md)). The embedded HTTP server covers a subset of them.
+All 79 tools are registered as OpenClaw plugin tools and exposed over MCP by `clawo-mcp` (see [mcp.md](./mcp.md)). The embedded HTTP server covers a subset of them.
 
 ## Session Lifecycle (6)
 
@@ -611,7 +611,7 @@ Get status and findings when completed.
 
 ---
 
-## Autoloop (6)
+## Autoloop (7)
 
 Three-agent autonomous iteration loop (Planner / Coder / Reviewer) over a git workspace. See [`autoloop.md`](./autoloop.md) for the operator reference (push policy, ledger layout, smoke test).
 
@@ -650,13 +650,13 @@ Start a chat-mode autoloop. Planner starts immediately; Coder + Reviewer start o
 > permission to choose what binary runs. Built-in engines stay fully selectable
 > over HTTP.
 >
-> **Resuming by reference.** A remote resume names the credential instead of
-> carrying it — `plannerCustomEngineRef` and friends on `POST /autoloop/<id>/resume`,
-> `agentCustomEngineRefs` on `workflow_resume` — and the orchestrator resolves the
-> name against its own `CLAWO_CUSTOM_ENGINE_<NAME>` environment.
-> `GET /autoloop/<id>/resume-requirements` lists which roles need one. The name is
-> not sensitive, the value never leaves the host, and an unknown name fails rather
-> than starting without credentials.
+> **Resuming by reference.** A remote or MCP resume names the credential instead of
+> carrying it — `plannerCustomEngineRef` and friends on `autoloop_resume` and
+> `POST /autoloop/<id>/resume`, `agentCustomEngineRefs` on `workflow_resume` — and
+> the orchestrator resolves the name against its own `CLAWO_CUSTOM_ENGINE_<NAME>`
+> environment. `GET /autoloop/<id>/resume-requirements` lists which roles need one.
+> The name is not sensitive, the value never leaves the host, and an unknown name
+> fails rather than starting without credentials.
 
 Custom configs are not persisted or accepted from Planner output. See [`multi-engine.md`](./multi-engine.md) for their shape.
 
@@ -674,20 +674,42 @@ agent progress, never by timer checks or runner bookkeeping.
 `autoloop_hard_timeout_ms` is anchored to run start and never renews; it wins
 when it coincides with lease expiry.
 
-Recovery is exposed by `POST /autoloop/<id>/resume`, not by an MCP resume tool.
-Its timeout body is limited to `send_timeout_ms` plus
+Recovery is exposed by `autoloop_resume` and by `POST /autoloop/<id>/resume`.
+Both forward caller options once to `SessionManager.autoloopResume`; omission
+stays omission. The timeout body is limited to `send_timeout_ms` plus
 `pending_dispatch_id`. The send timeout must be finite, in range, and strictly
 larger than the run's latest effective value (600000 for runs that predate this setting). Equal
 or smaller values are rejected, and there is deliberately no
 `allow_decrease`. Lease and hard-cap overrides are not accepted on resume.
 Each successful increase appends one migration row to `decisions.jsonl`; the
-original run spec, history, and prior audit bytes are not rewritten. The
-matching live awaiting-resume condition is advanced without replaying the
-timed-out logical dispatch. A live ordinary or activity-lease pause
-(`pending_dispatch` null) resumes with no timeout fields: the call returns once
-the run is active again, the lease re-arms without moving the hard deadline,
-and Planner chat parked during the pause is then delivered once, in order. A
-no-option resume does not clear a pending send timeout.
+original run spec, history, and prior audit bytes are not rewritten. Live
+semantics: a live ordinary or activity-lease pause (`pending_dispatch` null)
+resumes with no timeout fields (active again, lease re-armed, hard deadline
+unchanged, parked Planner chat delivered once); a live send-timeout pending
+pause is a no-op when timeout fields are omitted (pending is not cleared), and
+advancing it needs the matching live awaiting-resume increase plus
+`pending_dispatch_id` without replaying the timed-out logical dispatch. Cold
+semantics: omission still follows manager reconstruction even when a pending
+dispatch was stored; `pending_dispatch_id` is required only when an increase
+and pending coexist; a cold timeout-only increase without pending remains
+supported.
+
+### `autoloop_resume`
+
+Resume a v2 autoloop run through the same manager path as the HTTP resume route.
+Returns `{ ok, state }` (normalized by the plugin result wrapper). A paused or
+terminated state is not completed project work. Live pending omission is a
+no-op; cold omission follows reconstruction; pending ID is conditional on
+increase+pending; cold timeout-only increase without pending is supported.
+
+| Parameter                 | Type   | Required | Description                                                                 |
+| ------------------------- | ------ | -------- | --------------------------------------------------------------------------- |
+| `run_id`                  | string | yes      | Run id from `autoloop_start`                                                |
+| `send_timeout_ms`         | number |          | Optional strict increase (schema range 5000–7200000; no default)            |
+| `pending_dispatch_id`     | string |          | Exact pending id when increasing while a pending dispatch exists            |
+| `plannerCustomEngineRef`  | string |          | Host secret name for Planner custom engine (`CLAWO_CUSTOM_ENGINE_<REF>`)    |
+| `coderCustomEngineRef`    | string |          | Host secret name for Coder custom engine                                    |
+| `reviewerCustomEngineRef` | string |          | Host secret name for Reviewer custom engine                                 |
 
 ### `autoloop_chat`
 
