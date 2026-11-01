@@ -1143,6 +1143,47 @@ describe('ClaudeAgentDispatcher — partial Coder terminal handoff', () => {
     c.sendMessage.mock.calls.filter((x) => x[0] === 'autoloop-r1-planner').map((x) => x[1] as string);
   const replyPath = (text: string) => text.match(/persisted at handoff:\s+([^\s"]+\.txt)/)?.[1];
 
+  it('incomplete reply path characterization', async () => {
+    const replies = ['ORDINARY_INCOMPLETE_REPLY_ITER_0_BYTES_UNIQUE', 'ORDINARY_INCOMPLETE_REPLY_ITER_1_BYTES_UNIQUE'];
+    const { dispatcher, ledgerDir, workspace } = makeDispatcher({}, { sendOutputs: replies });
+    await dispatcher.spawnSubagents();
+
+    const seenRels: string[] = [];
+    for (const iter of [0, 1] as const) {
+      const acks = await dispatcher.deliver(
+        Msg.directive(iter, {
+          goal: `characterize-iter-${iter}`,
+          constraints: [],
+          success_criteria: [],
+          max_attempts: 1,
+        }),
+      );
+      expect(acks).toHaveLength(1);
+      expect(acks[0]).toMatchObject({
+        type: 'directive_ack',
+        payload: { understood: false },
+      });
+      expect(acks.some((m) => m.type === 'review_request' || m.type === 'iter_artifacts')).toBe(false);
+
+      const clarification = (acks[0] as { payload: { clarification: string } }).payload.clarification;
+      const rel = replyPath(clarification);
+      expect(rel).toBeTruthy();
+      expect(path.basename(rel!)).toMatch(/^coder_reply_.+\.txt$/);
+      expect(path.dirname(rel!)).toBe(path.join('tasks', 'r1', 'iter', String(iter)));
+
+      const abs = path.join(workspace, rel!);
+      expect(path.dirname(abs)).toBe(path.join(ledgerDir, 'iter', String(iter)));
+      expect(fs.existsSync(abs)).toBe(true);
+      expect(fs.readFileSync(abs, 'utf8')).toBe(replies[iter]);
+      expect(path.resolve(workspace, rel!)).toBe(path.resolve(abs));
+      expect(clarification).toContain(`Full coder reply persisted at handoff: ${rel}`);
+      seenRels.push(rel!);
+    }
+
+    expect(seenRels[0]).not.toBe(seenRels[1]);
+    expect(path.dirname(seenRels[0])).not.toBe(path.dirname(seenRels[1]));
+  });
+
   it('G1: incomplete turn exposes status, terminal tail and persisted path', async () => {
     const reply = longReply();
     expect(reply.indexOf(MARKER)).toBeGreaterThan(500);
