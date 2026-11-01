@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [7.16.2] - 2026-11-01
+
 ### Fixed
 
 - **A Claude goal sent back by a red verifier can finish.** Its repair objective keeps the caller's objective
