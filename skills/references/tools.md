@@ -1,6 +1,6 @@
 # Tools Reference
 
-All 78 tools are registered as OpenClaw plugin tools and exposed over MCP by `clawo-mcp` (see [mcp.md](./mcp.md)). The embedded HTTP server covers a subset of them.
+All 79 tools are registered as OpenClaw plugin tools and exposed over MCP by `clawo-mcp` (see [mcp.md](./mcp.md)). The embedded HTTP server covers a subset of them.
 
 ## Session Lifecycle (6)
 
@@ -71,14 +71,14 @@ else the value applies.
 
 Send a message and get the response.
 
-| Parameter | Type    | Required | Description                                                                                                                                                                                                                                                                         |
-| --------- | ------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `name`    | string  | yes      | Session name                                                                                                                                                                                                                                                                        |
-| `message` | string  | yes      | Message to send                                                                                                                                                                                                                                                                     |
+| Parameter | Type    | Required | Description                                                                                                                                                                                                                                                                                      |
+| --------- | ------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `name`    | string  | yes      | Session name                                                                                                                                                                                                                                                                                     |
+| `message` | string  | yes      | Message to send                                                                                                                                                                                                                                                                                  |
 | `effort`  | string  |          | Effort for this message: `low` … `ultra` (no `auto`). Antigravity, Grok, OpenCode and `codex-app` pass it to the engine for this turn; on Claude, `high` and above prefix the message with `ultrathink` (a persistent custom engine does the same for `high` and `max`). Other engines ignore it |
-| `plan`    | boolean |          | Ask for a plan only. Claude and persistent custom engines prefix the message with a plan-only instruction; the permission mode is unchanged, and other engines ignore it. To enforce read-only, start the session with `sandboxMode: 'read-only'`                                   |
-| `timeout` | number  |          | Timeout in ms (default 300000)                                                                                                                                                                                                                                                      |
-| `stream`  | boolean |          | Collect the text chunks into `chunks[]` on the result (returned with the final result, not streamed to the caller)                                                                                                                                                                  |
+| `plan`    | boolean |          | Ask for a plan only. Claude and persistent custom engines prefix the message with a plan-only instruction; the permission mode is unchanged, and other engines ignore it. To enforce read-only, start the session with `sandboxMode: 'read-only'`                                                |
+| `timeout` | number  |          | Timeout in ms (default 300000)                                                                                                                                                                                                                                                                   |
+| `stream`  | boolean |          | Collect the text chunks into `chunks[]` on the result (returned with the final result, not streamed to the caller)                                                                                                                                                                               |
 
 Returns `{ ok, output, sessionId, error?, usage, permissionDenials?, images?, chunks? }`. `usage` is
 `{ tokensIn, tokensOut, costUsd }` for this turn alone — what it added to the session's running totals, which
@@ -370,17 +370,17 @@ Run one task across N engine/model agents **in parallel** and collect their answ
 
 ### `fanout_start`
 
-| Parameter                            | Type    | Required | Description                                                                                                                                                                                                                                         |
-| ------------------------------------ | ------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `task`                               | string  | yes      | Shared task sent to every agent, optionally after its `persona`.                                                                                                                                                                                    |
-| `projectDir`                         | string  | yes      | Working directory all agents run in.                                                                                                                                                                                                                |
+| Parameter                            | Type    | Required | Description                                                                                                                                                                                                                                     |
+| ------------------------------------ | ------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `task`                               | string  | yes      | Shared task sent to every agent, optionally after its `persona`.                                                                                                                                                                                |
+| `projectDir`                         | string  | yes      | Working directory all agents run in.                                                                                                                                                                                                            |
 | `agents`                             | array   | yes      | Up to 16 specs: `{ name, engine?, model?, effort?, prompt?, persona?, baseUrl?, permissionMode?, sandboxMode?, customEngine?, acpAgent? }`. Names must be unique (each forms a session name); `permissionMode` defaults to `bypassPermissions`. |
-| `synthesize`                         | boolean |          | Run a final synthesis pass over the successful results (needs ≥2).                                                                                                                                                                                  |
-| `synthesisModel` / `synthesisEngine` | string  |          | Model/engine for the synthesis pass (default engine `claude`).                                                                                                                                                                                      |
-| `synthesisAcpAgent`                  | string  |          | With `synthesisEngine: 'acp'`: the ACP agent preset the synthesis pass starts.                                                                                                                                                                      |
-| `agentTimeoutMs`                     | number  |          | Per-agent timeout (default 600000).                                                                                                                                                                                                                 |
-| `maxTurnsPerAgent`                   | number  |          | Max agent loop turns (default 30).                                                                                                                                                                                                                  |
-| `maxBudgetUsd`                       | number  |          | Per-agent spend cap.                                                                                                                                                                                                                                |
+| `synthesize`                         | boolean |          | Run a final synthesis pass over the successful results (needs ≥2).                                                                                                                                                                              |
+| `synthesisModel` / `synthesisEngine` | string  |          | Model/engine for the synthesis pass (default engine `claude`).                                                                                                                                                                                  |
+| `synthesisAcpAgent`                  | string  |          | With `synthesisEngine: 'acp'`: the ACP agent preset the synthesis pass starts.                                                                                                                                                                  |
+| `agentTimeoutMs`                     | number  |          | Per-agent timeout (default 600000).                                                                                                                                                                                                             |
+| `maxTurnsPerAgent`                   | number  |          | Max agent loop turns (default 30).                                                                                                                                                                                                              |
+| `maxBudgetUsd`                       | number  |          | Per-agent spend cap.                                                                                                                                                                                                                            |
 
 Runs in the background; returns `{ ok, id, status, ... }`. Poll with `fanout_status`.
 Each agent's optional `effort` accepts `low`, `medium`, `high`, `xhigh`, `max`,
@@ -611,7 +611,7 @@ Get status and findings when completed.
 
 ---
 
-## Autoloop (6)
+## Autoloop (7)
 
 Three-agent autonomous iteration loop (Planner / Coder / Reviewer) over a git workspace. See [`autoloop.md`](./autoloop.md) for the operator reference (push policy, ledger layout, smoke test).
 
@@ -650,13 +650,13 @@ Start a chat-mode autoloop. Planner starts immediately; Coder + Reviewer start o
 > permission to choose what binary runs. Built-in engines stay fully selectable
 > over HTTP.
 >
-> **Resuming by reference.** A remote resume names the credential instead of
-> carrying it — `plannerCustomEngineRef` and friends on `POST /autoloop/<id>/resume`,
-> `agentCustomEngineRefs` on `workflow_resume` — and the orchestrator resolves the
-> name against its own `CLAWO_CUSTOM_ENGINE_<NAME>` environment.
-> `GET /autoloop/<id>/resume-requirements` lists which roles need one. The name is
-> not sensitive, the value never leaves the host, and an unknown name fails rather
-> than starting without credentials.
+> **Resuming by reference.** A remote or MCP resume names the credential instead of
+> carrying it — `plannerCustomEngineRef` and friends on `autoloop_resume` and
+> `POST /autoloop/<id>/resume`, `agentCustomEngineRefs` on `workflow_resume` — and
+> the orchestrator resolves the name against its own `CLAWO_CUSTOM_ENGINE_<NAME>`
+> environment. `GET /autoloop/<id>/resume-requirements` lists which roles need one.
+> The name is not sensitive, the value never leaves the host, and an unknown name
+> fails rather than starting without credentials.
 
 Custom configs are not persisted or accepted from Planner output. See [`multi-engine.md`](./multi-engine.md) for their shape.
 
@@ -674,20 +674,46 @@ agent progress, never by timer checks or runner bookkeeping.
 `autoloop_hard_timeout_ms` is anchored to run start and never renews; it wins
 when it coincides with lease expiry.
 
-Recovery is exposed by `POST /autoloop/<id>/resume`, not by an MCP resume tool.
-Its timeout body is limited to `send_timeout_ms` plus
+Recovery is exposed by `autoloop_resume` and by `POST /autoloop/<id>/resume`.
+Both forward caller options once to `SessionManager.autoloopResume`; omission
+stays omission. The timeout body is limited to `send_timeout_ms` plus
 `pending_dispatch_id`. The send timeout must be finite, in range, and strictly
 larger than the run's latest effective value (600000 for runs that predate this setting). Equal
 or smaller values are rejected, and there is deliberately no
 `allow_decrease`. Lease and hard-cap overrides are not accepted on resume.
 Each successful increase appends one migration row to `decisions.jsonl`; the
-original run spec, history, and prior audit bytes are not rewritten. The
-matching live awaiting-resume condition is advanced without replaying the
-timed-out logical dispatch. A live ordinary or activity-lease pause
-(`pending_dispatch` null) resumes with no timeout fields: the call returns once
-the run is active again, the lease re-arms without moving the hard deadline,
-and Planner chat parked during the pause is then delivered once, in order. A
-no-option resume does not clear a pending send timeout.
+original run spec, history, and prior audit bytes are not rewritten. Live
+semantics: a live ordinary or activity-lease pause (`pending_dispatch` null)
+resumes with no timeout fields (active again, lease re-armed, hard deadline
+unchanged, parked Planner chat delivered once); a live send-timeout pending
+pause is a no-op when timeout fields are omitted (pending is not cleared), and
+advancing it needs the matching live awaiting-resume increase plus
+`pending_dispatch_id` without replaying the timed-out logical dispatch. Cold
+semantics: omission still follows manager reconstruction even when a pending
+dispatch was stored; `pending_dispatch_id` is required only when an increase
+and pending coexist; a cold timeout-only increase without pending remains
+supported.
+
+### `autoloop_resume`
+
+Resume a v2 autoloop run through the same manager path as the HTTP resume route.
+Returns `{ ok, state }` (normalized by the plugin result wrapper). A paused or
+terminated state is not completed project work. Live pending omission is a
+no-op; cold omission follows reconstruction; pending ID is conditional on
+increase+pending; cold timeout-only increase without pending is supported.
+
+| Parameter                 | Type   | Required | Description                                                                                                   |
+| ------------------------- | ------ | -------- | ------------------------------------------------------------------------------------------------------------- |
+| `run_id`                  | string | yes      | Run id from `autoloop_start` (store grammar: 1–128 ASCII; first letter/digit/underscore)                      |
+| `send_timeout_ms`         | number |          | Optional strict increase (schema range 5000–7200000; no default)                                              |
+| `pending_dispatch_id`     | string |          | Exact pending id when increasing while a pending dispatch exists (1–128 ASCII letters/digits/`_`/`.`/`:`/`-`) |
+| `plannerCustomEngineRef`  | string |          | Host secret name for Planner custom engine (`CLAWO_CUSTOM_ENGINE_<REF>`; same 1–128 ASCII grammar)            |
+| `coderCustomEngineRef`    | string |          | Host secret name for Coder custom engine (same grammar)                                                       |
+| `reviewerCustomEngineRef` | string |          | Host secret name for Reviewer custom engine (same grammar)                                                    |
+
+Invalid `run_id` / pending / ref shapes fail at the facade with fixed field errors
+before any secret resolve or manager call. Valid-input manager and resolver errors
+propagate unchanged (no blanket catch).
 
 ### `autoloop_chat`
 

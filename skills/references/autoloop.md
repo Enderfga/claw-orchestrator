@@ -176,7 +176,7 @@ pending dispatch identity when available. It does not rewrite the original
 stored spec, chat or iteration evidence, or any earlier audit bytes.
 
 A live run paused by `pause_loop` or an expired activity lease, with
-`pending_dispatch` null, continues on `autoloopResume()` / `POST /autoloop/<id>/resume`
+`pending_dispatch` null, continues on `autoloop_resume` / `autoloopResume()` / `POST /autoloop/<id>/resume`
 with no timeout fields. That resume clears the lease expiry, sets status back
 to `planning` (or `running` once subagents have been spawned), re-arms the
 activity lease from the resume, and leaves the original hard deadline where it
@@ -236,6 +236,7 @@ the old name is already absent, reset may continue and create the replacement.
 | `autoloop_chat`        | `run_id`, `text`                                                                                                                                                | Send a chat message to the Planner; returns the Planner's reply.                                                                    |
 | `autoloop_status`      | `run_id`                                                                                                                                                        | Current state (status, iter, push count, subagents_spawned).                                                                        |
 | `autoloop_list`        | —                                                                                                                                                               | All autoloop runs in the run store, live or not.                                                                                    |
+| `autoloop_resume`      | `run_id`, `send_timeout_ms?`, `pending_dispatch_id?`, `plannerCustomEngineRef?`, `coderCustomEngineRef?`, `reviewerCustomEngineRef?`                            | Resume via `SessionManager.autoloopResume` once; same semantics as `POST /autoloop/<id>/resume`.                                    |
 | `autoloop_stop`        | `run_id`, `reason?`                                                                                                                                             | Terminate; stops Planner / Coder / Reviewer.                                                                                        |
 | `autoloop_reset_agent` | `run_id`, `agent` ('planner' / 'coder' / 'reviewer'), `force?`, `eager_restart?`                                                                                | Reset one subagent. Planner reset requires `force: true`.                                                                           |
 
@@ -272,8 +273,8 @@ removes partial files, and suppresses both spawn and directives.
 ### Custom engines and resume
 
 Custom engine configs are accepted only by `autoloop_start` (and, on resume, by
-`SessionManager.autoloopResume()` or by reference in the HTTP resume body), never
-through Planner output. This keeps config fields such as `env` and static CLI
+`SessionManager.autoloopResume()`, `autoloop_resume` refs, or by reference in the
+HTTP resume body), never through Planner output. This keeps config fields such as `env` and static CLI
 arguments out of the Planner transcript and `decisions.jsonl`. The run record
 stores only each role's engine, model, and effort, including the effective Coder/Reviewer
 selection after a successful spawn. When resuming a run that uses `custom`,
@@ -583,8 +584,8 @@ lives. The run record holds the last state the loop published and the engines
 `spawn_subagents` chose, so `autoloop_status` and `GET /autoloop/<id>/state`
 show a run's real state after it stops or the process restarts.
 
-Resume is explicit. `POST /autoloop/<id>/resume` (or
-`SessionManager.autoloopResume()`) restarts a run from its stored spec.
+Resume is explicit. `autoloop_resume`, `POST /autoloop/<id>/resume`, or
+`SessionManager.autoloopResume()` restarts a run from its stored spec.
 Custom-engine configs are the one thing the spec does not carry (they can hold
 secrets), so a resume must be given them again. Cancelling a run stops all three
 agents, the same as `autoloop_stop`.

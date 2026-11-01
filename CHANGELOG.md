@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`autoloop_resume` native tool.** One plugin/MCP registration that forwards
+  caller `run_id`, optional `send_timeout_ms` / `pending_dispatch_id`, and optional
+  `*CustomEngineRef` names once to `SessionManager.autoloopResume`. Omission stays
+  omission; live/cold validation and audit remain manager-owned. Distinct from
+  `workflow_resume`. Public help distinguishes live pending no-op from cold
+  reconstruction and conditional pending-ID; runtime behavior unchanged. Caller
+  string fields are screened at the facade for a finite ASCII identifier grammar
+  before resolver/manager effects; invalid inputs raise fixed field errors, and
+  valid-input manager/resolver errors propagate unchanged.
+
 ## [7.16.2] - 2026-11-01
 
 ### Fixed

@@ -32,7 +32,7 @@ import {
   type GoalArgs,
   type SolveArgs,
 } from './kernel/templates/index.js';
-import { readEvents as readKernelEvents } from './kernel/store.js';
+import { isValidRunId, readEvents as readKernelEvents } from './kernel/store.js';
 import { resolveSecretRefs } from './kernel/secrets.js';
 import type { RunState, WorkflowSpec } from './kernel/types.js';
 import { AUTOLOOP_TIMEOUT_SCHEMA, validateAutoloopTimeoutConfig } from './autoloop/types.js';
@@ -2292,6 +2292,129 @@ const plugin = {
         const ok = await getManager().autoloopStop(args.run_id as string, args.reason as string | undefined);
         if (!ok) return { ok: false, error: 'Run not found' };
         return { ok: true };
+      },
+    });
+
+    // ─── Tool: autoloop_resume ────────────────────────────────────
+    //
+    // Thin native facade over SessionManager.autoloopResume. Caller options are
+    // mapped once; omission stays omission. Live/cold validation and audit stay
+    // in the manager. A tiny local screen rejects malformed caller strings with
+    // fixed field errors before any resolver/manager effect; valid-input errors
+    // propagate unchanged. normalizeToolResult only wraps successful results.
+
+    const AUTOLOOP_RESUME_CALLER_ID_FIELDS = [
+      'pending_dispatch_id',
+      'plannerCustomEngineRef',
+      'coderCustomEngineRef',
+      'reviewerCustomEngineRef',
+    ] as const;
+    const autoloopResumeCallerIdError = (field: string): Error =>
+      new Error(`${field} must be a valid identifier of 1-128 ASCII letters, digits, underscore, dot, colon or dash`);
+    const assertAutoloopResumeCallerId = (field: string, value: unknown): void => {
+      if (typeof value !== 'string' || value.length < 1 || value.length > 128) {
+        throw autoloopResumeCallerIdError(field);
+      }
+      for (let i = 0; i < value.length; i++) {
+        const code = value.charCodeAt(i);
+        const ok =
+          (code >= 0x30 && code <= 0x39) || // 0-9
+          (code >= 0x41 && code <= 0x5a) || // A-Z
+          (code >= 0x61 && code <= 0x7a) || // a-z
+          code === 0x5f || // _
+          code === 0x2e || // .
+          code === 0x3a || // :
+          code === 0x2d; // -
+        if (!ok) throw autoloopResumeCallerIdError(field);
+      }
+    };
+
+    registerTool({
+      name: 'autoloop_resume',
+      description:
+        'Resume a v2 autoloop run. Ordinary and activity-lease pauses resume with no timeout fields. Live send-timeout pending: omitting timeout fields is a no-op (pending is not cleared); advancing it needs an explicit send_timeout_ms increase and the matching pending_dispatch_id. Cold resume: omission still follows manager reconstruction even when a pending dispatch was stored; pending_dispatch_id is required only when an increase and pending coexist; a cold timeout-only increase without pending remains supported. Optional *CustomEngineRef names resolve against CLAWO_CUSTOM_ENGINE_<REF> on the orchestrator host for cold custom-engine runs. run_id and optional pending/ref strings must be finite ASCII identifiers (see parameter schemas); invalid shapes fail before resume. Returns { ok, state }; a paused or terminated state is not completed project work.',
+      parameters: {
+        type: 'object',
+        properties: {
+          run_id: {
+            type: 'string',
+            minLength: 1,
+            maxLength: 128,
+            pattern: '^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$',
+            description:
+              'Run id from autoloop_start (1–128 ASCII; first letter/digit/underscore, then letter/digit/underscore/dot/dash).',
+          },
+          send_timeout_ms: {
+            type: 'number',
+            minimum: 5_000,
+            maximum: 7_200_000,
+            description:
+              'Optional send-timeout increase in ms (inclusive 5000–7200000). Omission preserves the historical resume path; when supplied it must be a strict increase over the run’s effective value (manager-enforced).',
+          },
+          pending_dispatch_id: {
+            type: 'string',
+            minLength: 1,
+            maxLength: 128,
+            pattern: '^[A-Za-z0-9_.:-]{1,128}$',
+            description:
+              'Optional exact pending dispatch id (1–128 ASCII letters/digits/underscore/dot/colon/dash). Required by the manager only when increasing the timeout while a pending dispatch exists (live or cold); omit for ordinary resume and for cold timeout-only increase without pending.',
+          },
+          plannerCustomEngineRef: {
+            type: 'string',
+            minLength: 1,
+            maxLength: 128,
+            pattern: '^[A-Za-z0-9_.:-]{1,128}$',
+            description:
+              'Secret reference name for the Planner custom engine (CLAWO_CUSTOM_ENGINE_<REF>; 1–128 ASCII letters/digits/underscore/dot/colon/dash). Supply only when the stored run used engine "custom" for that role.',
+          },
+          coderCustomEngineRef: {
+            type: 'string',
+            minLength: 1,
+            maxLength: 128,
+            pattern: '^[A-Za-z0-9_.:-]{1,128}$',
+            description:
+              'Secret reference name for the Coder custom engine (CLAWO_CUSTOM_ENGINE_<REF>; 1–128 ASCII letters/digits/underscore/dot/colon/dash). Supply only when the stored run used engine "custom" for that role.',
+          },
+          reviewerCustomEngineRef: {
+            type: 'string',
+            minLength: 1,
+            maxLength: 128,
+            pattern: '^[A-Za-z0-9_.:-]{1,128}$',
+            description:
+              'Secret reference name for the Reviewer custom engine (CLAWO_CUSTOM_ENGINE_<REF>; 1–128 ASCII letters/digits/underscore/dot/colon/dash). Supply only when the stored run used engine "custom" for that role.',
+          },
+        },
+        required: ['run_id'],
+      },
+      execute: async (_id, args) => {
+        const runId = args.run_id;
+        if (typeof runId !== 'string' || !isValidRunId(runId)) {
+          throw new Error('run_id must be a valid run identifier');
+        }
+        for (const key of AUTOLOOP_RESUME_CALLER_ID_FIELDS) {
+          if (!Object.prototype.hasOwnProperty.call(args, key)) continue;
+          assertAutoloopResumeCallerId(key, args[key]);
+        }
+
+        const resumeOptions: NonNullable<Parameters<SessionManager['autoloopResume']>[1]> = {
+          ...(resolveSecretRefs({
+            plannerCustomEngine: args.plannerCustomEngineRef as string | undefined,
+            coderCustomEngine: args.coderCustomEngineRef as string | undefined,
+            reviewerCustomEngine: args.reviewerCustomEngineRef as string | undefined,
+          }) as Pick<
+            NonNullable<Parameters<SessionManager['autoloopResume']>[1]>,
+            'plannerCustomEngine' | 'coderCustomEngine' | 'reviewerCustomEngine'
+          >),
+        };
+        if (Object.prototype.hasOwnProperty.call(args, 'send_timeout_ms')) {
+          resumeOptions.sendTimeoutMs = args.send_timeout_ms as number;
+        }
+        if (Object.prototype.hasOwnProperty.call(args, 'pending_dispatch_id')) {
+          resumeOptions.pendingDispatchId = args.pending_dispatch_id as string;
+        }
+
+        const state = await getManager().autoloopResume(runId, resumeOptions);
+        return { ok: true, state };
       },
     });
 
