@@ -797,3 +797,305 @@ describe('SDK entry', () => {
     expect(plugin.description).toContain('any ACP agent');
   });
 });
+
+// Feature acceptance for the thin native autoloop_resume facade. Missing
+// registration is RED for new exposure — not an existing-manager regression.
+describe('native autoloop_resume facade', () => {
+  const sampleState = {
+    run_id: 'resume-run',
+    status: 'planning',
+    iter: 0,
+    subagents_spawned: false,
+    started_at: '2026-10-29T00:00:00.000Z',
+    workspace: '/tmp',
+    ledger_dir: '/tmp/tasks/resume-run',
+    push_log_count: 0,
+    status_reason: null,
+    consecutive_phase_errors: 0,
+    recent_phase_errors: [],
+    metric_history: [],
+    last_activity_at: 0,
+  };
+
+  function withNoEmbeddedServer<T>(fn: () => Promise<T>): Promise<T> {
+    const previous = process.env.CLAWO_NO_EMBEDDED_SERVER;
+    process.env.CLAWO_NO_EMBEDDED_SERVER = '1';
+    return fn().finally(() => {
+      if (previous === undefined) delete process.env.CLAWO_NO_EMBEDDED_SERVER;
+      else process.env.CLAWO_NO_EMBEDDED_SERVER = previous;
+    });
+  }
+
+  it('public resume help distinguishes live pending no-op from cold reconstruction and conditional pending-ID', async () => {
+    const registration = collectRegistration();
+    try {
+      const tool = registration.tools.find((t) => t.name === 'autoloop_resume');
+      expect(tool).toBeDefined();
+      const description = tool!.description;
+      // Must not present the live send-timeout migration pair as a universal rule.
+      expect(description).not.toMatch(
+        /A recoverable send-timeout pause requires an explicit send_timeout_ms increase and the matching pending_dispatch_id/i,
+      );
+      expect(description).toMatch(/live/i);
+      expect(description).toMatch(/no-op|unchanged/i);
+      expect(description).toMatch(/cold/i);
+      expect(description).toMatch(/reconstruct/i);
+      expect(description).toMatch(/coexist|when (an |a )?increase.*pending|pending.*increase/i);
+      expect(description).toMatch(/timeout-only|without pending/i);
+
+      const { fileURLToPath } = await import('node:url');
+      const { dirname, join } = await import('node:path');
+      const toolsMd = fs.readFileSync(
+        join(dirname(fileURLToPath(import.meta.url)), '../../skills/references/tools.md'),
+        'utf8',
+      );
+      const recoveryIdx = toolsMd.indexOf('Recovery is exposed by `autoloop_resume`');
+      expect(recoveryIdx).toBeGreaterThan(-1);
+      const recoveryBlock = toolsMd.slice(recoveryIdx, toolsMd.indexOf('### `autoloop_resume`', recoveryIdx));
+      expect(recoveryBlock).toMatch(/live/i);
+      expect(recoveryBlock).toMatch(/no-op|does not clear a pending send timeout/i);
+      expect(recoveryBlock).toMatch(/cold/i);
+      expect(recoveryBlock).toMatch(/reconstruct/i);
+      expect(recoveryBlock).toMatch(/coexist|when (an |a )?increase.*pending|pending.*increase/i);
+      expect(recoveryBlock).toMatch(/timeout-only|without pending/i);
+      // Unqualified universal claim must not remain as the sole guidance.
+      expect(recoveryBlock).not.toMatch(/^A no-option resume does not clear a pending send timeout\.\s*$/m);
+    } finally {
+      registration.services[0]?.stop();
+    }
+  });
+
+  it('registers exactly one autoloop_resume with required run_id and optional migration/ref fields, no defaults', () => {
+    const registration = collectRegistration();
+    try {
+      const matches = registration.tools.filter((t) => t.name === 'autoloop_resume');
+      expect(matches).toHaveLength(1);
+      const tool = matches[0]!;
+      const parameters = tool.parameters as {
+        required?: string[];
+        properties?: Record<string, Record<string, unknown>>;
+      };
+      expect(parameters.required).toEqual(['run_id']);
+      const properties = parameters.properties ?? {};
+      expect(Object.keys(properties).sort()).toEqual(
+        [
+          'coderCustomEngineRef',
+          'pending_dispatch_id',
+          'plannerCustomEngineRef',
+          'reviewerCustomEngineRef',
+          'run_id',
+          'send_timeout_ms',
+        ].sort(),
+      );
+      expect(properties.run_id?.type).toBe('string');
+      expect(properties.send_timeout_ms).toMatchObject({
+        type: 'number',
+        minimum: 5_000,
+        maximum: 7_200_000,
+      });
+      expect(properties.send_timeout_ms).not.toHaveProperty('default');
+      expect(properties.pending_dispatch_id?.type).toBe('string');
+      expect(properties.pending_dispatch_id).not.toHaveProperty('default');
+      for (const ref of ['plannerCustomEngineRef', 'coderCustomEngineRef', 'reviewerCustomEngineRef'] as const) {
+        expect(properties[ref]?.type).toBe('string');
+        expect(properties[ref]).not.toHaveProperty('default');
+      }
+      for (const forbidden of [
+        'allow_decrease',
+        'activity_lease_ms',
+        'autoloop_hard_timeout_ms',
+        'planner_engine',
+        'coder_engine',
+        'reviewer_engine',
+        'planner_custom_engine',
+        'coder_custom_engine',
+        'reviewer_custom_engine',
+        'restart',
+      ]) {
+        expect(properties).not.toHaveProperty(forbidden);
+      }
+    } finally {
+      registration.services[0]?.stop();
+    }
+  });
+
+  it('forwards explicit upper-bound and ordinary timeouts with pending identity once; omission keeps properties absent', async () => {
+    await withNoEmbeddedServer(async () => {
+      const registration = collectRegistration();
+      const tool = registration.tools.find((t) => t.name === 'autoloop_resume');
+      expect(tool).toBeDefined();
+      const requirements = vi.spyOn(SessionManager.prototype, 'autoloopResumeRequirements');
+      const resume = vi.spyOn(SessionManager.prototype, 'autoloopResume').mockResolvedValue(sampleState as never);
+      const workflowResume = vi.spyOn(SessionManager.prototype, 'workflowResume');
+      try {
+        const upper = await tool!.execute('resume-upper', {
+          run_id: 'resume-run',
+          send_timeout_ms: 7_200_000,
+          pending_dispatch_id: 'dispatch-exact-1',
+        });
+        expect(resume).toHaveBeenCalledTimes(1);
+        expect(resume).toHaveBeenLastCalledWith('resume-run', {
+          sendTimeoutMs: 7_200_000,
+          pendingDispatchId: 'dispatch-exact-1',
+        });
+        expect((upper as { details: { ok: boolean; state: unknown } }).details.ok).toBe(true);
+        expect((upper as { details: { state: unknown } }).details.state).toBe(sampleState);
+
+        resume.mockClear();
+        const ordinary = await tool!.execute('resume-ordinary', {
+          run_id: 'resume-run',
+          send_timeout_ms: 700_000,
+          pending_dispatch_id: 'dispatch-exact-1',
+        });
+        expect(resume).toHaveBeenCalledTimes(1);
+        expect(resume).toHaveBeenLastCalledWith('resume-run', {
+          sendTimeoutMs: 700_000,
+          pendingDispatchId: 'dispatch-exact-1',
+        });
+        expect((ordinary as { details: { state: unknown } }).details.state).toBe(sampleState);
+
+        resume.mockClear();
+        await tool!.execute('resume-omit', { run_id: 'resume-run' });
+        expect(resume).toHaveBeenCalledTimes(1);
+        const omitOpts = resume.mock.calls[0]![1] as Record<string, unknown>;
+        expect(omitOpts).toEqual({});
+        expect(Object.prototype.hasOwnProperty.call(omitOpts, 'sendTimeoutMs')).toBe(false);
+        expect(Object.prototype.hasOwnProperty.call(omitOpts, 'pendingDispatchId')).toBe(false);
+        expect(requirements).not.toHaveBeenCalled();
+        expect(workflowResume).not.toHaveBeenCalled();
+      } finally {
+        registration.services[0]?.stop();
+        resume.mockRestore();
+        requirements.mockRestore();
+        workflowResume.mockRestore();
+      }
+    });
+  });
+
+  it('resolves only explicitly supplied custom-engine refs once and never retries after success or failure', async () => {
+    await withNoEmbeddedServer(async () => {
+      const registration = collectRegistration();
+      const tool = registration.tools.find((t) => t.name === 'autoloop_resume')!;
+      const plannerCfg = { name: 'planner-safe', bin: '/opt/planner-safe', args: {} };
+      process.env.CLAWO_CUSTOM_ENGINE_PLANNER_SYN = JSON.stringify(plannerCfg);
+      const resume = vi.spyOn(SessionManager.prototype, 'autoloopResume').mockResolvedValue(sampleState as never);
+      try {
+        const result = await tool.execute('resume-ref', {
+          run_id: 'resume-run',
+          plannerCustomEngineRef: 'planner-syn',
+        });
+        expect(resume).toHaveBeenCalledTimes(1);
+        expect(resume).toHaveBeenLastCalledWith('resume-run', { plannerCustomEngine: plannerCfg });
+        const details = (result as { details: Record<string, unknown> }).details;
+        expect(JSON.stringify(details)).not.toContain('/opt/planner-safe');
+        expect(JSON.stringify(details)).not.toContain('planner-safe');
+
+        resume.mockRejectedValueOnce(new Error('manager rejected once'));
+        await expect(tool.execute('resume-ref-fail', { run_id: 'resume-run' })).rejects.toThrow(
+          'manager rejected once',
+        );
+        expect(resume).toHaveBeenCalledTimes(2);
+      } finally {
+        delete process.env.CLAWO_CUSTOM_ENGINE_PLANNER_SYN;
+        registration.services[0]?.stop();
+        resume.mockRestore();
+      }
+    });
+  });
+
+  it('rejects malformed run/ref shapes before the manager and propagates manager/resolver errors unchanged', async () => {
+    await withNoEmbeddedServer(async () => {
+      const registration = collectRegistration();
+      const tool = registration.tools.find((t) => t.name === 'autoloop_resume')!;
+      const resume = vi.spyOn(SessionManager.prototype, 'autoloopResume');
+
+      try {
+        resume.mockClear();
+        await expect(tool.execute('resume-neg', { run_id: '' })).rejects.toThrow(
+          'run_id must be a valid run identifier',
+        );
+        expect(resume).not.toHaveBeenCalled();
+
+        resume.mockClear();
+        await expect(tool.execute('resume-neg', { run_id: 42 as unknown as string })).rejects.toThrow(
+          'run_id must be a valid run identifier',
+        );
+        expect(resume).not.toHaveBeenCalled();
+
+        resume.mockClear();
+        await expect(tool.execute('resume-neg', { run_id: 'resume-run', pending_dispatch_id: '' })).rejects.toThrow(
+          'pending_dispatch_id must be a valid identifier of 1-128 ASCII letters, digits, underscore, dot, colon or dash',
+        );
+        expect(resume).not.toHaveBeenCalled();
+
+        resume.mockClear();
+        await expect(tool.execute('resume-neg', { run_id: 'resume-run', plannerCustomEngineRef: '' })).rejects.toThrow(
+          'plannerCustomEngineRef must be a valid identifier of 1-128 ASCII letters, digits, underscore, dot, colon or dash',
+        );
+        expect(resume).not.toHaveBeenCalled();
+
+        resume.mockClear();
+        await expect(
+          tool.execute('resume-neg', { run_id: 'resume-run', plannerCustomEngineRef: 'missing-syn-ref' }),
+        ).rejects.toThrow(/Unknown secret reference 'missing-syn-ref'/);
+        expect(resume).not.toHaveBeenCalled();
+
+        process.env.CLAWO_CUSTOM_ENGINE_BAD_JSON = '{not-json';
+        try {
+          resume.mockClear();
+          await expect(
+            tool.execute('resume-neg', { run_id: 'resume-run', plannerCustomEngineRef: 'bad-json' }),
+          ).rejects.toThrow(/Secret reference 'bad-json' \(CLAWO_CUSTOM_ENGINE_BAD_JSON\) is not valid JSON/);
+          expect(resume).not.toHaveBeenCalled();
+        } finally {
+          delete process.env.CLAWO_CUSTOM_ENGINE_BAD_JSON;
+        }
+
+        resume.mockRejectedValueOnce(new Error('manager rejected once'));
+        await expect(tool.execute('resume-neg', { run_id: 'resume-run', send_timeout_ms: 700_000 })).rejects.toThrow(
+          'manager rejected once',
+        );
+        expect(resume).toHaveBeenCalledTimes(1);
+      } finally {
+        registration.services[0]?.stop();
+        resume.mockRestore();
+      }
+    });
+  });
+
+  it('keeps workflow_resume mapping on its own route and never invokes it from autoloop_resume', async () => {
+    await withNoEmbeddedServer(async () => {
+      const registration = collectRegistration();
+      const resumeTool = registration.tools.find((t) => t.name === 'autoloop_resume')!;
+      const workflowTool = registration.tools.find((t) => t.name === 'workflow_resume')!;
+      expect(workflowTool).toBeDefined();
+      const workflowParams = workflowTool.parameters as { required?: string[]; properties?: Record<string, unknown> };
+      expect(workflowParams.required).toEqual(['runId']);
+      expect(workflowParams.properties).toHaveProperty('agentCustomEngineRefs');
+      expect(workflowParams.properties).not.toHaveProperty('run_id');
+
+      const autoloopResume = vi
+        .spyOn(SessionManager.prototype, 'autoloopResume')
+        .mockResolvedValue(sampleState as never);
+      const workflowResume = vi.spyOn(SessionManager.prototype, 'workflowResume').mockResolvedValue({
+        runId: 'wf-1',
+        state: 'running',
+        currentNode: 'n1',
+      } as never);
+      try {
+        await resumeTool.execute('al-resume', { run_id: 'resume-run' });
+        expect(autoloopResume).toHaveBeenCalledTimes(1);
+        expect(workflowResume).not.toHaveBeenCalled();
+
+        await workflowTool.execute('wf-resume', { runId: 'wf-1' });
+        expect(workflowResume).toHaveBeenCalledTimes(1);
+        expect(workflowResume).toHaveBeenLastCalledWith('wf-1', { secrets: undefined });
+        expect(autoloopResume).toHaveBeenCalledTimes(1);
+      } finally {
+        registration.services[0]?.stop();
+        autoloopResume.mockRestore();
+        workflowResume.mockRestore();
+      }
+    });
+  });
+});

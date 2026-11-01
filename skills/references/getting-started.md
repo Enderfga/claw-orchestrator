@@ -165,7 +165,7 @@ In plugin mode, in `~/.openclaw/openclaw.json`:
 - [Verification](./verification.md) — acceptance contracts the runtime checks itself
 - [Observability](./observability.md) — the run ledger and spend caps
 - [Dashboard](./dashboard.md) — the browser UI served at `/dashboard`
-- [Tools Reference](./tools.md) — complete tool API reference (78 tools)
+- [Tools Reference](./tools.md) — complete tool API reference (79 tools)
 - [CLI Reference](./cli.md) — command-line interface
 - [MCP Server](./mcp.md) — expose the tools to any MCP host
 - [ACP Agent](./acp.md) — run the orchestrator as an Agent Client Protocol agent

@@ -77,6 +77,7 @@ export const TOOL_ANNOTATIONS: Record<string, ToolAnnotation> = {
   ultrareview_start: { openWorldHint: true },
   autoloop_start: { openWorldHint: true },
   autoloop_chat: { openWorldHint: true },
+  autoloop_resume: { openWorldHint: true },
   autoloop_reset_agent: {},
   codex_resume: { openWorldHint: true },
   codex_review: { openWorldHint: true },
