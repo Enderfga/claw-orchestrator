@@ -36,8 +36,9 @@ export function resolveSecretRef(ref: string, env: NodeJS.ProcessEnv = process.e
   }
   try {
     return JSON.parse(raw);
-  } catch (err) {
-    throw new Error(`Secret reference '${ref}' (${key}) is not valid JSON: ${(err as Error).message}`);
+  } catch {
+    // Name the variable to fix and stop there; the value is never repeated back.
+    throw new Error(`Secret reference '${ref}' (${key}) is not valid JSON`);
   }
 }
 

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A secret reference whose variable does not hold valid JSON is reported by the variable's name.**
+
 ## [7.16.1] - 2026-10-31
 
 ### Added
