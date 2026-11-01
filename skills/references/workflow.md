@@ -190,18 +190,18 @@ Every node has an `id` and a `kind`, plus these optional fields:
 
 The kind-specific fields:
 
-| Kind                                | Fields                                                                                                                                                                                                                                                                                                       |
-| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `agent`                             | `prompt` (required); `engine`, `model`, `effort`, `acpAgent` (a bundled ACP preset id, for `engine: "acp"`); `cwd` (default: the run's); `sessionName`, to reuse one named session across nodes; `permissionMode` (default `bypassPermissions`); `appendSystemPrompt`, standing instructions for the session |
-| `fanout`                            | `prompt` (required, the shared task) and `agents` (required); `synthesize`, `synthesisEngine` (default `claude`), `synthesisModel`, `synthesisAcpAgent`, `synthesisPermissionMode` (default `bypassPermissions`); `maxTurnsPerAgent` and `maxBudgetUsd`, per agent; `cwd`; `agentTimeoutMs`                  |
-| `council`                           | `task` (required) and `agents` (required); `projectDir` (default: the run's cwd); `maxRounds` (default 15, as for `council_start`); `maxTurnsPerAgent` and `maxBudgetUsd`, per agent; `defaultPermissionMode`; `agentTimeoutMs`                                                                              |
-| `verifier`                          | `contract` (required): an inline contract, or `"run"` for the run-level one; `cwd` (default: the run's)                                                                                                                                                                                                      |
-| `human_gate`                        | `prompt` (required)                                                                                                                                                                                                                                                                                          |
-| `router`                            | `routes` (required): `[{ "when": <condition>, "to": <node id> }]`, first match wins; `default`, taken when nothing matches (omitted: fall through to the next node)                                                                                                                                          |
-| `subflow`                           | `workflow` (required): an inline `WorkflowSpec`, or the id of an existing run, whose stored spec runs again as a new child run. Template names do not resolve here                                                                                                                                           |
-| `goal`                              | `objective` (required); `engine`, `cwd`, `model`, `effort`, `sandboxMode`, `launcher`, `threadId`, `tokenBudget`, `capacityRetry`, `stallMs` — see [Goal](#goal)                                                                                                                                             |
-| `autoloop`                          | `workspace` and `config` (the `autoloop_start` options). Started by `autoloop_start`                                                                                                                                                                                                                         |
-| `ultraapp_synth`, `ultraapp_deploy` | `appRunId`, `runDir`, `slug`; the deploy stage adds `version` and `codebasePath`. Started by UltraApp builds                                                                                                                                                                                                 |
+| Kind                                | Fields                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `agent`                             | `prompt` (required); `engine`, `model`, `effort`, `acpAgent` (a bundled ACP preset id, for `engine: "acp"`); `cwd` (default: the run's); `sessionName`, to keep one conversation across visits and nodes (each turn's process stops, and the next start under the name resumes the conversation; the name outlives the run, so make it unique to the run); `permissionMode` (default `bypassPermissions`); `appendSystemPrompt`, standing instructions for the session |
+| `fanout`                            | `prompt` (required, the shared task) and `agents` (required); `synthesize`, `synthesisEngine` (default `claude`), `synthesisModel`, `synthesisAcpAgent`, `synthesisPermissionMode` (default `bypassPermissions`); `maxTurnsPerAgent` and `maxBudgetUsd`, per agent; `cwd`; `agentTimeoutMs`                                                                                                                                                                            |
+| `council`                           | `task` (required) and `agents` (required); `projectDir` (default: the run's cwd); `maxRounds` (default 15, as for `council_start`); `maxTurnsPerAgent` and `maxBudgetUsd`, per agent; `defaultPermissionMode`; `agentTimeoutMs`                                                                                                                                                                                                                                        |
+| `verifier`                          | `contract` (required): an inline contract, or `"run"` for the run-level one; `cwd` (default: the run's)                                                                                                                                                                                                                                                                                                                                                                |
+| `human_gate`                        | `prompt` (required)                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `router`                            | `routes` (required): `[{ "when": <condition>, "to": <node id> }]`, first match wins; `default`, taken when nothing matches (omitted: fall through to the next node)                                                                                                                                                                                                                                                                                                    |
+| `subflow`                           | `workflow` (required): an inline `WorkflowSpec`, or the id of an existing run, whose stored spec runs again as a new child run. Template names do not resolve here                                                                                                                                                                                                                                                                                                     |
+| `goal`                              | `objective` (required); `engine`, `cwd`, `model`, `effort`, `sandboxMode`, `launcher`, `threadId`, `tokenBudget`, `capacityRetry`, `stallMs` — see [Goal](#goal)                                                                                                                                                                                                                                                                                                       |
+| `autoloop`                          | `workspace` and `config` (the `autoloop_start` options). Started by `autoloop_start`                                                                                                                                                                                                                                                                                                                                                                                   |
+| `ultraapp_synth`, `ultraapp_deploy` | `appRunId`, `runDir`, `slug`; the deploy stage adds `version` and `codebasePath`. Started by UltraApp builds                                                                                                                                                                                                                                                                                                                                                           |
 
 An entry in a fan-out's or council's `agents` takes `name` (required), `engine`,
 `model`, `effort`, `acpAgent`, `persona`, `prompt`, `permissionMode` and `baseUrl`;
@@ -403,12 +403,19 @@ what an unattended run needs around that loop.
   of the checkpoint, so it carries across process restarts and repair visits.
 - **Repair on the same thread.** Revisited after a red verifier — a red verdict
   other than the one in force when its current objective was set — the node clears
-  the finished goal and sets a new objective on the same thread: the failing
-  checks first (as diagnostic data, like an agent node's repair brief), then the
-  original objective. The agent keeps its context. The original objective is
-  always kept whole; when both do not fit in 4,000 characters the checks are cut
-  (the full output stays in the run's evidence). A first goal that was never set
-  left nothing on its thread, so its revisit starts a new one.
+  the finished goal and sets a new objective on the same thread, carrying the
+  failing checks (as diagnostic data, like an agent node's repair brief) with the
+  original objective. The agent keeps its context. On Codex the checks come first,
+  as the definition of done. On Claude they come after the objective as context,
+  and the condition the goal is judged on stays the objective (see below). The
+  original objective is always kept whole; when the rest does not fit in 4,000
+  characters the checks are cut (the full output stays in the run's evidence). A
+  first goal that was never set left nothing on its thread, so its revisit starts
+  a new one.
+- **A fresh thread is told why.** Any goal objective set while the run carries a
+  red verdict the node has not seen gets the failing checks: a revisit whose
+  thread was never set, and a different goal node that takes over after a red
+  verdict on its own first visit.
 - **Steering is live.** `workflow_steer` text goes into the running turn through
   `turn/steer`; with no turn running it waits for the next one. Text queued
   before the goal is set is put in front of the objective.
@@ -447,7 +454,9 @@ stream-json mode:
   asking to stop, and continuing only repeats that). The template's verifier
   still judges the tree. Write the objective as a condition the agent can show
   it met from inside the session; one that depends on something after the
-  agent stops can never be met.
+  agent stops can never be met. That is why a repair objective on Claude does
+  not call the runtime's checks the definition of done: they run after the agent
+  stops, so the judge could never see them pass.
 - The session id is the thread id. A new session is started with
   `--session-id` so it is known before the goal is set, and the session is kept
   out of the registry with `skipPersistence` (not `noSessionPersistence`, which
@@ -456,8 +465,9 @@ stream-json mode:
   continues it at once.
 - Steers are written into the running turn, which the CLI folds in. Cancel and
   pause send stream-json's `interrupt` control request; the goal stays set.
-- `tokensUsed` counts the session's input, output and cache-read tokens, and is
-  carried across reopened processes. `tokenBudget` counts from when the current
+- `tokensUsed` counts the session's input, output and cache-write tokens, and is
+  carried across reopened processes. Cache reads are not counted: every turn
+  re-reads the whole cached conversation, which would spend a budget on re-reading. `tokenBudget` counts from when the current
   objective was set; past it the turn is interrupted and the goal ends
   `budgetLimited`. `sandboxMode` does not apply; put the boundary in `launcher`.
 

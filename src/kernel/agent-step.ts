@@ -24,7 +24,7 @@ import type { ClaudeGoalOpen as GoalSessionOpen } from '../claude-goal-session.j
 export interface SessionManagerLike {
   startSession(config: Partial<SessionConfig> & { name?: string }): Promise<SessionInfo>;
   sendMessage(name: string, message: string, options?: Partial<SendOptions>): Promise<SendResult>;
-  stopSession(name: string): Promise<void>;
+  stopSession(name: string, opts?: { keepPersisted?: boolean }): Promise<void>;
   /** Optional so lightweight fakes stay valid; success falls back to throw/no-throw without it. */
   getStatus?(name: string): SessionInfo & { stats: SessionStats };
   /** The live `codex-app` session behind `name`, for the `goal` node. */
@@ -48,6 +48,11 @@ export interface AgentStepArgs {
   keepAlive?: boolean;
   /** Skip startSession — the caller already started this session. */
   reuseSession?: boolean;
+  /**
+   * Stop the process but keep the conversation: the next session started under
+   * this name resumes it. For a name the workflow author pinned.
+   */
+  keepConversation?: boolean;
   logger?: Logger;
 }
 
@@ -145,7 +150,7 @@ export async function runAgentStep(args: AgentStepArgs): Promise<AgentStepResult
     };
   } finally {
     if (started && !args.keepAlive) {
-      await manager.stopSession(sessionName).catch(() => {
+      await manager.stopSession(sessionName, args.keepConversation ? { keepPersisted: true } : undefined).catch(() => {
         // Best-effort teardown; a session that already died is fine.
       });
     }

@@ -281,6 +281,43 @@ describe('attempt isolation', () => {
     expect(fixers).toHaveLength(4);
     expect(new Set(fixers).size).toBe(4);
   }, 20_000);
+
+  it('keeps the conversation of a pinned agent session between visits', async () => {
+    // Stopping a session forgets its conversation unless told otherwise, so a
+    // pinned name used to start over on every visit, like an unpinned one.
+    const stops: Array<{ name: string; keep: boolean }> = [];
+    const manager = {
+      async startSession(config: { name?: string }) {
+        return { name: config.name } as never;
+      },
+      async sendMessage() {
+        return { output: 'done' } as never;
+      },
+      async stopSession(name: string, opts?: { keepPersisted?: boolean }) {
+        stops.push({ name, keep: !!opts?.keepPersisted });
+      },
+    };
+    const kernel = registerDefaultExecutors(new RunKernel({ manager, nodeTimeoutMs: 8000 }));
+    const rec = await kernel.start({
+      name: 'pinned',
+      cwd: tmp,
+      nodes: [
+        { id: 'implement', kind: 'agent', prompt: 'x', sessionName: 'pinned-implementer' },
+        { id: 'scratch', kind: 'agent', prompt: 'y' },
+        {
+          id: 'again',
+          kind: 'router',
+          routes: [{ when: { type: 'visits_lt', node: 'implement', n: 2 }, to: 'implement' }],
+        },
+      ],
+    });
+    await kernel.wait(rec.runId);
+    expect(stops.filter((s) => s.name === 'pinned-implementer')).toEqual([
+      { name: 'pinned-implementer', keep: true },
+      { name: 'pinned-implementer', keep: true },
+    ]);
+    expect(stops.filter((s) => s.name !== 'pinned-implementer').every((s) => !s.keep)).toBe(true);
+  }, 20_000);
 });
 
 describe('subflow', () => {

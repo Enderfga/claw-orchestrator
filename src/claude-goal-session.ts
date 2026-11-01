@@ -36,9 +36,12 @@
  * repeats that. The node goes on to its verifier either way, and the contract,
  * not the agent or the hook, decides.
  *
- * Tokens are the session's input, output and cache-read tokens; the CLI reports
- * no goal-level count. A reopened process starts its counters at zero, so the
- * node hands over what the thread had already spent.
+ * Tokens are the session's input, output and cache-write tokens; the CLI reports
+ * no goal-level count. Cache reads are left out: every turn re-reads the whole
+ * cached conversation, so counting them made a seven-minute goal report 2.2
+ * million tokens and spent a `tokenBudget` on re-reading rather than on work. A
+ * reopened process starts its counters at zero, so the node hands over what the
+ * thread had already spent.
  */
 
 import { EventEmitter } from 'node:events';
@@ -50,7 +53,7 @@ export interface ClaudeGoalHost {
   readonly sessionId?: string;
   send(message: string, options?: { waitForComplete?: boolean; timeout?: number }): Promise<unknown>;
   interruptTurn(): boolean;
-  getStats(): { tokensIn: number; tokensOut: number; cachedTokens: number };
+  getStats(): { tokensIn: number; tokensOut: number; cachedTokens: number; cacheCreationTokens?: number };
   on(event: string, listener: (...args: unknown[]) => void): unknown;
   off(event: string, listener: (...args: unknown[]) => void): unknown;
 }
@@ -275,7 +278,7 @@ export class ClaudeGoalSession extends EventEmitter implements GoalSession {
   private _sessionTokens(): number {
     try {
       const s = this.host.getStats();
-      return (s.tokensIn || 0) + (s.tokensOut || 0) + (s.cachedTokens || 0);
+      return (s.tokensIn || 0) + (s.tokensOut || 0) + (s.cacheCreationTokens || 0);
     } catch {
       return 0;
     }

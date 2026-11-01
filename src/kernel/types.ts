@@ -69,7 +69,12 @@ export interface AgentNode extends NodeBase, AgentBinding {
   kind: 'agent';
   prompt: string;
   cwd?: string;
-  /** Reuse a named session across nodes; omitted means one session per attempt. */
+  /**
+   * Pin the session name to keep one conversation across visits and nodes: each
+   * turn's process stops when it ends, and the next start under this name
+   * resumes the conversation (engines that resume by id). The name outlives the
+   * run, so make it unique to the run. Omitted means a new session per attempt.
+   */
   sessionName?: string;
   permissionMode?: string;
   /** Standing instructions for the session, appended to its system prompt. */

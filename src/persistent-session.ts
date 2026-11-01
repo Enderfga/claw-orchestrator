@@ -963,7 +963,7 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
 
   // ─── Utilities ───────────────────────────────────────────────────────────
 
-  getStats(): SessionStats & { sessionId?: string; uptime: number } {
+  getStats(): SessionStats & { sessionId?: string; uptime: number; cacheCreationTokens: number } {
     return {
       turns: this.stats.turns,
       turnsSucceeded: this.stats.turnsSucceeded,
@@ -972,6 +972,9 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
       tokensIn: this.stats.tokensIn,
       tokensOut: this.stats.tokensOut,
       cachedTokens: this.stats.cachedTokens,
+      // Not in SessionStats: only the goal adapter reads it, to count a goal's
+      // tokens without the cached conversation every turn re-reads.
+      cacheCreationTokens: this.stats.cacheCreationTokens,
       costUsd: Math.round(this.stats.costUsd * 10000) / 10000,
       isReady: this._isReady,
       startTime: this.stats.startTime,

@@ -514,6 +514,16 @@ describe('goal objective limit', () => {
     expect(composeObjective(['p'], 'o'.repeat(GOAL_OBJECTIVE_MAX_CHARS))).toBe('o'.repeat(GOAL_OBJECTIVE_MAX_CHARS));
   });
 
+  it('puts context after the objective and cuts it before the preface', () => {
+    expect(composeObjective([], 'task', 'why it failed')).toBe('task\n\n---\n\nwhy it failed');
+    expect(composeObjective(['steer'], 'task', 'why')).toBe('steer\n\n---\n\ntask\n\n---\n\nwhy');
+    const objective = 'o'.repeat(GOAL_OBJECTIVE_MAX_CHARS - 200);
+    const out = composeObjective(['steer'], objective, 'c'.repeat(1000));
+    expect([...out].length).toBeLessThanOrEqual(GOAL_OBJECTIVE_MAX_CHARS);
+    expect(out.startsWith(`steer\n\n---\n\n${objective}\n\n---\n\n`)).toBe(true);
+    expect(out).toContain('[cut to fit');
+  });
+
   it('starts a fresh thread on a revisit when the first goal was never set', async () => {
     // Codex writes a thread to disk with its first turn: a thread whose goal was
     // refused has nothing to resume, and resuming it would fail.
@@ -550,6 +560,61 @@ describe('goal objective limit', () => {
     expect(m.starts).toHaveLength(2);
     expect(m.starts[1].resumeSessionId).toBeUndefined();
     expect((done!.nodes.goal.data as GoalNodeData).threadId).toBe('thread-2');
+    // The fresh thread still hears why the run came back.
+    const fresh = [...m.sessions.values()][1].sets[0].objective ?? '';
+    expect(fresh).toContain('did not pass the acceptance checks');
+    expect(fresh).toContain('done-file');
+  });
+
+  it('briefs another goal node that takes over after a red verdict', async () => {
+    const cwd = path.join(tmp, 'repo');
+    fs.mkdirSync(cwd);
+    const m = fakeManager((_c, n) => {
+      const s = new FakeGoalSession(`thread-${n}`);
+      s.onSet = (_p, self) => {
+        if (n === 2) fs.writeFileSync(path.join(cwd, 'done.txt'), 'x');
+        self.move('complete');
+      };
+      return s;
+    });
+    const contract = {
+      checks: [
+        {
+          id: 'done-file',
+          type: 'command' as const,
+          cmd: process.execPath,
+          args: ['-e', "process.exit(require('fs').existsSync('done.txt') ? 0 : 1)"],
+        },
+      ],
+    };
+    const spec: WorkflowSpec = {
+      name: 'fresh-node',
+      cwd,
+      contract,
+      nodes: [
+        { id: 'implement', kind: 'goal', objective: 'create done.txt', onFailure: 'continue' } as never,
+        { id: 'verify', kind: 'verifier', contract: 'run', cwd, onFailure: 'continue' } as never,
+        {
+          id: 'gate',
+          kind: 'router',
+          routes: [{ when: { type: 'node_failed', node: 'verify' }, to: 'implement-fresh' }],
+          default: 'end',
+        } as never,
+        { id: 'implement-fresh', kind: 'goal', objective: 'create done.txt', onFailure: 'continue' } as never,
+        { id: 'verify-2', kind: 'verifier', contract: 'run', cwd, onFailure: 'continue' } as never,
+        { id: 'end', kind: 'router', routes: [] } as never,
+      ],
+    };
+    const kernel = kernelWith(m);
+    const done = await kernel.wait((await kernel.start(spec, { contract } as never)).runId);
+    expect(done!.outcome).toBe('verified');
+    const first = [...m.sessions.values()][0].sets[0].objective;
+    const takeover = [...m.sessions.values()][1].sets[0].objective ?? '';
+    // The first visit of the run has nothing to report; the takeover, on its own
+    // first visit, gets the failing checks.
+    expect(first).toBe('create done.txt');
+    expect(takeover).toContain('done-file');
+    expect(takeover).toMatch(/---\n\ncreate done\.txt$/);
   });
 });
 
@@ -585,6 +650,40 @@ function claudeManager(script: (s: FakeGoalSession, n: number) => void) {
 }
 
 describe('goal node on claude', () => {
+  it('on a repair keeps the objective as the condition and puts the failing checks after it', async () => {
+    // Claude's /goal is judged by a model that reads only the conversation. A
+    // repair objective that called the runtime's checks the definition of done
+    // could never be met in it: the hook blocked the stop until the CLI gave up.
+    const cwd = path.join(tmp, 'repo');
+    fs.mkdirSync(cwd);
+    const m = claudeManager((s) => {
+      s.onSet = (p, self) => {
+        if (p.objective?.includes('done-file')) fs.writeFileSync(path.join(cwd, 'done.txt'), 'x');
+        self.move('complete');
+      };
+    });
+    const contract = {
+      checks: [
+        {
+          id: 'done-file',
+          type: 'command' as const,
+          cmd: process.execPath,
+          args: ['-e', "process.exit(require('fs').existsSync('done.txt') ? 0 : 1)"],
+        },
+      ],
+    };
+    const spec = goalWorkflow({ task: 'create done.txt', cwd, contract, maxRepairs: 1, engine: 'claude' });
+    const kernel = kernelWith(m as never);
+    const done = await kernel.wait((await kernel.start(spec, { contract } as never)).runId);
+
+    expect(done!.outcome).toBe('verified');
+    const repair = [...m.sessions.values()][1].sets[0].objective ?? '';
+    expect(repair.startsWith('create done.txt\n\n---\n\n')).toBe(true);
+    expect(repair).toContain('not part of the condition above');
+    expect(repair).toContain('done-file');
+    expect(repair).not.toContain('definition of done');
+  });
+
   it('opens a claude session with its own id and a transcript it can resume, then completes', async () => {
     const m = claudeManager((s) => {
       s.onSet = (_p, self) => self.move('complete', { tokensUsed: 42 });

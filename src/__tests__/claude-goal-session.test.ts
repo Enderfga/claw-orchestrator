@@ -26,7 +26,11 @@ class FakeClaudeHost extends EventEmitter {
   probe = 'No goal set. Usage: `/goal <condition>`';
   /** When set, a bare `/goal` answers only once this resolves. */
   hold?: Promise<void>;
-  stats = { tokensIn: 0, tokensOut: 0, cachedTokens: 0 };
+  stats: { tokensIn: number; tokensOut: number; cachedTokens: number; cacheCreationTokens?: number } = {
+    tokensIn: 0,
+    tokensOut: 0,
+    cachedTokens: 0,
+  };
 
   async send(text: string, options: { waitForComplete?: boolean } = {}): Promise<unknown> {
     this.sent.push({ text, wait: !!options.waitForComplete });
@@ -247,11 +251,24 @@ describe('ClaudeGoalSession', () => {
     expect(s.goal?.tokensUsed).toBe(5000);
     expect(s.goal?.timeUsedSeconds).toBeGreaterThanOrEqual(60);
 
-    host.stats = { tokensIn: 600, tokensOut: 200, cachedTokens: 300 };
+    host.stats = { tokensIn: 600, tokensOut: 200, cachedTokens: 300, cacheCreationTokens: 400 };
     const g = await s.getGoal();
-    expect(g?.tokensUsed).toBe(6000);
+    expect(g?.tokensUsed).toBe(6100);
     expect(host.interrupts).toBe(1);
     expect(seen.at(-1)?.status).toBe('budgetLimited');
+  });
+
+  it('does not count the cached conversation every turn re-reads', async () => {
+    const host = new FakeClaudeHost();
+    const s = new ClaudeGoalSession(host);
+    await s.setGoal({ objective: 'x', tokenBudget: 1000 });
+    // Two million cache reads, as a few minutes of goal turns on a long
+    // conversation produce: input, output and cache writes stay under budget.
+    host.stats = { tokensIn: 300, tokensOut: 400, cachedTokens: 2_000_000, cacheCreationTokens: 200 };
+    const g = await s.getGoal();
+    expect(g?.tokensUsed).toBe(900);
+    expect(g?.status).toBe('active');
+    expect(host.interrupts).toBe(0);
   });
 
   it('steers only into a running turn', async () => {

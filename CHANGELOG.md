@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A Claude goal sent back by a red verifier can finish.** Its repair objective keeps the caller's objective
+  as the condition the goal is judged on and adds the failing checks after it as context. It used to call the
+  runtime's checks the definition of done; Claude's judge reads only the conversation, never saw them pass,
+  and the goal ended `blocked` after the CLI overrode the Stop hook.
+- **A goal on a fresh thread after a red verdict is told what failed**: a revisit whose thread was never set,
+  and another goal node that takes over after a red verdict, on its own first visit.
+- **A Claude goal's `tokensUsed` and `tokenBudget` leave out cache reads**, which every turn re-reads; input,
+  output and cache writes are counted.
+- **An agent node with a pinned `sessionName` keeps its conversation between visits and nodes.** Stopping the
+  session after each turn used to forget the conversation, so every visit started over.
 - **A secret reference whose variable does not hold valid JSON is reported by the variable's name.**
 
 ## [7.16.1] - 2026-10-31

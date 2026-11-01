@@ -19,8 +19,9 @@
  *    to `active` after a backoff. Every attempt counts before it is made, and
  *    past `capacityRetry.max` the node fails for good.
  *  - **Repair on the same thread.** Revisited after a red verifier, the node
- *    sets a new objective on the thread it already has — the failing checks
- *    first, then the original objective — so the agent keeps its context.
+ *    sets a new objective on the thread it already has, carrying the failing
+ *    checks with the original objective, so the agent keeps its context. A
+ *    fresh thread after a red verdict gets the same findings.
  *  - **Steer live.** Text from `workflow_steer` goes into the running turn via
  *    `turn/steer`; with no turn running it waits for the next one.
  */
@@ -29,7 +30,7 @@ import { randomUUID } from 'node:crypto';
 import { SESSION_EVENT } from '../../constants.js';
 import type { NodeContext, NodeResult } from '../engine.js';
 import type { GoalNode, NodeSpec } from '../types.js';
-import { repairBrief } from './agent.js';
+import { goalRepairBrief } from './agent.js';
 
 export type GoalStatus = 'active' | 'paused' | 'blocked' | 'usageLimited' | 'budgetLimited' | 'complete';
 
@@ -107,20 +108,27 @@ export const GOAL_OBJECTIVE_MAX_CHARS = 4_000;
 const chars = (s: string) => [...s].length;
 
 /**
- * The objective a revisit sets: what the agent must hear first (steers, the
- * failing checks), then the original objective. The original always survives
- * whole; when the two do not fit in Codex's limit the preface is cut, and the
- * full check output stays in the run's evidence.
+ * The objective a revisit sets: what the agent must hear first (steers, and on
+ * Codex the failing checks), then the original objective, then `context` (on
+ * Claude the failing checks, kept out of the condition the goal is judged on).
+ * The original always survives whole; when the rest does not fit in Codex's
+ * limit the context is cut first, then the preface, and the full check output
+ * stays in the run's evidence.
  */
-export function composeObjective(preface: string[], objective: string): string {
-  if (preface.length === 0) return objective;
+export function composeObjective(preface: string[], objective: string, context?: string): string {
+  if (preface.length === 0 && !context) return objective;
   const sep = '\n\n---\n\n';
   const cut = '\n[cut to fit the goal objective limit]';
-  const head = preface.join('\n\n');
-  const room = GOAL_OBJECTIVE_MAX_CHARS - chars(objective) - chars(sep);
-  if (chars(head) <= room) return `${head}${sep}${objective}`;
-  if (room <= chars(cut)) return objective;
-  return `${[...head].slice(0, room - chars(cut)).join('')}${cut}${sep}${objective}`;
+  const fit = (text: string, room: number): string | undefined => {
+    if (chars(text) <= room) return text;
+    if (room <= chars(cut)) return undefined;
+    return `${[...text].slice(0, room - chars(cut)).join('')}${cut}`;
+  };
+  let room = GOAL_OBJECTIVE_MAX_CHARS - chars(objective);
+  const head = preface.length > 0 ? fit(preface.join('\n\n'), room - chars(sep)) : undefined;
+  if (head !== undefined) room -= chars(head) + chars(sep);
+  const tail = context ? fit(context, room - chars(sep)) : undefined;
+  return `${head !== undefined ? `${head}${sep}` : ''}${objective}${tail !== undefined ? `${sep}${tail}` : ''}`;
 }
 const MAX_BACKOFF_MS = 15 * 60_000;
 const DEFAULT_STALL_MS = 5 * 60_000;
@@ -388,10 +396,14 @@ export async function executeGoalNode(node: NodeSpec, ctx: NodeContext): Promise
         absorb(await session!.setGoal({ objective: data.objective, tokenBudget: spec.tokenBudget ?? null }));
       }
     } else {
-      const preface = [...ctx.takeSteer(), ...(priorThread ? [repairBrief(ctx, spec.id)] : [])].filter(
-        (t): t is string => !!t,
-      );
-      const objective = composeObjective(preface, spec.objective);
+      // Any red verdict this node's objective was not set against: a repair on
+      // the same thread, and also a fresh thread (the old one never got a goal,
+      // or the repair runs on another node), which would otherwise start blind.
+      const brief = red !== undefined && red !== prior?.repairOf ? goalRepairBrief(ctx, claude) : undefined;
+      const steersNow = ctx.takeSteer();
+      const objective = claude
+        ? composeObjective(steersNow, spec.objective, brief)
+        : composeObjective([...steersNow, ...(brief ? [brief] : [])], spec.objective);
       if (startThread) await session!.clearGoal();
       const goal = await session!.setGoal({ objective, tokenBudget: spec.tokenBudget ?? null });
       data.repairOf = red;
