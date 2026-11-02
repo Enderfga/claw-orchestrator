@@ -190,14 +190,17 @@ Using Claw Orchestrator in a project or paper? Open a pull request to add it her
 
 ## Citation
 
-If Claw Orchestrator helps your research, please cite it:
+If Claw Orchestrator helps your research, please cite its
+[technical report](https://doi.org/10.5281/zenodo.23874036):
 
 ```bibtex
-@misc{fang2026claworchestrator,
-  title        = {Claw Orchestrator: A Unified Runtime for Coding Agent CLIs},
-  author       = {Fang, Guian},
-  year         = {2026},
-  howpublished = {\url{https://github.com/Enderfga/claw-orchestrator}}
+@techreport{fang2026claworchestrator,
+  title     = {Claw Orchestrator: A Unified Runtime for Coding Agent CLIs},
+  author    = {Fang, Guian},
+  year      = {2026},
+  publisher = {Zenodo},
+  doi       = {10.5281/zenodo.23874036},
+  url       = {https://doi.org/10.5281/zenodo.23874036}
 }
 ```
 

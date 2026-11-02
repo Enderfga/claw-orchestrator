@@ -16,11 +16,19 @@ keywords:
   - Codex
   - Agent Client Protocol
   - Model Context Protocol
+identifiers:
+  - type: doi
+    value: 10.5281/zenodo.23874036
+    description: The technical report, all versions
 preferred-citation:
-  type: software
+  type: report
   title: 'Claw Orchestrator: A Unified Runtime for Coding Agent CLIs'
   authors:
     - family-names: Fang
       given-names: Guian
+      affiliation: National University of Singapore
   year: 2026
-  url: https://github.com/Enderfga/claw-orchestrator
+  publisher:
+    name: Zenodo
+  doi: 10.5281/zenodo.23874036
+  url: https://doi.org/10.5281/zenodo.23874036
