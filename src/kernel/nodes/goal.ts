@@ -169,8 +169,14 @@ export async function executeGoalNode(node: NodeSpec, ctx: NodeContext): Promise
   // process died after the goal ended but before this node's result was
   // committed, and the goal's own ending is the result.
   const red = ctx.record.outcome === 'refuted' ? ctx.record.verdict?.evidenceId : undefined;
-  const finished = !!priorThread && TERMINAL.has(prior?.status ?? '');
-  const repairing = finished && red !== undefined && red !== prior?.repairOf;
+  const newRed = red !== undefined && red !== prior?.repairOf;
+  // A Codex goal that went `blocked` on a capacity error (a model at capacity, a
+  // usage limit) was not finished; a process that died during the backoff picks
+  // it up again, unless a new red verdict sends the node to repair instead.
+  const capacityBlock =
+    !claude && prior?.status === 'blocked' && TRANSIENT_ERRORS.has(prior?.lastError?.code ?? '') && !newRed;
+  const finished = !!priorThread && TERMINAL.has(prior?.status ?? '') && !capacityBlock;
+  const repairing = finished && newRed;
   const resuming = !!priorThread && !finished;
   // The first visit may start on a thread the caller names; after that the
   // checkpoint decides.
@@ -334,6 +340,7 @@ export async function executeGoalNode(node: NodeSpec, ctx: NodeContext): Promise
         model: spec.model,
         effort: spec.effort as never,
         ...(claude ? {} : { sandboxMode: spec.sandboxMode }),
+        ...(claude && spec.disallowedTools?.length ? { disallowedTools: spec.disallowedTools } : {}),
         launcher: spec.launcher,
         permissionMode: 'bypassPermissions',
         // The node checkpoints the thread id itself; a registry entry would only
@@ -389,7 +396,11 @@ export async function executeGoalNode(node: NodeSpec, ctx: NodeContext): Promise
       const goal = await session!.getGoal();
       if (goal) {
         absorb(goal);
-        if (goal.status === 'paused' || goal.status === 'usageLimited') {
+        if (
+          goal.status === 'paused' ||
+          goal.status === 'usageLimited' ||
+          (goal.status === 'blocked' && capacityBlock)
+        ) {
           absorb(await session!.setGoal({ status: 'active' }));
         }
       } else {
@@ -472,16 +483,23 @@ export async function executeGoalNode(node: NodeSpec, ctx: NodeContext): Promise
         absorb(await live.getGoal().catch(() => live.goal));
       }
 
-      const end = ended();
+      // Codex ends a goal turn that hit a capacity error and marks the goal
+      // `blocked`; the cause comes with the turn, not as a goal status. That is
+      // the same transient condition `usageLimited` names, so it is resumed the
+      // same way, within the same bound, rather than ending the node.
+      const capacityBlocked = !claude && data.status === 'blocked' && capacityError;
+      const end = capacityBlocked ? undefined : ended();
       if (end) return end;
 
       const status = data.status;
       const stalled = status === 'active' && !live.turnActive && (Date.now() - lastNews >= stallMs || capacityError);
-      const needsResume = status === 'paused' || status === 'usageLimited' || stalled;
+      const needsResume = status === 'paused' || status === 'usageLimited' || stalled || capacityBlocked;
       if (!needsResume) {
         retryAt = null;
       } else if (retryAt === null) {
-        const stop = spendRecovery(stalled ? 'stalled' : status);
+        const stop = spendRecovery(
+          stalled ? 'stalled' : capacityBlocked ? `blocked by ${data.lastError?.code ?? 'a capacity error'}` : status,
+        );
         if (stop) return stop;
       } else if (Date.now() >= retryAt) {
         retryAt = null;

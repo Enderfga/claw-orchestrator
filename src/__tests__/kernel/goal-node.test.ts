@@ -169,6 +169,70 @@ describe('goal node', () => {
     }
   });
 
+  it('resumes a goal codex blocked over a model at capacity, within its bound', async () => {
+    // codex 0.166.0: the turn ends with turn.error serverOverloaded and the goal
+    // goes `blocked`. That is a transient condition, not a finished goal.
+    let overloads = 2;
+    const m = fakeManager(() => {
+      const s = new FakeGoalSession('t');
+      s.onSet = (_p, self) => {
+        if (overloads-- > 0) {
+          const err = {
+            message: 'Selected model is at capacity. Please try a different model.',
+            code: 'serverOverloaded',
+            willRetry: false,
+            at: new Date().toISOString(),
+          };
+          self.lastError = err;
+          self.emit('codex:error', err);
+          self.move('blocked');
+        } else self.move('complete');
+      };
+      return s;
+    });
+    const kernel = kernelWith(m);
+    const done = await kernel.wait((await kernel.start(oneGoal({ capacityRetry: { max: 5, backoffMs: 5 } }))).runId);
+    expect(done!.nodes.goal.state).toBe('succeeded');
+    const session = [...m.sessions.values()][0];
+    // Same thread, same objective: only the status is set back to active.
+    expect(m.starts).toHaveLength(1);
+    expect(session.sets.slice(1)).toEqual([{ status: 'active' }, { status: 'active' }]);
+    const data = done!.nodes.goal.data as GoalNodeData;
+    expect(data.resumes).toBe(2);
+    expect(data.lastError?.code).toBe('serverOverloaded');
+  });
+
+  it('gives up on a goal blocked over capacity once the bound is spent, naming the cause', async () => {
+    const m = fakeManager(() => {
+      const s = new FakeGoalSession('t');
+      s.onSet = (_p, self) => {
+        self.emit('codex:error', { message: 'at capacity', code: 'serverOverloaded', willRetry: false, at: '' });
+        self.move('blocked');
+      };
+      return s;
+    });
+    const kernel = kernelWith(m);
+    const done = await kernel.wait((await kernel.start(oneGoal({ capacityRetry: { max: 2, backoffMs: 5 } }))).runId);
+    expect(done!.nodes.goal.state).toBe('failed');
+    expect(done!.nodes.goal.error).toMatch(/did not recover after 2 resume attempts.*serverOverloaded/);
+  });
+
+  it('still fails at once on a goal blocked for any other reason', async () => {
+    const m = fakeManager(() => {
+      const s = new FakeGoalSession('t');
+      s.onSet = (_p, self) => {
+        self.emit('codex:error', { message: 'bad request', code: 'badRequest', willRetry: false, at: '' });
+        self.move('blocked');
+      };
+      return s;
+    });
+    const kernel = kernelWith(m);
+    const done = await kernel.wait((await kernel.start(oneGoal({ capacityRetry: { max: 5, backoffMs: 5 } }))).runId);
+    expect(done!.nodes.goal.state).toBe('failed');
+    expect(done!.nodes.goal.error).toBe('goal blocked: bad request');
+    expect((done!.nodes.goal.data as GoalNodeData).resumes).toBe(0);
+  });
+
   it('resumes a usage-limited goal after a backoff, within its bound', async () => {
     let limits = 2;
     const m = fakeManager(() => {
@@ -413,6 +477,44 @@ describe('goal node after a crash', () => {
     expect(m2.starts).toHaveLength(0);
     expect(done!.nodes.goal.state).toBe('succeeded');
     expect(done!.state).toBe('completed');
+  });
+
+  it('picks a goal blocked over capacity back up after a crash in the backoff', async () => {
+    const m = fakeManager(() => {
+      const s = new FakeGoalSession('thread-K');
+      s.onSet = (_p, self) => self.move('complete', { tokensUsed: 50 });
+      return s;
+    });
+    const kernel = kernelWith(m);
+    const first = await kernel.start(oneGoal());
+    await kernel.wait(first.runId);
+    // The process died while waiting to resume a goal codex had blocked over capacity.
+    await crashedInGoal(first.runId, (r) => {
+      const data = r.nodes.goal.data as GoalNodeData;
+      data.status = 'blocked';
+      data.lastError = { message: 'Selected model is at capacity.', code: 'serverOverloaded', at: '' };
+    });
+
+    const m2 = fakeManager(() => {
+      const s = new FakeGoalSession('thread-K');
+      s.goal = {
+        objective: 'make it faster',
+        status: 'blocked',
+        tokenBudget: null,
+        tokensUsed: 50,
+        timeUsedSeconds: 1,
+      };
+      s.onSet = (p, self) => {
+        if (p.status === 'active') self.move('complete');
+      };
+      return s;
+    });
+    const kernel2 = kernelWith(m2);
+    await kernel2.resume(first.runId);
+    const done = await kernel2.wait(first.runId);
+    expect(m2.starts[0].resumeSessionId).toBe('thread-K');
+    expect([...m2.sessions.values()][0].sets).toEqual([{ status: 'active' }]);
+    expect(done!.nodes.goal.state).toBe('succeeded');
   });
 
   it('finishes a repair pass that completed, rather than repairing the same red verdict again', async () => {
@@ -682,6 +784,23 @@ describe('goal node on claude', () => {
     expect(repair).toContain('not part of the condition above');
     expect(repair).toContain('done-file');
     expect(repair).not.toContain('definition of done');
+  });
+
+  it('passes disallowedTools to the claude session, and refuses them on codex before starting', async () => {
+    const m = claudeManager((s) => {
+      s.onSet = (_p, self) => self.move('complete');
+    });
+    const kernel = kernelWith(m as never);
+    const done = await kernel.wait(
+      (await kernel.start(oneGoal({ engine: 'claude', disallowedTools: ['ScheduleWakeup', 'Monitor'] }))).runId,
+    );
+    expect(done!.nodes.goal.state).toBe('succeeded');
+    expect(m.starts[0].disallowedTools).toEqual(['ScheduleWakeup', 'Monitor']);
+
+    const codex = kernelWith(fakeManager(() => new FakeGoalSession('t')));
+    await expect(codex.start(oneGoal({ disallowedTools: ['shell'] }))).rejects.toThrow(
+      /disallowedTools is not supported on engine 'codex'/,
+    );
   });
 
   it('opens a claude session with its own id and a transcript it can resume, then completes', async () => {

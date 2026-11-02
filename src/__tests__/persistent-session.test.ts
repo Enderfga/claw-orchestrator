@@ -189,6 +189,9 @@ describe('PersistentClaudeSession', () => {
 
     it('drops an inherited ANTHROPIC_API_KEY when no baseUrl is configured', async () => {
       vi.stubEnv('ANTHROPIC_API_KEY', 'proxy-key-not-for-official-api');
+      // An inherited ANTHROPIC_BASE_URL keeps the key on purpose; the test runner's
+      // own shell may have one, so it is cleared here rather than assumed absent.
+      vi.stubEnv('ANTHROPIC_BASE_URL', '');
       session = new PersistentClaudeSession(makeConfig());
       const { spawnEngine: spawn } = await import('../engine-spawn.js');
       const startPromise = session.start();

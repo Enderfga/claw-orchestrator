@@ -104,6 +104,7 @@ export async function executeAgentNode(node: NodeSpec, ctx: NodeContext): Promis
       effort: spec.effort as never,
       ...(spec.acpAgent === undefined ? {} : { acpAgent: spec.acpAgent }),
       ...(spec.appendSystemPrompt ? { appendSystemPrompt: spec.appendSystemPrompt } : {}),
+      ...(spec.disallowedTools?.length ? { disallowedTools: spec.disallowedTools } : {}),
       permissionMode: (spec.permissionMode as never) ?? 'bypassPermissions',
     },
   });

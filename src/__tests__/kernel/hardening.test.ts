@@ -282,6 +282,42 @@ describe('attempt isolation', () => {
     expect(new Set(fixers).size).toBe(4);
   }, 20_000);
 
+  it('passes an agent node disallowedTools list to the session, and refuses it where the engine ignores it', async () => {
+    const configs: Array<Record<string, unknown>> = [];
+    const manager = {
+      async startSession(config: Record<string, unknown>) {
+        configs.push(config);
+        return { name: config.name } as never;
+      },
+      async sendMessage() {
+        return { output: 'done' } as never;
+      },
+      async stopSession() {},
+    };
+    const kernel = registerDefaultExecutors(new RunKernel({ manager, nodeTimeoutMs: 8000 }));
+    const rec = await kernel.start({
+      name: 'deny',
+      cwd: tmp,
+      nodes: [{ id: 'a', kind: 'agent', prompt: 'x', disallowedTools: ['ScheduleWakeup'] }],
+    });
+    await kernel.wait(rec.runId);
+    expect(configs[0].disallowedTools).toEqual(['ScheduleWakeup']);
+    await expect(
+      kernel.start({
+        name: 'deny-codex',
+        cwd: tmp,
+        nodes: [{ id: 'a', kind: 'agent', engine: 'codex', prompt: 'x', disallowedTools: ['shell'] }],
+      }),
+    ).rejects.toThrow(/not supported on engine 'codex'/);
+    await expect(
+      kernel.start({
+        name: 'deny-bad',
+        cwd: tmp,
+        nodes: [{ id: 'a', kind: 'agent', prompt: 'x', disallowedTools: 'ScheduleWakeup' as never }],
+      }),
+    ).rejects.toThrow(/must be a list of tool names/);
+  }, 20_000);
+
   it('keeps the conversation of a pinned agent session between visits', async () => {
     // Stopping a session forgets its conversation unless told otherwise, so a
     // pinned name used to start over on every visit, like an unpinned one.

@@ -79,6 +79,8 @@ export interface AgentNode extends NodeBase, AgentBinding {
   permissionMode?: string;
   /** Standing instructions for the session, appended to its system prompt. */
   appendSystemPrompt?: string;
+  /** Tools the session may not use (`--disallowed-tools`). Engines `claude` and `grok`; refused on the others. */
+  disallowedTools?: string[];
 }
 
 /**
@@ -245,6 +247,11 @@ export interface GoalNode extends NodeBase {
   capacityRetry?: { max: number; backoffMs?: number };
   /** An active goal with no turn and no notification for this long is resumed. Default 5 min. */
   stallMs?: number;
+  /**
+   * Tools the session may not use (`--disallowed-tools`). `claude` only: Codex's
+   * app-server has no per-thread tool list, so it is refused there.
+   */
+  disallowedTools?: string[];
 }
 
 /**

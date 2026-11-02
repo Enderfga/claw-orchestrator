@@ -414,6 +414,22 @@ export function validateSpec(spec: WorkflowSpec): void {
     if (node.timeoutMs !== undefined && (!Number.isFinite(node.timeoutMs) || node.timeoutMs <= 0)) {
       throw new Error(`Node '${node.id}': timeoutMs must be a positive number`);
     }
+    if ((node.kind === 'agent' || node.kind === 'goal') && node.disallowedTools !== undefined) {
+      const tools = node.disallowedTools as unknown;
+      if (!Array.isArray(tools) || tools.some((t) => typeof t !== 'string' || t.length === 0)) {
+        throw new Error(`Node '${node.id}': disallowedTools must be a list of tool names`);
+      }
+      // Refused, not dropped: a node that asked to deny tools and silently ran
+      // with them would be worse than one that did not start.
+      const engine = node.engine ?? (node.kind === 'goal' ? 'codex' : 'claude');
+      const honours = node.kind === 'goal' ? engine === 'claude' : engine === 'claude' || engine === 'grok';
+      if (tools.length > 0 && !honours) {
+        throw new Error(
+          `Node '${node.id}': disallowedTools is not supported on engine '${engine}' ` +
+            `(${node.kind === 'goal' ? 'goal nodes: claude' : 'agent nodes: claude, grok'})`,
+        );
+      }
+    }
   }
 
   if (spec.maxNodeVisits !== undefined && (!Number.isInteger(spec.maxNodeVisits) || spec.maxNodeVisits < 1)) {

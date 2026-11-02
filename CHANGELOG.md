@@ -9,15 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **`autoloop_resume` native tool.** One plugin/MCP registration that forwards
-  caller `run_id`, optional `send_timeout_ms` / `pending_dispatch_id`, and optional
-  `*CustomEngineRef` names once to `SessionManager.autoloopResume`. Omission stays
-  omission; live/cold validation and audit remain manager-owned. Distinct from
-  `workflow_resume`. Public help distinguishes live pending no-op from cold
-  reconstruction and conditional pending-ID; runtime behavior unchanged. Caller
-  string fields are screened at the facade for a finite ASCII identifier grammar
-  before resolver/manager effects; invalid inputs raise fixed field errors, and
-  valid-input manager/resolver errors propagate unchanged.
+- **`autoloop_resume` tool.** An agent can resume a paused autoloop run itself, over the plugin or MCP, as
+  `POST /autoloop/<id>/resume` already allowed: optional `send_timeout_ms` and `pending_dispatch_id` to move a
+  timed-out dispatch on, and `*CustomEngineRef` names for runs that used custom engines. The manager's errors
+  come back as they are, so a caller can correct its arguments. Not the same as `workflow_resume`. 79 tools.
+- **`disallowedTools` on `agent` and `goal` nodes**, passed to the session as `--disallowed-tools`: on `claude`
+  and `grok` agent nodes and `claude` goal nodes. A spec that sets it for an engine that would ignore it is
+  refused at start.
+
+### Fixed
+
+- **A Codex goal blocked by a model at capacity is resumed, not failed.** Codex ends such a turn with
+  `serverOverloaded` and marks the goal `blocked`; the node now treats that like a usage limit and sets the
+  goal back to `active` on the same thread after a backoff, within `capacityRetry`. A goal blocked for any
+  other reason still ends the node.
+- **A failed Codex turn's error reaches `lastError`** when the app-server reports it only in `turn/completed`,
+  so the node's error names the cause.
 
 ## [7.16.2] - 2026-11-01
 

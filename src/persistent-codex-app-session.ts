@@ -124,7 +124,12 @@ interface AgentMessageDeltaNotification {
 
 interface TurnCompletedNotification {
   threadId: string;
-  turn: { id: string; status: string };
+  turn: {
+    id: string;
+    status: string;
+    /** Set on a failed or interrupted turn: the same shape as an `error` notification's. */
+    error?: { message?: string; codexErrorInfo?: unknown } | null;
+  };
 }
 
 // ─── PersistentCodexAppServerSession ───────────────────────────────────────
@@ -159,6 +164,8 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
   private currentTurnId?: string;
   private currentGoal: ThreadGoal | null = null;
   private _lastError: CodexAppError | null = null;
+  /** The turn the last `error` notification the server would not retry belonged to. */
+  private _lastErrorTurn: string | null = null;
 
   // Per-turn buffers (reset at each send)
   private turnAssistantText = '';
@@ -583,6 +590,22 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
         // partial text and is not a success. `stop_reason` keeps its own two-state
         // mapping, so `interrupted` stays out of the error bucket there.
         const failed = p.turn?.status === 'failed';
+        // A failed goal turn may report its cause only here, not as an `error`
+        // notification: a model at capacity ends the turn with
+        // `turn.error.codexErrorInfo: serverOverloaded` and the goal then goes
+        // `blocked` (codex 0.166.0). Surfaced as `codex:error` unless the same
+        // turn already raised a final one.
+        const turnError = p.turn?.error;
+        if (turnError && p.turn.status !== 'completed' && this._lastErrorTurn !== p.turn.id) {
+          this._lastError = {
+            message: turnError.message ?? 'codex app-server turn failed',
+            code: errorInfoName(turnError.codexErrorInfo),
+            willRetry: false,
+            at: new Date().toISOString(),
+          };
+          this._lastErrorTurn = p.turn.id;
+          this.emit('codex:error', this._lastError);
+        }
         this._stats.turns++;
         if (p.turn?.status === 'completed') this._stats.turnsSucceeded++;
         this._stats.lastActivity = new Date().toISOString();
@@ -618,7 +641,11 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
         break;
       }
       case 'error': {
-        const p = params as { error?: { message?: string; codexErrorInfo?: unknown }; willRetry?: boolean };
+        const p = params as {
+          error?: { message?: string; codexErrorInfo?: unknown };
+          willRetry?: boolean;
+          turnId?: string;
+        };
         const message = p.error?.message ?? 'codex app-server error';
         this._lastError = {
           message,
@@ -626,6 +653,7 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
           willRetry: p.willRetry === true,
           at: new Date().toISOString(),
         };
+        this._lastErrorTurn = p.willRetry === true ? null : (p.turnId ?? null);
         this.emit('codex:error', this._lastError);
         this._emitError(new Error(message));
         break;

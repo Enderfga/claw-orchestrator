@@ -603,6 +603,43 @@ describe('PersistentCodexAppServerSession — goals', () => {
     });
   });
 
+  it('reports the error a failed goal turn carries in turn/completed, once per turn', async () => {
+    // codex 0.166.0: a model at capacity can end a goal turn with only
+    // turn.error set and no `error` notification; the goal then goes blocked.
+    const proc = createMockProc(defaultResponder());
+    const session = await startSession(proc);
+    const seen: Array<{ code: string | null; willRetry: boolean }> = [];
+    session.on('codex:error', (e) => seen.push(e as { code: string | null; willRetry: boolean }));
+    push(proc, 'turn/completed', {
+      threadId: 't1',
+      turn: {
+        id: 'g1',
+        status: 'failed',
+        error: {
+          message: 'Selected model is at capacity. Please try a different model.',
+          codexErrorInfo: 'serverOverloaded',
+        },
+      },
+    });
+    // A turn whose final error already came as a notification is not reported twice.
+    push(proc, 'error', {
+      error: { message: 'usage limit', codexErrorInfo: 'usageLimitExceeded' },
+      willRetry: false,
+      threadId: 't1',
+      turnId: 'g2',
+    });
+    push(proc, 'turn/completed', {
+      threadId: 't1',
+      turn: { id: 'g2', status: 'failed', error: { message: 'usage limit', codexErrorInfo: 'usageLimitExceeded' } },
+    });
+    // A completed turn reports nothing.
+    push(proc, 'turn/completed', { threadId: 't1', turn: { id: 'g3', status: 'completed', error: null } });
+    await new Promise((r) => setTimeout(r, 5));
+    expect(seen.map((e) => e.code)).toEqual(['serverOverloaded', 'usageLimitExceeded']);
+    expect(seen[0].willRetry).toBe(false);
+    expect(session.lastError).toMatchObject({ code: 'usageLimitExceeded' });
+  });
+
   it('steer() goes into a turn the goal loop started, which no send() is waiting on', async () => {
     const proc = createMockProc(defaultResponder((m) => (m.method === 'turn/steer' ? { turnId: 'g1' } : undefined)));
     const session = await startSession(proc);
