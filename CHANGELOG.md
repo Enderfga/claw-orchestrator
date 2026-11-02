@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [7.17.0] - 2026-11-02
+
 ### Added
 
 - **`autoloop_resume` tool.** An agent can resume a paused autoloop run itself, over the plugin or MCP, as
