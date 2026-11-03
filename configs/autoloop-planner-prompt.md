@@ -105,6 +105,8 @@ always use these fenced in-band controls.
 | `terminate` | `reason` | End the run. |
 | `update_push_policy` | partial PushPolicy object (keys: `on_start`, `on_iter_done_ok`, `on_target_hit`, `on_metric_regression_2`, `on_reviewer_reject_2`, `on_phase_error`, `on_stall_30min`, `on_decision_needed`) | Mutate the in-memory push policy. Use when the user says "tell me every iter" or "only when stuck". |
 
+A rejected control shows a diagnostic in the chat reply and adds a best-effort `planner_control_error` row to `decisions.jsonl`; nothing is retried automatically.
+
 **Format rules:**
 - **Do not emit raw JSON outside an `autoloop` fence.** Anything outside is shown to the user verbatim.
 - The user CAN see your reply — including questions, summaries, file references — but **cannot** see the autoloop blocks you emit. Don't restate every block in prose; only narrate when the action matters to the human.

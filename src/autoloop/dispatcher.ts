@@ -255,9 +255,68 @@ interface DecisionLogEntry {
     | 'spawn_subagents'
     | 'phase_error'
     | 'send_timeout'
-    | 'policy_silence_blocked';
+    | 'policy_silence_blocked'
+    | 'planner_control_error';
   actor: 'planner' | 'runner' | 'dispatcher';
   payload: Record<string, unknown>;
+}
+
+const PLANNER_CONTROL_ERROR_HEADER =
+  'Planner control error. Requested actions are not confirmed; inspect run artifacts before retrying.';
+const PLANNER_CONTROL_PARSE_DETAIL = 'Unrecognized or malformed planner control block';
+const PLANNER_CONTROL_GENERIC_DETAIL = 'Planner control rejected';
+const PLANNER_CONTROL_DETAIL_LIMIT = 4;
+const PLANNER_CONTROL_DETAIL_CHARS = 160;
+const PLANNER_CONTROL_DIAGNOSTIC_CHARS = 1024;
+
+/** Batch phase for projection — selected by the dispatcher/handler branch. */
+type PlannerControlProjectionOrigin = 'validation' | 'effect' | 'parse';
+
+/**
+ * Project parse/handler errors into bounded diagnostic text for chat/audit.
+ * Validation origin uses producer-authored safe messages; parse and effect
+ * origins stay on fixed generics. Never infers trust from error text, tool
+ * prefixes, or forged properties.
+ */
+function projectPlannerControlErrors(
+  errors: Array<{ tool: string; error: string }>,
+  origin: PlannerControlProjectionOrigin,
+): {
+  diagnostic: string;
+  details: string[];
+  count: number;
+  omitted: number;
+} {
+  const count = errors.length;
+  const details: string[] = [];
+  for (const entry of errors) {
+    if (details.length >= PLANNER_CONTROL_DETAIL_LIMIT) break;
+    let detail: string;
+    if (origin === 'validation') {
+      detail = entry.error;
+    } else if (origin === 'parse') {
+      detail = PLANNER_CONTROL_PARSE_DETAIL;
+    } else {
+      detail = PLANNER_CONTROL_GENERIC_DETAIL;
+    }
+    if (detail.length > PLANNER_CONTROL_DETAIL_CHARS) {
+      detail = detail.slice(0, PLANNER_CONTROL_DETAIL_CHARS);
+    }
+    details.push(detail);
+  }
+  const omitted = Math.max(0, count - details.length);
+  const lines = [PLANNER_CONTROL_ERROR_HEADER];
+  for (let i = 0; i < details.length; i++) {
+    lines.push(`${i + 1}. ${details[i]}`);
+  }
+  if (omitted > 0) {
+    lines.push(`(${omitted} additional error(s) omitted)`);
+  }
+  let diagnostic = lines.join('\n');
+  if (diagnostic.length > PLANNER_CONTROL_DIAGNOSTIC_CHARS) {
+    diagnostic = diagnostic.slice(0, PLANNER_CONTROL_DIAGNOSTIC_CHARS);
+  }
+  return { diagnostic, details, count, omitted };
 }
 
 export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatcher {
@@ -1144,19 +1203,47 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
     const handlerResult =
       parsed.parse_errors.length > 0
         ? {
-            emitted_messages: [],
+            emitted_messages: [] as Awaited<ReturnType<typeof applyPlannerToolCalls>>['emitted_messages'],
             errors: parsed.parse_errors.map(({ block_index, error }) => ({
               tool: `autoloop block ${block_index}`,
               error,
             })),
+            error_origin: 'parse' as const,
           }
         : await applyPlannerToolCalls(parsed.calls, effects, nextIter);
+
+    // Legacy operator sink: one raw warn per error with original tool/error.
     for (const errEntry of handlerResult.errors) {
       this.logger.warn?.(`[autoloop] tool '${errEntry.tool}' failed: ${errEntry.error}`);
     }
 
-    // Emit cleaned reply (without raw JSON blocks) for the chat tool to surface.
-    if (parsed.cleaned_reply) {
+    // Surface rejected controls as one safe diagnostic + identical chat history.
+    // Ordinary valid / prose-only / nonrecognized fences keep cleaned prose only.
+    if (handlerResult.errors.length > 0) {
+      const origin: PlannerControlProjectionOrigin =
+        handlerResult.error_origin === 'validation'
+          ? 'validation'
+          : handlerResult.error_origin === 'parse'
+            ? 'parse'
+            : 'effect';
+      const projection = projectPlannerControlErrors(handlerResult.errors, origin);
+      this.appendDecisionLog({
+        kind: 'planner_control_error',
+        actor: 'dispatcher',
+        payload: {
+          iter: nextIter,
+          dispatch_id: dispatchId,
+          count: projection.count,
+          details: projection.details,
+          omitted: projection.omitted,
+        },
+      });
+      const combined = parsed.cleaned_reply
+        ? `${projection.diagnostic}\n\n${parsed.cleaned_reply}`
+        : projection.diagnostic;
+      this.emit('planner_reply', combined);
+      this.appendChatEntry({ who: 'planner', text: combined, ts: new Date().toISOString() });
+    } else if (parsed.cleaned_reply) {
       this.emit('planner_reply', parsed.cleaned_reply);
       this.appendChatEntry({ who: 'planner', text: parsed.cleaned_reply, ts: new Date().toISOString() });
     }

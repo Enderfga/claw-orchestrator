@@ -7,10 +7,13 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createHash } from 'node:crypto';
 import fsDefault, * as fs from 'node:fs';
-import { syncBuiltinESMExports } from 'node:module';
+import { createRequire, syncBuiltinESMExports } from 'node:module';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import vm from 'node:vm';
 
 import { ClaudeAgentDispatcher } from '../autoloop/dispatcher.js';
 import { AutoloopRunner } from '../autoloop/runner.js';
@@ -18,6 +21,12 @@ import { type AnyAutoloopMessage, Msg } from '../autoloop/messages.js';
 import type { SessionManager } from '../session-manager.js';
 import type { PushPolicy } from '../autoloop/types.js';
 import { DEFAULT_PUSH_POLICY, LEDGER_SCHEMA_VERSION } from '../autoloop/types.js';
+
+/** Mirror of dispatcher deriveDispatchId — system identity only, never model text. */
+function expectedDispatchId(runId: string, env: AnyAutoloopMessage): string {
+  const identity = JSON.stringify([runId, env.msg_id, env.iter, env.from, env.to, env.type]);
+  return `dispatch_${createHash('sha256').update(identity).digest('hex')}`;
+}
 
 interface StubCalls {
   startSession: ReturnType<typeof vi.fn>;
@@ -1328,6 +1337,972 @@ describe('ClaudeAgentDispatcher — partial Coder terminal handoff', () => {
     } finally {
       fsDefault.writeFileSync = originalWrite;
       syncBuiltinESMExports();
+    }
+  });
+});
+
+describe('planner-control-feedback', () => {
+  const INVALID_CONSTRAINTS_REPLY = [
+    'Submitting the small fixture task.',
+    plannerControl('send_directive', {
+      goal: 'Update a synthetic README fixture',
+      constraints: 'Only README.md',
+      success_criteria: ['The fixture heading is present'],
+      max_attempts: 1,
+    }),
+  ].join('\n');
+
+  const BLOCK_ONLY_INVALID = plannerControl('send_directive', {
+    goal: 'Update a synthetic README fixture',
+    constraints: 'Only README.md',
+    success_criteria: ['The fixture heading is present'],
+    max_attempts: 1,
+  });
+
+  function readJsonl(file: string): Array<Record<string, unknown>> {
+    if (!fs.existsSync(file)) return [];
+    const raw = fs.readFileSync(file, 'utf-8').trim();
+    if (!raw) return [];
+    return raw.split('\n').map((line) => JSON.parse(line) as Record<string, unknown>);
+  }
+
+  it('invalid constraints plus prose emits safe notice, audit, identical event/history', async () => {
+    const { dispatcher, ledgerDir } = makeDispatcher({}, { sendOutput: INVALID_CONSTRAINTS_REPLY });
+    const replies: string[] = [];
+    dispatcher.on('planner_reply', (text: string) => replies.push(text));
+
+    const emitted = await dispatcher.deliver(Msg.chat(0, { text: 'submit fixture' }));
+
+    expect(emitted.filter((message) => message.type === 'directive')).toEqual([]);
+    expect(replies).toHaveLength(1);
+    const combined = replies[0]!;
+    expect(combined).toContain('Planner control error');
+    expect(combined).toContain('Requested actions are not confirmed');
+    expect(combined).toContain('Submitting the small fixture task.');
+    expect(combined).toContain('send_directive constraints must be an array of strings');
+
+    const chat = readJsonl(path.join(ledgerDir, 'chat.jsonl'));
+    const plannerEntries = chat.filter((entry) => entry.who === 'planner');
+    expect(plannerEntries).toHaveLength(1);
+    expect(plannerEntries[0]!.text).toBe(combined);
+
+    const decisions = readJsonl(path.join(ledgerDir, 'decisions.jsonl'));
+    const controlErrors = decisions.filter((row) => row.kind === 'planner_control_error');
+    expect(controlErrors).toHaveLength(1);
+    expect(controlErrors[0]).toMatchObject({
+      actor: 'dispatcher',
+      payload: { count: 1 },
+    });
+    const details = (controlErrors[0]!.payload as { details: string[] }).details;
+    expect(details).toEqual(['send_directive constraints must be an array of strings']);
+  });
+
+  it('block-only invalid control emits nonempty notice and zero directives', async () => {
+    const { dispatcher, ledgerDir } = makeDispatcher({}, { sendOutput: BLOCK_ONLY_INVALID });
+    const replies: string[] = [];
+    dispatcher.on('planner_reply', (text: string) => replies.push(text));
+
+    const emitted = await dispatcher.deliver(Msg.chat(0, { text: 'block only' }));
+
+    expect(emitted.filter((message) => message.type === 'directive')).toEqual([]);
+    expect(replies).toHaveLength(1);
+    const combined = replies[0]!;
+    expect(combined.length).toBeGreaterThan(0);
+    expect(combined).toContain('Planner control error');
+    expect(combined).toContain('send_directive constraints must be an array of strings');
+
+    const chat = readJsonl(path.join(ledgerDir, 'chat.jsonl'));
+    const plannerEntries = chat.filter((entry) => entry.who === 'planner');
+    expect(plannerEntries).toHaveLength(1);
+    expect(plannerEntries[0]!.text).toBe(combined);
+
+    const decisions = readJsonl(path.join(ledgerDir, 'decisions.jsonl'));
+    expect(decisions.filter((row) => row.kind === 'planner_control_error')).toHaveLength(1);
+  });
+
+  it('malformed mixed batch rejects all effects with generic parse notice', async () => {
+    const originalPlan = '# original plan\n';
+    const originalGoal = '{"original":true}\n';
+    fs.writeFileSync(path.join(tmpRoot, 'plan.md'), originalPlan);
+    fs.writeFileSync(path.join(tmpRoot, 'goal.json'), originalGoal);
+    const policyRef: PushPolicy = JSON.parse(JSON.stringify(DEFAULT_PUSH_POLICY));
+    const policyBefore = JSON.stringify(policyRef);
+    expect(policyRef.on_start.channel).not.toBe('email');
+    expect(policyRef.on_start.level).not.toBe('warn');
+    const spawn = vi.fn(async () => undefined);
+    const reply = [
+      plannerControl('write_plan', { content: '# replacement\n' }),
+      '```autoloop\n{malformed json\n```',
+      plannerControl('update_push_policy', {
+        on_start: { silent: false, level: 'warn', channel: 'email' },
+      }),
+      plannerControl('spawn_subagents', { initial_directive: { goal: 'must not run' } }),
+      plannerControl('send_directive', {
+        goal: 'must not run',
+        constraints: [],
+        success_criteria: [],
+        max_attempts: 1,
+      }),
+    ].join('\n');
+    const { dispatcher, ledgerDir } = makeDispatcher(
+      { onSpawnSubagents: spawn, pushPolicyRef: policyRef },
+      { sendOutput: reply },
+    );
+    const replies: string[] = [];
+    dispatcher.on('planner_reply', (text: string) => replies.push(text));
+
+    const emitted = await dispatcher.deliver(Msg.chat(0, { text: 'mixed batch' }));
+
+    expect(fs.readFileSync(path.join(tmpRoot, 'plan.md'), 'utf-8')).toBe(originalPlan);
+    expect(fs.readFileSync(path.join(tmpRoot, 'goal.json'), 'utf-8')).toBe(originalGoal);
+    expect(JSON.stringify(policyRef)).toBe(policyBefore);
+    expect(policyRef.on_start.channel).not.toBe('email');
+    expect(spawn).not.toHaveBeenCalled();
+    expect(emitted).toEqual([]);
+    expect(replies[0]).toContain('Planner control error');
+    expect(replies[0]).toContain('Unrecognized or malformed planner control block');
+    expect(replies[0]).not.toMatch(/malformed json|SyntaxError|JSON/);
+    expect(
+      readJsonl(path.join(ledgerDir, 'decisions.jsonl')).filter((row) => row.kind === 'planner_control_error'),
+    ).toHaveLength(1);
+  });
+
+  it.each([
+    {
+      name: 'send_directive.constraints',
+      detail: 'send_directive constraints must be an array of strings',
+      reply: [
+        plannerControl('write_plan', { content: '# rewritten\n' }),
+        plannerControl('update_push_policy', {
+          on_start: { silent: false, level: 'warn', channel: 'email' },
+        }),
+        plannerControl('send_directive', {
+          goal: 'a',
+          constraints: 'bad',
+          success_criteria: ['ok'],
+          max_attempts: 1,
+        }),
+      ].join('\n'),
+    },
+    {
+      name: 'send_directive.success_criteria',
+      detail: 'send_directive success_criteria must be an array of strings',
+      reply: [
+        plannerControl('write_plan', { content: '# rewritten\n' }),
+        plannerControl('update_push_policy', {
+          on_start: { silent: false, level: 'warn', channel: 'email' },
+        }),
+        plannerControl('send_directive', {
+          goal: 'a',
+          constraints: ['ok'],
+          success_criteria: 'bad',
+          max_attempts: 1,
+        }),
+      ].join('\n'),
+    },
+    {
+      name: 'spawn.constraints',
+      detail: 'spawn_subagents initial_directive constraints must be an array of strings',
+      reply: [
+        plannerControl('write_plan', { content: '# rewritten\n' }),
+        plannerControl('update_push_policy', {
+          on_start: { silent: false, level: 'warn', channel: 'email' },
+        }),
+        plannerControl('spawn_subagents', {
+          initial_directive: {
+            goal: 'b',
+            constraints: 'bad',
+            success_criteria: ['ok'],
+            max_attempts: 1,
+          },
+        }),
+      ].join('\n'),
+    },
+    {
+      name: 'spawn.success_criteria',
+      detail: 'spawn_subagents initial_directive success_criteria must be an array of strings',
+      reply: [
+        plannerControl('write_plan', { content: '# rewritten\n' }),
+        plannerControl('update_push_policy', {
+          on_start: { silent: false, level: 'warn', channel: 'email' },
+        }),
+        plannerControl('spawn_subagents', {
+          initial_directive: {
+            goal: 'b',
+            constraints: ['ok'],
+            success_criteria: 'bad',
+            max_attempts: 1,
+          },
+        }),
+      ].join('\n'),
+    },
+  ])('exact static detail for $name in reply and audit', async ({ detail, reply }) => {
+    const originalPlan = '# keep\n';
+    fs.writeFileSync(path.join(tmpRoot, 'plan.md'), originalPlan);
+    const policyRef: PushPolicy = JSON.parse(JSON.stringify(DEFAULT_PUSH_POLICY));
+    const policyBefore = JSON.stringify(policyRef);
+    const spawn = vi.fn(async () => undefined);
+    const { dispatcher, ledgerDir } = makeDispatcher(
+      { onSpawnSubagents: spawn, pushPolicyRef: policyRef },
+      { sendOutput: reply },
+    );
+    const replies: string[] = [];
+    dispatcher.on('planner_reply', (text: string) => replies.push(text));
+
+    const emitted = await dispatcher.deliver(Msg.chat(0, { text: `t04-${detail}` }));
+
+    expect(fs.readFileSync(path.join(tmpRoot, 'plan.md'), 'utf-8')).toBe(originalPlan);
+    expect(JSON.stringify(policyRef)).toBe(policyBefore);
+    expect(spawn).not.toHaveBeenCalled();
+    expect(emitted).toEqual([]);
+    expect(replies[0]).toBe(
+      [
+        'Planner control error. Requested actions are not confirmed; inspect run artifacts before retrying.',
+        `1. ${detail}`,
+      ].join('\n'),
+    );
+    const row = readJsonl(path.join(ledgerDir, 'decisions.jsonl')).find((r) => r.kind === 'planner_control_error')!;
+    const payload = row.payload as { count: number; details: string[] };
+    expect(payload.count).toBe(1);
+    expect(payload.details).toEqual([detail]);
+    expect(replies[0]).toContain(detail);
+  });
+
+  it('invalid0 then corrected1 in same Planner emits exact arrays', async () => {
+    const corrected = plannerControl('send_directive', {
+      goal: 'Update a synthetic README fixture',
+      constraints: ['Only README.md'],
+      success_criteria: ['The fixture heading is present'],
+      max_attempts: 1,
+    });
+    const { dispatcher, calls } = makeDispatcher(
+      {},
+      { sendOutputs: [INVALID_CONSTRAINTS_REPLY, `Retrying.\n${corrected}`] },
+    );
+
+    const first = await dispatcher.deliver(Msg.chat(0, { text: 'invalid0' }));
+    expect(first.filter((message) => message.type === 'directive')).toEqual([]);
+
+    const second = await dispatcher.deliver(Msg.chat(0, { text: 'corrected1' }));
+    const directives = second.filter((message) => message.type === 'directive');
+    expect(directives).toHaveLength(1);
+    expect(directives[0]).toMatchObject({
+      type: 'directive',
+      payload: {
+        goal: 'Update a synthetic README fixture',
+        constraints: ['Only README.md'],
+        success_criteria: ['The fixture heading is present'],
+        max_attempts: 1,
+      },
+    });
+    expect(
+      calls.startSession.mock.calls.filter((c) => (c[0] as { name: string }).name.endsWith('-planner')),
+    ).toHaveLength(1);
+  });
+
+  it('concurrent and settled same-envelope redelivery keeps one send/event/audit', async () => {
+    const { dispatcher, calls, ledgerDir } = makeDispatcher({}, { sendOutput: INVALID_CONSTRAINTS_REPLY });
+    const replies: string[] = [];
+    dispatcher.on('planner_reply', (text: string) => replies.push(text));
+    const envelope = fixedIdentity(Msg.chat(0, { text: 'same envelope' }), 'pcf-t06');
+
+    const a = dispatcher.deliver(envelope);
+    const b = dispatcher.deliver({ ...envelope, ts: '2035-01-01T00:00:00.000Z' });
+    const [emittedA, emittedB] = await Promise.all([a, b]);
+    const emittedC = await dispatcher.deliver({ ...envelope, ts: '2035-01-02T00:00:00.000Z' });
+
+    expect(calls.sendMessage).toHaveBeenCalledTimes(1);
+    expect(emittedA).toEqual([]);
+    expect(emittedB).toEqual([]);
+    expect(emittedC).toEqual([]);
+    expect(replies).toHaveLength(1);
+    expect(
+      readJsonl(path.join(ledgerDir, 'decisions.jsonl')).filter((row) => row.kind === 'planner_control_error'),
+    ).toHaveLength(1);
+  });
+
+  it('corrected runner chat one Coder send; retained envelope replay reuses identities', async () => {
+    const corrected = `ok\n${plannerControl('send_directive', {
+      goal: 'ship fixture',
+      constraints: ['Only README.md'],
+      success_criteria: ['heading present'],
+      max_attempts: 1,
+    })}`;
+    const { manager, calls } = makeStubManager();
+    const workspace = tmpRoot;
+    const dispatcher = new ClaudeAgentDispatcher({ manager, runId: 'r1', workspace });
+    let plannerTurns = 0;
+    let coderTurns = 0;
+    calls.sendMessage.mockImplementation(async (name: string) => {
+      if (name === 'autoloop-r1-coder') {
+        coderTurns += 1;
+        return { output: `${'P'.repeat(800)}T07_CODER_ONCE`, error: undefined };
+      }
+      if (name === 'autoloop-r1-planner') {
+        plannerTurns += 1;
+        return { output: plannerTurns === 1 ? corrected : 'ack', error: undefined };
+      }
+      return { output: '', error: undefined };
+    });
+
+    const captured: Array<{ inbound: AnyAutoloopMessage; outbound: AnyAutoloopMessage[] }> = [];
+    const realDeliver = dispatcher.deliver.bind(dispatcher);
+    dispatcher.deliver = async (env: AnyAutoloopMessage) => {
+      const outbound = await realDeliver(env);
+      captured.push({ inbound: structuredClone(env), outbound: structuredClone(outbound) });
+      return outbound;
+    };
+
+    const runner = new AutoloopRunner({
+      run_id: 'r1',
+      workspace,
+      ledger_dir: path.join(workspace, 'tasks', 'r1'),
+      dispatcher,
+      notifyUser: vi.fn(async () => undefined),
+      stallCheckIntervalMs: 86_400_000,
+    });
+    await runner.start();
+    await dispatcher.spawnSubagents();
+    try {
+      await runner.chat('corrected single directive');
+      expect(coderTurns).toBe(1);
+
+      const chatCapture = captured.find((c) => c.inbound.type === 'chat');
+      const directiveCapture = captured.find((c) => c.inbound.type === 'directive');
+      expect(chatCapture).toBeDefined();
+      expect(directiveCapture).toBeDefined();
+      expect(chatCapture!.outbound.filter((m) => m.type === 'directive')).toHaveLength(1);
+
+      const plannerAfterRunner = plannerTurns;
+      const coderAfterRunner = coderTurns;
+
+      const replayedChat = await dispatcher.deliver(chatCapture!.inbound);
+      expect(replayedChat.map((m) => m.msg_id)).toEqual(chatCapture!.outbound.map((m) => m.msg_id));
+      expect(plannerTurns).toBe(plannerAfterRunner);
+
+      const replayedDirective = await dispatcher.deliver(directiveCapture!.inbound);
+      expect(replayedDirective.map((m) => m.msg_id)).toEqual(directiveCapture!.outbound.map((m) => m.msg_id));
+      expect(coderTurns).toBe(coderAfterRunner);
+      // Explicit: this asserts dispatcher retained-envelope identity only — not global runner-queue dedup.
+    } finally {
+      runner.stop();
+    }
+  });
+
+  it('valid, prose-only, and nonrecognized fences invent no error notice', async () => {
+    const cases = [
+      {
+        label: 'valid',
+        output: `Done.\n${plannerControl('send_directive', {
+          goal: 'ok',
+          constraints: [],
+          success_criteria: [],
+          max_attempts: 1,
+        })}`,
+      },
+      { label: 'prose', output: 'Just thinking about the plan.' },
+      {
+        label: 'json-fence',
+        output: '```json\n{"tool":"send_directive","args":{"goal":"x","constraints":"bad"}}\n```',
+      },
+    ];
+    for (const c of cases) {
+      const { dispatcher, ledgerDir } = makeDispatcher({}, { sendOutput: c.output });
+      const replies: string[] = [];
+      dispatcher.on('planner_reply', (text: string) => replies.push(text));
+      await dispatcher.deliver(Msg.chat(0, { text: c.label }));
+      expect(replies.join('\n'), c.label).not.toContain('Planner control error');
+      expect(
+        readJsonl(path.join(ledgerDir, 'decisions.jsonl')).filter((row) => row.kind === 'planner_control_error'),
+        c.label,
+      ).toEqual([]);
+    }
+  });
+
+  const ARRAY_VALUES: Array<{ name: string; value: unknown; accept: boolean }> = [
+    { name: 'omitted', value: undefined, accept: true },
+    { name: 'empty', value: [], accept: true },
+    { name: 'strings', value: ['ok'], accept: true },
+    { name: 'string', value: 'bad', accept: false },
+    { name: 'null', value: null, accept: false },
+    { name: 'numbers', value: [1], accept: false },
+    { name: 'object', value: { a: 1 }, accept: false },
+  ];
+
+  it.each(
+    (['constraints', 'success_criteria'] as const).flatMap((field) =>
+      (['send_directive', 'spawn'] as const).flatMap((loc) => ARRAY_VALUES.map((v) => ({ loc, field, ...v }))),
+    ),
+  )('$loc $field $name accept=$accept', async ({ loc, field, value, accept }) => {
+    const args: Record<string, unknown> =
+      loc === 'send_directive'
+        ? {
+            goal: 'g',
+            max_attempts: 1,
+            ...(value === undefined ? {} : { [field]: value }),
+            ...(field === 'constraints' ? { success_criteria: [] } : { constraints: [] }),
+          }
+        : {
+            initial_directive: {
+              goal: 'g',
+              max_attempts: 1,
+              ...(value === undefined ? {} : { [field]: value }),
+              ...(field === 'constraints' ? { success_criteria: [] } : { constraints: [] }),
+            },
+          };
+    const tool = loc === 'send_directive' ? 'send_directive' : 'spawn_subagents';
+    const spawn = vi.fn(async () => undefined);
+    const { dispatcher } = makeDispatcher({ onSpawnSubagents: spawn }, { sendOutput: plannerControl(tool, args) });
+    const emitted = await dispatcher.deliver(Msg.chat(0, { text: 't09' }));
+    if (accept) {
+      if (loc === 'send_directive') {
+        expect(emitted.filter((m) => m.type === 'directive')).toHaveLength(1);
+      } else {
+        expect(spawn).toHaveBeenCalledTimes(1);
+      }
+    } else {
+      expect(emitted.filter((m) => m.type === 'directive')).toEqual([]);
+      expect(spawn).not.toHaveBeenCalled();
+    }
+  });
+
+  it.each([
+    { name: 'empty-goal', args: { goal: '', constraints: [], success_criteria: [], max_attempts: 1 }, ok: false },
+    { name: 'ws-goal', args: { goal: '   ', constraints: [], success_criteria: [], max_attempts: 1 }, ok: false },
+    { name: 'num-goal', args: { goal: 1, constraints: [], success_criteria: [], max_attempts: 1 }, ok: false },
+    { name: 'attempts-0', args: { goal: 'g', constraints: [], success_criteria: [], max_attempts: 0 }, ok: false },
+    { name: 'attempts-neg', args: { goal: 'g', constraints: [], success_criteria: [], max_attempts: -1 }, ok: false },
+    {
+      name: 'attempts-float',
+      args: { goal: 'g', constraints: [], success_criteria: [], max_attempts: 1.5 },
+      ok: false,
+    },
+    {
+      name: 'attempts-string',
+      args: { goal: 'g', constraints: [], success_criteria: [], max_attempts: '1' },
+      ok: false,
+    },
+    { name: 'attempts-1', args: { goal: 'g', constraints: [], success_criteria: [], max_attempts: 1 }, ok: true },
+    { name: 'attempts-omitted', args: { goal: 'g', constraints: [], success_criteria: [] }, ok: true },
+  ])('$name ok=$ok', async ({ args, ok }) => {
+    const { dispatcher } = makeDispatcher({}, { sendOutput: plannerControl('send_directive', args) });
+    const emitted = await dispatcher.deliver(Msg.chat(0, { text: 't10' }));
+    const directives = emitted.filter((m) => m.type === 'directive');
+    if (ok) {
+      expect(directives).toHaveLength(1);
+      expect(directives[0]).toMatchObject({
+        payload: { goal: 'g', constraints: [], success_criteria: [], max_attempts: 1 },
+      });
+    } else {
+      expect(directives).toEqual([]);
+    }
+  });
+
+  it('hidden unknown-tool/engine sentinels absent from new sinks', async () => {
+    const SENTINEL = 'INJECT_MARK\n\u0001X';
+    const warns: string[] = [];
+    const reply = [
+      plannerControl(SENTINEL, { x: 1 }),
+      plannerControl('spawn_subagents', { coder_engine: SENTINEL }),
+    ].join('\n');
+    const { dispatcher, ledgerDir } = makeDispatcher(
+      {
+        logger: {
+          debug: () => undefined,
+          info: () => undefined,
+          warn: (msg: string) => {
+            warns.push(msg);
+          },
+          error: () => undefined,
+        },
+      },
+      { sendOutput: reply },
+    );
+    const replies: string[] = [];
+    dispatcher.on('planner_reply', (text: string) => replies.push(text));
+    await dispatcher.deliver(Msg.chat(0, { text: 't11' }));
+
+    // Legacy operator raw sink keeps original tool/error; projection is chat/audit only.
+    expect(warns.some((w) => w.includes("tool '") && w.includes('failed:'))).toBe(true);
+    expect(warns.join('\n')).toContain('INJECT_MARK');
+    expect(warns.join('\n')).not.toContain('Planner control error');
+
+    const newSinks = [
+      replies.join('\n'),
+      fs.readFileSync(path.join(ledgerDir, 'chat.jsonl'), 'utf-8'),
+      fs.readFileSync(path.join(ledgerDir, 'decisions.jsonl'), 'utf-8'),
+    ];
+    for (const sink of newSinks) {
+      expect(sink).not.toContain('INJECT_MARK');
+      expect(sink).not.toContain('\u0001');
+    }
+    expect(replies[0]).toContain('unknown planner tool');
+    expect(replies[0]).toContain('spawn_subagents coder_engine has unknown engine');
+    expect(replies[0]).not.toContain('Planner control rejected');
+    expect(replies[0]).not.toContain(SENTINEL);
+  });
+
+  it('malformed/write_goal sentinel absent from new sinks', async () => {
+    const SENTINEL = 'LEAK_JSON\n\u0001Y';
+    const captureLogger = (warns: string[]) => ({
+      debug: () => undefined,
+      info: () => undefined,
+      warn: (msg: string) => {
+        warns.push(msg);
+      },
+      error: () => undefined,
+    });
+
+    {
+      const warns: string[] = [];
+      const { dispatcher, ledgerDir } = makeDispatcher(
+        { logger: captureLogger(warns) },
+        { sendOutput: '```autoloop\n{"tool":"send_directive","args":{"goal":"' + SENTINEL + '"\n```' },
+      );
+      const replies: string[] = [];
+      dispatcher.on('planner_reply', (text: string) => replies.push(text));
+      await dispatcher.deliver(Msg.chat(0, { text: 't12-malformed' }));
+      expect(warns.some((w) => w.includes("tool '") && w.includes('failed:'))).toBe(true);
+      expect(warns.join('\n')).not.toContain('Planner control error');
+      const newSinks = [
+        replies.join('\n'),
+        fs.readFileSync(path.join(ledgerDir, 'chat.jsonl'), 'utf-8'),
+        fs.readFileSync(path.join(ledgerDir, 'decisions.jsonl'), 'utf-8'),
+      ];
+      for (const sink of newSinks) {
+        expect(sink).not.toContain('LEAK_JSON');
+        expect(sink).not.toContain('\u0001');
+      }
+      expect(replies[0]).toContain('Planner control error');
+      expect(replies[0]).toContain('Unrecognized or malformed planner control block');
+    }
+
+    {
+      const warns: string[] = [];
+      const { dispatcher, ledgerDir } = makeDispatcher(
+        { logger: captureLogger(warns) },
+        { sendOutput: plannerControl('write_goal', { content: `{${SENTINEL}` }) },
+      );
+      const replies: string[] = [];
+      dispatcher.on('planner_reply', (text: string) => replies.push(text));
+      await dispatcher.deliver(Msg.chat(0, { text: 't12-write-goal' }));
+      expect(warns.some((w) => w.includes("tool '") && w.includes('failed:'))).toBe(true);
+      const newSinks = [
+        replies.join('\n'),
+        fs.readFileSync(path.join(ledgerDir, 'chat.jsonl'), 'utf-8'),
+        fs.readFileSync(path.join(ledgerDir, 'decisions.jsonl'), 'utf-8'),
+      ];
+      for (const sink of newSinks) {
+        expect(sink).not.toContain('LEAK_JSON');
+        expect(sink).not.toContain('\u0001');
+      }
+      expect(replies[0]).toContain('write_goal content is not valid JSON');
+      expect(replies[0]).not.toContain('Planner control rejected');
+      expect(warns.join('\n')).not.toContain('Planner control error');
+    }
+  });
+
+  it('twenty invalid controls bound details and report exact count', async () => {
+    const longAttacker = `ATTACK_${'Z'.repeat(500)}`;
+    const blocks = Array.from({ length: 20 }, (_, i) =>
+      plannerControl('send_directive', {
+        goal: 'g',
+        constraints: i === 0 ? longAttacker : 'bad',
+        success_criteria: [],
+        max_attempts: 1,
+      }),
+    ).join('\n');
+    const { dispatcher, ledgerDir } = makeDispatcher({}, { sendOutput: blocks });
+    const replies: string[] = [];
+    dispatcher.on('planner_reply', (text: string) => replies.push(text));
+    await dispatcher.deliver(Msg.chat(0, { text: 't13' }));
+
+    expect(replies).toHaveLength(1);
+    expect(replies[0]!.length).toBeLessThanOrEqual(1024);
+    expect(replies[0]).not.toContain('ATTACK_');
+    expect(replies[0]).not.toContain(longAttacker.slice(0, 40));
+    const row = readJsonl(path.join(ledgerDir, 'decisions.jsonl')).find((r) => r.kind === 'planner_control_error')!;
+    const payload = row.payload as { count: number; details: string[]; omitted: number };
+    expect(payload.count).toBe(20);
+    expect(payload.details).toHaveLength(4);
+    expect(payload.omitted).toBe(16);
+    for (const d of payload.details) {
+      expect(d.length).toBeLessThanOrEqual(160);
+      expect(d).toBe('send_directive constraints must be an array of strings');
+    }
+  });
+
+  it('partial artifact success then effect error stays generic without false rollback', async () => {
+    const PRINTABLE = 'EFFECT_LEAK';
+    const C0 = '\u0001';
+    const SENTINEL = `${PRINTABLE}\n${C0}Z`;
+    const plan = '# staged plan\n';
+    const warns: string[] = [];
+    const spawn = vi.fn(async () => {
+      throw new Error(`spawn failed ${SENTINEL}`);
+    });
+    const reply = [
+      plannerControl('write_plan', { content: plan }),
+      plannerControl('spawn_subagents', { initial_directive: { goal: 'after write' } }),
+    ].join('\n');
+    const { dispatcher, ledgerDir, calls } = makeDispatcher(
+      {
+        onSpawnSubagents: spawn,
+        logger: {
+          debug: () => undefined,
+          info: () => undefined,
+          warn: (msg: string) => {
+            warns.push(msg);
+          },
+          error: () => undefined,
+        },
+      },
+      { sendOutput: reply },
+    );
+    const replies: string[] = [];
+    dispatcher.on('planner_reply', (text: string) => replies.push(text));
+
+    const emitted = await dispatcher.deliver(Msg.chat(0, { text: 't14' }));
+
+    expect(fs.readFileSync(path.join(tmpRoot, 'plan.md'), 'utf-8')).toBe(plan);
+    expect(spawn).toHaveBeenCalledTimes(1);
+    expect(emitted.filter((m) => m.type === 'directive')).toEqual([]);
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toContain('Planner control error');
+    expect(replies[0]).toContain('Requested actions are not confirmed');
+    expect(replies[0]).toContain('inspect run artifacts');
+    expect(replies[0]).toContain('Planner control rejected');
+    expect(replies[0]).not.toMatch(/nothing was applied|zero effects|rolled back|auto-?retr/i);
+
+    const history = fs.readFileSync(path.join(ledgerDir, 'chat.jsonl'), 'utf-8');
+    const audit = fs.readFileSync(path.join(ledgerDir, 'decisions.jsonl'), 'utf-8');
+    // Legacy raw per-error warn keeps the effect failure text for operators.
+    expect(warns.some((w) => w.includes("tool 'spawn_subagents' failed:") && w.includes(PRINTABLE))).toBe(true);
+    expect(warns.join('\n')).not.toContain('Planner control error');
+    const newSinks = [replies[0]!, history, audit];
+    for (const sink of newSinks) {
+      expect(sink).not.toContain(PRINTABLE);
+      expect(sink).not.toContain(C0);
+    }
+    expect(calls.sendMessage).toHaveBeenCalledTimes(1);
+    // No automatic resend of the failed effect path.
+    expect(spawn).toHaveBeenCalledTimes(1);
+  });
+
+  it('audit/history survive reconstruction without dispatch', async () => {
+    const { dispatcher, ledgerDir, workspace } = makeDispatcher({}, { sendOutput: INVALID_CONSTRAINTS_REPLY });
+    const replies: string[] = [];
+    dispatcher.on('planner_reply', (text: string) => replies.push(text));
+    const chatEnv = fixedIdentity(Msg.chat(0, { text: 't15' }), 'pcf-t15-chat');
+    await dispatcher.deliver(chatEnv);
+    expect(replies).toHaveLength(1);
+    const expectedId = expectedDispatchId('r1', chatEnv);
+
+    const decisionsBefore = readJsonl(path.join(ledgerDir, 'decisions.jsonl'));
+    const controlRow = decisionsBefore.find((row) => row.kind === 'planner_control_error')!;
+    expect(controlRow).toMatchObject({
+      actor: 'dispatcher',
+      payload: {
+        iter: 0,
+        dispatch_id: expectedId,
+        count: 1,
+        details: ['send_directive constraints must be an array of strings'],
+      },
+    });
+    const historyBefore = readJsonl(path.join(ledgerDir, 'chat.jsonl'));
+    const plannerHistory = historyBefore.filter((e) => e.who === 'planner');
+    expect(plannerHistory).toHaveLength(1);
+    expect(plannerHistory[0]!.text).toBe(replies[0]);
+
+    const beforeDecisionsRaw = fs.readFileSync(path.join(ledgerDir, 'decisions.jsonl'), 'utf-8');
+    const beforeChatRaw = fs.readFileSync(path.join(ledgerDir, 'chat.jsonl'), 'utf-8');
+
+    const { manager, calls } = makeStubManager({ sendOutput: 'should not send' });
+    const reconstructed = new ClaudeAgentDispatcher({ manager, runId: 'r1', workspace });
+    void reconstructed;
+    expect(fs.readFileSync(path.join(ledgerDir, 'decisions.jsonl'), 'utf-8')).toBe(beforeDecisionsRaw);
+    expect(fs.readFileSync(path.join(ledgerDir, 'chat.jsonl'), 'utf-8')).toBe(beforeChatRaw);
+    const decisionsAfter = readJsonl(path.join(ledgerDir, 'decisions.jsonl'));
+    const rowAfter = decisionsAfter.find((row) => row.kind === 'planner_control_error')!;
+    expect(rowAfter.payload).toMatchObject({
+      iter: 0,
+      dispatch_id: expectedId,
+      count: 1,
+    });
+    expect(readJsonl(path.join(ledgerDir, 'chat.jsonl')).filter((e) => e.who === 'planner')[0]!.text).toBe(replies[0]);
+    expect(calls.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('decision append failure preserves feedback without claimed persistence', async () => {
+    const warns: string[] = [];
+    const { dispatcher, ledgerDir } = makeDispatcher(
+      {
+        logger: {
+          debug: () => undefined,
+          info: () => undefined,
+          warn: (msg: string) => {
+            warns.push(msg);
+          },
+          error: () => undefined,
+        },
+      },
+      { sendOutput: INVALID_CONSTRAINTS_REPLY },
+    );
+    fs.mkdirSync(ledgerDir, { recursive: true });
+    fs.mkdirSync(path.join(ledgerDir, 'decisions.jsonl'));
+    const replies: string[] = [];
+    dispatcher.on('planner_reply', (text: string) => replies.push(text));
+
+    const emitted = await dispatcher.deliver(Msg.chat(0, { text: 't16' }));
+
+    expect(emitted).toEqual([]);
+    expect(replies[0]).toContain('Planner control error');
+    expect(replies[0]).toContain('Submitting the small fixture task.');
+    expect(warns.some((w) => w.includes('decisions.jsonl append failed'))).toBe(true);
+    expect(warns.join('\n')).not.toMatch(/persisted successfully|exactly-once/i);
+    const chat = readJsonl(path.join(ledgerDir, 'chat.jsonl'));
+    expect(chat.filter((e) => e.who === 'planner')[0]!.text).toBe(replies[0]);
+  });
+
+  it('valid multi-controls, two directives, iter_done N+1 preserved', async () => {
+    const reply = [
+      plannerControl('notify_user', { level: 'info', summary: 'hi' }),
+      plannerControl('send_directive', {
+        goal: 'first',
+        constraints: [],
+        success_criteria: [],
+        max_attempts: 1,
+      }),
+      plannerControl('send_directive', {
+        goal: 'second',
+        constraints: ['c'],
+        success_criteria: ['s'],
+        max_attempts: 1,
+      }),
+    ].join('\n');
+    const { dispatcher } = makeDispatcher({}, { sendOutput: reply });
+    const chatOut = await dispatcher.deliver(Msg.chat(0, { text: 'multi' }));
+    expect(chatOut.filter((m) => m.type === 'push_user')).toHaveLength(1);
+    expect(chatOut.filter((m) => m.type === 'directive')).toHaveLength(2);
+
+    const { dispatcher: d2 } = makeDispatcher(
+      {},
+      {
+        sendOutput: plannerControl('send_directive', {
+          goal: 'after-done',
+          constraints: [],
+          success_criteria: [],
+          max_attempts: 1,
+        }),
+      },
+    );
+    const afterDone = await d2.deliver(Msg.iterDone(3, { iter: 3, verdict: 'advance', metric: 1 }));
+    const next = afterDone.find((m) => m.type === 'directive');
+    expect(next?.iter).toBe(4);
+  });
+});
+
+describe('planner-control-revision', () => {
+  function readJsonl(file: string): Array<Record<string, unknown>> {
+    if (!fs.existsSync(file)) return [];
+    const raw = fs.readFileSync(file, 'utf-8').trim();
+    if (!raw) return [];
+    return raw.split('\n').map((line) => JSON.parse(line) as Record<string, unknown>);
+  }
+
+  /**
+   * Load the real private projector + its constants from dispatcher.ts via AST
+   * extract + transpile. Artificial inputs only — not reachable producer text.
+   */
+  function loadActualPlannerControlProjector(): (
+    errors: Array<{ tool: string; error: string }>,
+    origin: 'validation' | 'effect' | 'parse',
+  ) => { diagnostic: string; details: string[]; count: number; omitted: number } {
+    const dispatcherPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../autoloop/dispatcher.ts');
+    const source = fs.readFileSync(dispatcherPath, 'utf-8');
+    const require = createRequire(import.meta.url);
+    const ts = require('typescript') as typeof import('typescript');
+    const ast = ts.createSourceFile('dispatcher.ts', source, ts.ScriptTarget.Latest, true);
+    const selected = ast.statements.filter(
+      (n) =>
+        (ts.isVariableStatement(n) &&
+          n.declarationList.declarations.some((d) => d.name.getText(ast).startsWith('PLANNER_CONTROL_'))) ||
+        (ts.isFunctionDeclaration(n) && n.name?.text === 'projectPlannerControlErrors'),
+    );
+    expect(selected.filter((n) => ts.isFunctionDeclaration(n))).toHaveLength(1);
+    const exactText = selected.map((n) => n.getText(ast)).join('\n');
+    const js = ts.transpileModule(exactText, {
+      compilerOptions: { target: ts.ScriptTarget.ES2022 },
+    }).outputText;
+    return vm.runInNewContext(`${js}\nprojectPlannerControlErrors;`, {}) as (
+      errors: Array<{ tool: string; error: string }>,
+      origin: 'validation' | 'effect' | 'parse',
+    ) => { diagnostic: string; details: string[]; count: number; omitted: number };
+  }
+
+  function captureLogger(warns: string[]) {
+    return {
+      debug: () => undefined,
+      info: () => undefined,
+      warn: (msg: string) => {
+        warns.push(msg);
+      },
+      error: () => undefined,
+    };
+  }
+
+  it('useful validation messages surface for empty write_plan, missing notify summary, typo tool, and duplicates', async () => {
+    const cases: Array<{ reply: string; detail: string }> = [
+      {
+        reply: plannerControl('write_plan', { content: '   ' }),
+        detail: 'write_plan requires non-empty `content` (full plan.md body)',
+      },
+      {
+        reply: plannerControl('notify_user', { level: 'info', summary: '' }),
+        detail: 'notify_user requires `summary`',
+      },
+      {
+        reply: plannerControl('send_directiv', {
+          goal: 'g',
+          constraints: [],
+          success_criteria: [],
+          max_attempts: 1,
+        }),
+        detail: 'unknown planner tool: send_directiv',
+      },
+      {
+        reply: [
+          plannerControl('write_plan', { content: '# a\n' }),
+          plannerControl('write_plan', { content: '# b\n' }),
+        ].join('\n'),
+        detail: 'duplicate write_plan control in one Planner batch',
+      },
+    ];
+    for (const { reply, detail } of cases) {
+      const warns: string[] = [];
+      const { dispatcher, ledgerDir } = makeDispatcher({ logger: captureLogger(warns) }, { sendOutput: reply });
+      const replies: string[] = [];
+      dispatcher.on('planner_reply', (text: string) => replies.push(text));
+      await dispatcher.deliver(Msg.chat(0, { text: `rev-${detail.slice(0, 24)}` }));
+      expect(replies[0]).toContain(detail);
+      expect(warns.some((w) => w.includes("tool '") && w.includes('failed:') && w.includes(detail))).toBe(true);
+      expect(warns.join('\n')).not.toContain('Planner control error');
+      // Shared tmp ledger accumulates rows across loop cases — take the latest.
+      const audits = readJsonl(path.join(ledgerDir, 'decisions.jsonl')).filter(
+        (r) => r.kind === 'planner_control_error',
+      );
+      const audit = audits[audits.length - 1]!;
+      expect((audit.payload as { details: string[] }).details).toContain(detail);
+    }
+  });
+
+  it('hostile unknown-tool names stay generic; permitted ASCII identifier bounds are reflected', async () => {
+    const maxOk = 'a' + 'b'.repeat(47);
+    const overlong = 'a' + 'b'.repeat(48);
+    const cases: Array<{ tool: string; expectName: boolean }> = [
+      { tool: 'send_directiv', expectName: true },
+      { tool: maxOk, expectName: true },
+      { tool: overlong, expectName: false },
+      { tool: 'BadCase', expectName: false },
+      { tool: 'has-dash', expectName: false },
+      { tool: 'has space', expectName: false },
+      { tool: 'newline\ntool', expectName: false },
+      { tool: 'unicodé_tool', expectName: false },
+      { tool: 'autoloop block 0', expectName: false },
+    ];
+    for (const { tool, expectName } of cases) {
+      const { dispatcher } = makeDispatcher({}, { sendOutput: plannerControl(tool, { x: 1 }) });
+      const replies: string[] = [];
+      dispatcher.on('planner_reply', (text: string) => replies.push(text));
+      await dispatcher.deliver(Msg.chat(0, { text: `tool-${tool.slice(0, 12)}` }));
+      if (expectName) {
+        expect(replies[0]).toContain(`unknown planner tool: ${tool}`);
+      } else {
+        expect(replies[0]).toContain('unknown planner tool');
+        expect(replies[0]).not.toContain(tool.split('\n')[0]!);
+        expect(replies[0]).not.toContain('Planner control rejected');
+      }
+    }
+  });
+
+  it('effect failures with validation-looking text and forged properties stay generic in new sinks', async () => {
+    const LOOKS_VALID = 'write_plan requires non-empty `content` (full plan.md body)';
+    const warns: string[] = [];
+    const spawn = vi.fn(async () => {
+      const err = new Error(LOOKS_VALID) as Error & { origin?: string; detail?: string };
+      err.origin = 'validation';
+      err.detail = LOOKS_VALID;
+      throw err;
+    });
+    const { dispatcher, ledgerDir } = makeDispatcher(
+      { onSpawnSubagents: spawn, logger: captureLogger(warns) },
+      {
+        sendOutput: [
+          plannerControl('write_plan', { content: '# keep\n' }),
+          plannerControl('spawn_subagents', { initial_directive: { goal: 'g' } }),
+        ].join('\n'),
+      },
+    );
+    const replies: string[] = [];
+    dispatcher.on('planner_reply', (text: string) => replies.push(text));
+    await dispatcher.deliver(Msg.chat(0, { text: 'forged-effect' }));
+    expect(fs.readFileSync(path.join(tmpRoot, 'plan.md'), 'utf-8')).toBe('# keep\n');
+    expect(replies[0]).toContain('Planner control rejected');
+    expect(replies[0]).not.toContain(LOOKS_VALID);
+    expect(warns.some((w) => w.includes(LOOKS_VALID))).toBe(true);
+    const audit = fs.readFileSync(path.join(ledgerDir, 'decisions.jsonl'), 'utf-8');
+    expect(audit).not.toContain(LOOKS_VALID);
+  });
+
+  it('spoofed autoloop-block tool name is not treated as parse origin', async () => {
+    const { dispatcher } = makeDispatcher({}, { sendOutput: plannerControl('autoloop block 0', { goal: 'x' }) });
+    const replies: string[] = [];
+    dispatcher.on('planner_reply', (text: string) => replies.push(text));
+    await dispatcher.deliver(Msg.chat(0, { text: 'spoof-parse' }));
+    expect(replies[0]).not.toContain('Unrecognized or malformed planner control block');
+    expect(replies[0]).toContain('unknown planner tool');
+    expect(replies[0]).not.toContain('autoloop block 0');
+  });
+
+  it('records longest reachable producer safe detail under 160 and exercises renderer 160 boundary separately', async () => {
+    // Natural producer-authored validation messages in planner-tools are all <160.
+    // Longest currently reachable authored validation detail (measured, not fabricated):
+    const LONGEST = 'spawn_subagents cannot include custom engine config; configure it at autoloop_start';
+    // Measured length of this reachable producer message (all natural details are ≤160).
+    expect(LONGEST.length).toBe(83);
+    expect(LONGEST.length).toBeLessThanOrEqual(160);
+    const { dispatcher, ledgerDir } = makeDispatcher(
+      {},
+      {
+        sendOutput: plannerControl('spawn_subagents', {
+          coder_custom_engine: { name: 'x', bin: 'y', args: {} },
+        }),
+      },
+    );
+    const replies: string[] = [];
+    dispatcher.on('planner_reply', (text: string) => replies.push(text));
+    await dispatcher.deliver(Msg.chat(0, { text: 'longest-natural' }));
+    expect(replies[0]).toContain(LONGEST);
+    const row = readJsonl(path.join(ledgerDir, 'decisions.jsonl')).find((r) => r.kind === 'planner_control_error')!;
+    expect((row.payload as { details: string[] }).details[0]).toBe(LONGEST);
+
+    // Artificial inputs into the ACTUAL private renderer (extracted from production
+    // source). Not reachable producer messages and not a duplicated local algorithm.
+    const project = loadActualPlannerControlProjector();
+    for (const length of [159, 160, 161, 200] as const) {
+      const errors = Array.from({ length: 7 }, () => ({
+        tool: 'artificial_renderer_input',
+        error: 'V'.repeat(length),
+      }));
+      const result = project(errors, 'validation');
+      expect(result.count).toBe(7);
+      expect(result.omitted).toBe(3);
+      expect(result.details).toHaveLength(4);
+      for (const detail of result.details) {
+        expect(detail.length).toBe(Math.min(length, 160));
+      }
+      expect(result.diagnostic.length).toBeLessThanOrEqual(1024);
+      expect(result.diagnostic).toContain('Planner control error');
     }
   });
 });
