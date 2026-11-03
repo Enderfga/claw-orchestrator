@@ -116,6 +116,9 @@ export async function replayTrace(traceFile: string, storeRoot: string): Promise
 
   // Final drain for any trailing claude-* entries past the last user action.
   await drainUntil(totalReplies);
+  // A turn that took the last reply can still be writing the run's files; read
+  // the spec, and let the caller remove the store, only once it has finished.
+  await mgr.waitForIdle();
 
   const specJson = JSON.parse(fs.readFileSync(path.join(store.runDirAbsolute(runId), 'spec.json'), 'utf8'));
   return { runId, specJson };
