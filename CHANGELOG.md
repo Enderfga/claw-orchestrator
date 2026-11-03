@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [7.17.1] - 2026-11-03
+
 ### Fixed
 
 - **`session_send` reports a turn whose engine process exited before it finished as failed.** It used to
