@@ -7,12 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
+### Fixed
 
-- Autoloop incomplete Coder reply persistence now derives the save destination
-  from the existing iteration directory (`iterDir`) and displays the
-  workspace-relative reference from that same path. Observable handoff behavior
-  is unchanged.
+- **`session_send` reports a turn whose engine process exited before it finished as failed.** It used to
+  answer `ok: true` with no error and the partial text as if it were the reply (#161). Now `ok` is `false`,
+  `error` names the exit code, and `output` keeps what was streamed. `ok` also follows `error` for a turn
+  the engine reported as failed.
 
 ## [7.17.0] - 2026-11-02
 

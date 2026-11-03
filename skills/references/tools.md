@@ -80,7 +80,10 @@ Send a message and get the response.
 | `timeout` | number  |          | Timeout in ms (default 300000)                                                                                                                                                                                                                                                                   |
 | `stream`  | boolean |          | Collect the text chunks into `chunks[]` on the result (returned with the final result, not streamed to the caller)                                                                                                                                                                               |
 
-Returns `{ ok, output, sessionId, error?, usage, permissionDenials?, images?, chunks? }`. `usage` is
+Returns `{ ok, output, sessionId, error?, usage, permissionDenials?, images?, chunks? }`. A turn that failed
+has `ok: false` and `error` set: the engine reported an error result, or its process exited before the turn
+finished (`the claude process exited with code 1 before the turn finished`), in which case `output` keeps
+whatever it had streamed. `usage` is
 `{ tokensIn, tokensOut, costUsd }` for this turn alone — what it added to the session's running totals, which
 `coding_session_status` reports. `permissionDenials` lists the tool
 calls the engine refused during the turn — `[{ toolName, toolUseId?, input? }]` — and is present only

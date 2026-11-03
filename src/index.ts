@@ -557,7 +557,10 @@ const plugin = {
             : undefined,
         });
         return {
-          ok: true,
+          // A turn that failed (an error result, or an engine that exited mid-turn)
+          // comes back with `error` set; `ok` says the same, so a caller that reads
+          // only `ok` does not take an unfinished turn for a reply.
+          ok: !result.error,
           ...result,
           ...(wantChunks ? { chunks } : {}),
         };

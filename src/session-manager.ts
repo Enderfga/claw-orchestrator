@@ -1445,6 +1445,15 @@ export class SessionManager {
           const evt = (result as { event?: Record<string, unknown> }).event;
           if (evt?.is_error) {
             turnError = String((evt.result as string) || result.text || 'turn failed');
+          } else if (evt?.stop_reason === 'process_exit') {
+            // A long-running engine process that dies mid-turn resolves the send
+            // with whatever it had streamed and no result event. That is an
+            // unfinished turn, not a reply: the partial text stays in `output`,
+            // and the exit code goes into the error the caller sees.
+            const code = evt.exit_code;
+            turnError =
+              `the ${managed.config.engine || 'claude'} process exited` +
+              `${typeof code === 'number' ? ` with code ${code}` : ''} before the turn finished`;
           }
           // Surfaced here because this is the one place every caller funnels
           // through. The result event was dropped at this line, and it is the
