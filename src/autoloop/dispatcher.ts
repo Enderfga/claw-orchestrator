@@ -1310,11 +1310,12 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
       if (!parsed.cleaned_reply && !clarificationQ) {
         this.appendChatEntry({ who: 'coder', text: replyText, ts: new Date().toISOString() });
       }
-      const rel = path.join('tasks', this.config.runId, 'iter', String(env.iter), `coder_reply_${dispatchId}.txt`);
+      const replyFile = path.join(iterDir, `coder_reply_${dispatchId}.txt`);
+      const rel = path.relative(this.config.workspace, replyFile);
       let persistedRel: string | null = null;
       try {
-        fs.mkdirSync(path.dirname(path.join(this.config.workspace, rel)), { recursive: true });
-        fs.writeFileSync(path.join(this.config.workspace, rel), body);
+        fs.mkdirSync(path.dirname(replyFile), { recursive: true });
+        fs.writeFileSync(replyFile, body);
         persistedRel = rel;
       } catch {
         /* write failure → report not persisted; do not probe */
