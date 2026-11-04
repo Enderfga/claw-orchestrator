@@ -4784,4 +4784,39 @@ describe('SessionManager', () => {
       });
     });
   });
+
+  describe('planner-control-feedback', () => {
+    const fence = (tool: string, args: Record<string, unknown>): string =>
+      `\`\`\`autoloop\n${JSON.stringify({ tool, args })}\n\`\`\``;
+
+    it('autoloopChat returns combined notice/prose with zero Coder dispatch', async () => {
+      const runId = 'planner-control-feedback-t17';
+      const workspace = path.join(TEST_WF_DIR, 'workspaces', runId);
+      fs.mkdirSync(workspace, { recursive: true });
+      await mgr.autoloopStart({ runId, workspace });
+      const handle = mgr.getAutoloop(runId)!;
+      const planner = mockSessions[0]!;
+      planner.sendImplementation = async () => ({
+        text: [
+          'Submitting the small fixture task.',
+          fence('send_directive', {
+            goal: 'Update a synthetic README fixture',
+            constraints: 'Only README.md',
+            success_criteria: ['The fixture heading is present'],
+            max_attempts: 1,
+          }),
+        ].join('\n'),
+        event: { type: 'result', result: 'ok' },
+      });
+
+      const result = await mgr.autoloopChat(runId, 'submit fixture via manager');
+
+      expect(result).toEqual({ reply: expect.any(String) });
+      expect(result.reply).toContain('Planner control error');
+      expect(result.reply).toContain('Submitting the small fixture task.');
+      expect(result.reply).toContain('send_directive constraints must be an array of strings');
+      expect(createdConfigs.some((config) => config.name.endsWith('-coder'))).toBe(false);
+      expect(handle.runner.state.iter).toBe(0);
+    });
+  });
 });

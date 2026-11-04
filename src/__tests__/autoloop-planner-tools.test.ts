@@ -294,8 +294,9 @@ describe('applyPlannerToolCalls', () => {
     );
 
     expect(r.errors).toHaveLength(1);
-    expect(r.errors[0].error).toContain('coder_engine');
-    expect(r.errors[0].error).toContain('not-real');
+    expect(r.errors[0].error).toBe('spawn_subagents coder_engine has unknown engine');
+    expect(r.errors[0].error).not.toContain('not-real');
+    expect(r.error_origin).toBe('validation');
     expect(calls).toEqual([]);
     expect(r.emitted_messages).toEqual([]);
   });
@@ -393,7 +394,9 @@ describe('applyPlannerToolCalls', () => {
 
     const bad = await applyPlannerToolCalls([{ tool: 'write_goal', args: { content: '{not json' } }], fx, 0);
     expect(bad.errors).toHaveLength(1);
-    expect(bad.errors[0].error).toMatch(/not valid JSON/);
+    expect(bad.errors[0].error).toBe('write_goal content is not valid JSON');
+    expect(bad.errors[0].error).not.toMatch(/Unexpected|position|not json/i);
+    expect(bad.error_origin).toBe('validation');
     expect(writes).toHaveLength(1); // unchanged — bad call must not write
   });
 
@@ -403,5 +406,58 @@ describe('applyPlannerToolCalls', () => {
     expect(r.errors).toHaveLength(1);
     expect(r.errors[0].error).toContain('non-empty');
     expect(writes).toEqual([]);
+  });
+
+  it('marks preparation/duplicate failures as validation origin and effect failures as effect origin', async () => {
+    const { fx } = makeMockEffects();
+    const prep = await applyPlannerToolCalls([{ tool: 'notify_user', args: { level: 'info' } }], fx, 0);
+    expect(prep.error_origin).toBe('validation');
+
+    const dup = await applyPlannerToolCalls(
+      [
+        { tool: 'write_plan', args: { content: '# a\n' } },
+        { tool: 'write_plan', args: { content: '# b\n' } },
+      ],
+      fx,
+      0,
+    );
+    expect(dup.error_origin).toBe('validation');
+    expect(dup.errors[0].error).toContain('duplicate write_plan');
+
+    const fxEffect: PlannerToolEffects = {
+      ...fx,
+      spawnSubagents: async () => {
+        throw new Error('write_plan requires non-empty `content` (full plan.md body)');
+      },
+      writePlanFiles: async () => undefined,
+    };
+    const effect = await applyPlannerToolCalls(
+      [{ tool: 'spawn_subagents', args: { initial_directive: { goal: 'g' } } }],
+      fxEffect,
+      0,
+    );
+    expect(effect.error_origin).toBe('effect');
+    expect(effect.errors[0].error).toContain('write_plan requires');
+  });
+
+  it('unknown-tool reflection uses full-string ASCII form; hostile names stay generic', async () => {
+    const { fx } = makeMockEffects();
+    const ok = await applyPlannerToolCalls([{ tool: 'send_directiv' as 'notify_user', args: {} }], fx, 0);
+    expect(ok.errors[0].error).toBe('unknown planner tool: send_directiv');
+
+    const hostile = await applyPlannerToolCalls([{ tool: 'Evil\nTool' as 'notify_user', args: {} }], fx, 0);
+    expect(hostile.errors[0].error).toBe('unknown planner tool');
+    expect(hostile.errors[0].error).not.toContain('Evil');
+  });
+
+  it('invalid-args tool label omits non-permitted identifiers', async () => {
+    const { fx } = makeMockEffects();
+    const r = await applyPlannerToolCalls(
+      [{ tool: 'Bad\nName' as 'notify_user', args: null as unknown as Record<string, unknown> }],
+      fx,
+      0,
+    );
+    expect(r.errors[0].error).toBe('planner control requires an object `args`');
+    expect(r.errors[0].error).not.toContain('Bad');
   });
 });
