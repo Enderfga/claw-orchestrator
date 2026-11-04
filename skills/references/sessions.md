@@ -284,7 +284,7 @@ Built-in format translation lets Claude Code CLI talk to non-Anthropic models:
 - **Gemini** thought signature caching (round-trip thinking)
 - Auto-detect provider from model name patterns
 
-A `claude` session started with a non-Claude model and no `baseUrl` starts the proxy on a local port and points the session at it. Configuration is in the proxy section of [Multi-Engine](./multi-engine.md); see [`src/proxy/`](https://github.com/Enderfga/claw-orchestrator/tree/main/src/proxy) for implementation details.
+A `claude` session started with a non-Claude model and no `baseUrl` starts the proxy on a local port and points the session at it, unless `CLAWO_CLAUDE_GATEWAY=1` says the caller's own gateway serves that model (see [Multi-Engine](./multi-engine.md)). Configuration is in the proxy section of [Multi-Engine](./multi-engine.md); see [`src/proxy/`](https://github.com/Enderfga/claw-orchestrator/tree/main/src/proxy) for implementation details.
 
 ## Circuit Breaker
 

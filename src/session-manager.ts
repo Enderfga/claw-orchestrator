@@ -219,7 +219,7 @@ import {
   overrideModelPricing,
   ENGINE_BINARY_NAMES,
 } from './types.js';
-import { resolveAlias, isClaudeModel, lookupModel, resolveEngineAndModel } from './models.js';
+import { resolveAlias, isClaudeModel, lookupModel, resolveEngineAndModel, claudeGatewayMode } from './models.js';
 import { isAgyConversationId } from './agy-conversation.js';
 import { Council } from './council.js';
 import { Fanout, type FanoutConfig, type FanoutSession, type FanoutAgentSpec } from './fanout.js';
@@ -1251,7 +1251,8 @@ export class SessionManager {
     // Auto-inject proxy baseUrl for non-Claude models on the claude engine.
     // Starts a local proxy server that converts Anthropic → OpenAI format
     // and forwards to the OpenClaw gateway. Zero config required.
-    if (engine === 'claude' && fullConfig.resolvedModel && !fullConfig.baseUrl) {
+    // Not in gateway mode: there the caller's own gateway serves the model by name.
+    if (engine === 'claude' && fullConfig.resolvedModel && !fullConfig.baseUrl && !claudeGatewayMode()) {
       if (!isClaudeModel(fullConfig.resolvedModel!)) {
         const proxyPort = await this._ensureProxyServer();
         if (proxyPort) {

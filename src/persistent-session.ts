@@ -26,7 +26,7 @@ import {
   type CostBreakdown,
   getModelPricing,
 } from './types.js';
-import { resolveAlias, getContextWindow, isClaudeModel } from './models.js';
+import { resolveAlias, getContextWindow, isClaudeModel, claudeGatewayMode } from './models.js';
 import { sanitizeSecrets } from './sanitize.js';
 
 import {
@@ -233,13 +233,17 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
     }
     if (this.options.customSessionId) args.push('--session-id', this.options.customSessionId);
 
-    // Model — proxy mode mapping
+    // Model — proxy mode mapping. In gateway mode the base URL is the caller's
+    // own gateway, which knows the model by its own name: no `/real/` rewrite.
     if (this.options.model) {
-      if (!isClaudeModel(this.options.model!) && this.options.baseUrl) {
+      if (!isClaudeModel(this.options.model!) && this.options.baseUrl && !claudeGatewayMode()) {
         this._realModel = this.options.model;
         args.push('--model', 'opus');
       } else {
-        const cliModel = this.options.model.includes('/') ? this.options.model.split('/').pop()! : this.options.model;
+        const cliModel =
+          this.options.model.includes('/') && !claudeGatewayMode()
+            ? this.options.model.split('/').pop()!
+            : this.options.model;
         args.push('--model', cliModel);
       }
     }

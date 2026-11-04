@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`CLAWO_CLAUDE_GATEWAY=1`: a `claude` session on your own Anthropic-compatible gateway.** With it set, any
+  model name goes to the CLI as given (`--model gw-model-1`), to the gateway in `ANTHROPIC_BASE_URL` or a
+  session's `baseUrl`. Without it, a non-Claude model on the claude engine is routed through the built-in
+  proxy or renamed behind a `/real/<model>` URL, which only that proxy understands. It applies to every
+  `claude` session the process starts, workflow nodes included.
+
 ## [7.17.2] - 2026-11-04
 
 ### Fixed

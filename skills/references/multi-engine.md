@@ -500,6 +500,15 @@ What happens behind the scenes:
 2. Starts a local proxy server on `127.0.0.1` (random port, auto-managed) the first time a Claude session names a non-Claude model, provided a gateway URL was found
 3. Claude Code CLI sends Anthropic-format requests → proxy converts to OpenAI → gateway → any model
 
+### Your own Anthropic-compatible gateway
+
+A gateway that speaks the Anthropic API and serves other models under their own names (an internal model
+gateway, for instance) needs none of this. Set `CLAWO_CLAUDE_GATEWAY=1` in the environment clawo runs in,
+with the gateway in `ANTHROPIC_BASE_URL` (and its token in `ANTHROPIC_AUTH_TOKEN`) or in a session's
+`baseUrl`. A `claude` session then passes any model name to the CLI as given (`--model gw-model-1`), starts no
+proxy, and does not rewrite the base URL. Because it is read from the environment, it applies to every
+`claude` session the process starts, including those of workflow, fan-out and council nodes.
+
 ### Manual Config (optional)
 
 Override with environment variables if needed:

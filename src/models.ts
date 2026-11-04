@@ -793,6 +793,18 @@ export function isGeminiModel(model: string): boolean {
 }
 
 /** Check if a model string is a Claude model. */
+/**
+ * `CLAWO_CLAUDE_GATEWAY=1`: the `claude` engine talks to an Anthropic-compatible
+ * gateway of the caller's own (`ANTHROPIC_BASE_URL`, or a session's `baseUrl`)
+ * that serves non-Claude models under their own names. Any model name then goes
+ * to the CLI as given, and the built-in proxy — which exists to route a
+ * non-Claude model through the OpenClaw gateway — is not started.
+ */
+export function claudeGatewayMode(env: NodeJS.ProcessEnv = process.env): boolean {
+  const v = env.CLAWO_CLAUDE_GATEWAY?.trim().toLowerCase();
+  return v === '1' || v === 'true';
+}
+
 export function isClaudeModel(model: string): boolean {
   const l = model.toLowerCase();
   return (
