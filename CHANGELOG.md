@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [7.18.0] - 2026-11-04
+
 ### Added
 
 - **`CLAWO_CLAUDE_GATEWAY=1`: a `claude` session on your own Anthropic-compatible gateway.** With it set, any

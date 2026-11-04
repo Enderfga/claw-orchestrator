@@ -42,6 +42,8 @@ https://github.com/user-attachments/assets/5bf9bea8-e5ac-4632-a292-a80a45831dff
 
 ## News
 
+- **[2026-11]** v7.18.0: `CLAWO_CLAUDE_GATEWAY=1` runs a `claude` session on any model your own
+  Anthropic-compatible gateway serves, by its own name.
 - **[2026-11]** v7.17.0: an agent can resume a paused autoloop run itself (`autoloop_resume`), and a Codex goal
   that hits a model at capacity is resumed on its thread instead of failing.
 - **[2026-10]** v7.16.0: `clawo goal --engine claude` runs a goal on Claude Code's `/goal`, with the same
