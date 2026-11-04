@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [7.20.0] - 2026-11-04
+
 ### Added
 
 - **A fan-out agent can run as a goal.** Given an `objective` (engine `claude` or `codex`), it works until the
