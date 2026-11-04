@@ -44,24 +44,22 @@ export function repairBrief(ctx: NodeContext, nodeId: string): string | undefine
  * a goal sent back to a fresh thread (its own was never set, or the run starts
  * the repair on a new node) knows nothing of the last attempt otherwise.
  *
- * Codex's goal ends when the agent says so, so the brief can tell the agent the
- * checks are what counts. Claude Code's `/goal` condition is judged by a
- * separate model that reads only the conversation, and the runtime's checks run
- * after the agent stops, where that model cannot see them. Told the checks are
- * the definition of done, it never let the goal end: the CLI ended the turn over
- * the Stop hook nine times running and the node finished `blocked`. On Claude
- * the findings therefore go after the objective as context, and the condition
- * the goal is judged on stays the caller's objective.
+ * Codex's goal ends when the agent says so, so the brief goes in front of the
+ * objective and tells the agent the checks are what counts. Claude Code's
+ * `/goal` condition is judged by a separate model that reads only the
+ * conversation, and the runtime's checks run after the agent stops, where that
+ * model cannot see them; anything in the condition about them can never be met.
+ * On Claude the brief is therefore sent as a message of its own before the goal
+ * (`ClaudeGoalSession.setGoal`'s `context`), and says so.
  */
 export function goalRepairBrief(ctx: NodeContext, judgedInConversation: boolean): string | undefined {
   const checks = failingChecks(ctx);
   if (!checks) return undefined;
   if (!judgedInConversation) return repairBriefText(checks);
   return (
-    `Context for this attempt, not part of the condition above: the previous attempt did not pass the ` +
-    `acceptance checks the runtime ran on this working tree. The runtime runs them again after you stop, so ` +
-    `they cannot be shown in this conversation; the condition above is what this goal is judged on. ` +
-    `${DATA_NOTICE}:\n\n\`\`\`\n${checks}\n\`\`\`\n\n${FIX_NOTICE}`
+    `Before the goal is set again: the previous attempt did not pass the acceptance checks the runtime ` +
+    `ran on this working tree. The runtime runs them again after you stop; they are not part of the goal ` +
+    `and cannot be shown in this conversation. ${DATA_NOTICE}:\n\n\`\`\`\n${checks}\n\`\`\`\n\n${FIX_NOTICE}`
   );
 }
 

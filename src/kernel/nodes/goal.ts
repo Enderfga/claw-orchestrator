@@ -52,7 +52,16 @@ export interface GoalSession {
   readonly goal: GoalSnapshot | null;
   readonly lastError: { message: string; code: string | null; willRetry: boolean; at: string } | null;
   readonly turnActive: boolean;
-  setGoal(p: { objective?: string; status?: 'active' | 'paused'; tokenBudget?: number | null }): Promise<GoalSnapshot>;
+  /**
+   * `context` is read by Claude only: sent as an ordinary message before the
+   * goal, so it informs the agent without becoming part of the condition.
+   */
+  setGoal(p: {
+    objective?: string;
+    status?: 'active' | 'paused';
+    tokenBudget?: number | null;
+    context?: string;
+  }): Promise<GoalSnapshot>;
   getGoal(): Promise<GoalSnapshot | null>;
   clearGoal(): Promise<void>;
   steer(text: string): Promise<{ steered: boolean }>;
@@ -108,27 +117,20 @@ export const GOAL_OBJECTIVE_MAX_CHARS = 4_000;
 const chars = (s: string) => [...s].length;
 
 /**
- * The objective a revisit sets: what the agent must hear first (steers, and on
- * Codex the failing checks), then the original objective, then `context` (on
- * Claude the failing checks, kept out of the condition the goal is judged on).
- * The original always survives whole; when the rest does not fit in Codex's
- * limit the context is cut first, then the preface, and the full check output
- * stays in the run's evidence.
+ * The objective a revisit sets on Codex: what the agent must hear first (steers,
+ * the failing checks), then the original objective. The original always survives
+ * whole; when the two do not fit in Codex's limit the preface is cut, and the
+ * full check output stays in the run's evidence.
  */
-export function composeObjective(preface: string[], objective: string, context?: string): string {
-  if (preface.length === 0 && !context) return objective;
+export function composeObjective(preface: string[], objective: string): string {
+  if (preface.length === 0) return objective;
   const sep = '\n\n---\n\n';
   const cut = '\n[cut to fit the goal objective limit]';
-  const fit = (text: string, room: number): string | undefined => {
-    if (chars(text) <= room) return text;
-    if (room <= chars(cut)) return undefined;
-    return `${[...text].slice(0, room - chars(cut)).join('')}${cut}`;
-  };
-  let room = GOAL_OBJECTIVE_MAX_CHARS - chars(objective);
-  const head = preface.length > 0 ? fit(preface.join('\n\n'), room - chars(sep)) : undefined;
-  if (head !== undefined) room -= chars(head) + chars(sep);
-  const tail = context ? fit(context, room - chars(sep)) : undefined;
-  return `${head !== undefined ? `${head}${sep}` : ''}${objective}${tail !== undefined ? `${sep}${tail}` : ''}`;
+  const head = preface.join('\n\n');
+  const room = GOAL_OBJECTIVE_MAX_CHARS - chars(objective) - chars(sep);
+  if (chars(head) <= room) return `${head}${sep}${objective}`;
+  if (room <= chars(cut)) return objective;
+  return `${[...head].slice(0, room - chars(cut)).join('')}${cut}${sep}${objective}`;
 }
 const MAX_BACKOFF_MS = 15 * 60_000;
 const DEFAULT_STALL_MS = 5 * 60_000;
@@ -411,12 +413,20 @@ export async function executeGoalNode(node: NodeSpec, ctx: NodeContext): Promise
       // the same thread, and also a fresh thread (the old one never got a goal,
       // or the repair runs on another node), which would otherwise start blind.
       const brief = red !== undefined && red !== prior?.repairOf ? goalRepairBrief(ctx, claude) : undefined;
-      const steersNow = ctx.takeSteer();
-      const objective = claude
-        ? composeObjective(steersNow, spec.objective, brief)
-        : composeObjective([...steersNow, ...(brief ? [brief] : [])], spec.objective);
+      const preface = [...ctx.takeSteer(), ...(brief ? [brief] : [])];
       if (startThread) await session!.clearGoal();
-      const goal = await session!.setGoal({ objective, tokenBudget: spec.tokenBudget ?? null });
+      // On Claude the condition is the caller's objective, word for word; steers
+      // and the failing checks go in ahead of it as context (see setGoal there).
+      const goal = claude
+        ? await session!.setGoal({
+            objective: spec.objective,
+            tokenBudget: spec.tokenBudget ?? null,
+            ...(preface.length ? { context: preface.join('\n\n') } : {}),
+          })
+        : await session!.setGoal({
+            objective: composeObjective(preface, spec.objective),
+            tokenBudget: spec.tokenBudget ?? null,
+          });
       data.repairOf = red;
       absorb(goal);
     }

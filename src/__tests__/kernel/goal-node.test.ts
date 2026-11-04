@@ -35,7 +35,7 @@ afterEach(() => {
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
-type SetParams = { objective?: string; status?: 'active' | 'paused'; tokenBudget?: number | null };
+type SetParams = { objective?: string; status?: 'active' | 'paused'; tokenBudget?: number | null; context?: string };
 
 /** A codex-app thread whose goal moves only when a test (or its script) says so. */
 class FakeGoalSession extends EventEmitter {
@@ -616,16 +616,6 @@ describe('goal objective limit', () => {
     expect(composeObjective(['p'], 'o'.repeat(GOAL_OBJECTIVE_MAX_CHARS))).toBe('o'.repeat(GOAL_OBJECTIVE_MAX_CHARS));
   });
 
-  it('puts context after the objective and cuts it before the preface', () => {
-    expect(composeObjective([], 'task', 'why it failed')).toBe('task\n\n---\n\nwhy it failed');
-    expect(composeObjective(['steer'], 'task', 'why')).toBe('steer\n\n---\n\ntask\n\n---\n\nwhy');
-    const objective = 'o'.repeat(GOAL_OBJECTIVE_MAX_CHARS - 200);
-    const out = composeObjective(['steer'], objective, 'c'.repeat(1000));
-    expect([...out].length).toBeLessThanOrEqual(GOAL_OBJECTIVE_MAX_CHARS);
-    expect(out.startsWith(`steer\n\n---\n\n${objective}\n\n---\n\n`)).toBe(true);
-    expect(out).toContain('[cut to fit');
-  });
-
   it('starts a fresh thread on a revisit when the first goal was never set', async () => {
     // Codex writes a thread to disk with its first turn: a thread whose goal was
     // refused has nothing to resume, and resuming it would fail.
@@ -752,7 +742,7 @@ function claudeManager(script: (s: FakeGoalSession, n: number) => void) {
 }
 
 describe('goal node on claude', () => {
-  it('on a repair keeps the objective as the condition and puts the failing checks after it', async () => {
+  it('on a repair sends the failing checks before the goal, whose condition is the objective alone', async () => {
     // Claude's /goal is judged by a model that reads only the conversation. A
     // repair objective that called the runtime's checks the definition of done
     // could never be met in it: the hook blocked the stop until the CLI gave up.
@@ -760,7 +750,8 @@ describe('goal node on claude', () => {
     fs.mkdirSync(cwd);
     const m = claudeManager((s) => {
       s.onSet = (p, self) => {
-        if (p.objective?.includes('done-file')) fs.writeFileSync(path.join(cwd, 'done.txt'), 'x');
+        if ((p as { context?: string }).context?.includes('done-file'))
+          fs.writeFileSync(path.join(cwd, 'done.txt'), 'x');
         self.move('complete');
       };
     });
@@ -779,11 +770,12 @@ describe('goal node on claude', () => {
     const done = await kernel.wait((await kernel.start(spec, { contract } as never)).runId);
 
     expect(done!.outcome).toBe('verified');
-    const repair = [...m.sessions.values()][1].sets[0].objective ?? '';
-    expect(repair.startsWith('create done.txt\n\n---\n\n')).toBe(true);
-    expect(repair).toContain('not part of the condition above');
-    expect(repair).toContain('done-file');
-    expect(repair).not.toContain('definition of done');
+    const repair = [...m.sessions.values()][1].sets[0] as { objective?: string; context?: string };
+    // The condition the judge holds the agent to is the caller's objective and nothing else.
+    expect(repair.objective).toBe('create done.txt');
+    expect(repair.context).toContain('done-file');
+    expect(repair.context).toContain('not part of the goal');
+    expect(repair.context).not.toContain('definition of done');
   });
 
   it('passes disallowedTools to the claude session, and refuses them on codex before starting', async () => {

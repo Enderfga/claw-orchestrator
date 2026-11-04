@@ -411,10 +411,11 @@ what an unattended run needs around that loop.
   the finished goal and sets a new objective on the same thread, carrying the
   failing checks (as diagnostic data, like an agent node's repair brief) with the
   original objective. The agent keeps its context. On Codex the checks come first,
-  as the definition of done. On Claude they come after the objective as context,
-  and the condition the goal is judged on stays the objective (see below). The
-  original objective is always kept whole; when the rest does not fit in 4,000
-  characters the checks are cut (the full output stays in the run's evidence). A
+  as the definition of done. On Claude they are sent as a message of their own
+  just before the goal, which is set to the original objective word for word (see
+  below). On Codex the original objective is always kept whole; when the rest does
+  not fit in 4,000 characters the checks are cut (the full output stays in the
+  run's evidence). A
   first goal that was never set left nothing on its thread, so its revisit starts
   a new one.
 - **A fresh thread is told why.** Any goal objective set while the run carries a
@@ -459,9 +460,11 @@ stream-json mode:
   asking to stop, and continuing only repeats that). The template's verifier
   still judges the tree. Write the objective as a condition the agent can show
   it met from inside the session; one that depends on something after the
-  agent stops can never be met. That is why a repair objective on Claude does
-  not call the runtime's checks the definition of done: they run after the agent
-  stops, so the judge could never see them pass.
+  agent stops can never be met. Everything after `/goal` is that condition, so a
+  repair never adds to it: steers and the failing checks are sent first as an
+  ordinary message (the agent replies with one word), and `/goal` carries the
+  objective alone. The checks run after the agent stops, where the judge could
+  never see them pass.
 - The session id is the thread id. A new session is started with
   `--session-id` so it is known before the goal is set, and the session is kept
   out of the registry with `skipPersistence` (not `noSessionPersistence`, which

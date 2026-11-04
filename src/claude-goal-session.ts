@@ -75,6 +75,16 @@ type GoalError = { message: string; code: string | null; willRetry: boolean; at:
 /** Sent to pick a goal back up: the Stop hook keeps it going from there. */
 export const CLAUDE_GOAL_CONTINUE = 'Continue working toward the active goal. Pick up from where the work stands now.';
 
+/**
+ * Appended to context sent ahead of a `/goal`. The context is an ordinary
+ * message, so the agent answers it with a turn of its own; this keeps that turn
+ * to one word, and the work to the goal turn that follows.
+ */
+export const CLAUDE_GOAL_CONTEXT_ACK =
+  'Read this and reply with the single word "Noted". Do not start working yet: the goal set next says what to do.';
+
+const CONTEXT_TIMEOUT_MS = 5 * 60_000;
+
 const PROBE_TIMEOUT_MS = 60_000;
 
 /** Map a failed turn's text onto the codex error codes the node treats as transient. */
@@ -188,8 +198,27 @@ export class ClaudeGoalSession extends EventEmitter implements GoalSession {
     objective?: string;
     status?: 'active' | 'paused';
     tokenBudget?: number | null;
+    context?: string;
   }): Promise<GoalSnapshot> {
     if (p.objective !== undefined) {
+      // Everything after `/goal` is the condition the Stop hook's judge holds the
+      // agent to, and the judge reads only the conversation. Context such as a
+      // failed check's output, put there, became part of the condition: the judge
+      // asked to see that check pass, which happens only after the agent stops,
+      // and blocked every stop until the CLI gave up (2026-11-04, CLI 2.1.318).
+      // So context goes in as its own message first, and `/goal` carries only
+      // the objective. The reply to it is not a goal turn: `_settle` ignores it.
+      if (p.context?.trim()) {
+        try {
+          await this.host.send(`${p.context.trim()}\n\n${CLAUDE_GOAL_CONTEXT_ACK}`, {
+            waitForComplete: true,
+            timeout: CONTEXT_TIMEOUT_MS,
+          });
+        } catch {
+          // A context turn that did not finish must not run into the goal turn.
+          this.host.interruptTurn();
+        }
+      }
       this._goal = {
         objective: p.objective,
         status: 'active',

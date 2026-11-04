@@ -11,6 +11,7 @@
 import { describe, it, expect } from 'vitest';
 import { EventEmitter } from 'node:events';
 import {
+  CLAUDE_GOAL_CONTEXT_ACK,
   CLAUDE_GOAL_CONTINUE,
   ClaudeGoalSession,
   classifyClaudeError,
@@ -269,6 +270,46 @@ describe('ClaudeGoalSession', () => {
     expect(g?.tokensUsed).toBe(900);
     expect(g?.status).toBe('active');
     expect(host.interrupts).toBe(0);
+  });
+
+  it('sends context as its own message before the goal, so the condition is the objective alone', async () => {
+    const host = new FakeClaudeHost();
+    const s = new ClaudeGoalSession(host);
+    const g = await s.setGoal({ objective: 'make the tests pass', context: 'check-2 failed: expected 3, got 2' });
+    expect(host.sent[0].text).toBe(`check-2 failed: expected 3, got 2\n\n${CLAUDE_GOAL_CONTEXT_ACK}`);
+    expect(host.sent[0].wait).toBe(true);
+    expect(host.sent[1]).toEqual({ text: '/goal make the tests pass', wait: false });
+    expect(g.objective).toBe('make the tests pass');
+    expect(g.status).toBe('active');
+  });
+
+  it('does not take the reply to the context for the end of the goal', async () => {
+    const host = new FakeClaudeHost();
+    const s = new ClaudeGoalSession(host);
+    // The context turn ends, with no goal set yet, before the goal turn starts.
+    const send = host.send.bind(host);
+    host.send = async (text, o) => {
+      const r = await send(text, o);
+      if (text.startsWith('ctx')) host.end({ subtype: 'success', result: 'Noted' });
+      return r;
+    };
+    await s.setGoal({ objective: 'x', context: 'ctx' });
+    await tick();
+    expect(s.turnActive).toBe(true);
+    expect(s.goal?.status).toBe('active');
+  });
+
+  it('interrupts a context turn that does not finish rather than let it run into the goal', async () => {
+    const host = new FakeClaudeHost();
+    const send = host.send.bind(host);
+    host.send = async (text, o) => {
+      if (text.startsWith('ctx')) throw new Error('Timeout waiting for response');
+      return send(text, o);
+    };
+    const s = new ClaudeGoalSession(host);
+    await s.setGoal({ objective: 'x', context: 'ctx' });
+    expect(host.interrupts).toBe(1);
+    expect(host.sent.at(-1)).toEqual({ text: '/goal x', wait: false });
   });
 
   it('steers only into a running turn', async () => {

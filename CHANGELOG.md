@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A Claude goal's repair can finish: the condition is the caller's objective alone.** The failing checks
+  were appended to the `/goal` text with a note that they were not part of the condition, but Claude Code's
+  judge reads everything after `/goal` as the condition, asked to see those checks pass, and blocked the stop
+  until the CLI gave up. They are now sent as an ordinary message just before `/goal`, which carries the
+  objective word for word. Steers that arrive before a Claude goal is set go the same way.
+
 ## [7.17.1] - 2026-11-03
 
 ### Fixed
