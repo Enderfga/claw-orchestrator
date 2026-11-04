@@ -509,6 +509,10 @@ with the gateway in `ANTHROPIC_BASE_URL` (and its token in `ANTHROPIC_AUTH_TOKEN
 proxy, and does not rewrite the base URL. Because it is read from the environment, it applies to every
 `claude` session the process starts, including those of workflow, fan-out and council nodes.
 
+Such a model is priced only from `pricingOverrides` (or the registry, if it knows the name). The CLI's own
+cost figure is ignored, since it prices tokens from Anthropic's table, and without an override the cost is
+recorded as 0, with a single warning per model name.
+
 ### Manual Config (optional)
 
 Override with environment variables if needed:

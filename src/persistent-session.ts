@@ -26,7 +26,7 @@ import {
   type CostBreakdown,
   getModelPricing,
 } from './types.js';
-import { resolveAlias, getContextWindow, isClaudeModel, claudeGatewayMode } from './models.js';
+import { resolveAlias, getContextWindow, isClaudeModel, claudeGatewayMode, gatewayModelPricing } from './models.js';
 import { sanitizeSecrets } from './sanitize.js';
 
 import {
@@ -1019,7 +1019,7 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
     const bare = configured?.replace(/\[1m\]$/i, '');
     const isAlias = !!bare && resolveAlias(bare) !== bare;
     const model = (isAlias ? this._engineModel : undefined) || configured || this._engineModel;
-    const pricing = getModelPricing(model);
+    const pricing = this._pricing(model);
     const nonCachedIn = Math.max(0, this.stats.tokensIn - this.stats.cachedTokens);
     return {
       model: model || 'default',
@@ -1187,6 +1187,9 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
     // for someone else's tokens. Fall back to the registry, which at least
     // knows which model was really asked for.
     if (this._realModel) return;
+    // A gateway's own model: the CLI prices its tokens from Anthropic's table,
+    // which does not know it. The registry or pricingOverrides decide instead.
+    if (this._onGatewayModel()) return;
     const previous = this._lastReportedCost;
     if (this._costBaselinePending) {
       this._costBaselinePending = false;
@@ -1244,11 +1247,20 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
     return Math.min(100, Math.round((this._lastTurnPromptTokens / window) * 100));
   }
 
+  /** A non-Claude model served by the caller's own gateway (`CLAWO_CLAUDE_GATEWAY`). */
+  private _onGatewayModel(model = this.options.model): boolean {
+    return !!model && claudeGatewayMode() && !isClaudeModel(model);
+  }
+
+  private _pricing(model: string | undefined) {
+    return model && this._onGatewayModel(model) ? gatewayModelPricing(model) : getModelPricing(model);
+  }
+
   private _updateCost(): void {
     // Only reached when the engine did not report its own spend — a custom CLI
     // driven through this class, or a turn that ended before `result`.
     if (this._lastReportedCost !== null) return;
-    const pricing = getModelPricing(this.options.model);
+    const pricing = this._pricing(this.options.model);
     // Anthropic bills cache writes above the input rate and the premium depends
     // on the TTL: 1.25x for the 5-minute cache, 2x for the 1-hour one. Leaving
     // them out entirely is what made the old estimate collapse on cached

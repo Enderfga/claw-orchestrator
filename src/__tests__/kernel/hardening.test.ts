@@ -318,6 +318,43 @@ describe('attempt isolation', () => {
     ).rejects.toThrow(/must be a list of tool names/);
   }, 20_000);
 
+  it('starts each fan-out agent in the cwd its spec names, and records it on the result', async () => {
+    const configs: Array<Record<string, unknown>> = [];
+    const manager = {
+      async startSession(config: Record<string, unknown>) {
+        configs.push(config);
+        return { name: config.name } as never;
+      },
+      async sendMessage() {
+        return { output: 'done' } as never;
+      },
+      async stopSession() {},
+    };
+    const kernel = registerDefaultExecutors(new RunKernel({ manager, nodeTimeoutMs: 8000 }));
+    const rec = await kernel.start({
+      name: 'fanout-cwd',
+      cwd: tmp,
+      nodes: [
+        {
+          id: 'impl',
+          kind: 'fanout',
+          prompt: 'build it',
+          agents: [
+            { name: 'one', cwd: path.join(tmp, 'copy-1') },
+            { name: 'two', cwd: 'copy-2' },
+          ],
+        },
+      ],
+    });
+    const done = await kernel.wait(rec.runId);
+    expect(configs.map((c) => c.cwd).sort()).toEqual([path.join(tmp, 'copy-1'), path.join(tmp, 'copy-2')].sort());
+    const results = (done!.nodes.impl.data as { results: Array<{ agent: string; cwd: string }> }).results;
+    expect(Object.fromEntries(results.map((r) => [r.agent, r.cwd]))).toEqual({
+      one: path.join(tmp, 'copy-1'),
+      two: path.join(tmp, 'copy-2'),
+    });
+  }, 20_000);
+
   it('keeps the conversation of a pinned agent session between visits', async () => {
     // Stopping a session forgets its conversation unless told otherwise, so a
     // pinned name used to start over on every visit, like an unpinned one.

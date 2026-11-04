@@ -25,12 +25,18 @@ writeFileSync(process.env.GATEWAY_PROBE_OUT, JSON.stringify({ argv: process.argv
 const id = randomUUID();
 const emit = (v) => process.stdout.write(JSON.stringify(v) + '\\n');
 emit({ type: 'system', subtype: 'init', session_id: id });
-createInterface({ input: process.stdin }).on('line', () => {});
+createInterface({ input: process.stdin }).on('line', (line) => {
+  if (JSON.parse(line).type !== 'user') return;
+  emit({ type: 'result', subtype: 'success', is_error: false, result: 'ok', session_id: id, total_cost_usd: 1.5,
+    usage: { input_tokens: 1000, output_tokens: 100 } });
+});
 `;
 
 type Manager = {
   startSession(c: Record<string, unknown>): Promise<unknown>;
   stopSession(n: string): Promise<void>;
+  sendMessage(n: string, m: string, o?: Record<string, unknown>): Promise<unknown>;
+  getStatus(n: string): { stats: { costUsd: number } };
 };
 let SessionManager: new (o: unknown) => Manager;
 const fixture = path.join(tmp, 'fake-claude.mjs');
@@ -128,5 +134,32 @@ describe('claude engine in gateway mode (CLAWO_CLAUDE_GATEWAY=1)', () => {
     const r = await started({ model: 'gw-model-1', baseUrl: 'http://127.0.0.1:9' });
     expect(modelArg(r.argv)).toBe('opus');
     expect(r.base).toBe('http://127.0.0.1:9/real/gw-model-1');
+  }, 30_000);
+
+  it('does not take the CLI cost figure for a gateway model, which the CLI cannot price', async () => {
+    process.env.CLAWO_CLAUDE_GATEWAY = '1';
+    process.env.ANTHROPIC_BASE_URL = 'https://gateway.example.com';
+    const cost = async (model: string) => {
+      const mgr = new SessionManager({ logger: { info() {}, warn() {}, error() {}, debug() {} } });
+      const name = `gw-cost-${++n}`;
+      process.env.GATEWAY_PROBE_OUT = path.join(tmp, `probe-${n}.json`);
+      await mgr.startSession({
+        name,
+        engine: 'claude',
+        cwd: tmp,
+        noSessionPersistence: true,
+        model,
+        launcher: [process.execPath, fixture],
+      });
+      try {
+        await mgr.sendMessage(name, 'hi', { timeout: 10_000 });
+        return mgr.getStatus(name).stats.costUsd;
+      } finally {
+        await mgr.stopSession(name).catch(() => undefined);
+      }
+    };
+    expect(await cost('gw-model-1')).toBe(0);
+    // A Claude model through the same gateway keeps the CLI's figure.
+    expect(await cost('sonnet')).toBe(1.5);
   }, 30_000);
 });

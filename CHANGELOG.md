@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A fan-out agent can have its own `cwd`** (fan-out nodes and `fanout_start`), absolute or relative to the
+  fan-out's. Agents that each write code no longer edit the same files, and each result records the `cwd` it
+  ran in.
+
+### Fixed
+
+- **An unknown model is warned about once, not on every priced update.** A model served through
+  `CLAWO_CLAUDE_GATEWAY` is priced from `pricingOverrides` only, not at Sonnet's rate or from the CLI's own
+  figure; without an override its cost is recorded as 0.
+
 ## [7.18.0] - 2026-11-04
 
 ### Added

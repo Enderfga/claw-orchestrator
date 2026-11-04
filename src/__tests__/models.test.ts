@@ -605,3 +605,32 @@ describe('models registered on 2026-09-23', () => {
     expect(lookupModel('gpt-6-sol')!.pricing).not.toEqual(lookupModel('gpt-5.6-sol')!.pricing);
   });
 });
+
+describe('pricing a model the registry does not know', () => {
+  it('warns once per model name, not on every priced turn', async () => {
+    const { getModelPricing } = await import('../models.js');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      for (let i = 0; i < 5; i++) getModelPricing('warn-once-model-a');
+      getModelPricing('warn-once-model-b');
+      const calls = warn.mock.calls.map((c) => String(c[0]));
+      expect(calls.filter((m) => m.includes('warn-once-model-a'))).toHaveLength(1);
+      expect(calls.filter((m) => m.includes('warn-once-model-b'))).toHaveLength(1);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('prices a gateway model from pricingOverrides, else at 0, never at another model rate', async () => {
+    const { gatewayModelPricing, overrideModelPricing, _resetPricingOverrides } = await import('../models.js');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      expect(gatewayModelPricing('gateway-only-model')).toEqual({ input: 0, output: 0 });
+      overrideModelPricing({ 'gateway-only-model': { input: 1, output: 4 } });
+      expect(gatewayModelPricing('gateway-only-model')).toMatchObject({ input: 1, output: 4 });
+    } finally {
+      _resetPricingOverrides();
+      warn.mockRestore();
+    }
+  });
+});

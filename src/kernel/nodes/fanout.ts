@@ -35,6 +35,7 @@ export async function executeFanoutNode(node: NodeSpec, ctx: NodeContext): Promi
         acpAgent: a.acpAgent,
         prompt: a.prompt,
         persona: a.persona,
+        cwd: a.cwd,
         baseUrl: a.baseUrl,
         permissionMode: a.permissionMode as never,
         sandboxMode: a.sandboxMode,

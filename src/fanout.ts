@@ -3,8 +3,8 @@
  * results, with an optional synthesis pass.
  *
  * This is the cross-engine "diverse perspectives / best-of-N" primitive: each
- * agent runs in its own session (any engine) against the shared projectDir and
- * returns an answer. Unlike `council`, there is no consensus voting, no rounds,
+ * agent runs in its own session (any engine) against the shared projectDir, or
+ * a directory of its own, and returns an answer. Unlike `council`, there is no consensus voting, no rounds,
  * and no git-worktree isolation — so it is intended for analysis/generation
  * that returns text (review from N angles, best-of-N drafts), NOT parallel file
  * edits. For isolated parallel editing use `council` (per-agent worktrees).
@@ -25,6 +25,8 @@ import type {
 } from './types.js';
 import { type Logger } from './logger.js';
 import { mapBounded } from './concurrency.js';
+import { sanitizeCwd } from './validation.js';
+import * as path from 'node:path';
 
 /** Minimal SessionManager surface used by Fanout (avoids a circular import). */
 interface SessionManagerLike {
@@ -40,6 +42,11 @@ interface SessionManagerLike {
 export interface FanoutAgentSpec extends AgentBinding {
   /** Unique label for this agent (used in the session name and results). */
   name: string;
+  /**
+   * This agent's own working directory, absolute or relative to the fan-out's.
+   * Agents that each write code need one apiece, or they edit the same files.
+   */
+  cwd?: string;
   /** Complete per-agent prompt; replaces the shared task when non-empty. */
   prompt?: string;
   /** Role instructions prepended to the shared task without a non-empty prompt. */
@@ -94,6 +101,8 @@ export interface FanoutAgentResult {
   agent: string;
   engine: EngineType;
   model?: string;
+  /** The directory this agent ran in. */
+  cwd?: string;
   ok: boolean;
   output: string;
   error?: string;
@@ -200,10 +209,12 @@ export class Fanout {
     }
     const sessionName = `${this.session.id}-${spec.name}`;
     const start = Date.now();
+    let cwd = this.config.projectDir;
     try {
+      cwd = spec.cwd ? sanitizeCwd(path.resolve(this.config.projectDir, spec.cwd))! : this.config.projectDir;
       await this.manager.startSession({
         name: sessionName,
-        cwd: this.config.projectDir,
+        cwd,
         engine,
         model: spec.model,
         ...(spec.effort === undefined ? {} : { effort: spec.effort }),
@@ -233,6 +244,7 @@ export class Fanout {
         agent: spec.name,
         engine,
         model: spec.model,
+        cwd,
         ok,
         output: result.output,
         error: ok ? undefined : result.error || 'engine did not report the turn as succeeded',
@@ -244,6 +256,7 @@ export class Fanout {
         agent: spec.name,
         engine,
         model: spec.model,
+        cwd,
         ok: false,
         output: '',
         error: (err as Error).message,

@@ -69,6 +69,43 @@ describe('Fanout', () => {
     expect(stopped).toHaveLength(2);
   });
 
+  it('starts each agent in its own cwd when one is given, and reports it', async () => {
+    const { manager, startedConfigs } = makeManager();
+    const fan = new Fanout(
+      baseConfig([
+        { name: 'a', engine: 'claude', cwd: '/tmp/proj-copies/a' },
+        { name: 'b', engine: 'codex', cwd: 'copies/b' },
+        { name: 'c', engine: 'claude' },
+      ]),
+      manager,
+    );
+    const session = await fan.run();
+    const cwdOf = (n: string) => startedConfigs.find((c) => String(c.name).endsWith(`-${n}`))!.cwd;
+    expect(cwdOf('a')).toBe('/tmp/proj-copies/a');
+    // Relative to the fan-out's own directory.
+    expect(cwdOf('b')).toBe('/tmp/proj/copies/b');
+    expect(cwdOf('c')).toBe('/tmp/proj');
+    const byAgent = Object.fromEntries(session.results.map((r) => [r.agent, r.cwd]));
+    expect(byAgent).toEqual({ a: '/tmp/proj-copies/a', b: '/tmp/proj/copies/b', c: '/tmp/proj' });
+  });
+
+  it('fails only the agent whose cwd is unsafe', async () => {
+    const { manager, started } = makeManager();
+    const fan = new Fanout(
+      baseConfig([
+        { name: 'a', engine: 'claude', cwd: '/' },
+        { name: 'b', engine: 'claude' },
+      ]),
+      manager,
+    );
+    const session = await fan.run();
+    const a = session.results.find((r) => r.agent === 'a')!;
+    expect(a.ok).toBe(false);
+    expect(a.error).toMatch(/Unsafe working directory/);
+    expect(session.results.find((r) => r.agent === 'b')!.ok).toBe(true);
+    expect(started.some((n) => n.endsWith('-a'))).toBe(false);
+  });
+
   it('composes persona instructions before the shared task', async () => {
     const { manager, sent } = makeManager();
     const fan = new Fanout(baseConfig([{ name: 'a', persona: 'ROLE INSTRUCTIONS' }]), manager);

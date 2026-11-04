@@ -704,6 +704,34 @@ function effectivePricing(key: string): ModelPricing | undefined {
   return _pricingOverrides.get(key) ?? lookupModel(key)?.pricing;
 }
 
+/** Models already warned about: the warning is per name, not per priced turn or streamed update. */
+const _warnedUnknown = new Set<string>();
+function warnOnce(model: string, message: string): void {
+  if (_warnedUnknown.has(model)) return;
+  _warnedUnknown.add(model);
+  console.warn(message);
+}
+
+/** A model's price from a runtime override or the registry; undefined when it has neither. */
+export function knownModelPricing(model: string): ModelPricing | undefined {
+  return effectivePricing(pricingKey(model));
+}
+
+/**
+ * A model served by the caller's own gateway (`CLAWO_CLAUDE_GATEWAY`) is priced
+ * only from the registry or `pricingOverrides`. Without either its cost is not
+ * known, and is recorded as 0 rather than at another model's rate.
+ */
+export function gatewayModelPricing(model: string): ModelPricing {
+  const known = knownModelPricing(model);
+  if (known) return known;
+  warnOnce(
+    model,
+    `[models] "${model}" has no price: its cost is recorded as 0. Set pricingOverrides to track what it costs.`,
+  );
+  return { input: 0, output: 0 };
+}
+
 /** Get pricing for a model. Falls back to sonnet pricing for unknown models. */
 export function getModelPricing(model?: string, defaultModel = 'claude-sonnet-4-6'): ModelPricing {
   // No model means "the engine default" — which still goes through the override
@@ -712,7 +740,7 @@ export function getModelPricing(model?: string, defaultModel = 'claude-sonnet-4-
   // puts no minLength on `model`, and the config spread preserves it verbatim).
   const direct = effectivePricing(pricingKey(model || defaultModel));
   if (direct) return direct;
-  if (model) console.warn(`[models] Unknown model "${model}" — falling back to ${defaultModel} pricing`);
+  if (model) warnOnce(model, `[models] Unknown model "${model}" — falling back to ${defaultModel} pricing`);
   return effectivePricing(pricingKey(defaultModel)) ?? { input: 0, output: 0 };
 }
 

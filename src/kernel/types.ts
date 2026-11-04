@@ -108,6 +108,11 @@ export interface FanoutAgentSpec extends AgentBinding {
   sandboxMode?: 'read-only' | 'workspace-write' | 'danger-full-access';
   baseUrl?: string;
   ultracode?: boolean;
+  /**
+   * Fan-out only: this agent's own working directory, absolute or relative to the
+   * node's `cwd`. Council seats ignore it; they get worktrees of their own.
+   */
+  cwd?: string;
 }
 
 export interface FanoutNode extends NodeBase {

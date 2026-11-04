@@ -1213,12 +1213,15 @@ const plugin = {
             description:
               'The shared task sent to every agent, after persona role instructions when supplied; a non-empty per-agent prompt replaces it.',
           },
-          projectDir: { type: 'string', description: 'Working directory all agents run in.' },
+          projectDir: {
+            type: 'string',
+            description: 'Working directory the agents run in, unless an agent names its own cwd.',
+          },
           agents: {
             type: 'array',
             maxItems: 16,
             description:
-              "Agent specs: { name, engine?, model?, effort?, prompt?, persona?, baseUrl?, permissionMode?, sandboxMode?, customEngine?, acpAgent? }. permissionMode uses each engine's own permission handling as in session_start; workers that must not write should set sandboxMode to read-only. sandboxMode uses the same values and per-engine behavior as session_start.",
+              "Agent specs: { name, engine?, model?, effort?, prompt?, persona?, cwd?, baseUrl?, permissionMode?, sandboxMode?, customEngine?, acpAgent? }. cwd gives an agent its own working directory (absolute, or relative to projectDir); agents that all write code need one each, or they edit the same files. permissionMode uses each engine's own permission handling as in session_start; workers that must not write should set sandboxMode to read-only. sandboxMode uses the same values and per-engine behavior as session_start.",
             items: {
               type: 'object',
               properties: {
@@ -1237,6 +1240,11 @@ const plugin = {
                   type: 'string',
                   description:
                     'Per-agent role instructions prepended to the shared task when no non-empty prompt is supplied.',
+                },
+                cwd: {
+                  type: 'string',
+                  description:
+                    "This agent's own working directory, absolute or relative to projectDir. Defaults to projectDir.",
                 },
                 baseUrl: { type: 'string' },
                 permissionMode: {
