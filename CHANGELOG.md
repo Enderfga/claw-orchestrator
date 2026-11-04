@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [7.19.0] - 2026-11-04
+
 ### Added
 
 - **A fan-out agent can have its own `cwd`** (fan-out nodes and `fanout_start`), absolute or relative to the
