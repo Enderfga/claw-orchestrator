@@ -109,6 +109,8 @@ export interface FanoutAgentResult {
   durationMs: number;
   /** What this agent's turn cost, as its send measured it. */
   costUsd?: number;
+  /** A goal agent: the child run its goal ran in, and how the goal ended. */
+  goal?: { runId: string; status?: string; tokensUsed?: number; threadId?: string };
 }
 
 export interface FanoutSession {

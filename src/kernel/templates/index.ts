@@ -23,6 +23,7 @@ import type {
   WorkflowSpec,
 } from '../types.js';
 import { DEFAULT_AGENT_TIMEOUT_MS as FANOUT_AGENT_TIMEOUT_MS } from '../../fanout.js';
+import { DEFAULT_NODE_TIMEOUT_MS } from '../engine.js';
 import {
   DEFAULT_AGENT_TIMEOUT_MS as COUNCIL_AGENT_TIMEOUT_MS,
   DEFAULT_MAX_ROUNDS,
@@ -47,6 +48,26 @@ export function fanoutNodeBudget(
   agentTimeoutMs = FANOUT_AGENT_TIMEOUT_MS,
 ): number {
   return (agentTimeoutMs + SESSION_READY_TIMEOUT_MS) * (Math.max(1, agents) + (synthesize ? 1 : 0));
+}
+
+/**
+ * The same for a fan-out whose agents may run goals. Goal agents run in parallel
+ * with the turn agents and with each other, so the node needs the longer of the
+ * two: the turn agents' worst case, or the longest goal (the kernel's node
+ * timeout when a goal sets none).
+ */
+export function fanoutAgentsBudget(
+  agents: FanoutAgentSpec[],
+  synthesize: boolean | undefined,
+  agentTimeoutMs = FANOUT_AGENT_TIMEOUT_MS,
+): number {
+  const turns = agents.filter((a) => !a.objective?.trim()).length;
+  const goals = agents.filter((a) => !!a.objective?.trim());
+  const turnBudget = turns > 0 ? fanoutNodeBudget(turns, synthesize, agentTimeoutMs) : 0;
+  const goalBudget = goals.length
+    ? Math.max(...goals.map((a) => a.timeoutMs || DEFAULT_NODE_TIMEOUT_MS)) + SESSION_READY_TIMEOUT_MS
+    : 0;
+  return Math.max(turnBudget, goalBudget) || fanoutNodeBudget(agents.length, synthesize, agentTimeoutMs);
 }
 
 /**
@@ -125,7 +146,7 @@ export function fanoutWorkflow(args: FanoutArgs): WorkflowSpec {
         synthesize: args.synthesize,
         cwd: args.cwd,
         agentTimeoutMs: FANOUT_AGENT_TIMEOUT_MS,
-        timeoutMs: fanoutNodeBudget(args.agents.length, args.synthesize),
+        timeoutMs: fanoutAgentsBudget(args.agents, args.synthesize),
       },
     ],
   };
@@ -431,7 +452,7 @@ export function legacyFanoutWorkflow(args: LegacyFanoutArgs): WorkflowSpec {
         cwd: args.cwd,
         // `||`: a zero timeout reaches the send as "use the default", so budget for that.
         agentTimeoutMs: args.timeoutMs || FANOUT_AGENT_TIMEOUT_MS,
-        timeoutMs: fanoutNodeBudget(args.agents.length, args.synthesize, args.timeoutMs || FANOUT_AGENT_TIMEOUT_MS),
+        timeoutMs: fanoutAgentsBudget(args.agents, args.synthesize, args.timeoutMs || FANOUT_AGENT_TIMEOUT_MS),
       },
     ],
   };

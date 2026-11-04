@@ -873,3 +873,104 @@ describe('goal node on claude', () => {
     expect('engine' in codex.nodes[0]).toBe(false);
   });
 });
+
+describe('fan-out agents that run goals', () => {
+  /** Goal sessions complete when set; plain sends answer for the turn agents. */
+  function mixedManager() {
+    const m = fakeManager((c) => {
+      const s = new FakeGoalSession(`thread-${String(c.name).split('-').pop()}`);
+      s.onSet = (_p, self) => self.move('complete', { tokensUsed: 7 });
+      return s;
+    });
+    return Object.assign(m, {
+      async sendMessage() {
+        return { output: 'turn answer' } as never;
+      },
+    });
+  }
+
+  const spec = (cwd: string): WorkflowSpec => ({
+    name: 'parallel-impl',
+    cwd,
+    nodes: [
+      {
+        id: 'impl',
+        kind: 'fanout',
+        prompt: 'review it',
+        agents: [
+          { name: 'alpha', engine: 'codex', objective: 'build it in alpha', cwd: 'copy-a' },
+          { name: 'beta', engine: 'codex', objective: 'build it in beta', cwd: 'copy-b' },
+          { name: 'gamma', engine: 'claude' },
+        ],
+      } as never,
+    ],
+  });
+
+  it('runs each goal agent as its own goal run in its own directory, beside the turn agents', async () => {
+    const m = mixedManager();
+    const kernel = kernelWith(m);
+    const done = await kernel.wait((await kernel.start(spec(tmp))).runId);
+    expect(done!.nodes.impl.state).toBe('succeeded');
+    const data = done!.nodes.impl.data as {
+      results: Array<{ agent: string; ok: boolean; cwd: string; goal?: { runId: string; status?: string } }>;
+      goalRuns: Record<string, string>;
+    };
+    const by = Object.fromEntries(data.results.map((r) => [r.agent, r]));
+    expect(Object.keys(by)).toEqual(['alpha', 'beta', 'gamma']);
+    expect(by.alpha).toMatchObject({ ok: true, cwd: path.join(tmp, 'copy-a'), goal: { status: 'complete' } });
+    expect(by.beta).toMatchObject({ ok: true, cwd: path.join(tmp, 'copy-b'), goal: { status: 'complete' } });
+    expect(by.gamma).toMatchObject({ ok: true, cwd: tmp });
+    expect(by.gamma.goal).toBeUndefined();
+    // Each goal set on a session started in its agent's directory, under its own child run.
+    const goalStarts = m.starts.filter((c) => c.engine === 'codex-app');
+    expect(goalStarts.map((c) => c.cwd).sort()).toEqual([path.join(tmp, 'copy-a'), path.join(tmp, 'copy-b')]);
+    expect(data.goalRuns.alpha).toBe(by.alpha.goal!.runId);
+    expect(data.goalRuns.alpha).not.toBe(data.goalRuns.beta);
+    const objectives = [...m.sessions.values()].map((s) => s.sets[0]?.objective).filter(Boolean);
+    expect(objectives.sort()).toEqual(['build it in alpha', 'build it in beta']);
+  });
+
+  it('refuses at start a goal agent without claude or codex, and synthesis beside goal agents', async () => {
+    const kernel = kernelWith(mixedManager());
+    const one = (agent: Record<string, unknown>, extra: Record<string, unknown> = {}): WorkflowSpec => ({
+      name: 'bad',
+      cwd: tmp,
+      nodes: [{ id: 'impl', kind: 'fanout', prompt: 'x', agents: [agent], ...extra } as never],
+    });
+    await expect(kernel.start(one({ name: 'a', objective: 'do it' }))).rejects.toThrow(
+      /needs engine 'claude' or 'codex'/,
+    );
+    await expect(kernel.start(one({ name: 'a', engine: 'opencode', objective: 'do it' }))).rejects.toThrow(
+      /needs engine/,
+    );
+    await expect(
+      kernel.start(one({ name: 'a', engine: 'codex', objective: 'do it' }, { synthesize: true })),
+    ).rejects.toThrow(/synthesize is not supported/);
+  });
+
+  it('reattaches to its goal runs after the parent process dies, instead of starting them again', async () => {
+    const m = mixedManager();
+    const kernel = kernelWith(m);
+    const first = await kernel.start(spec(tmp));
+    await kernel.wait(first.runId);
+    // Put the parent back to the moment its fan-out node was still running.
+    const record = loadRun(first.runId)!;
+    record.state = 'running';
+    record.endedAt = undefined;
+    record.nodes.impl.state = 'running';
+    record.currentNode = 'impl';
+    const crashed = acquireLease(first.runId, 'crashed-process');
+    commit(crashed, { record });
+    releaseLease(crashed);
+
+    const m2 = mixedManager();
+    const kernel2 = kernelWith(m2);
+    await kernel2.resume(first.runId);
+    const done = await kernel2.wait(first.runId);
+    expect(done!.nodes.impl.state).toBe('succeeded');
+    // The goals had already finished: they are adopted, not set again.
+    expect(m2.starts.filter((c) => c.engine === 'codex-app')).toHaveLength(0);
+    const data = done!.nodes.impl.data as { goalRuns: Record<string, string> };
+    expect(data.goalRuns).toEqual((record.nodes.impl.data as { goalRuns: Record<string, string> }).goalRuns);
+  });
+});

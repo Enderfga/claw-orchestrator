@@ -414,6 +414,22 @@ export function validateSpec(spec: WorkflowSpec): void {
     if (node.timeoutMs !== undefined && (!Number.isFinite(node.timeoutMs) || node.timeoutMs <= 0)) {
       throw new Error(`Node '${node.id}': timeoutMs must be a positive number`);
     }
+    if (node.kind === 'fanout') {
+      const goals = (node.agents ?? []).filter((a) => a.objective !== undefined);
+      for (const a of goals) {
+        if (typeof a.objective !== 'string' || !a.objective.trim()) {
+          throw new Error(`Node '${node.id}': agent '${a.name}' has an empty objective`);
+        }
+        if (a.engine !== 'claude' && a.engine !== 'codex') {
+          throw new Error(
+            `Node '${node.id}': agent '${a.name}' runs a goal, which needs engine 'claude' or 'codex' (got '${a.engine ?? 'none'}')`,
+          );
+        }
+      }
+      if (goals.length > 0 && node.synthesize) {
+        throw new Error(`Node '${node.id}': synthesize is not supported when agents run goals`);
+      }
+    }
     if ((node.kind === 'agent' || node.kind === 'goal') && node.disallowedTools !== undefined) {
       const tools = node.disallowedTools as unknown;
       if (!Array.isArray(tools) || tools.some((t) => typeof t !== 'string' || t.length === 0)) {

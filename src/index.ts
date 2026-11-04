@@ -1246,6 +1246,26 @@ const plugin = {
                   description:
                     "This agent's own working directory, absolute or relative to projectDir. Defaults to projectDir.",
                 },
+                objective: {
+                  type: 'string',
+                  description:
+                    'Run this agent as a goal (a /goal on engine claude or codex, which must be set) instead of one turn: it works until the objective is met, out of budget, or blocked, with stalls and capacity errors resumed. Not with synthesize.',
+                },
+                tokenBudget: { type: 'number', description: 'Goal agents: tokens the goal may spend.' },
+                timeoutMs: {
+                  type: 'number',
+                  description: "Goal agents: how long the goal may run. Default: the kernel's node timeout (30 min).",
+                },
+                stallMs: {
+                  type: 'number',
+                  description: 'Goal agents: an active goal with no turn and no news for this long is resumed.',
+                },
+                capacityRetry: {
+                  type: 'object',
+                  description: 'Goal agents: resume attempts after usage limits, overload or stalls.',
+                  properties: { max: { type: 'number' }, backoffMs: { type: 'number' } },
+                  required: ['max'],
+                },
                 baseUrl: { type: 'string' },
                 permissionMode: {
                   type: 'string',

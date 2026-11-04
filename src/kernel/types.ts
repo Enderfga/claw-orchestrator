@@ -113,6 +113,23 @@ export interface FanoutAgentSpec extends AgentBinding {
    * node's `cwd`. Council seats ignore it; they get worktrees of their own.
    */
   cwd?: string;
+  /**
+   * Fan-out only: run this agent as a goal instead of one turn — a `/goal` on its
+   * engine (`codex` or `claude`, required) with this objective, under the same
+   * rules as a `goal` node: the goal ends when its judge or the agent says it is
+   * met, out of budget, or blocked, and stalls and capacity errors are resumed.
+   * It runs as a child run with one goal node, so a resumed parent picks it up
+   * where it was rather than starting it again.
+   */
+  objective?: string;
+  /** Goal agents: tokens the goal may spend. */
+  tokenBudget?: number;
+  /** Goal agents: resuming after usage limits, overload and stalls (as on a goal node). */
+  capacityRetry?: { max: number; backoffMs?: number };
+  /** Goal agents: an active goal with no turn and no news for this long is resumed. */
+  stallMs?: number;
+  /** Goal agents: how long the goal may run. Default: the kernel's node timeout. */
+  timeoutMs?: number;
 }
 
 export interface FanoutNode extends NodeBase {

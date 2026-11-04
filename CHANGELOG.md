@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A fan-out agent can run as a goal.** Given an `objective` (engine `claude` or `codex`), it works until the
+  goal is met, out of budget, or blocked, under the same rules as a `goal` node, beside the agents that take
+  one turn. Each goal runs in a child run checkpointed on the node, so a resumed parent reattaches to it
+  instead of starting it again; its result carries the goal's run id and final status. With per-agent `cwd`,
+  several agents can each work a copy of a project until it is done.
+
 ## [7.19.0] - 2026-11-04
 
 ### Added
