@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [7.17.2] - 2026-11-04
+
 ### Fixed
 
 - **A Claude goal's repair can finish: the condition is the caller's objective alone.** The failing checks
