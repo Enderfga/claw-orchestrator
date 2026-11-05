@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`CLAUDE_BIN` was ignored by the session manager.** It always passed `claude` to the session, so the variable that
+  the docs describe never took effect for `clawo serve` or the MCP server. An explicit `claudeBin` still wins.
+
 ## [7.20.0] - 2026-11-04
 
 ### Added

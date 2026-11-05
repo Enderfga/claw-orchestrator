@@ -1063,7 +1063,9 @@ export class SessionManager {
   constructor(config?: Partial<PluginConfig>, logger?: Logger) {
     this.logger = logger || createConsoleLogger('SessionManager');
     this.pluginConfig = {
-      claudeBin: config?.claudeBin || 'claude',
+      // CLAUDE_BIN is what PersistentClaudeSession already honours when it gets no
+      // explicit binary; the manager always passed one, so the variable was dead.
+      claudeBin: config?.claudeBin || process.env.CLAUDE_BIN || 'claude',
       defaultModel: config?.defaultModel,
       defaultPermissionMode: config?.defaultPermissionMode || 'acceptEdits',
       defaultEffort: config?.defaultEffort || 'auto',
