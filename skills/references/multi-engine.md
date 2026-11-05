@@ -690,3 +690,25 @@ To add a built-in engine (for CLIs that need custom protocol handling beyond wha
 The `ISession` interface is deliberately minimal — each engine handles its own subprocess bootstrapping, I/O protocol, and cleanup internally.
 
 For most third-party CLIs, the `custom` engine with `CustomEngineConfig` is sufficient and requires zero code changes.
+
+## Claude account profiles
+
+`CLAUDE_CONFIG_DIR` selects the Claude Code login, so running two accounts means two configuration directories. A
+profile gives each one a name. List them in `~/.claw-orchestrator/claude-profiles.json` (override the location with
+`CLAWO_CLAUDE_PROFILES`); every directory must be absolute and must already exist, which keeps a typo from creating a
+second, empty login:
+
+```json
+{ "personal": "C:\Users\me\.claude", "work": "C:\Users\me\.claude-work" }
+```
+
+Then start a session under one of them:
+
+```bash
+clawo session-start build -e claude --claude-profile work
+```
+
+The same name is accepted by the `session_start` tool (`claudeProfile`). The HTTP surface does not take a raw
+`configDir` (it answers 400), so a caller can only choose among the directories the server's owner listed. Log each
+directory in once with `CLAUDE_CONFIG_DIR=<dir> claude auth login`. The profile is saved with the session, so a later
+`session_start` under the same name resumes with the same login. Profiles apply to the `claude` engine only.

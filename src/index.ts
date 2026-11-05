@@ -321,6 +321,11 @@ const plugin = {
               'Engine to use (default: claude). codex = `codex exec` per send (no /goal). codex-app = long-running `codex app-server` with /goal support. agy = Google Antigravity CLI (stream-json output with reported token usage; the conversation is resumed by its id on each send). grok = xAI Grok Build CLI (reports its own per-turn cost). opencode = sst/opencode CLI (provider-agnostic; pass model as `provider/model`). acp = any Agent Client Protocol agent, chosen with acpAgent. Use "custom" with customEngine config for any CLI. gemini and cursor are legacy, kept for existing callers: use agy and grok instead.',
           },
           model: { type: 'string', description: 'Model to use (opus, sonnet, haiku, gpt-5.5, agy-pro, etc.)' },
+          claudeProfile: {
+            type: 'string',
+            description:
+              "Claude engine only. Name of an account profile from the server's claude-profiles.json: the session runs under that profile's Claude login. Omit for the default login.",
+          },
           permissionMode: {
             type: 'string',
             enum: ['acceptEdits', 'bypassPermissions', 'default', 'manual', 'dontAsk', 'plan', 'auto'],

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Claude account profiles.** One server can run Claude sessions for several accounts. A profile maps a name to a
+  Claude Code configuration directory (`CLAUDE_CONFIG_DIR`) in `~/.claw-orchestrator/claude-profiles.json`
+  (`CLAWO_CLAUDE_PROFILES` relocates it); `session_start` and `clawo session-start --claude-profile <name>` take the
+  name. A request never carries a path: the HTTP surface refuses `configDir` and the server resolves the name from its
+  own file. The profile is stored with the persisted session, so a resume by name uses the same login.
+
 ## [7.20.0] - 2026-11-04
 
 ### Added

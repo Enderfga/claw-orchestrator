@@ -202,6 +202,30 @@ describe('PersistentClaudeSession', () => {
       expect(opts.env.ANTHROPIC_API_KEY).toBeUndefined();
     });
 
+    it('passes configDir to the CLI as CLAUDE_CONFIG_DIR', async () => {
+      vi.stubEnv('CLAUDE_CONFIG_DIR', 'inherited-dir-must-lose');
+      session = new PersistentClaudeSession(makeConfig({ configDir: '/accounts/work' }));
+      const { spawnEngine: spawn } = await import('../engine-spawn.js');
+      const startPromise = session.start();
+      emitInitEvent(mockProc);
+      await startPromise;
+
+      const opts = vi.mocked(spawn).mock.calls.at(-1)![2] as { env: NodeJS.ProcessEnv };
+      expect(opts.env.CLAUDE_CONFIG_DIR).toBe('/accounts/work');
+    });
+
+    it('leaves CLAUDE_CONFIG_DIR as inherited when no configDir is set', async () => {
+      vi.stubEnv('CLAUDE_CONFIG_DIR', '/inherited/dir');
+      session = new PersistentClaudeSession(makeConfig());
+      const { spawnEngine: spawn } = await import('../engine-spawn.js');
+      const startPromise = session.start();
+      emitInitEvent(mockProc);
+      await startPromise;
+
+      const opts = vi.mocked(spawn).mock.calls.at(-1)![2] as { env: NodeJS.ProcessEnv };
+      expect(opts.env.CLAUDE_CONFIG_DIR).toBe('/inherited/dir');
+    });
+
     it('keeps an official-format ANTHROPIC_API_KEY even without baseUrl', async () => {
       vi.stubEnv('ANTHROPIC_API_KEY', 'sk-ant-api03-real-key');
       session = new PersistentClaudeSession(makeConfig());

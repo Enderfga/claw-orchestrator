@@ -209,6 +209,10 @@ program
   .option('--enable-auto-mode', 'Enable auto permission mode')
   .option('--resume-session-id <id>', 'Resume existing session by ID')
   .option('--base-url <url>', 'Custom API endpoint (for proxy)')
+  .option(
+    '--claude-profile <name>',
+    "Claude engine: run under the account profile of that name from the server's claude-profiles.json",
+  )
   .option('--add-dir <dirs>', 'Comma-separated additional working directories')
   .option(
     '--custom-engine <preset>',
@@ -239,6 +243,7 @@ program
         .filter(Boolean);
     if (opts.resumeSessionId) body.resumeSessionId = opts.resumeSessionId;
     if (opts.baseUrl) body.baseUrl = opts.baseUrl;
+    if (opts.claudeProfile) body.claudeProfile = opts.claudeProfile;
     if (opts.addDir)
       body.addDir = opts.addDir
         .split(',')
