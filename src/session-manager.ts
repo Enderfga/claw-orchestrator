@@ -12,6 +12,7 @@ import { execFile, execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { promisify } from 'node:util';
 import { execEngine } from './engine-spawn.js';
+import { resolveClaudeProfile } from './claude-profiles.js';
 
 const execFileAsync = promisify(execFile);
 import * as http from 'node:http';
@@ -53,6 +54,8 @@ interface PersistedSession {
   sandboxMode?: SessionConfig['sandboxMode'];
   autoCompactPercent?: number;
   chrome?: boolean;
+  /** Account profile the conversation was started under; a resume must use the same login. */
+  claudeProfile?: string;
   originalCreated: string;
   lastResumed: string;
   lastActivity: number;
@@ -1231,9 +1234,16 @@ export class SessionManager {
       sandboxMode: config.sandboxMode ?? persisted?.sandboxMode,
       autoCompactPercent: config.autoCompactPercent ?? persisted?.autoCompactPercent,
       chrome: config.chrome ?? persisted?.chrome,
+      claudeProfile: config.claudeProfile ?? persisted?.claudeProfile,
       ...config,
       ...(resumeId ? { resumeSessionId: resumeId } : {}),
     };
+
+    // A profile names an account; the directory comes from the server's own file.
+    if (fullConfig.claudeProfile) {
+      if (engine !== 'claude') throw new Error('claudeProfile applies to the claude engine only');
+      fullConfig.configDir = resolveClaudeProfile(fullConfig.claudeProfile);
+    }
 
     // Resolve model alias
     if (fullConfig.model) {
@@ -1551,6 +1561,7 @@ export class SessionManager {
       effort: source.config.effort,
       maxBudgetUsd: source.config.maxBudgetUsd,
       autoCompactPercent: source.config.autoCompactPercent,
+      claudeProfile: source.config.claudeProfile,
       systemPrompt: source.config.systemPrompt,
       appendSystemPrompt: source.config.appendSystemPrompt,
       addDir: source.config.addDir,
@@ -2983,6 +2994,7 @@ export class SessionManager {
       sandboxMode: managed.config.sandboxMode,
       autoCompactPercent: managed.config.autoCompactPercent,
       chrome: managed.config.chrome,
+      claudeProfile: managed.config.claudeProfile,
       originalCreated: existing?.originalCreated || managed.created,
       lastResumed: new Date().toISOString(),
       lastActivity: managed.lastActivity,

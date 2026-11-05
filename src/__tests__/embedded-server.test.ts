@@ -323,6 +323,33 @@ describe('EmbeddedServer', () => {
   //    `PersistentCustomSession` spawns `bin`. The guard is now shape-matched
   //    and runs on every body in `route()`, so the next route added cannot
   //    reintroduce it by being forgotten.
+  describe('claude account over HTTP', () => {
+    it('refuses a configDir body: a request names a profile, never a directory', async () => {
+      await server.start();
+
+      const res = await request(port, '/session/start', {
+        method: 'POST',
+        body: { name: 'sneaky', cwd: '/tmp', configDir: '/home/other-user/.claude' },
+      });
+
+      expect(res.status).toBe(400);
+      expect(String((res.body as { error?: string }).error)).toContain('claudeProfile');
+      expect(manager.startSession).not.toHaveBeenCalled();
+    });
+
+    it('passes a claudeProfile name through to startSession', async () => {
+      await server.start();
+
+      const res = await request(port, '/session/start', {
+        method: 'POST',
+        body: { name: 'acct', cwd: '/tmp', claudeProfile: 'work' },
+      });
+
+      expect(res.status).not.toBe(400);
+      expect(manager.startSession).toHaveBeenCalledWith(expect.objectContaining({ claudeProfile: 'work' }));
+    });
+  });
+
   describe('custom engine over HTTP', () => {
     it('refuses a customEngine body on /session/start without reaching startSession', async () => {
       await server.start();

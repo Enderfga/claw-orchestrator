@@ -305,6 +305,18 @@ export interface SessionConfig {
   engine?: EngineType;
   model?: string;
   baseUrl?: string;
+  /**
+   * Claude engine only. Name of an account profile from the profiles file
+   * (`claude-profiles.json`, see `claude-profiles.ts`). The session manager
+   * resolves it to `configDir`, so a request names a profile and never a path.
+   */
+  claudeProfile?: string;
+  /**
+   * Claude engine only. Directory handed to the CLI as `CLAUDE_CONFIG_DIR`, which
+   * selects the logged-in account. For in-process callers; the HTTP surface
+   * refuses it and takes `claudeProfile` instead.
+   */
+  configDir?: string;
   permissionMode: PermissionMode;
   // Tool control
   allowedTools?: string[];

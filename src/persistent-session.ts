@@ -396,6 +396,8 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
       delete spawnEnv.ANTHROPIC_API_KEY;
     }
     if (this.options.baseUrl) spawnEnv.ANTHROPIC_BASE_URL = this.options.baseUrl;
+    // Selects the logged-in account: each profile has its own login and history.
+    if (this.options.configDir) spawnEnv.CLAUDE_CONFIG_DIR = this.options.configDir;
     if (this.options.enableAgentTeams) spawnEnv.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS = 'true';
     // Smart default: bare mode auto-enables 1H prompt caching
     if (

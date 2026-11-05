@@ -533,6 +533,14 @@ export class EmbeddedServer {
         return;
       }
 
+      // `configDir` is the directory behind a Claude login. The network surface
+      // takes a `claudeProfile` name and the server resolves it from its own file,
+      // so a request cannot point a session at a directory nobody listed.
+      if (body.configDir !== undefined) {
+        json(400, { ok: false, error: 'configDir is not accepted over HTTP; use claudeProfile' });
+        return;
+      }
+
       // ─── Session Routes ──────────────────────────────────────────
 
       if (path === '/session/start') {
