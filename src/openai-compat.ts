@@ -17,6 +17,7 @@ import {
   OPENAI_COMPAT_DEFAULT_MODEL,
   OPENAI_COMPAT_AUTO_COMPACT_THRESHOLD,
   OPENAI_COMPAT_SESSION_PREFIX,
+  OPENAI_COMPAT_TURN_TIMEOUT_MS,
 } from './constants.js';
 
 /**
@@ -149,6 +150,12 @@ export interface OpenAIChatCompletionChunk {
  * tool list within a single session (without an explicit key, a changed list
  * resolves to a new session; with one, the session keeps its old tools).
  */
+/** Turn timeout for compat sends: OPENAI_COMPAT_TURN_TIMEOUT_MS (ms) if set to a positive number, else the default. */
+export function compatTurnTimeoutMs(): number {
+  const v = Number(process.env.OPENAI_COMPAT_TURN_TIMEOUT_MS);
+  return Number.isFinite(v) && v > 0 ? v : OPENAI_COMPAT_TURN_TIMEOUT_MS;
+}
+
 export function isToolsPerMessageModeEnabled(): boolean {
   const v = process.env.OPENAI_COMPAT_TOOLS_PER_MESSAGE;
   if (!v) return false;
@@ -1310,6 +1317,7 @@ async function handleNonStreaming(
   try {
     reportStatus('thinking', 'Processing request...');
     const result = await manager.sendMessage(sessionName, userMessage, {
+      timeout: compatTurnTimeoutMs(),
       onEvent: (event: { type: string; tool?: { name?: string; input?: Record<string, unknown> } }) => {
         if (event.type === 'tool_use' && event.tool?.name) {
           const desc = getToolDescription(event.tool.name, event.tool.input);
@@ -1426,6 +1434,7 @@ async function handleStreaming(
   try {
     reportStatus('thinking', 'Processing request...');
     const result = await manager.sendMessage(sessionName, userMessage, {
+      timeout: compatTurnTimeoutMs(),
       onChunk: (chunk: string) => {
         if (hasTools) {
           bufferedText += chunk;

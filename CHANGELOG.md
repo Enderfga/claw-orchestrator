@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **OpenAI-compatible requests no longer time out after 5 minutes.** A chat completion now waits up to 30 minutes
+  for the turn (`OPENAI_COMPAT_TURN_TIMEOUT_MS` to change it). The 5-minute session default cut off gateway agents
+  whose single reply ran longer, and the gateway retried the same slow turn and then fell back to another model.
+
 ## [7.20.0] - 2026-11-04
 
 ### Added

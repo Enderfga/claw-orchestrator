@@ -20,6 +20,7 @@ import {
   serializeConversationHistory,
   type OpenAIChatMessage,
   isToolsPerMessageModeEnabled,
+  compatTurnTimeoutMs,
   noToolsSystemPrompt,
   buildSessionSystemPrompt,
   handleChatCompletion,
@@ -3618,5 +3619,88 @@ describe('fenceHistoryTags — invisible filler between the bracket and the tag 
       { role: 'user', content: 'b' },
     ]);
     expect(Date.now() - started).toBeLessThan(2_000);
+  });
+});
+
+// ─── compat turn timeout ─────────────────────────────────────────────────────
+//
+// The session manager's default send timeout (TURN_TIMEOUT_MS, 5 min) cut off gateway agents
+// whose single reply runs longer — a nightly job writing a long log in one tool call timed out at
+// exactly 300 s, twice per run, and the gateway fell back to a weaker model. Compat sends now
+// carry their own, longer ceiling.
+
+describe('compatTurnTimeoutMs', () => {
+  let saved: string | undefined;
+  beforeEach(() => {
+    saved = process.env.OPENAI_COMPAT_TURN_TIMEOUT_MS;
+    delete process.env.OPENAI_COMPAT_TURN_TIMEOUT_MS;
+  });
+  afterEach(() => {
+    if (saved === undefined) delete process.env.OPENAI_COMPAT_TURN_TIMEOUT_MS;
+    else process.env.OPENAI_COMPAT_TURN_TIMEOUT_MS = saved;
+  });
+
+  it('defaults to 30 minutes when the env var is unset', () => {
+    expect(compatTurnTimeoutMs()).toBe(1_800_000);
+  });
+
+  it('uses a positive number from the env var', () => {
+    process.env.OPENAI_COMPAT_TURN_TIMEOUT_MS = '3600000';
+    expect(compatTurnTimeoutMs()).toBe(3_600_000);
+  });
+
+  it('ignores values that are not a positive number', () => {
+    for (const v of ['', '0', '-5', 'abc', 'Infinity']) {
+      process.env.OPENAI_COMPAT_TURN_TIMEOUT_MS = v;
+      expect(compatTurnTimeoutMs()).toBe(1_800_000);
+    }
+  });
+});
+
+describe('handleChatCompletion passes the compat turn timeout to sendMessage', () => {
+  let saved: string | undefined;
+  beforeEach(() => {
+    saved = process.env.OPENAI_COMPAT_TURN_TIMEOUT_MS;
+    process.env.OPENAI_COMPAT_TURN_TIMEOUT_MS = '1234567';
+  });
+  afterEach(() => {
+    if (saved === undefined) delete process.env.OPENAI_COMPAT_TURN_TIMEOUT_MS;
+    else process.env.OPENAI_COMPAT_TURN_TIMEOUT_MS = saved;
+  });
+
+  const managerRecording = (seen: Array<number | undefined>) => ({
+    startSession: async (c: Record<string, unknown>) => ({ name: c.name as string }),
+    sendMessage: async (_n: string, _m: string, opts?: { timeout?: number }) => {
+      seen.push(opts?.timeout);
+      return { output: 'ok', events: [] };
+    },
+    stopSession: async () => {},
+    listSessions: () => [],
+    getStatus: () => ({ stats: { tokensIn: 1, tokensOut: 1, contextPercent: 1 } }),
+    compactSession: async () => ({}),
+  });
+
+  it('on the non-streaming path', async () => {
+    const seen: Array<number | undefined> = [];
+    const { res } = recordingRes();
+    await handleChatCompletion(
+      managerRecording(seen) as never,
+      { model: 'claude-sonnet-4-5', messages: [{ role: 'user', content: 'hi' }] },
+      {},
+      res,
+    );
+    expect(seen).toEqual([1_234_567]);
+  });
+
+  it('on the streaming path', async () => {
+    const seen: Array<number | undefined> = [];
+    const { res } = recordingRes();
+    await handleChatCompletion(
+      managerRecording(seen) as never,
+      { model: 'claude-sonnet-4-5', stream: true, messages: [{ role: 'user', content: 'hi' }] },
+      {},
+      res,
+    );
+    expect(seen).toEqual([1_234_567]);
   });
 });
