@@ -733,7 +733,9 @@ restoring or limit error) and nothing is sent. Accepted chat survives
 `autoloop_stop` and owner loss and is delivered once, in order, after a resume.
 A message that was mid-delivery when the run stopped is not resent; it is
 reported through `unconfirmed_chat` in `autoloop_status` and one notice in chat
-history.
+history. A rejected control shows a diagnostic in the chat reply and adds a
+best-effort `planner_control_error` row to `decisions.jsonl`; nothing is
+retried automatically.
 
 ### `autoloop_status`
 

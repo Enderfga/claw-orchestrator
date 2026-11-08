@@ -12,6 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **OpenAI-compatible requests no longer time out after 5 minutes.** A chat completion now waits up to 30 minutes
   for the turn (`OPENAI_COMPAT_TURN_TIMEOUT_MS` to change it). The 5-minute session default cut off gateway agents
   whose single reply ran longer, and the gateway retried the same slow turn and then fell back to another model.
+- Autoloop surfaces rejected Planner controls as one safe diagnostic in the chat
+  reply and a best-effort `planner_control_error` audit row (with useful
+  validation details), while the operator log keeps the raw per-error warning.
 
 ## [7.20.0] - 2026-11-04
 
@@ -56,6 +59,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   judge reads everything after `/goal` as the condition, asked to see those checks pass, and blocked the stop
   until the CLI gave up. They are now sent as an ordinary message just before `/goal`, which carries the
   objective word for word. Steers that arrive before a Claude goal is set go the same way.
+
 
 ## [7.17.1] - 2026-11-03
 

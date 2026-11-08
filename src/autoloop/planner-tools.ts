@@ -110,11 +110,31 @@ export interface PlannerArtifactWrite {
 
 // ─── Tool execution ──────────────────────────────────────────────────────────
 
+/** Batch-level failure phase — set by the handling branch, never by thrown data. */
+export type PlannerControlErrorOrigin = 'validation' | 'effect';
+
 export interface PlannerToolHandlerResult {
   /** Messages the runner should push into its own queue. */
   emitted_messages: AnyAutoloopMessage[];
   /** Errors encountered while handling this batch (does not throw). */
   errors: Array<{ tool: string; error: string }>;
+  /**
+   * Present when `errors.length > 0`. Distinguishes preparation/duplicate
+   * validation from artifact/policy/spawn effect failures. Origin is chosen by
+   * the actual branch, not by error text or forged properties.
+   */
+  error_origin?: PlannerControlErrorOrigin;
+}
+
+/** Full-string ASCII identifier safe to reflect in user/audit diagnostics. */
+const SAFE_PLANNER_TOOL_ID = /^[a-z][a-z0-9_]{0,47}$/;
+
+function isSafePlannerToolId(value: string): boolean {
+  return SAFE_PLANNER_TOOL_ID.test(value);
+}
+
+function plannerToolLabel(tool: string): string {
+  return isSafePlannerToolId(tool) ? tool : 'planner control';
 }
 
 interface PreparedPlannerCall {
@@ -160,7 +180,7 @@ function prepareDirective(raw: Record<string, unknown>, tool: string): PreparedD
 
 function preparePlannerCall(call: PlannerToolCall, iter: number): PreparedPlannerCall {
   if (typeof call.args !== 'object' || call.args === null || Array.isArray(call.args)) {
-    throw new Error(`${call.tool} requires an object \`args\``);
+    throw new Error(`${plannerToolLabel(call.tool)} requires an object \`args\``);
   }
 
   switch (call.tool) {
@@ -198,7 +218,8 @@ function preparePlannerCall(call: PlannerToolCall, iter: number): PreparedPlanne
       for (const field of ['coder_engine', 'reviewer_engine'] as const) {
         const value = raw[field];
         if (value !== undefined && (typeof value !== 'string' || !ENGINE_TYPES.includes(value as EngineType))) {
-          throw new Error(`spawn_subagents ${field} has unknown engine '${String(value)}'`);
+          // Omit the rejected value — it is Planner-controlled and may be hostile.
+          throw new Error(`spawn_subagents ${field} has unknown engine`);
         }
         if (value === 'acp') throw new Error(`spawn_subagents ${field} 'acp' is not supported by Autoloop`);
       }
@@ -269,8 +290,9 @@ function preparePlannerCall(call: PlannerToolCall, iter: number): PreparedPlanne
       }
       try {
         JSON.parse(content);
-      } catch (error) {
-        throw new Error(`write_goal content is not valid JSON: ${(error as Error).message}`);
+      } catch {
+        // Static message only — never interpolate the parser tail into safe sinks.
+        throw new Error('write_goal content is not valid JSON');
       }
       if (commit_message !== undefined && typeof commit_message !== 'string') {
         throw new Error('write_goal `commit_message` must be a string');
@@ -281,7 +303,10 @@ function preparePlannerCall(call: PlannerToolCall, iter: number): PreparedPlanne
       };
     }
     default:
-      throw new Error(`unknown planner tool: ${call.tool}`);
+      if (isSafePlannerToolId(call.tool)) {
+        throw new Error(`unknown planner tool: ${call.tool}`);
+      }
+      throw new Error('unknown planner tool');
   }
 }
 
@@ -311,14 +336,14 @@ export async function applyPlannerToolCalls(
     }
   }
 
-  if (errors.length > 0) return { emitted_messages: [], errors };
+  if (errors.length > 0) return { emitted_messages: [], errors, error_origin: 'validation' };
 
   for (const singleton of ['write_plan', 'write_goal', 'spawn_subagents'] as const) {
     if (prepared.filter(({ call }) => call.tool === singleton).length > 1) {
       errors.push({ tool: singleton, error: `duplicate ${singleton} control in one Planner batch` });
     }
   }
-  if (errors.length > 0) return { emitted_messages: [], errors };
+  if (errors.length > 0) return { emitted_messages: [], errors, error_origin: 'validation' };
 
   const artifacts = prepared.flatMap(({ artifact }) => (artifact ? [artifact] : []));
   if (artifacts.length > 0) {
@@ -328,6 +353,7 @@ export async function applyPlannerToolCalls(
       return {
         emitted_messages: [],
         errors: [{ tool: artifacts.map(({ file }) => file).join(','), error: (err as Error).message }],
+        error_origin: 'effect',
       };
     }
   }
@@ -337,7 +363,11 @@ export async function applyPlannerToolCalls(
     try {
       fx.updatePushPolicy(entry.policyDelta);
     } catch (err) {
-      return { emitted_messages: [], errors: [{ tool: entry.call.tool, error: (err as Error).message }] };
+      return {
+        emitted_messages: [],
+        errors: [{ tool: entry.call.tool, error: (err as Error).message }],
+        error_origin: 'effect',
+      };
     }
   }
 
@@ -346,7 +376,11 @@ export async function applyPlannerToolCalls(
     try {
       await fx.spawnSubagents(spawnCall.spawnArgs);
     } catch (err) {
-      return { emitted_messages: [], errors: [{ tool: spawnCall.call.tool, error: (err as Error).message }] };
+      return {
+        emitted_messages: [],
+        errors: [{ tool: spawnCall.call.tool, error: (err as Error).message }],
+        error_origin: 'effect',
+      };
     }
   }
 

@@ -256,7 +256,10 @@ blocks appear in another order: all plan/goal bodies are staged and replaced as
 one failure-atomic artifact transaction, then policy effects run, then at most
 one subagent spawn runs, and only then are directive messages returned to the
 runner. A staging or replacement failure restores the prior artifact bytes,
-removes partial files, and suppresses both spawn and directives.
+removes partial files, and suppresses both spawn and directives. A rejected
+control shows a diagnostic in the chat reply and adds a best-effort
+`planner_control_error` row to `decisions.jsonl`; nothing is retried
+automatically.
 
 | Tool                 | Args                                                                                                                                  | What                                                                                                                                                                                                                                                                                 |
 | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
