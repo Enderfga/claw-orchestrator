@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Autoloop surfaces rejected Planner controls as one safe diagnostic in the chat
   reply and a best-effort `planner_control_error` audit row (with useful
   validation details), while the operator log keeps the raw per-error warning.
+- **`CLAUDE_BIN` was ignored by the session manager.** It always passed `claude` to the session, so the variable that
+  the docs describe never took effect for `clawo serve` or the MCP server. An explicit `claudeBin` still wins.
 
 ## [7.20.0] - 2026-11-04
 
