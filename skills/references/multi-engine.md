@@ -45,7 +45,7 @@ as options (see the notes under [Antigravity](#google-antigravity-engine-agy) an
 
 ### Claude Code (`engine: 'claude'`)
 
-Default engine. Long-running subprocess with streaming JSON I/O. Tested with Claude Code CLI **2.1.317**.
+Default engine. Long-running subprocess with streaming JSON I/O. Tested with Claude Code CLI **2.1.319**.
 
 - Persistent multi-turn conversations
 - Real-time streaming (text, tool_use, tool_result, system events)
@@ -152,7 +152,7 @@ await manager.codexGoal('codex-goal-task', { action: 'set', objective: 'build a 
 
 Wraps Google's **Antigravity CLI** (`agy`) — the successor to Gemini CLI (consumer
 Gemini CLI tiers stopped serving 2026-06-18). Each `send()` spawns a new process
-in print mode, with the message as the `-p` argument. Tested with `agy` **1.4.12**.
+in print mode, with the message as the `-p` argument. Tested with `agy` **1.5.3**.
 
 - One-shot execution per message (no persistent subprocess)
 - **Structured output and real usage** — `--output-format stream-json` emits an
@@ -241,7 +241,7 @@ await manager.startSession({
 ### Grok Build (`engine: 'grok'`)
 
 Wraps xAI's **Grok Build** CLI. Each `send()` spawns `grok -p <msg> --output-format json`, which
-prints a single JSON object and exits. Tested with `grok` **1.0.70**.
+prints a single JSON object and exits. Tested with `grok` **1.0.77**.
 
 - **Cost comes from the engine, not from the price table.** The result object carries
   `total_cost_usd`, and the wrapper writes it straight into the session's spend, so the run ledger

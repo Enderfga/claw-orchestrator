@@ -141,10 +141,10 @@ engine, so one dropdown switches between Claude, Codex, Antigravity and Grok mod
 
 | Engine      | CLI        | Tested version                  |
 | ----------- | ---------- | ------------------------------- |
-| Claude Code | `claude`   | 2.1.317                         |
+| Claude Code | `claude`   | 2.1.319                         |
 | Codex       | `codex`    | 0.166.0                         |
-| Antigravity | `agy`      | 1.4.12                          |
-| Grok Build  | `grok`     | 1.0.70                          |
+| Antigravity | `agy`      | 1.5.3                           |
+| Grok Build  | `grok`     | 1.0.77                          |
 | OpenCode    | `opencode` | 1.19.5                          |
 | ACP agent   | any        | Kimi Code 2.3.1, dsh 0.2.1-rc.2 |
 | Custom CLI  | any        | —                               |
