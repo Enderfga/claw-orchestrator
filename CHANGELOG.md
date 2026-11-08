@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Council seats now pass `sandboxMode` to the seat's session** on the SDK (`councilStart`) and
+  workflow (`council` node) routes instead of dropping it. Omission is unchanged; how a mode is
+  applied remains engine-specific.
+
 ## [7.20.1] - 2026-11-08
 
 ### Fixed

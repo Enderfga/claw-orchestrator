@@ -204,8 +204,9 @@ The kind-specific fields:
 | `ultraapp_synth`, `ultraapp_deploy` | `appRunId`, `runDir`, `slug`; the deploy stage adds `version` and `codebasePath`. Started by UltraApp builds                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 
 An entry in a fan-out's or council's `agents` takes `name` (required), `engine`,
-`model`, `effort`, `acpAgent`, `persona`, `prompt`, `permissionMode` and `baseUrl`;
-a fan-out agent also takes `sandboxMode`, and a council agent `ultracode` and
+`model`, `effort`, `acpAgent`, `persona`, `prompt`, `permissionMode`, `sandboxMode`
+(forwarded to the seat's session; how a mode is applied is engine-specific) and
+`baseUrl`; a council agent also takes `ultracode` and
 `emoji` (shown with its name in its charter and the transcript). An agent
 node and each of these entries use `engine`, `model` and `effort` the same way;
 `effort` accepts `low`, `medium`, `high`, `xhigh`, `max`, `ultra`, or `auto`, and
