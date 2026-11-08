@@ -7,16 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [7.20.1] - 2026-11-08
+
 ### Fixed
 
 - **OpenAI-compatible requests no longer time out after 5 minutes.** A chat completion now waits up to 30 minutes
   for the turn (`OPENAI_COMPAT_TURN_TIMEOUT_MS` to change it). The 5-minute session default cut off gateway agents
   whose single reply ran longer, and the gateway retried the same slow turn and then fell back to another model.
-- Autoloop surfaces rejected Planner controls as one safe diagnostic in the chat
-  reply and a best-effort `planner_control_error` audit row (with useful
-  validation details), while the operator log keeps the raw per-error warning.
-- **`CLAUDE_BIN` was ignored by the session manager.** It always passed `claude` to the session, so the variable that
-  the docs describe never took effect for `clawo serve` or the MCP server. An explicit `claudeBin` still wins.
+- **A rejected Planner control now shows in the Autoloop reply.** When a control block fails validation or
+  cannot be applied, the reply starts with a diagnostic (naming the problem for a validation error) and
+  `decisions.jsonl` gets a `planner_control_error` row. Before, the control was dropped with only a warning
+  in the server log, which still has the raw error. Nothing is retried automatically. (#162, thanks @ajmtrz)
+- **`CLAUDE_BIN` now takes effect for `clawo serve` and the MCP server.** The session manager always passed
+  `claude`, so the variable the docs describe was ignored; an explicit `claudeBin` still wins.
+  (#163, thanks @wagnerglorenz)
+
+### Changed
+
+- Tested with Claude Code 2.1.319, Antigravity 1.5.3 and Grok Build 1.0.77 (Codex 0.166.0 and OpenCode 1.19.5
+  unchanged): one live turn on each through its wrapper, and the model registry matches the OpenAI, Anthropic
+  and xAI published prices.
 
 ## [7.20.0] - 2026-11-04
 
