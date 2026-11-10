@@ -577,6 +577,48 @@ describe('PersistentCodexSession', () => {
     session.stop();
   });
 
+  // A turn makes one request per tool round, and the difference between two
+  // `turn.completed` totals sums them: it is the turn's spend, not the
+  // context's size. The rollout records each request's own usage in a
+  // `token_count` event's `last_token_usage`; the turn's last one is the context.
+  it("measures contextPercent by the turn's last request, not the turn's summed usage", async () => {
+    const tokenCount = (last: number, total: number) =>
+      JSON.stringify({
+        type: 'event_msg',
+        payload: {
+          type: 'token_count',
+          info: {
+            total_token_usage: { input_tokens: total, cached_input_tokens: 0, output_tokens: 10 },
+            last_token_usage: { input_tokens: last, cached_input_tokens: last - 1_000, output_tokens: 10 },
+            model_context_window: 258_400,
+          },
+        },
+      });
+    writeRollout('thread-req', [
+      JSON.stringify({ type: 'event_msg', payload: { type: 'task_started', model_context_window: 258_400 } }),
+      tokenCount(60_000, 60_000),
+      tokenCount(61_000, 121_000),
+      tokenCount(62_000, 183_000),
+      tokenCount(63_000, 246_000),
+    ]);
+    const session = new PersistentCodexSession({ name: 'test', cwd: '/tmp', model: 'gpt-5.5' });
+    await session.start();
+
+    const p = session.send('hi', { waitForComplete: true });
+    setTimeout(() => {
+      mockProc.stdout.push(JSON.stringify({ type: 'thread.started', thread_id: 'thread-req' }) + '\n');
+      mockProc.stdout.push(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 246_000 } }) + '\n');
+      mockProc.stdout.push(null);
+      mockProc.emit('close', 0);
+    }, 10);
+    await p;
+
+    // 63,000 / 258,400 = 24%, where the turn's sum read 95%. Spend is still the sum.
+    expect(session.getStats().contextPercent).toBe(24);
+    expect(session.getStats().tokensIn).toBe(246_000);
+    session.stop();
+  });
+
   // With no --model, codex runs the model in the user's ~/.codex/config.toml.
   // Pricing that at the wrapper default understated an Astra session 2x on
   // input; the rollout's turn_context names the model that actually ran.

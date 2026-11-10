@@ -42,8 +42,26 @@ function createMockProcess() {
 
 let mockProc: ReturnType<typeof createMockProcess>;
 
-function reply(body: Record<string, unknown>, code = 0) {
-  mockProc.stdout.push(JSON.stringify(body));
+/**
+ * Print `body` the way `--output-format streaming-json` does: the reply as
+ * `text` events, one `usage` event per request, then an `end` event carrying
+ * the rest. A refusal is a single `error` line in either format.
+ */
+function reply(body: Record<string, unknown>, code = 0, requests?: Array<Record<string, number>>) {
+  const lines: Array<Record<string, unknown>> = [];
+  if (body.type === 'error') {
+    lines.push(body);
+  } else {
+    const { text, ...rest } = body;
+    if (typeof text === 'string') {
+      for (const data of text.match(/[\s\S]{1,3}/g) ?? []) lines.push({ type: 'text', data });
+    }
+    for (const usage of requests ?? (body.usage ? [body.usage as Record<string, number>] : [])) {
+      lines.push({ type: 'usage', usage });
+    }
+    lines.push({ type: 'end', ...rest });
+  }
+  mockProc.stdout.push(lines.map((l) => JSON.stringify(l) + '\n').join(''));
   mockProc.stdout.push(null);
   mockProc.emit('close', code);
 }
@@ -77,16 +95,47 @@ describe('PersistentGrokSession — flags', () => {
     expect(mockSpawn.mock.calls[0][0]).toBe('grok');
   });
 
-  it('asks for single-turn JSON and passes the cwd', async () => {
+  it('asks for streaming JSON and passes the cwd', async () => {
     const s = new PersistentGrokSession({ name: 't', cwd: '/tmp', permissionMode: 'bypassPermissions' });
     await s.start();
     const p = s.send('hi', { waitForComplete: true });
     setTimeout(() => reply(OK_RESULT), 5);
-    await p;
+    const r = (await p) as { text: string };
     const args = spawnArgs();
     expect(args.slice(0, 2)).toEqual(['-p', 'hi']);
-    expect(args[args.indexOf('--output-format') + 1]).toBe('json');
+    expect(args[args.indexOf('--output-format') + 1]).toBe('streaming-json');
     expect(args[args.indexOf('--cwd') + 1]).toBe('/tmp');
+    // The reply arrives in pieces and is joined back together.
+    expect(r.text).toBe('PING');
+  });
+
+  it("measures the context by the turn's last request, not the turn's summed usage", async () => {
+    // A turn makes one request per tool round; the `end` event's usage sums
+    // them (four requests of ~35k reported 141k on 1.0.77). Each request has
+    // its own `usage` event, and the last one is the context.
+    const s = new PersistentGrokSession({ name: 't', cwd: '/tmp', model: 'grok-4.6' });
+    await s.start();
+    const p = s.send('hi', { waitForComplete: true });
+    const request = (cached: number) => ({ input_tokens: 1_000, output_tokens: 30, cache_read_input_tokens: cached });
+    setTimeout(
+      () =>
+        reply(
+          {
+            ...OK_RESULT,
+            usage: { input_tokens: 4_000, output_tokens: 120, cache_read_input_tokens: 398_000 },
+          },
+          0,
+          [request(98_000), request(99_000), request(100_000), request(101_000)],
+        ),
+      5,
+    );
+    await p;
+    const stats = s.getStats();
+    // Spend is still the whole turn's.
+    expect(stats.tokensIn).toBe(4_000);
+    expect(stats.cachedTokens).toBe(398_000);
+    // grok-4.6's 500K window: 102,000 is 20%, where the sum read 80%.
+    expect(stats.contextPercent).toBe(20);
   });
 
   it("maps our `manual` permission mode onto grok's `default`", async () => {

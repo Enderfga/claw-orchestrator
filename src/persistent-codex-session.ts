@@ -15,7 +15,16 @@
  */
 
 import { killEngineTree, spawnEngine } from './engine-spawn.js';
-import { writeFileSync, unlinkSync, readFileSync, readdirSync } from 'node:fs';
+import {
+  writeFileSync,
+  unlinkSync,
+  readFileSync,
+  readdirSync,
+  openSync,
+  fstatSync,
+  readSync,
+  closeSync,
+} from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -130,6 +139,9 @@ export class PersistentCodexSession extends BaseOneShotSession {
   /** Guards the rollout lookup so it runs at most once per session. */
   private _rolloutRead = false;
 
+  /** This thread's rollout file, once found. */
+  private _rolloutPath?: string;
+
   /**
    * The model codex reports it ran, from the rollout's `turn_context`. With no
    * `--model`, codex runs the `model` in the user's `~/.codex/config.toml`, and
@@ -192,6 +204,7 @@ export class PersistentCodexSession extends BaseOneShotSession {
       const root = join(process.env.CODEX_HOME || join(homedir(), '.codex'), 'sessions');
       const match = this._findRolloutFile(root, `-${this.codexThreadId}.jsonl`);
       if (!match) return;
+      this._rolloutPath = match;
 
       const text = readFileSync(match, 'utf8');
 
@@ -229,6 +242,38 @@ export class PersistentCodexSession extends BaseOneShotSession {
       }
     } catch {
       /* best effort — registry fallback covers every failure mode */
+    }
+  }
+
+  /**
+   * Prompt size of the latest request codex recorded for this thread.
+   *
+   * A turn makes one request per tool round, and `turn.completed.usage` — or
+   * the difference between two of them — sums them all: it is the turn's spend,
+   * not the context's size. The rollout records each request's own usage as a
+   * `token_count` event's `last_token_usage`, whose `input_tokens` includes the
+   * cached reads. Only the file's tail is read; undefined when there is no
+   * rollout (an `--ephemeral` thread) or nothing in it to read.
+   */
+  private _lastRequestPrompt(): number | undefined {
+    if (!this._rolloutPath) return undefined;
+    let fd: number | undefined;
+    try {
+      fd = openSync(this._rolloutPath, 'r');
+      const size = fstatSync(fd).size;
+      const len = Math.min(size, 256 * 1024);
+      const buf = Buffer.alloc(len);
+      readSync(fd, buf, 0, len, size - len);
+      const all = buf.toString('utf8').match(/"last_token_usage":\s*\{[^}]*\}/g);
+      const last = all?.[all.length - 1];
+      if (!last) return undefined;
+      const parsed = JSON.parse(`{${last}}`) as { last_token_usage?: { input_tokens?: number } };
+      const prompt = parsed.last_token_usage?.input_tokens;
+      return typeof prompt === 'number' && prompt > 0 ? prompt : undefined;
+    } catch {
+      return undefined;
+    } finally {
+      if (fd !== undefined) closeSync(fd);
     }
   }
 
@@ -549,6 +594,9 @@ export class PersistentCodexSession extends BaseOneShotSession {
         // A fresh session has no rollout to read until its first turn has
         // created one; retry now that the thread id is known.
         this._readRollout();
+        // The context is the turn's last request, which only the rollout records.
+        const lastRequestPrompt = this._lastRequestPrompt();
+        if (lastRequestPrompt !== undefined) this._reportTurnInputTokens(lastRequestPrompt);
         this._addHistory({ text: assistantText, code });
 
         const images = [...this._generatedImages()].filter((p) => !imagesBefore.has(p));

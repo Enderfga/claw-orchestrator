@@ -13,10 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are registered at $8/$40 per Mtok with $0.20 cache reads and a 1M context. Claude Code 2.1.321 made Fable 5.2
   its default Fable model, and its `fable` resolves to `claude-fable-5-2`, so a `fable` session was being priced
   at Fable 5.1's $10/$50 and a session on the full id at the family default.
-- **A Claude session's context percentage is its last request, not the turn's summed usage.** A turn makes
-  one API request per tool round and the turn's reported usage adds them up, so five requests of about 170k
-  read as 86% of a 1M window and set off an 85% `autoCompactPercent` with the context at 17%. The figure is now
-  the prompt of the turn's last request on the conversation; a subagent's requests are left out.
+- **A session's context percentage is its last request, not the turn's summed usage.** A turn makes one
+  API request per tool round, and the usage an engine reports for the turn adds them up: on Claude, five
+  requests of about 170k read as 86% of a 1M window and set off an 85% `autoCompactPercent` with the context
+  at 17%. The figure is now the prompt of the turn's last request — on Claude from each request's `assistant`
+  event (a subagent's requests are left out), on Antigravity from its `agent_response` steps, on Codex from
+  the `token_count` events in the thread's rollout, and on Grok from the per-request `usage` events of
+  `--output-format streaming-json`, which the wrapper now asks for in place of `json`. Antigravity's figure
+  now also counts cached reads, which it had left out. Spend still counts every request.
 - **Council seats now pass `sandboxMode` to the seat's session** on the SDK (`councilStart`) and
   workflow (`council` node) routes instead of dropping it. Omission is unchanged; how a mode is
   applied remains engine-specific.

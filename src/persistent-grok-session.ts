@@ -1,11 +1,14 @@
 /**
  * Grok Build (xAI) session wrapper.
  *
- * One-shot per send: `grok -p <msg> --output-format json`, which prints a single
- * JSON object and exits. That object is unusually complete for this engine class
- * — it carries the reply, a terminal `stopReason`, a resumable `sessionId`, real
+ * One-shot per send: `grok -p <msg> --output-format streaming-json`, which prints
+ * one JSON object per line and exits. Its final `end` event is unusually complete
+ * for this engine class — a terminal `stopReason`, a resumable `sessionId`, real
  * token usage, the model that actually answered, and the engine's own
- * `total_cost_usd`.
+ * `total_cost_usd` — and the reply arrives as `text` pieces before it. The
+ * single-object `json` format carries the same, but its usage is only the turn's
+ * sum; the stream also reports each request's own, which is what the context
+ * size has to be read from.
  *
  * Two consequences shape this file:
  *
@@ -36,23 +39,65 @@ import { sanitizeSecrets } from './sanitize.js';
 import { BaseOneShotSession } from './base-oneshot-session.js';
 import { SESSION_EVENT } from './constants.js';
 
-/** The shape `--output-format json` prints. Only the fields we consume. */
+interface GrokUsage {
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_read_input_tokens?: number;
+  cache_creation_input_tokens?: number;
+}
+
+/**
+ * The turn's result: the `end` event with the reply joined back onto it, which
+ * is the object `--output-format json` prints. Only the fields we consume.
+ */
 interface GrokJsonResult {
   text?: string;
   stopReason?: string;
   sessionId?: string;
-  usage?: {
-    input_tokens?: number;
-    output_tokens?: number;
-    cache_read_input_tokens?: number;
-    cache_creation_input_tokens?: number;
-  };
+  /** The whole turn's usage: the sum of every request it made. */
+  usage?: GrokUsage;
   total_cost_usd?: number;
   modelUsage?: Record<string, unknown>;
   error?: string;
   /** `error` when grok refused the turn outright (usage limit, auth), with `message`. */
   type?: string;
   message?: string;
+}
+
+/** One line of `--output-format streaming-json`. Only the fields we consume. */
+interface GrokStreamEvent extends GrokJsonResult {
+  /** A piece of the reply, on a `text` event. */
+  data?: unknown;
+}
+
+/**
+ * Fold grok's streaming lines into the turn's result and its last request's usage.
+ *
+ * The `end` event carries what the single `json` object does except the reply,
+ * which arrives as `text` pieces (joined, they equal that object's `text`,
+ * measured on 1.0.77). Each request of the turn reports its own `usage` event,
+ * which the single object does not: there, usage is only the turn's sum.
+ */
+function parseGrokStream(stdout: string): { result?: GrokJsonResult; lastRequest?: GrokUsage } {
+  let text = '';
+  let end: GrokJsonResult | undefined;
+  let error: GrokJsonResult | undefined;
+  let lastRequest: GrokUsage | undefined;
+  for (const line of stdout.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('{')) continue;
+    let evt: GrokStreamEvent;
+    try {
+      evt = JSON.parse(trimmed) as GrokStreamEvent;
+    } catch {
+      continue;
+    }
+    if (evt.type === 'text' && typeof evt.data === 'string') text += evt.data;
+    else if (evt.type === 'usage' && evt.usage) lastRequest = evt.usage;
+    else if (evt.type === 'end') end = evt;
+    else if (evt.type === 'error') error = evt;
+  }
+  return { result: end ? { ...end, text } : error, lastRequest };
 }
 
 /** grok's warning when a sandbox profile could not be applied (1.0.50). */
@@ -109,7 +154,7 @@ export class PersistentGrokSession extends BaseOneShotSession {
   }
 
   private _buildArgs(message: string, options: SessionSendOptions): string[] {
-    const args: string[] = ['-p', message, '--output-format', 'json'];
+    const args: string[] = ['-p', message, '--output-format', 'streaming-json'];
 
     if (this.options.cwd) args.push('--cwd', this.options.cwd);
 
@@ -155,8 +200,8 @@ export class PersistentGrokSession extends BaseOneShotSession {
     }
 
     // Structured output. grok's `--json-schema` takes the schema inline, the
-    // same shape our engine-agnostic option carries, and implies the JSON
-    // output format we already ask for.
+    // same shape our engine-agnostic option carries; under streaming JSON the
+    // reply's `text` pieces join into the conforming object (1.0.77).
     if (this.options.jsonSchema) args.push('--json-schema', this.options.jsonSchema);
 
     if (this.options.agent) args.push('--agent', this.options.agent);
@@ -279,13 +324,7 @@ export class PersistentGrokSession extends BaseOneShotSession {
         if (settled) return;
         settled = true;
 
-        let parsed: GrokJsonResult | undefined;
-        try {
-          const trimmed = stdout.trim();
-          if (trimmed) parsed = JSON.parse(trimmed) as GrokJsonResult;
-        } catch {
-          parsed = undefined;
-        }
+        const { result: parsed, lastRequest } = parseGrokStream(stdout);
 
         // A turn that produced no parseable result object failed, whatever the
         // exit code says: there is no reply to hand back.
@@ -316,10 +355,19 @@ export class PersistentGrokSession extends BaseOneShotSession {
           this._stats.tokensOut += usage.output_tokens ?? 0;
           this._stats.cachedTokens += cacheRead;
           this._stats.cacheCreationTokens += cacheWrite;
-          // The prompt is every input-side token, not just the uncached
-          // remainder: on a resumed turn `input_tokens` is the small tail and
-          // the cached reads are most of the context that has to fit.
-          this._reportTurnInputTokens((usage.input_tokens ?? 0) + cacheRead + cacheWrite);
+        }
+        // The context is the prompt of the turn's last request — every
+        // input-side token, not just the uncached remainder, since on a resumed
+        // turn `input_tokens` is the small tail and the cached reads are most of
+        // the context that has to fit. The turn's sum stands in only when no
+        // request reported its own usage.
+        const prompt = lastRequest ?? usage;
+        if (prompt) {
+          this._reportTurnInputTokens(
+            (prompt.input_tokens ?? 0) +
+              (prompt.cache_read_input_tokens ?? 0) +
+              (prompt.cache_creation_input_tokens ?? 0),
+          );
         }
         const reported = parsed?.modelUsage && Object.keys(parsed.modelUsage)[0];
         if (reported) this.grokModel = reported;

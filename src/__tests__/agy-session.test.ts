@@ -877,6 +877,56 @@ describe('PersistentAgySession', () => {
       expect(session.conversationId).toBe('11111111-2222-3333-4444-555555555555');
     });
 
+    it("measures the context by the turn's last request, not the turn's summed usage", async () => {
+      // agy's `result.usage` sums every request of the turn, and `input_tokens`
+      // leaves the cached reads out. Each `agent_response` step reports its own
+      // request; the last one is the context. Shapes from agy 1.5.3.
+      const session = new PersistentAgySession({ name: 'test', cwd: '/tmp' });
+      await session.start();
+      const conv = 'fb445f86-e702-4506-8b45-56fe7b56ddb9';
+      const step = (input: number, cached: number, conversation_id = conv) =>
+        JSON.stringify({
+          event: 'step_update',
+          step_update: {
+            conversation_id,
+            state: 'DONE',
+            step_type: 'agent_response',
+            usage: { input_tokens: input, output_tokens: 40, cache_read_tokens: cached },
+          },
+        }) + '\n';
+
+      const p = session.send('hello', { waitForComplete: true });
+      setTimeout(() => {
+        feedText(mockProc, JSON.stringify({ event: 'init', conversation_id: conv }) + '\n');
+        for (const [input, cached] of [
+          [200_000, 0],
+          [2_000, 199_000],
+          [2_000, 201_000],
+          [2_000, 203_000],
+        ])
+          feedText(mockProc, step(input, cached));
+        // A subagent works in a conversation of its own.
+        feedText(mockProc, step(600_000, 0, '99999999-8888-7777-6666-555555555555'));
+        feedText(
+          mockProc,
+          JSON.stringify({
+            event: 'result',
+            result: {
+              conversation_id: conv,
+              status: 'SUCCESS',
+              response: 'done',
+              usage: { input_tokens: 806_000, output_tokens: 200, cache_read_tokens: 603_000 },
+            },
+          }) + '\n',
+        );
+        closeProc(mockProc, 0);
+      }, 10);
+      await p;
+
+      // 205,000 of a 1M window, not the summed 806,000 (81%).
+      expect(session.getStats().contextPercent).toBe(21);
+    });
+
     it('takes the conversation id from the init event', async () => {
       const session = new PersistentAgySession({ name: 'test', cwd: '/tmp' });
       await session.start();

@@ -15,7 +15,7 @@ SessionManager
 ├── engine: 'agy'       → PersistentAgySession
 │   └── Wraps: agy -p (Google Antigravity CLI, per-message spawning, stream-json output)
 ├── engine: 'grok'      → PersistentGrokSession
-│   └── Wraps: grok -p --output-format json (xAI Grok Build, per-message spawning)
+│   └── Wraps: grok -p --output-format streaming-json (xAI Grok Build, per-message spawning)
 ├── engine: 'opencode'  → PersistentOpencodeSession
 │   └── Wraps: opencode run --format json, message on stdin (per-message spawning)
 ├── engine: 'acp'       → PersistentAcpSession
@@ -240,10 +240,11 @@ await manager.startSession({
 
 ### Grok Build (`engine: 'grok'`)
 
-Wraps xAI's **Grok Build** CLI. Each `send()` spawns `grok -p <msg> --output-format json`, which
-prints a single JSON object and exits. Tested with `grok` **1.0.77**.
+Wraps xAI's **Grok Build** CLI. Each `send()` spawns `grok -p <msg> --output-format streaming-json`,
+which prints one JSON object per line and exits: the reply as `text` pieces, a `usage` event per
+request, and an `end` event with the rest. Tested with `grok` **1.0.77**.
 
-- **Cost comes from the engine, not from the price table.** The result object carries
+- **Cost comes from the engine, not from the price table.** The `end` event carries
   `total_cost_usd`, and the wrapper writes it straight into the session's spend, so the run ledger
   and the `maxBudgetUsd` gate both read what xAI charged. Other engines multiply tokens by a rate in
   `models.ts`. `grok-4.7` (grok's default since 1.0.67) and `grok-4.6` are still registered, for
@@ -252,9 +253,10 @@ prints a single JSON object and exits. Tested with `grok` **1.0.77**.
 - **Real conversation continuity**: the `sessionId` from turn 1 is replayed as `--resume <id>`.
   `--continue` is not used — it means "the most recent session for this cwd", which collides
   between concurrent sessions.
-- Real token counts from `usage` (`input_tokens`, `output_tokens`, `cache_read_input_tokens`,
-  `cache_creation_input_tokens`). These are **per-turn**, unlike codex, where the same field is
-  cumulative, and `input_tokens` excludes the cached reads.
+- Real token counts from the `end` event's `usage` (`input_tokens`, `output_tokens`,
+  `cache_read_input_tokens`, `cache_creation_input_tokens`). These are **per-turn**, unlike codex,
+  where the same field is cumulative, and `input_tokens` excludes the cached reads. They sum every
+  request of the turn, so the context percentage comes from the last request's own `usage` event.
 - Permission modes pass straight through: grok's `--permission-mode` takes the same vocabulary we
   use. The one exception is our `manual`, which grok spells `default`.
 - Reasoning effort maps to `--effort`; grok accepts `low|medium|high|xhigh`, so `max` and `ultra`
