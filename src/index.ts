@@ -59,6 +59,7 @@ export type { AutoloopEnvelope, AnyAutoloopMessage, AutoloopMessageType, Autoloo
 export type { AgentDispatcher, AutoloopConfig, AutoloopState, AutoloopStatus, PushPolicy } from './autoloop/types.js';
 export { parseConsensus, stripConsensusTags, hasConsensusMarker } from './consensus.js';
 export { sanitizeCwd, validateRegex, validateName } from './validation.js';
+export type { SafeRegex } from './validation.js';
 export { type Logger, createConsoleLogger, nullLogger } from './logger.js';
 export { CircuitBreaker } from './circuit-breaker.js';
 export { InboxManager, type SessionLookup } from './inbox-manager.js';

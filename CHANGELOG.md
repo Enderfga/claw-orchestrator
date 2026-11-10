@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The plugin loads when its dependencies are installed without lifecycle scripts.** OpenClaw installs
+  plugin dependencies with `npm install --ignore-scripts`, which left the native `re2` addon unbuilt: the
+  install exited 0 and the plugin then failed to load with `Cannot find module './build/Release/re2.node'`.
+  User-supplied patterns (`session_grep`, `/session/grep`, custom-engine `sanitizePatterns`) now compile with
+  [re2js](https://github.com/le0pard/re2js), a pure-JavaScript port of RE2 with no install script. They keep
+  RE2's linear-time matching (#64), its rejection of lookbehind and backreferences, and native `re2`'s
+  translation of JavaScript escape syntax (`\u00e9`, `\cA`, `\p{Letter}`, `(?<name>…)`). `\C` (one UTF-8
+  byte) is now rejected.
+
+### Changed
+
+- **`validateRegex` returns a `SafeRegex`** (`test`, `replaceAll`, `flags`; type exported from the package)
+  instead of a `RegExp`-typed RE2 object. SDK callers that used other `RegExp` members or passed the result to
+  `String.prototype.replace` need `test` / `replaceAll`.
+
 ## [7.20.2] - 2026-11-10
 
 ### Fixed
