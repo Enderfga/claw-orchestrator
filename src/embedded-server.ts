@@ -89,6 +89,11 @@ function autoloopErrorStatus(error: unknown): number {
 // `acpAgent` is the same thing for the `acp` engine: an inline config names the
 // command to run.
 const CUSTOM_ENGINE_KEY = /(custom_?engines?|acp_?agents?)$/i;
+
+/** A Host header naming this machine by a loopback name, with or without a port. */
+const LOOPBACK_HOST = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i;
+/** A browser Origin on this machine. 0.0.0.0 is a bind address, never a real Origin. */
+const LOOPBACK_ORIGIN = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/;
 const MAX_SCAN_DEPTH = 12;
 
 /**
@@ -268,7 +273,8 @@ export class EmbeddedServer {
       this.authToken = null;
       console.warn(
         '[embedded-server] OPENCLAW_SERVER_TOKEN=disabled — authentication is OFF. ' +
-          'All endpoints are reachable to any process that can connect. Only safe on a trusted single-user host.',
+          'All endpoints are reachable to any process that can connect; only loopback Host names and origins are served. ' +
+          'Only safe on a trusted single-user host.',
       );
     } else if (envToken) {
       this.authToken = envToken;
@@ -393,15 +399,40 @@ export class EmbeddedServer {
   }
 
   private handleRequest(req: http.IncomingMessage, res: http.ServerResponse): void {
-    // CORS — localhost by default; /v1/ paths allow all origins (for webchat frontends)
+    // With auth off (OPENCLAW_SERVER_TOKEN=disabled) only the network guards the
+    // agents behind these routes, so a web page in a browser on this host must
+    // not reach them. A DNS-rebound hostname arrives with a foreign Host; a page
+    // on another site sends its Origin (on every cross-origin POST, preflighted
+    // or not) or, for a plain <img>/<script> GET, Sec-Fetch-Site: cross-site.
+    // While auth is off, serve only loopback Host names and loopback origins.
+    const authOff = !this.authToken;
+    if (authOff) {
+      const reqOrigin = req.headers.origin;
+      const foreignHost = !LOOPBACK_HOST.test(req.headers.host ?? '');
+      const foreignOrigin = reqOrigin !== undefined && !LOOPBACK_ORIGIN.test(reqOrigin);
+      const crossSiteNoOrigin = reqOrigin === undefined && req.headers['sec-fetch-site'] === 'cross-site';
+      if (foreignHost || foreignOrigin || crossSiteNoOrigin) {
+        req.resume();
+        res.writeHead(403, { 'Content-Type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            ok: false,
+            error:
+              'Authentication is disabled, so only requests from this host (Host and Origin localhost, 127.0.0.1 or [::1]) are served',
+          }),
+        );
+        return;
+      }
+    }
+
+    // CORS — localhost by default; with auth on, /v1/ paths allow all origins
+    // (for webchat frontends) and OPENCLAW_CORS_ORIGINS=* allows all paths.
     const origin = req.headers.origin || '';
     const urlPath = new URL(req.url || '/', `http://localhost:${this.port}`).pathname;
     const corsAllowAll = process.env.OPENCLAW_CORS_ORIGINS === '*';
     const isV1Path = urlPath.startsWith('/v1/');
-    // 0.0.0.0 is a bind/wildcard address, never a legitimate browser Origin —
-    // don't reflect it back as an allowed CORS origin.
-    const isLocalhost = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/.test(origin);
-    if (isLocalhost || isV1Path || corsAllowAll) {
+    const isLocalhost = LOOPBACK_ORIGIN.test(origin);
+    if (isLocalhost || (!authOff && (isV1Path || corsAllowAll))) {
       res.setHeader('Access-Control-Allow-Origin', origin || '*');
     }
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -474,7 +505,9 @@ export class EmbeddedServer {
     // Read body for POST — require JSON content type (CSRF mitigation)
     if (req.method === 'POST') {
       const contentType = req.headers['content-type'] || '';
-      if (!contentType.includes('application/json')) {
+      // The media type itself, not a substring: `text/plain;application/json` is a
+      // CORS-safelisted type a cross-site page can send without a preflight.
+      if (contentType.split(';')[0].trim().toLowerCase() !== 'application/json') {
         // Drain before answering. Ending a response while the peer is still
         // writing lets the connection be torn down under it, which surfaces on
         // the client as `write ECONNRESET` — and in a test run as a non-zero exit
