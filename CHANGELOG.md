@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [7.21.2] - 2026-11-10
+
 ### Fixed
 
 - **Only read routes answer `GET`; every other route accepts only `POST`.** Routing did not look at the method and
@@ -17,15 +19,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ultraapp snapshot, `/runs`, `/agents`, `/skills`, `/rules`, `/v1/models`, `/v1/sessions`, `/health`, `/login`,
   the dashboard); any other method or route answers 405 with `Allow: POST`. Cookies are not isolated by port,
   so this also stops an `<img>` on a same-site page from acting with the dashboard's `clawo_auth` cookie, and,
-  with auth disabled, covers browsers that send no `Sec-Fetch-Site`.
+  with auth disabled, covers browsers that send no `Sec-Fetch-Site`. (#171, thanks @ajmtrz)
 - **A workflow gate is answered only by an explicit `approved` boolean.** `POST /workflow/<id>/approve` treated a
   body without `approved` as an approval; it now answers 400 unless `approved` is `true` or `false`. The CLI and
-  the `workflow_approve` tool already send it.
+  the `workflow_approve` tool already send it. (#171, thanks @ajmtrz)
 - **UltraApp's Docker deploys publish the backend port on loopback only.** `docker run` used
   `-p <port>:3000`, which publishes the port on every host interface, although the router reaches the backend on
   `127.0.0.1`. It now uses `-p 127.0.0.1:<port>:3000`. Containers created earlier keep their old binding for as
   long as they exist (`stop`/`start`, promoting that version back and daemon restarts reuse them); deploy a new
-  version and remove the old containers, or delete the run, to rebind.
+  version and remove the old containers, or delete the run, to rebind. (#172, thanks @ajmtrz)
 - **With auth disabled, a web page in a browser on the same host can no longer drive the server.** Under
   `OPENCLAW_SERVER_TOKEN=disabled` the `/v1/*` CORS reply echoed any `Origin`, no route checked `Host`, and a
   `Content-Type` that merely contained `application/json` was accepted. So a page could call
@@ -36,7 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   origins get CORS headers, whatever `OPENCLAW_CORS_ORIGINS` says (403 otherwise). A POST body's media type
   must now be exactly `application/json` (parameters such as `charset` allowed) in every mode. With auth on,
   only that `Content-Type` check changes. A non-loopback bind or a proxy forwarding another hostname now
-  gets 403s with auth disabled.
+  gets 403s with auth disabled. (#170, thanks @ajmtrz)
 
 ## [7.21.1] - 2026-11-10
 
