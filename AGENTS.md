@@ -242,7 +242,8 @@ git push origin main && git push origin vX.Y.Z
 gh release create vX.Y.Z --title "vX.Y.Z — Title" --notes "release notes"
 ```
 
-This triggers the `Publish to npm` workflow automatically.
+This triggers the `Publish to npm` workflow automatically, and `Publish to ClawHub` once it is set up (see
+[ClawHub](#clawhub) below).
 
 **Publishing uses npm trusted publishing (OIDC) — there is no `NPM_TOKEN` to rotate.**
 `publish.yml` installs npm 11.x (trusted publishing needs >= 11.5.1; the pin stays on the 11.x line
@@ -255,9 +256,28 @@ token problem. (Migrated from a 90-day-expiring `NPM_TOKEN` secret in v4.5.0.)
 ### 7. Verify
 
 ```bash
-gh run list --limit 2                          # CI + Publish should both pass
+gh run list --limit 3                          # CI + Publish (+ ClawHub) should all pass
 npm view @enderfga/claw-orchestrator version   # should equal X.Y.Z
 ```
+
+### ClawHub
+
+The same GitHub release also triggers `clawhub-publish.yml`. It builds and packs the package, then publishes
+it to [ClawHub](https://clawhub.ai) through ClawHub's reusable `package-publish.yml` workflow, pinned by commit
+SHA, and waits for ClawHub's security checks. It runs only when the repository secret `CLAWHUB_TOKEN` exists;
+without it, release runs skip. One-time setup:
+
+1. Sign in at [clawhub.ai](https://clawhub.ai) with the GitHub account that owns the `@enderfga` scope, and
+   create a token under Settings → API tokens. The package scope must match the publishing account.
+2. Add it as the repository secret `CLAWHUB_TOKEN`.
+
+The next release is then the first ClawHub publish, which also creates the package there. A manual run
+(Actions → Publish to ClawHub → Run workflow) is a dry run by default; a real manual publish, for example to
+retry a release, must be started on that release's tag (`vX.Y.Z` matching `package.json`). ClawHub keeps each release hidden until its security
+checks pass; if they hold it, the run fails after the wait (30 minutes by default) and the release can be
+retried or recovered with `clawhub package recover`. `openclaw.compat.pluginApi` and
+`openclaw.build.openclawVersion` in `package.json` are required by ClawHub; `clawhub-metadata.test.ts` keeps them
+equal to the `openclaw` peer range and the lockfile version.
 
 ## Engine CLI Reference
 

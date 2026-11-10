@@ -14,6 +14,12 @@
     "extensions": [
       "./dist/src/index.js"
     ],
+    "compat": {
+      "pluginApi": ">=2026.3.0"
+    },
+    "build": {
+      "openclawVersion": "2026.6.8"
+    },
     "hooks": {}
   },
   "files": [
