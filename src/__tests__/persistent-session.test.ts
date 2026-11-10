@@ -1143,6 +1143,45 @@ describe('PersistentClaudeSession', () => {
       );
       expect(session.getStats().contextPercent).toBe(40);
     });
+
+    it("contextPercent is the turn's last request, not the turn's summed usage", () => {
+      // A turn with tool calls makes one API request per round, and `result.usage`
+      // sums them: five requests of ~170k each reported 860k, which read as 86%
+      // of a 1M window and set off an 85% auto-compact with the context at 17%.
+      // Measured on 2.1.321: four requests of 47,931 / 48,108 / 48,211 / 48,314
+      // prompt tokens, and a result reporting 192,564.
+      const emit = (e: Record<string, unknown>) => mockProc.stdout.emit('data', Buffer.from(JSON.stringify(e) + '\n'));
+      const assistant = (prompt: number, parent: string | null = null) =>
+        emit({
+          type: 'assistant',
+          parent_tool_use_id: parent,
+          message: {
+            role: 'assistant',
+            content: [{ type: 'text', text: '.' }],
+            usage: { input_tokens: 2, cache_read_input_tokens: prompt - 1002, cache_creation_input_tokens: 1000 },
+          },
+        });
+      for (const prompt of [170_000, 171_000, 172_000, 173_000, 174_000]) assistant(prompt);
+      // A subagent's request is its own context, not this conversation's — even
+      // when it is the turn's last, as in a turn stopped while a subagent runs.
+      assistant(600_000, 'toolu_sub');
+      emit({
+        type: 'result',
+        usage: {
+          input_tokens: 10,
+          output_tokens: 50,
+          cache_read_input_tokens: 854_990,
+          cache_creation_input_tokens: 5_000,
+        },
+        modelUsage: { 'claude-opus-5-5': { contextWindow: 1_000_000 } },
+      });
+      expect(session.getStats().contextPercent).toBe(17);
+
+      // The next turn starts over: with no request of its own to read, it falls
+      // back to its result rather than keeping the previous turn's figure.
+      emit({ type: 'result', usage: { input_tokens: 2, output_tokens: 4, cache_read_input_tokens: 300_000 } });
+      expect(session.getStats().contextPercent).toBe(30);
+    });
   });
 
   describe('getHistory()', () => {

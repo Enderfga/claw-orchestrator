@@ -108,8 +108,10 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
   private _engineModel: string | undefined;
   /** Ids of messages this session wrote whose result has not arrived yet. */
   private _unanswered = new Set<string>();
-  /** Full prompt size of the last turn: input + cached reads + cache writes. */
+  /** Context size after the last turn: the prompt of its last request (input + cached reads + cache writes). */
   private _lastTurnPromptTokens = 0;
+  /** Prompt of the current turn's latest request on this conversation (0 until one arrives). */
+  private _turnRequestPromptTokens = 0;
 
   public sessionId?: string;
   public stats: InternalStats;
@@ -626,6 +628,7 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
 
       case 'assistant':
         this.emit(SESSION_EVENT.ASSISTANT, event);
+        this._noteRequestPrompt(event as Record<string, unknown>);
         if (event.message?.content && Array.isArray(event.message.content)) {
           for (const block of event.message.content) {
             if (block.type === 'tool_use') {
@@ -743,6 +746,7 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
     // discounting itself by the abandoned turn's tokens.
     this._msgProvisional = { in: 0, out: 0, cacheRead: 0, cacheCreate: 0, cacheCreate1h: 0 };
     this._turnApplied = { in: 0, out: 0, cacheRead: 0, cacheCreate: 0, cacheCreate1h: 0 };
+    this._turnRequestPromptTokens = 0;
 
     let finalMessage = typeof message === 'string' ? message : message;
     if (typeof finalMessage === 'string') {
@@ -1143,7 +1147,15 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
     this.stats.cacheCreation1hTokens = Math.max(0, this.stats.cacheCreation1hTokens + delta.cacheCreate1h);
 
     if (authoritative) {
-      this._lastTurnPromptTokens = reported.in + reported.cacheRead + reported.cacheCreate;
+      // `result.usage` sums every request of the turn — one per tool round — so
+      // it is the turn's spend, not the context's size. The context is the prompt
+      // of the turn's last request; the summed figure stands in only when no
+      // request reported its own usage.
+      this._lastTurnPromptTokens =
+        this._turnRequestPromptTokens > 0
+          ? this._turnRequestPromptTokens
+          : reported.in + reported.cacheRead + reported.cacheCreate;
+      this._turnRequestPromptTokens = 0;
       this._msgProvisional = { in: 0, out: 0, cacheRead: 0, cacheCreate: 0, cacheCreate1h: 0 };
       this._turnApplied = { in: 0, out: 0, cacheRead: 0, cacheCreate: 0, cacheCreate1h: 0 };
     } else {
@@ -1157,6 +1169,24 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
       };
     }
     this._updateCost();
+  }
+
+  /**
+   * Remember the prompt size of one API request of the current turn.
+   *
+   * Every `assistant` event carries its request's usage, and the input side of
+   * it is fixed for the whole request. A subagent's requests arrive here too,
+   * marked with `parent_tool_use_id`; they measure the subagent's own context,
+   * so they are skipped.
+   */
+  private _noteRequestPrompt(event: Record<string, unknown>): void {
+    if (event.parent_tool_use_id) return;
+    const usage = (event.message as Record<string, unknown> | undefined)?.usage as Record<string, unknown> | undefined;
+    if (!usage) return;
+    const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
+    const prompt =
+      num(usage.input_tokens) + num(usage.cache_read_input_tokens) + num(usage.cache_creation_input_tokens);
+    if (prompt > 0) this._turnRequestPromptTokens = prompt;
   }
 
   /**
