@@ -21,6 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A workflow gate is answered only by an explicit `approved` boolean.** `POST /workflow/<id>/approve` treated a
   body without `approved` as an approval; it now answers 400 unless `approved` is `true` or `false`. The CLI and
   the `workflow_approve` tool already send it.
+- **UltraApp's Docker deploys publish the backend port on loopback only.** `docker run` used
+  `-p <port>:3000`, which publishes the port on every host interface, although the router reaches the backend on
+  `127.0.0.1`. It now uses `-p 127.0.0.1:<port>:3000`. Containers created earlier keep their old binding for as
+  long as they exist (`stop`/`start`, promoting that version back and daemon restarts reuse them); deploy a new
+  version and remove the old containers, or delete the run, to rebind.
 - **With auth disabled, a web page in a browser on the same host can no longer drive the server.** Under
   `OPENCLAW_SERVER_TOKEN=disabled` the `/v1/*` CORS reply echoed any `Origin`, no route checked `Host`, and a
   `Content-Type` that merely contained `application/json` was accepted. So a page could call
