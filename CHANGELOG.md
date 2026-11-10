@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [7.21.3] - 2026-11-11
+
 ### Fixed
 
 - **The built-in model proxy serves only the sessions it started.** The proxy a `claude` session gets for a
@@ -14,7 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   provider keys in the environment, so any local process that found the port could spend them. Each process now
   draws a random secret, which the sessions' base URL carries as its first path segment; requests without it get
   401 before their body is read. Under the secret, bodies are capped at 32 MB, `POST` bodies must be
-  `application/json`, and methods other than `POST`, `GET` and `HEAD` get 405.
+  `application/json`, and methods other than `POST`, `GET` and `HEAD` get 405. (#173, thanks @ajmtrz)
 
 ## [7.21.2] - 2026-11-10
 
