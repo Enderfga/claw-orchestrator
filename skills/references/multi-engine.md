@@ -502,6 +502,14 @@ What happens behind the scenes:
 2. Starts a local proxy server on `127.0.0.1` (random port, auto-managed) the first time a Claude session names a non-Claude model, provided a gateway URL was found
 3. Claude Code CLI sends Anthropic-format requests → proxy converts to OpenAI → gateway → any model
 
+The proxy forwards with the gateway key and any provider keys in the environment, so it serves only the
+sessions it started. Each process draws a random secret, and a session's base URL carries it as the first path
+segment (`http://127.0.0.1:<port>/<secret>`). A request without it gets 401 before its body is read, so a process
+that only knows the port cannot spend those credentials. The secret is in the Claude child's environment, so the
+processes that session runs, and other processes of the same user that can read it, still reach the proxy. It is
+not persisted, and a restarted process uses a new one. Under the secret, `POST` must be `application/json` (415
+otherwise), bodies are capped at 32 MB (413), and methods other than `POST`, `GET` and `HEAD` get 405.
+
 ### Your own Anthropic-compatible gateway
 
 A gateway that speaks the Anthropic API and serves other models under their own names (an internal model

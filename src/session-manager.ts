@@ -9,7 +9,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { execFile, execFileSync } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
 import { execEngine } from './engine-spawn.js';
 
@@ -41,6 +41,8 @@ function getPluginVersion(): string {
 // CLAWO_SESSIONS_DIR relocates the file, so tests never touch the real one.
 const PERSIST_DIR = process.env.CLAWO_SESSIONS_DIR || path.join(os.homedir(), '.openclaw');
 const PERSIST_FILE = path.join(PERSIST_DIR, 'claude-sessions.json');
+/** Largest request body the auto-proxy accepts: Anthropic's own Messages API limit (32 MB). */
+const PROXY_MAX_BODY_BYTES = 32 * 1024 * 1024;
 // PERSIST_DISK_TTL_MS imported from ./constants.js
 
 interface PersistedSession {
@@ -1041,6 +1043,8 @@ export class SessionManager {
   private _debouncedSave: () => void;
   private _proxyServer: http.Server | null = null;
   private _proxyPort: number | null = null;
+  /** Per-process secret every request to the auto-proxy must carry as its first path segment. */
+  private _proxyToken: string | null = null;
   /** In-flight proxy startup, so concurrent callers share one server. */
   private _proxyStartPromise: Promise<number | null> | null = null;
   private _activePids = new Map<string, number>();
@@ -1257,7 +1261,7 @@ export class SessionManager {
       if (!isClaudeModel(fullConfig.resolvedModel!)) {
         const proxyPort = await this._ensureProxyServer();
         if (proxyPort) {
-          fullConfig.baseUrl = `http://127.0.0.1:${proxyPort}`;
+          fullConfig.baseUrl = this._proxyBaseUrl(proxyPort);
         }
       }
     }
@@ -2428,6 +2432,7 @@ export class SessionManager {
       this._proxyServer.close();
       this._proxyServer = null;
       this._proxyPort = null;
+      this._proxyToken = null;
     }
     // Persist final state (TTL-expired sessions already removed by cleanup)
     this._savePersisted();
@@ -2876,6 +2881,11 @@ export class SessionManager {
     return this._proxyStartPromise;
   }
 
+  /** The base URL a session reaches the auto-proxy at: the port plus this process's secret path segment. */
+  private _proxyBaseUrl(port: number): string {
+    return this._proxyToken ? `http://127.0.0.1:${port}/${this._proxyToken}` : `http://127.0.0.1:${port}`;
+  }
+
   private async _startProxyServer(): Promise<number | null> {
     // Auto-detect gateway config
     const gwConfig = this._readGatewayConfig();
@@ -2897,16 +2907,68 @@ export class SessionManager {
       gatewayKey,
     });
 
+    // The proxy forwards with the host's provider and gateway credentials, so
+    // loopback alone is not enough: any local process could spend them. Each
+    // request must carry this process's secret as its first path segment, which
+    // only the sessions given _proxyBaseUrl() know, and it is checked before
+    // the body is read. Bodies are bounded and, for POST, must be JSON.
+    const token = randomBytes(24).toString('hex');
+    const expected = Buffer.from(token);
+    const refuse = (res: http.ServerResponse, status: number, error: string) => {
+      res.statusCode = status;
+      res.setHeader('Content-Type', 'application/json');
+      res.setHeader('Connection', 'close');
+      res.end(JSON.stringify({ error }));
+    };
+
     return new Promise((resolve) => {
       const server = http.createServer((req, res) => {
+        const rawUrl = req.url || '/';
+        const segment = rawUrl.split('/')[1] ?? '';
+        const presented = Buffer.from(segment.split('?')[0]);
+        if (presented.length !== expected.length || !timingSafeEqual(presented, expected)) {
+          refuse(res, 401, 'Unauthorized');
+          req.destroy();
+          return;
+        }
+        const method = req.method || 'GET';
+        if (method !== 'POST' && method !== 'GET' && method !== 'HEAD') {
+          refuse(res, 405, 'Method not allowed');
+          req.destroy();
+          return;
+        }
+        if (method === 'POST') {
+          const contentType = (req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+          if (contentType !== 'application/json') {
+            refuse(res, 415, 'Content-Type must be application/json');
+            req.destroy();
+            return;
+          }
+          if (Number(req.headers['content-length'] || 0) > PROXY_MAX_BODY_BYTES) {
+            refuse(res, 413, 'Payload too large');
+            req.destroy();
+            return;
+          }
+        }
         let body = '';
+        let size = 0;
+        let aborted = false;
         req.on('data', (chunk: Buffer) => {
+          if (aborted) return;
+          size += chunk.length;
+          if (size > PROXY_MAX_BODY_BYTES) {
+            aborted = true;
+            refuse(res, 413, 'Payload too large');
+            req.destroy();
+            return;
+          }
           body += chunk.toString();
         });
         req.on('end', () => {
+          if (aborted) return;
           const httpReq = {
-            method: req.method || 'GET',
-            url: req.url || '/',
+            method,
+            url: rawUrl.slice(token.length + 1) || '/',
             headers: req.headers as Record<string, string>,
             json: async () => JSON.parse(body),
           };
@@ -2934,6 +2996,7 @@ export class SessionManager {
       server.listen(0, '127.0.0.1', () => {
         const addr = server.address() as { port: number };
         this._proxyServer = server;
+        this._proxyToken = token;
         this._proxyPort = addr.port;
         this.logger.info(`Auto-proxy started on port ${addr.port} (gateway: ${gatewayUrl})`);
         resolve(addr.port);
