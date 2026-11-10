@@ -42,6 +42,7 @@ https://github.com/user-attachments/assets/5bf9bea8-e5ac-4632-a292-a80a45831dff
 
 ## News
 
+- **[2026-11]** v7.21.0: the plugin loads when OpenClaw installs it, with no native module to build.
 - **[2026-11]** v7.20.0: a fan-out agent can run as a goal, so several agents can each work a copy of a
   project until it is done, in parallel.
 - **[2026-11]** v7.19.0: a fan-out agent can run in a directory of its own, so several agents can write code

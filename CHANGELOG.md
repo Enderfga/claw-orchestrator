@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [7.21.0] - 2026-11-10
+
 ### Fixed
 
 - **The plugin loads when its dependencies are installed without lifecycle scripts.** OpenClaw installs
@@ -16,7 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   [re2js](https://github.com/le0pard/re2js), a pure-JavaScript port of RE2 with no install script. They keep
   RE2's linear-time matching (#64), its rejection of lookbehind and backreferences, and native `re2`'s
   translation of JavaScript escape syntax (`\u00e9`, `\cA`, `\p{Letter}`, `(?<name>…)`). `\C` (one UTF-8
-  byte) is now rejected.
+  byte) is now rejected. (#166, thanks @ajmtrz)
 
 ### Changed
 
