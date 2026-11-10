@@ -27,7 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Tested with Claude Code 2.1.321.
+- Tested with Claude Code 2.1.322 and Codex 0.167.0.
 
 ## [7.20.1] - 2026-11-08
 
