@@ -614,6 +614,158 @@ describe('EmbeddedServer', () => {
       for (const a of agents) expect(resolveAlias(a.model)).toBe(resolveAlias('opus'));
     });
 
+    // Only reads answer GET/HEAD; every other route answers only POST. Routing does
+    // not look at the method and gives a GET an empty body, so a GET used to run
+    // state-changing routes: GET /session/start started a session.
+    const ACTIONS = [
+      'startSession',
+      'sendMessage',
+      'stopSession',
+      'compactSession',
+      'setModel',
+      'setEffort',
+      'teamSend',
+      'createAgent',
+      'createSkill',
+      'createRule',
+      'councilStart',
+      'workflowStart',
+      'workflowCancel',
+      'workflowResume',
+      'workflowSteer',
+      'workflowApprove',
+      'autoloopStart',
+      'acceptAutoloopChat',
+      'autoloopDelete',
+      'autoloopResume',
+    ] as const;
+    const UA_ACTIONS = [
+      'createRun',
+      'submitAnswer',
+      'applySpecEdit',
+      'startBuild',
+      'cancelBuild',
+      'startContainer',
+      'stopContainer',
+      'deleteRun',
+      'submitDoneModeMessage',
+      'promoteVersion',
+      'addFile',
+    ] as const;
+    function spyOnActions() {
+      const m = manager as unknown as Record<string, unknown>;
+      const spies: Array<ReturnType<typeof vi.fn>> = [];
+      for (const name of ACTIONS) {
+        const fn = vi.fn().mockResolvedValue({});
+        m[name] = fn;
+        spies.push(fn);
+      }
+      const ua: Record<string, unknown> = { store: { listRuns: vi.fn().mockResolvedValue([]) } };
+      for (const name of UA_ACTIONS) {
+        const fn = vi.fn().mockResolvedValue({ ok: true });
+        ua[name] = fn;
+        spies.push(fn);
+      }
+      m.getUltraappManager = () => ua;
+      return spies;
+    }
+
+    it.each([
+      '/session/start',
+      '/session/send',
+      '/session/stop',
+      '/session/compact',
+      '/session/model',
+      '/session/effort',
+      '/session/team-send',
+      '/agents/create',
+      '/skills/create',
+      '/rules/create',
+      '/v1/chat/completions',
+      '/council/new',
+      '/workflow/new',
+      '/workflow/r1/cancel',
+      '/workflow/r1/resume',
+      '/workflow/r1/steer',
+      '/workflow/r1/approve',
+      '/autoloop/new',
+      '/autoloop/r1/chat',
+      '/autoloop/r1/delete',
+      '/autoloop/r1/resume',
+      '/ultraapp/new',
+      '/ultraapp/u1/answer',
+      '/ultraapp/u1/answer/x',
+      '/ultraapp/u1/spec-edit',
+      '/ultraapp/u1/spec-edit/x',
+      '/ultraapp/u1/build',
+      '/ultraapp/u1/build/cancel',
+      '/ultraapp/u1/start',
+      '/ultraapp/u1/stop',
+      '/ultraapp/u1/delete',
+      '/ultraapp/u1/feedback',
+      '/ultraapp/u1/promote-version',
+      '/ultraapp/u1/files',
+      '/ultraapp/u1/files/x',
+    ])('answers 405 to GET on %s and runs nothing', async (route) => {
+      const spies = spyOnActions();
+      await server.start();
+
+      for (const method of ['GET', 'HEAD', 'PUT', 'DELETE']) {
+        const res = await request(port, route, { method });
+        expect(res.status, method).toBe(405);
+        expect(res.headers.allow).toBe('POST');
+      }
+      for (const spy of spies) expect(spy).not.toHaveBeenCalled();
+    });
+
+    it('still answers GET on read routes', async () => {
+      spyOnActions();
+      await server.start();
+
+      for (const route of [
+        '/session/list',
+        '/agents',
+        '/v1/models',
+        '/health',
+        '/council/list',
+        '/workflow/list',
+        '/autoloop/list',
+        '/ultraapp/list',
+        '/workflow/r1/state',
+        '/workflow/r1/evidence',
+        '/autoloop/r1/state',
+        '/ultraapp/u1',
+        '/ultraapp/u1/artifacts',
+        '/council/c1/state',
+        '/autoloop/r1/resume-requirements',
+      ]) {
+        const res = await request(port, route);
+        expect(res.status, route).not.toBe(405);
+      }
+      for (const route of ['/session/list', '/agents', '/v1/models', '/health']) {
+        expect((await request(port, route)).status, route).toBe(200);
+      }
+    });
+
+    // A gate is answered only by an explicit boolean: an empty body is not an approval.
+    it('requires an explicit approved boolean to answer a workflow gate', async () => {
+      const workflowApprove = vi.fn().mockResolvedValue({ answered: true });
+      (manager as unknown as { workflowApprove: typeof workflowApprove }).workflowApprove = workflowApprove;
+      await server.start();
+
+      for (const body of [{}, { approved: 'yes' }, { approved: null }]) {
+        const res = await request(port, '/workflow/r1/approve', { method: 'POST', body });
+        expect(res.status, JSON.stringify(body)).toBe(400);
+      }
+      expect(workflowApprove).not.toHaveBeenCalled();
+
+      for (const approved of [true, false]) {
+        const res = await request(port, '/workflow/r1/approve', { method: 'POST', body: { approved } });
+        expect(res.status).toBe(200);
+        expect(workflowApprove).toHaveBeenLastCalledWith('r1', approved);
+      }
+    });
+
     it('returns 404 for unknown routes', async () => {
       const res = await request(port, '/nonexistent', { method: 'POST', body: {} });
       expect(res.status).toBe(404);

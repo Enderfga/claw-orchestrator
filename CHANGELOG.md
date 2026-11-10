@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Only read routes answer `GET`; every other route accepts only `POST`.** Routing did not look at the method and
+  gave a `GET` an empty body, so a `GET` ran state-changing routes: `GET /session/start` started a session, and
+  the `/workflow/<id>/…`, `/autoloop/<id>/…` and `/ultraapp/<id>/…` actions ran by `GET` too, some even with an
+  extra path segment (`/ultraapp/<id>/answer/x`). `GET` and `HEAD` now reach only an explicit list of reads (the
+  lists, `state`, `events`, `evidence`, `chat_history`, `push_log`, `resume-requirements`, `artifacts`, the
+  ultraapp snapshot, `/runs`, `/agents`, `/skills`, `/rules`, `/v1/models`, `/v1/sessions`, `/health`, `/login`,
+  the dashboard); any other method or route answers 405 with `Allow: POST`. Cookies are not isolated by port,
+  so this also stops an `<img>` on a same-site page from acting with the dashboard's `clawo_auth` cookie, and,
+  with auth disabled, covers browsers that send no `Sec-Fetch-Site`.
+- **A workflow gate is answered only by an explicit `approved` boolean.** `POST /workflow/<id>/approve` treated a
+  body without `approved` as an approval; it now answers 400 unless `approved` is `true` or `false`. The CLI and
+  the `workflow_approve` tool already send it.
 - **With auth disabled, a web page in a browser on the same host can no longer drive the server.** Under
   `OPENCLAW_SERVER_TOKEN=disabled` the `/v1/*` CORS reply echoed any `Origin`, no route checked `Host`, and a
   `Content-Type` that merely contained `application/json` was accepted. So a page could call

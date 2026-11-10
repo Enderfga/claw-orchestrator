@@ -90,6 +90,43 @@ function autoloopErrorStatus(error: unknown): number {
 // command to run.
 const CUSTOM_ENGINE_KEY = /(custom_?engines?|acp_?agents?)$/i;
 
+/**
+ * The routes a GET (or HEAD) may reach: reads that change nothing. Every other
+ * route answers only POST. An allow-list rather than a list of state-changing
+ * routes, so a route added later, or a path `route()` also matches with extra
+ * segments (`/ultraapp/<id>/answer/x`), is refused by default.
+ */
+const READ_ROUTES = new Set([
+  '/health',
+  '/login',
+  '/dashboard',
+  '/dashboard/',
+  '/dashboard/index.html',
+  '/dash',
+  '/dash/',
+  '/session/list',
+  '/session/status',
+  '/session/grep',
+  '/session/cost',
+  '/session/team-list',
+  '/runs',
+  '/agents',
+  '/skills',
+  '/rules',
+  '/v1/models',
+  '/v1/sessions',
+  '/council/list',
+  '/workflow/list',
+  '/autoloop/list',
+  '/ultraapp/list',
+]);
+const READ_ROUTE_PATTERN =
+  /^\/(?:council\/[^/]+\/(?:state|events)|workflow\/[^/]+\/(?:state|evidence|events)|autoloop\/[^/]+\/(?:state|push_log|chat_history|events|resume-requirements)|ultraapp\/(?!new$)[^/]+(?:\/(?:artifacts|events))?)$/;
+
+function isReadRoute(path: string): boolean {
+  return READ_ROUTES.has(path) || READ_ROUTE_PATTERN.test(path);
+}
+
 /** A Host header naming this machine by a loopback name, with or without a port. */
 const LOOPBACK_HOST = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i;
 /** A browser Origin on this machine. 0.0.0.0 is a bind address, never a real Origin. */
@@ -499,6 +536,25 @@ export class EmbeddedServer {
     if (!this._checkRateLimit(clientIp)) {
       res.writeHead(429, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: false, error: 'Rate limit exceeded' }));
+      return;
+    }
+
+    // Only reads answer GET/HEAD; everything else answers only POST. route() does
+    // not look at the method and gives a non-POST request an empty body, so
+    // without this a GET ran state-changing routes: GET /session/start started a
+    // session, and an <img> on a same-site page could answer a workflow gate.
+    const readMethod = req.method === 'GET' || req.method === 'HEAD';
+    if (req.method !== 'POST' && !(readMethod && isReadRoute(path))) {
+      req.resume();
+      const message = 'This route accepts only POST';
+      res.writeHead(405, { 'Content-Type': 'application/json', Allow: 'POST' });
+      res.end(
+        JSON.stringify(
+          path.startsWith('/v1/')
+            ? { error: { message, type: 'invalid_request_error' } }
+            : { ok: false, error: message },
+        ),
+      );
       return;
     }
 
@@ -925,9 +981,10 @@ export class EmbeddedServer {
 
       // ─── Workflow kernel — list / new / state / control / evidence / SSE ─
       //
-      // Same conventions as /runs and /autoloop/*: any method reaches the route,
-      // POST bodies win over query params, and the whole block sits behind the
-      // shared auth + rate limit.
+      // Reads (list, state, evidence, events) answer GET as well as POST, with POST
+      // bodies winning over query params; the actions (new, cancel, resume, steer,
+      // approve) answer only POST. The whole block sits behind the shared auth +
+      // rate limit.
 
       if (path === '/workflow/list') {
         json(200, {
@@ -1006,7 +1063,12 @@ export class EmbeddedServer {
               json(200, { ok: true, ...this.manager.workflowSteer(runId, String(body.text ?? '')) });
               return;
             case 'approve':
-              json(200, { ok: true, ...(await this.manager.workflowApprove(runId, body.approved !== false)) });
+              // Only an explicit boolean answers a gate: an empty body is not an approval.
+              if (typeof body.approved !== 'boolean') {
+                json(400, { ok: false, error: 'approve requires `approved`: true or false' });
+                return;
+              }
+              json(200, { ok: true, ...(await this.manager.workflowApprove(runId, body.approved)) });
               return;
             case 'evidence': {
               const bundle = this.manager.workflowEvidence(

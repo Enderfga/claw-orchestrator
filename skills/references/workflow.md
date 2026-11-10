@@ -571,8 +571,9 @@ run's `workflow_list` entry), then sends each kernel event as a `workflow-event`
 
 Cancel and steer reach a run only while it executes in this process. Answering a
 gate does not need that: a run parked by a process that has since exited is
-resumed with the answer attached. On the CLI, `reject`, `false` or `no` as the
-last argument of `clawo workflow approve` rejects; anything else approves.
+resumed with the answer attached. `POST /workflow/<id>/approve` takes
+`{ approved: true | false }`; a body without a boolean `approved` gets 400. On the CLI, `reject`, `false` or `no`
+as the last argument of `clawo workflow approve` rejects; anything else approves.
 
 In a running `goal` node, steer text goes into the current turn (`turn/steer`).
 Otherwise, steer text is **prepended** to the next agent node's prompt: an instruction that
