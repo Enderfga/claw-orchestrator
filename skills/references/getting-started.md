@@ -93,7 +93,7 @@ The plugin does not manage authentication — it expects each CLI to be ready to
 
 ### Embedded Server Authentication
 
-Authentication on the embedded HTTP server (used by the CLI and standalone mode) is on by default:
+Authentication on the embedded HTTP server (used by the CLI, standalone mode and the OpenClaw plugin) is on by default:
 
 | Variable                | Purpose                                                                                                                       |
 | ----------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
@@ -102,6 +102,34 @@ Authentication on the embedded HTTP server (used by the CLI and standalone mode)
 On start the server writes the token to `~/.openclaw/server-token` (mode 0600) and reuses it across restarts; delete the file and restart the server to rotate it. Every request except `/health` must carry it as `Authorization: Bearer <token>`, the `clawo_auth` cookie, or a `?token=` query parameter. Browsers sign in once via `/login?token=<token>&redirect=/dashboard`, which sets the cookie and redirects, so the token does not stay in the address bar.
 
 The CLI finds the token on its own: `CLAWO_AUTH_TOKEN`, then `OPENCLAW_SERVER_TOKEN`, then the token file.
+
+### Security model
+
+The token is a full-control credential. Anyone who presents it can run commands on the host as the user
+the server runs as: start a session with `bypassPermissions`; send a turn to `/v1/chat/completions` (a
+`bypassPermissions` agent with Bash and the other built-in tools, unless the request passes its own
+`tools`); start a council (its seats run with `bypassPermissions`); run a workflow whose contract has
+`command` checks; or set the `launcher` of a session or a workflow `goal` node. Treat it like that user's
+SSH key.
+
+- **Where the server runs:** `clawo serve`, and under OpenClaw the plugin, which starts the same server inside
+  the Gateway on the first tool call, so there the token runs commands as the Gateway's user.
+  `CLAWO_NO_EMBEDDED_SERVER=1` skips the server where the HTTP API is not needed.
+- **Default bind:** `127.0.0.1:18796`, reachable only from the same host. `-H/--host` or `OPENCLAW_SERVER_HOST`
+  changes the address; `0.0.0.0` makes it reachable from the network.
+- **Who can read the token:** the token file is created with mode 0600, so only the server's own user (and root)
+  can read it, and that user can already run commands. On the default bind, authentication keeps other local
+  users out.
+- **`OPENCLAW_SERVER_TOKEN=disabled`:** anyone who can reach the port gets that control, and so can any web page
+  open in a browser on the same host: the `/v1/*` paths answer cross-origin requests and the server does not
+  check the `Host` header. Never disable auth on a machine where a browser runs.
+- **Tunnels and non-loopback binds:** a reverse tunnel or a public bind exposes remote command execution as
+  the server's user to anyone who has the token, or to anyone at all with auth disabled. Put an authenticating
+  layer you trust in front (Cloudflare Access, Tailscale, mTLS) and let the proxy inject the token, as
+  [dashboard.md](./dashboard.md#hosted-access-via-reverse-proxy-recommended) describes. Never put the token in a
+  shared URL.
+- **Rotating a leaked token:** delete the token file and restart the server (under OpenClaw, the Gateway), or
+  change `OPENCLAW_SERVER_TOKEN` when the token comes from there.
 
 ### OpenAI-Compatible Endpoint
 

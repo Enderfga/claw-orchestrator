@@ -298,10 +298,10 @@ describe('POST /autoloop/new', () => {
     }
   });
 
-  // A custom engine names an executable to spawn. This HTTP surface is routinely
-  // reverse-tunnelled to a public hostname and its token is a monitoring
-  // credential, so accepting one from the request body would turn any dashboard
-  // session into remote code execution. Built-in engines stay selectable.
+  // A custom engine names an executable to spawn, plus argv and a credential-
+  // bearing env. Such configs never travel in request bodies or run specs; over
+  // HTTP they are chosen by preset id or reference (see the comment above
+  // findCustomEngineKey). Built-in engines stay selectable.
   it('refuses a custom engine supplied over HTTP instead of spawning its binary', async () => {
     vi.mocked(manager.autoloopStart).mockClear();
     for (const key of ['planner_custom_engine', 'coder_custom_engine', 'reviewer_custom_engine']) {

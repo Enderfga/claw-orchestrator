@@ -98,12 +98,14 @@ bookmarked `/dash` works for the next 24 hours (the cookie's lifetime).
 
 ### Hosted access via reverse proxy (recommended)
 
-Don't expose the token to the public internet. Instead, gate the public
+Don't expose the token to the public internet: it is a full-control credential that permits running
+commands as the server's user (see [Security model](./getting-started.md#security-model)). Instead, gate the public
 hostname with whatever auth layer you already trust (Cloudflare Access,
 Tailscale, mTLS, etc.) and have the reverse proxy **inject the Bearer
 token on behalf of the user** when forwarding to port 18796. The browser
 authenticates only against your edge auth; the dashboard's own token stays
-inside the box.
+inside the box. Everyone your edge auth admits then has the token's full control, so
+admit only people you would give a shell on the host.
 
 Example reverse-proxy pattern (Node):
 

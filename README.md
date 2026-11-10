@@ -108,7 +108,9 @@ clawo goal --objective-file GOAL.md --check "npm run bench:check" --check-timeou
 ```
 
 The server writes an access token to `~/.openclaw/server-token` and the CLI reads it from there. To sign in the
-browser once, open `http://127.0.0.1:18796/login?token=<token>&redirect=/dash`.
+browser once, open `http://127.0.0.1:18796/login?token=<token>&redirect=/dash`. The token grants full control,
+including running commands as the server's user, so keep it private; see
+[Security model](./skills/references/getting-started.md#security-model) before exposing the server beyond localhost.
 
 - 🧪 **Acceptance contracts and evidence bundles** ([guide](./skills/references/verification.md))
 - 🔁 **Workflows, resume and the goal node** ([guide](./skills/references/workflow.md))

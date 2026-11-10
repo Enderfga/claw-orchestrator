@@ -648,10 +648,11 @@ Start a chat-mode autoloop. Planner starts immediately; Coder + Reviewer start o
 > request body is checked, on every route, and one carrying an inline engine
 > config at any depth — `customEngine`, `*_custom_engine`, `agentCustomEngines`,
 > `acpAgent` — is rejected with a 400 naming the offending key path. A bundled
-> preset id (a string) is accepted, since it cannot name a binary of its own. The embedded server is
-> often reverse-tunnelled and its token is a monitoring credential, not
-> permission to choose what binary runs. Built-in engines stay fully selectable
-> over HTTP.
+> preset id (a string) is accepted, since it cannot name a binary of its own. This keeps
+> credential-bearing engine configs out of request bodies and run specs; it is not a security
+> boundary, because the server's token already permits running commands (see
+> [Security model](./getting-started.md#security-model)). Built-in engines stay fully
+> selectable over HTTP.
 >
 > **Resuming by reference.** A remote or MCP resume names the credential instead of
 > carrying it — `plannerCustomEngineRef` and friends on `autoloop_resume` and
