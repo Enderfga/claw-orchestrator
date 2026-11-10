@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are registered at $8/$40 per Mtok with $0.20 cache reads and a 1M context. Claude Code 2.1.321 made Fable 5.2
   its default Fable model, and its `fable` resolves to `claude-fable-5-2`, so a `fable` session was being priced
   at Fable 5.1's $10/$50 and a session on the full id at the family default.
+- **Council seats now pass `sandboxMode` to the seat's session** on the SDK (`councilStart`) and
+  workflow (`council` node) routes instead of dropping it. Omission is unchanged; how a mode is
+  applied remains engine-specific.
 
 ### Changed
 

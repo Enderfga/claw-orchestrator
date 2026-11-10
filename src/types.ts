@@ -920,6 +920,8 @@ export interface AgentPersona extends AgentBinding {
   role?: string;
   baseUrl?: string;
   permissionMode?: PermissionMode;
+  /** Forwarded to the seat's session; engine adapters apply it as they already do. */
+  sandboxMode?: SessionConfig['sandboxMode'];
   customEngine?: CustomEngineConfig;
   /** Per-agent reasoning effort passed to the agent's session. */
   /** Per-agent ultracode / dynamic workflows (council, claude engine only). */

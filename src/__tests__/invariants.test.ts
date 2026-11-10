@@ -485,6 +485,137 @@ describe('the legacy API contract survives the adapter', () => {
 
     fs.rmSync(cwd, { recursive: true, force: true });
   });
+
+  it(
+    'council sandboxMode: councilStart forwards each mode and keeps permissionMode independent',
+    { timeout: 60_000 },
+    async () => {
+      const cwd = gitRepo();
+      const seats = [
+        { name: 'ro', emoji: '', persona: 'P', engine: 'codex' as const, sandboxMode: 'read-only' as const },
+        {
+          name: 'ww',
+          emoji: '',
+          persona: 'P',
+          engine: 'agy' as const,
+          sandboxMode: 'workspace-write' as const,
+        },
+        {
+          name: 'dfa',
+          emoji: '',
+          persona: 'P',
+          engine: 'claude' as const,
+          sandboxMode: 'danger-full-access' as const,
+          permissionMode: 'plan' as const,
+        },
+      ];
+      const council = await mgr.councilStart('build it', {
+        agents: seats,
+        maxRounds: 1,
+        projectDir: cwd,
+      });
+      await (mgr as unknown as { kernel: { wait(id: string): Promise<unknown> } }).kernel.wait(council.id);
+
+      const ro = observed.find((o) => o.config.name?.includes('-ro-r'))!;
+      const ww = observed.find((o) => o.config.name?.includes('-ww-r'))!;
+      const dfa = observed.find((o) => o.config.name?.includes('-dfa-r'))!;
+      // Assert sandboxMode alone so a RED AssertionError names the key (vitest
+      // abbreviates multi-key toMatchObject diffs and can hide it).
+      expect(ro.config).toMatchObject({ sandboxMode: 'read-only' });
+      expect(ro.config).toMatchObject({ engine: 'codex', permissionMode: 'bypassPermissions' });
+      expect(ww.config).toMatchObject({ sandboxMode: 'workspace-write' });
+      expect(ww.config).toMatchObject({ engine: 'agy', permissionMode: 'bypassPermissions' });
+      expect(dfa.config).toMatchObject({ sandboxMode: 'danger-full-access' });
+      expect(dfa.config).toMatchObject({ engine: 'claude', permissionMode: 'plan' });
+
+      fs.rmSync(cwd, { recursive: true, force: true });
+    },
+  );
+
+  it(
+    'council sandboxMode: an omitted seat sandboxMode stays omitted and defaults are unchanged',
+    { timeout: 60_000 },
+    async () => {
+      const cwd = gitRepo();
+      const council = await mgr.councilStart('build it', {
+        agents: [
+          { name: 'codex-def', emoji: '', persona: 'P', engine: 'codex' },
+          { name: 'claude-def', emoji: '', persona: 'P', engine: 'claude' },
+        ],
+        maxRounds: 1,
+        projectDir: cwd,
+      });
+      await (mgr as unknown as { kernel: { wait(id: string): Promise<unknown> } }).kernel.wait(council.id);
+
+      for (const suffix of ['codex-def', 'claude-def']) {
+        const started = observed.find((o) => o.config.name?.includes(`-${suffix}-r`))!;
+        expect(started.config.permissionMode).toBe('bypassPermissions');
+        expect(started.config.sandboxMode).toBeUndefined();
+      }
+
+      observed = [];
+      const withDefault = await mgr.councilStart('build it', {
+        agents: [{ name: 'def-pm', emoji: '', persona: 'P', engine: 'codex' }],
+        maxRounds: 1,
+        projectDir: cwd,
+        defaultPermissionMode: 'acceptEdits',
+      });
+      await (mgr as unknown as { kernel: { wait(id: string): Promise<unknown> } }).kernel.wait(withDefault.id);
+      const defPm = observed.find((o) => o.config.name?.includes('-def-pm-r'))!;
+      expect(defPm.config.permissionMode).toBe('acceptEdits');
+      expect(defPm.config.sandboxMode).toBeUndefined();
+
+      fs.rmSync(cwd, { recursive: true, force: true });
+    },
+  );
+
+  it(
+    'council sandboxMode: a kernel council node forwards sandboxMode through workflowStart',
+    { timeout: 60_000 },
+    async () => {
+      const cwd = gitRepo();
+      const record = await mgr.workflowStart({
+        name: 'council-sandbox',
+        cwd,
+        nodes: [
+          {
+            id: 'c',
+            kind: 'council',
+            task: 'build it',
+            maxRounds: 1,
+            projectDir: cwd,
+            agents: [
+              {
+                name: 'ro',
+                emoji: '',
+                persona: 'P',
+                engine: 'codex',
+                sandboxMode: 'read-only',
+                permissionMode: 'plan',
+              },
+              {
+                name: 'ww',
+                emoji: '',
+                persona: 'P',
+                engine: 'agy',
+                sandboxMode: 'workspace-write',
+              },
+            ],
+          },
+        ],
+      } as never);
+      await (mgr as unknown as { kernel: { wait(id: string): Promise<unknown> } }).kernel.wait(record.runId);
+
+      const ro = observed.find((o) => o.config.name?.includes('-ro-r'))!;
+      const ww = observed.find((o) => o.config.name?.includes('-ww-r'))!;
+      expect(ro.config).toMatchObject({ sandboxMode: 'read-only' });
+      expect(ro.config).toMatchObject({ engine: 'codex', permissionMode: 'plan' });
+      expect(ww.config).toMatchObject({ sandboxMode: 'workspace-write' });
+      expect(ww.config).toMatchObject({ engine: 'agy' });
+
+      fs.rmSync(cwd, { recursive: true, force: true });
+    },
+  );
 });
 
 // ─── 2. Read-only really is read-only ───────────────────────────────────────

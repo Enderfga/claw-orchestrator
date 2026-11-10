@@ -555,6 +555,7 @@ export class Council extends EventEmitter {
           model: agent.model,
           baseUrl: agent.baseUrl,
           permissionMode: agent.permissionMode ?? this.config.defaultPermissionMode ?? 'bypassPermissions',
+          ...(agent.sandboxMode === undefined ? {} : { sandboxMode: agent.sandboxMode }),
           appendSystemPrompt: systemPrompt,
           maxTurns: this.config.maxTurnsPerAgent || DEFAULT_MAX_TURNS_PER_AGENT,
           maxBudgetUsd: this.config.maxBudgetUsd,

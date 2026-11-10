@@ -114,7 +114,8 @@ returning); direct TypeScript callers need `await`.
 
 ### Mixed Engines
 
-Agents can use different engines and models. Each agent also accepts `effort` and, on Claude, `ultracode`:
+Agents can use different engines and models. Each agent also accepts `effort`, `sandboxMode` (forwarded
+to the seat's session; how a mode is applied is engine-specific), and, on Claude, `ultracode`:
 
 ```json
 {

@@ -36,6 +36,7 @@ export async function executeCouncilNode(node: NodeSpec, ctx: NodeContext): Prom
         acpAgent: a.acpAgent,
         baseUrl: a.baseUrl,
         permissionMode: a.permissionMode as never,
+        sandboxMode: a.sandboxMode,
         effort: a.effort as never,
         ultracode: a.ultracode,
         customEngine: customEngines[a.name] as never,
