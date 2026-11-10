@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [7.20.2] - 2026-11-10
+
 ### Fixed
 
 - **Claude Fable 5.2 is priced, and the `fable` alias now means it.** `claude-fable-5-2` and `claude-mythos-5-2`
@@ -23,7 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now also counts cached reads, which it had left out. Spend still counts every request.
 - **Council seats now pass `sandboxMode` to the seat's session** on the SDK (`councilStart`) and
   workflow (`council` node) routes instead of dropping it. Omission is unchanged; how a mode is
-  applied remains engine-specific.
+  applied remains engine-specific. (#165, thanks @ajmtrz)
 
 ### Changed
 
