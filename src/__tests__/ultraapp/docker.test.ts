@@ -71,8 +71,9 @@ describe('docker wrapper', () => {
     expect(r.ok).toBe(true);
     expect(r.containerName).toBe('container-name-here');
     const args = spawn.mock.calls[0][1];
-    expect(args).toContain('-p');
-    expect(args).toContain('19101:3000');
+    // Published on loopback only: the router reaches the backend on 127.0.0.1, and a
+    // bare HOST_PORT:3000 would publish it on every host interface.
+    expect(args[args.indexOf('-p') + 1]).toBe('127.0.0.1:19101:3000');
     expect(args).toContain('--restart');
     expect(args).toContain('unless-stopped');
     expect(args).toContain('-e');
