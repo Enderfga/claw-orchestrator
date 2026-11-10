@@ -64,13 +64,19 @@ function autoloopErrorStatus(error: unknown): number {
 }
 
 /**
- * Custom engines name an arbitrary executable (`bin`) plus argv and env. That
- * is fine for a local, programmatic caller, but this HTTP surface is routinely
- * reverse-tunnelled to a public hostname, and its auth token is a *monitoring*
- * credential — it was never meant to confer "run any binary on the host".
- * Accepting a custom-engine object from the request body would turn any
- * dashboard session into remote code execution, so the network surface refuses
- * it outright. Built-in engines (the actual ask in #72) stay fully selectable.
+ * The HTTP token is a full-control credential: a request that carries it can
+ * already run commands as the server's user — a `bypassPermissions` session, a
+ * contract `command` check, the `launcher` of a session or a workflow `goal`
+ * node. So this refusal is not a security boundary, and nothing should rely on
+ * it as one; the threat model is in skills/references/getting-started.md
+ * (Security model).
+ *
+ * What it keeps is that credential-bearing engine configs — a binary, its argv
+ * and an env that usually carries credentials — never travel in request bodies
+ * or get stored in run specs (see kernel/secrets.ts). Over HTTP they are chosen
+ * by bundled preset id, or on autoloop resume by `*CustomEngineRef` name
+ * resolved from the server's environment. Built-in engines (the actual ask in
+ * #72) stay fully selectable.
  */
 //
 // Matched by SHAPE, not by an allowlist of known keys, and applied to every

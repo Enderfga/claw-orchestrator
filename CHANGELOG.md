@@ -22,6 +22,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   commit SHA). It runs once the repository secret `CLAWHUB_TOKEN` is set and skips releases until then; setup
   is in `AGENTS.md` under Release Process.
 
+### Docs
+
+- **The embedded server's token is documented as a full-control credential.** A request that carries it can
+  already run commands as the server's user (a `bypassPermissions` session, a `/v1/chat/completions` turn, a
+  council, contract `command` checks, a `launcher`), so `getting-started.md` has a new Security model section:
+  where the server runs (including inside the OpenClaw Gateway), the default `127.0.0.1` bind, what the token
+  is equivalent to, why `OPENCLAW_SERVER_TOKEN=disabled` is unsafe wherever a browser runs, what a tunnel or
+  non-loopback bind exposes, and how to rotate the token. `README.md`, `cli.md`, `dashboard.md`,
+  `openai-compat.md` and `tools.md` point to it. The comment on the inline custom-engine refusal no longer
+  calls the token a monitoring credential: the refusal keeps credential-bearing engine configs out of request
+  bodies and run specs, and is not a security boundary.
+
 ## [7.21.0] - 2026-11-10
 
 ### Fixed
