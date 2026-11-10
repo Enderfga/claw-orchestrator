@@ -120,9 +120,17 @@ SSH key.
 - **Who can read the token:** the token file is created with mode 0600, so only the server's own user (and root)
   can read it, and that user can already run commands. On the default bind, authentication keeps other local
   users out.
-- **`OPENCLAW_SERVER_TOKEN=disabled`:** anyone who can reach the port gets that control, and so can any web page
-  open in a browser on the same host: the `/v1/*` paths answer cross-origin requests and the server does not
-  check the `Host` header. Never disable auth on a machine where a browser runs.
+- **`OPENCLAW_SERVER_TOKEN=disabled`:** any process that can reach the port gets that control. To keep web pages
+  in a browser on the same host out, the server then answers only requests from this host: `Host` must be
+  `localhost`, `127.0.0.1` or `[::1]` (a DNS-rebound name gets a 403), an `Origin`, when sent, must be one of those
+  too, and a cross-site request without one (`Sec-Fetch-Site: cross-site`, as from an `<img>` tag) gets a 403;
+  browsers that send no `Sec-Fetch-Site` (Safari before 16.4, Firefox before 90) are not covered by that last
+  check. Only loopback origins get CORS headers, whatever `OPENCLAW_CORS_ORIGINS` says. Requests that carry an
+  `Origin` from any loopback page (a local dev server, an ultraapp under `/forge/`) still count as this host, but a
+  link from one loopback host to another (`localhost:3000` → `127.0.0.1:18796`) arrives as cross-site with no
+  `Origin` and gets a 403; open the URL directly instead. A non-loopback bind, a
+  `CLAWO_API_URL` naming the host another way (its hostname, `127.0.0.2`) or a proxy that forwards another
+  hostname gets 403s with auth disabled: keep auth on there.
 - **Tunnels and non-loopback binds:** a reverse tunnel or a public bind exposes remote command execution as
   the server's user to anyone who has the token, or to anyone at all with auth disabled. Put an authenticating
   layer you trust in front (Cloudflare Access, Tailscale, mTLS) and let the proxy inject the token, as

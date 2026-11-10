@@ -105,7 +105,7 @@ function request(
 function rawRequest(
   port: number,
   path: string,
-  options: { method?: string; body?: string; contentType?: string },
+  options: { method?: string; body?: string; contentType?: string; headers?: Record<string, string> },
 ): Promise<{ status: number; body: unknown }> {
   return new Promise((resolve, reject) => {
     const req = http.request(
@@ -114,7 +114,7 @@ function rawRequest(
         port,
         path,
         method: options.method || 'POST',
-        headers: { 'Content-Type': options.contentType || 'application/json' },
+        headers: { 'Content-Type': options.contentType || 'application/json', ...options.headers },
       },
       (res) => {
         let data = '';
@@ -663,6 +663,106 @@ describe('EmbeddedServer', () => {
       expect(allowed).toContain('x-session-id');
       expect(allowed).toContain('x-session-reset');
     });
+
+    // With auth off, nothing but the network stands between a request and the
+    // agent behind /v1/chat/completions, so a web page in a browser on this host
+    // must not be able to reach it: no foreign origin in the CORS reply, and no
+    // DNS-rebound hostname in Host.
+    it('does not echo a foreign Origin while auth is disabled', async () => {
+      await server.start();
+
+      const res = await request(port, '/v1/chat/completions', {
+        method: 'OPTIONS',
+        headers: { Origin: 'https://evil.example' },
+      });
+      expect(res.headers['access-control-allow-origin']).toBeUndefined();
+    });
+
+    it('refuses a non-loopback Host while auth is disabled', async () => {
+      await server.start();
+
+      for (const host of [`evil.example:${port}`, 'evil.example', `192.168.1.5:${port}`]) {
+        const res = await request(port, '/v1/models', { headers: { Host: host } });
+        expect(res.status, host).toBe(403);
+      }
+      const post = await request(port, '/session/start', {
+        method: 'POST',
+        body: { name: 'x', cwd: '/tmp' },
+        headers: { Host: `evil.example:${port}` },
+      });
+      expect(post.status).toBe(403);
+      expect(manager.startSession).not.toHaveBeenCalled();
+    });
+
+    // A cross-site page can send a POST without a preflight when its Content-Type
+    // is a CORS-safelisted type (text/plain), and a GET with no Origin from a
+    // plain <img>. With auth off neither may reach a route.
+    it('refuses a preflight-free POST from a foreign origin while auth is disabled', async () => {
+      await server.start();
+
+      const res = await rawRequest(port, '/session/start', {
+        body: JSON.stringify({ name: 'pwn', cwd: '/tmp' }),
+        contentType: 'text/plain;application/json',
+        headers: { Origin: 'https://evil.example', 'Sec-Fetch-Site': 'cross-site' },
+      });
+      expect(res.status).toBe(403);
+      expect(manager.startSession).not.toHaveBeenCalled();
+    });
+
+    it('refuses a cross-site request without an Origin while auth is disabled', async () => {
+      await server.start();
+
+      const res = await request(port, '/session/start', { headers: { 'Sec-Fetch-Site': 'cross-site' } });
+      expect(res.status).toBe(403);
+      expect(manager.startSession).not.toHaveBeenCalled();
+    });
+
+    it('does not echo foreign origins for OPENCLAW_CORS_ORIGINS=* while auth is disabled', async () => {
+      process.env.OPENCLAW_CORS_ORIGINS = '*';
+      await server.start();
+
+      const res = await request(port, '/session/list', {
+        method: 'OPTIONS',
+        headers: { Origin: 'https://evil.example' },
+      });
+      expect(res.headers['access-control-allow-origin']).toBeUndefined();
+    });
+
+    it('lets a loopback page call cross-site while auth is disabled', async () => {
+      await server.start();
+
+      const res = await request(port, '/v1/models', {
+        headers: { Origin: 'http://localhost:3000', 'Sec-Fetch-Site': 'cross-site' },
+      });
+      expect(res.status).toBe(200);
+      expect(res.headers['access-control-allow-origin']).toBe('http://localhost:3000');
+    });
+
+    it('still serves loopback hosts and origins while auth is disabled', async () => {
+      await server.start();
+
+      for (const host of [`127.0.0.1:${port}`, `localhost:${port}`, `[::1]:${port}`, 'localhost']) {
+        const res = await request(port, '/v1/models', { headers: { Host: host } });
+        expect(res.status, host).toBe(200);
+      }
+      const res = await request(port, '/v1/chat/completions', {
+        method: 'OPTIONS',
+        headers: { Origin: 'http://localhost:3000' },
+      });
+      expect(res.headers['access-control-allow-origin']).toBe('http://localhost:3000');
+    });
+
+    it('keeps echoing /v1 origins and any Host when auth is on', async () => {
+      process.env.OPENCLAW_SERVER_TOKEN = 'cors-test-token';
+      server = new EmbeddedServer(manager, port);
+      await server.start();
+
+      const res = await request(port, '/v1/models', {
+        headers: { Origin: 'https://chat.example', Host: 'chat.example', Authorization: 'Bearer cors-test-token' },
+      });
+      expect(res.status).toBe(200);
+      expect(res.headers['access-control-allow-origin']).toBe('https://chat.example');
+    });
   });
 
   describe('error handling', () => {
@@ -690,6 +790,21 @@ describe('EmbeddedServer', () => {
       const res = await request(port, '/autoloop/new', { method: 'POST', body: { workspace: os.tmpdir() } });
       expect(res.status).toBe(409);
       expect((res.body as Record<string, string>).error).toBe(message);
+    });
+
+    it('requires the JSON media type itself, not a Content-Type that merely contains it', async () => {
+      await server.start();
+
+      const smuggled = await rawRequest(port, '/session/start', {
+        body: JSON.stringify({ name: 't', cwd: '/tmp' }),
+        contentType: 'text/plain;application/json',
+      });
+      expect(smuggled.status).toBe(415);
+      const withCharset = await rawRequest(port, '/session/start', {
+        body: JSON.stringify({ name: 't', cwd: '/tmp' }),
+        contentType: 'Application/JSON; charset=utf-8',
+      });
+      expect(withCharset.status).toBe(200);
     });
 
     it('returns 400 for invalid JSON body', async () => {

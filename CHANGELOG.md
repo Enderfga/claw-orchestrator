@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **With auth disabled, a web page in a browser on the same host can no longer drive the server.** Under
+  `OPENCLAW_SERVER_TOKEN=disabled` the `/v1/*` CORS reply echoed any `Origin`, no route checked `Host`, and a
+  `Content-Type` that merely contained `application/json` was accepted. So a page could call
+  `/v1/chat/completions` cross-origin, any route through DNS rebinding, or `POST /session/start` without a
+  preflight (`text/plain;application/json`); an `<img>` could even start a session with `GET /session/start`.
+  While auth is off, the server now serves only requests from this host: `Host` and any `Origin` must be
+  `localhost`, `127.0.0.1` or `[::1]`, a cross-site request without `Origin` is refused, and only loopback
+  origins get CORS headers, whatever `OPENCLAW_CORS_ORIGINS` says (403 otherwise). A POST body's media type
+  must now be exactly `application/json` (parameters such as `charset` allowed) in every mode. With auth on,
+  only that `Content-Type` check changes. A non-loopback bind or a proxy forwarding another hostname now
+  gets 403s with auth disabled.
+
 ## [7.21.1] - 2026-11-10
 
 ### Fixed

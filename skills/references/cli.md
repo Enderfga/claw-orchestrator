@@ -61,7 +61,7 @@ An `X-Session-Reset: 1` (or `true`) header answers the request from a fresh sess
 - `composer*`, `cursor*`, `auto` → the legacy `cursor` engine
 - anything else → Claude engine
 
-**CORS:** `/v1/` paths allow cross-origin requests by default, and `localhost` origins are allowed on every path. Set `OPENCLAW_CORS_ORIGINS=*` to allow all origins on all paths.
+**CORS:** `localhost` origins are allowed on every path. With auth on, `/v1/` paths also allow any origin, and `OPENCLAW_CORS_ORIGINS=*` allows all origins on all paths; with auth disabled only loopback origins are allowed, and only loopback `Host` names are served (see [Security model](./getting-started.md#security-model)).
 
 **Auto-compact:** When a session's context utilization exceeds 80%, the endpoint automatically compacts the session before sending the next message.
 
