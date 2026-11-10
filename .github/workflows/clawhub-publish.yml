@@ -1,0 +1,91 @@
+name: Publish to ClawHub
+
+# Publishes each GitHub release to ClawHub, alongside the npm publish in
+# publish.yml, authenticated by the CLAWHUB_TOKEN repository secret. Without
+# that secret, release runs skip. A manual run (workflow_dispatch) is a dry run
+# by default and needs no secret; a real manual publish must run on the tag
+# v<package.json version>, so it builds the code of that release. Setup:
+# AGENTS.md, Release Process → ClawHub.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Preview only; nothing is published
+        type: boolean
+        default: true
+
+permissions: {}
+
+concurrency:
+  group: clawhub-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      enabled: ${{ steps.token.outputs.enabled }}
+    steps:
+      - id: token
+        env:
+          HAS_TOKEN: ${{ secrets.CLAWHUB_TOKEN != '' }}
+          EVENT: ${{ github.event_name }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          REF: ${{ github.ref }}
+        run: |
+          if [[ "$EVENT" == "workflow_dispatch" && "$DRY_RUN" != "true" && "$REF" != refs/tags/* ]]; then
+            echo "::error::A real manual publish must run on a release tag (Use workflow from: Tags → vX.Y.Z)."
+            exit 1
+          fi
+          if [[ "$HAS_TOKEN" == "true" || "$EVENT" == "workflow_dispatch" ]]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::CLAWHUB_TOKEN is not set; skipping the ClawHub publish of this release."
+          fi
+
+  pack:
+    needs: check
+    if: needs.check.outputs.enabled == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require the release tag for a real manual publish
+        if: github.event_name == 'workflow_dispatch' && !inputs.dry_run
+        run: |
+          expected="v$(node -p "require('./package.json').version")"
+          if [[ "$GITHUB_REF_NAME" != "$expected" ]]; then
+            echo "::error::A real manual publish must run on tag $expected, not $GITHUB_REF_NAME."
+            exit 1
+          fi
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm run build
+      # The repository does not commit dist/; this builds a tarball equivalent to the npm publish.
+      - run: mkdir -p clawpack && npm pack --pack-destination clawpack
+      - uses: actions/upload-artifact@v4
+        with:
+          name: clawhub-package
+          path: clawpack/*.tgz
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: pack
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    uses: openclaw/clawhub/.github/workflows/package-publish.yml@32c8be8ff5a85dc605c671c1e73df489ae6abbda
+    with:
+      package_artifact_name: clawhub-package
+      dry_run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+    secrets:
+      clawhub_token: ${{ secrets.CLAWHUB_TOKEN }}
