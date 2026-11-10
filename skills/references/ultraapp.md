@@ -111,7 +111,18 @@ all-interfaces binding for as long as they exist: `stop`/`start`, promoting that
 version back, and Docker daemon restarts all reuse the container. To rebind, deploy a
 new version and remove the old containers, or delete the run. On Docker Engine before
 28.0, a port published on `127.0.0.1` can still be reached by hosts on the same
-network segment. Slug→port map
+network segment.
+
+Browsers scope cookies by host, not port, so the dashboard's `clawo_auth` cookie, which carries
+the server token, is also sent to the router when both are opened under the same hostname. The
+router removes it from the `Cookie` header before forwarding and drops any `Set-Cookie` for it
+from the app's response, so an app backend neither receives nor replaces it. Other cookies pass
+through unchanged. In `host` mode the app still runs as the same OS user, which can read
+`~/.openclaw/server-token`, and it inherits the server's environment, including
+`OPENCLAW_SERVER_TOKEN` when set. Only `docker` mode, which passes the app nothing but
+`BASE_PATH`, separates an app from the token.
+
+Slug→port map
 persists to `~/.claw-orchestrator/ultraapps/_router.json`. Host-mode pid metadata
 persists to `~/.claw-orchestrator/host-procs.json`.
 

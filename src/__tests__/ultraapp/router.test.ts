@@ -119,6 +119,67 @@ describe('UltraappRouter', () => {
     expect(l.find((x) => x.slug === 'a')!.port).toBe(backendPort);
   });
 
+  // Browsers scope cookies by host, not port, so the dashboard's full-control
+  // `clawo_auth` cookie (set by the embedded server on :18796, Path=/) is also
+  // sent to the router on :19000. It must never reach an app backend, and a
+  // backend must not be able to set or overwrite it.
+  describe('control-plane cookie', () => {
+    let echo: http.Server;
+    let echoPort: number;
+    let seen: Array<string | undefined>;
+
+    beforeEach(async () => {
+      seen = [];
+      echoPort = await freePort();
+      echo = await new Promise<http.Server>((resolve) => {
+        const srv = http.createServer((req, res) => {
+          seen.push(req.headers.cookie);
+          res.setHeader('Set-Cookie', [
+            'clawo_auth=from-app; Path=/; HttpOnly',
+            'app_session=s1; Path=/forge/c/',
+            ' CLAWO_AUTH =x; Path=/',
+            'clawo_auth_hint=ok; Path=/forge/c/',
+          ]);
+          res.writeHead(200, { 'Content-Type': 'text/plain' });
+          res.end('ok');
+        });
+        srv.listen(echoPort, '127.0.0.1', () => resolve(srv));
+      });
+      router.register('c', echoPort);
+    });
+    afterEach(async () => {
+      await new Promise<void>((r) => echo.close(() => r()));
+    });
+
+    function request(cookie?: string): Promise<{ status: number; setCookie: string[] }> {
+      return new Promise((resolve, reject) => {
+        http
+          .get(
+            { host: '127.0.0.1', port: routerPort, path: '/forge/c/x', headers: cookie ? { cookie } : {} },
+            (res) => {
+              res.resume();
+              res.on('end', () => resolve({ status: res.statusCode ?? 0, setCookie: res.headers['set-cookie'] ?? [] }));
+            },
+          )
+          .on('error', reject);
+      });
+    }
+
+    it('strips clawo_auth from the Cookie header and keeps the app cookies', async () => {
+      await request('app_session=s1; clawo_auth=SECRET-TOKEN; clawo_auth_hint=ok');
+      await request('clawo_auth=SECRET-TOKEN');
+      await request('a=1;clawo_auth=SECRET-TOKEN;b=2');
+      expect(seen).toEqual(['app_session=s1; clawo_auth_hint=ok', undefined, 'a=1; b=2']);
+      expect(seen.join(' ')).not.toContain('SECRET-TOKEN');
+    });
+
+    it('drops a backend Set-Cookie for clawo_auth and passes the others through', async () => {
+      const r = await request();
+      expect(r.status).toBe(200);
+      expect(r.setCookie).toEqual(['app_session=s1; Path=/forge/c/', 'clawo_auth_hint=ok; Path=/forge/c/']);
+    });
+  });
+
   it('falls back to next free port when basePort taken', async () => {
     const blocker = http.createServer().listen(0, '127.0.0.1');
     await new Promise<void>((r) => blocker.on('listening', () => r()));

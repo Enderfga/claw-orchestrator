@@ -14,6 +14,25 @@ import * as http from 'node:http';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
+/**
+ * The embedded server's full-control auth cookie. Browsers scope cookies by
+ * host, not port, so the cookie the dashboard sets on :18796 (`Path=/`) is also
+ * sent here. App backends must never see it, nor set it.
+ */
+const CONTROL_COOKIE = 'clawo_auth';
+
+const cookieName = (pair: string): string => pair.split('=')[0].trim().toLowerCase();
+
+/** The request's Cookie header without the control cookie; undefined when nothing is left. */
+function stripControlCookie(header: string | undefined): string | undefined {
+  if (!header) return undefined;
+  const kept = header
+    .split(';')
+    .map((pair) => pair.trim())
+    .filter((pair) => pair && cookieName(pair) !== CONTROL_COOKIE);
+  return kept.length ? kept.join('; ') : undefined;
+}
+
 export interface UltraappRouterOptions {
   port: number;
   mapPath: string;
@@ -113,16 +132,26 @@ export class UltraappRouter {
     // Hono's `root.basePath('/forge/<slug>')` model), so the framework
     // itself owns prefix-stripping. Stripping here would double-strip and
     // 404 every request.
+    // The dashboard's control cookie is removed on the way in and refused on
+    // the way out: a generated app is not trusted with the server's token.
+    const headers: http.OutgoingHttpHeaders = { ...req.headers, 'x-forwarded-prefix': `/forge/${slug}` };
+    delete headers.cookie;
+    const cookie = stripControlCookie(req.headers.cookie);
+    if (cookie) headers.cookie = cookie;
     const proxy = http.request(
       {
         host: '127.0.0.1',
         port: backend,
         path: url,
         method: req.method,
-        headers: { ...req.headers, 'x-forwarded-prefix': `/forge/${slug}` },
+        headers,
       },
       (br) => {
-        res.writeHead(br.statusCode ?? 502, br.headers);
+        const out: http.OutgoingHttpHeaders = { ...br.headers };
+        const setCookie = br.headers['set-cookie']?.filter((c) => cookieName(c) !== CONTROL_COOKIE);
+        if (setCookie?.length) out['set-cookie'] = setCookie;
+        else delete out['set-cookie'];
+        res.writeHead(br.statusCode ?? 502, out);
         br.pipe(res);
       },
     );
