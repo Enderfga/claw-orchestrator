@@ -83,7 +83,10 @@ jobs:
       actions: read
       contents: read
       id-token: write
-    uses: openclaw/clawhub/.github/workflows/package-publish.yml@32c8be8ff5a85dc605c671c1e73df489ae6abbda
+    # Pinned to the commit openclaw/openclaw's own plugin release pins. Since openclaw/clawhub#3962 (24f4d42),
+    # this workflow runs plugin validation under Bun, which the CLI refuses ("Plugin validation requires
+    # Node.js 22.13+"); from that commit on, every publish of a plugin root fails. Move the pin once openclaw/clawhub#4512 is fixed.
+    uses: openclaw/clawhub/.github/workflows/package-publish.yml@ef56b2cb287f0db5462b92dea8e4b63325d0341c
     with:
       package_artifact_name: clawhub-package
       dry_run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
