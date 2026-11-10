@@ -141,7 +141,7 @@ engine, so one dropdown switches between Claude, Codex, Antigravity and Grok mod
 
 | Engine      | CLI        | Tested version                  |
 | ----------- | ---------- | ------------------------------- |
-| Claude Code | `claude`   | 2.1.319                         |
+| Claude Code | `claude`   | 2.1.321                         |
 | Codex       | `codex`    | 0.166.0                         |
 | Antigravity | `agy`      | 1.5.3                           |
 | Grok Build  | `grok`     | 1.0.77                          |

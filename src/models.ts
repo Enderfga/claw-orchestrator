@@ -38,30 +38,44 @@ export interface ModelDef {
 
 const MODELS: ModelDef[] = [
   // ── Anthropic ──────────────────────────────────────────────────────────
-  // The Fable tier sits above Opus: $10/$50 per Mtok and a full 1M-token
-  // context at standard pricing (no long-context surcharge). Mythos is the same
-  // model at the same price under limited availability, so each generation is
-  // registered in both spellings — an unregistered id does not fail, it prices
-  // at the family default.
+  // The Fable tier sits above Opus, with a full 1M-token context at standard
+  // pricing (no long-context surcharge): $8/$40 per Mtok for 5.2, $10/$50 for
+  // 5 and 5.1. Mythos is the same model at the same price under limited
+  // availability, so each generation is registered in both spellings — an
+  // unregistered id does not fail, it prices at the family default.
   //
-  // Cache reads are where the two generations differ, and 5.1 is the exception
-  // to a rule that holds everywhere else in this file: a cache hit is 0.1x base
-  // input on every Claude model EXCEPT Fable 5.1 and Mythos 5.1, which are
-  // 0.025x — $0.25 per Mtok against a $10 input price. Deriving it from the
-  // input rate would over-report those two by 4x. Cache *writes* keep the usual
-  // 1.25x / 2x multipliers, which is why only the read is stored here.
+  // Cache reads are where the generations differ. A cache hit is 0.1x base
+  // input on most Claude models, but 0.025x on Fable/Mythos 5.1 and 5.2 —
+  // $0.25 and $0.20 per Mtok — and 0.05x on Opus 5.5 and Sonnet 5.5. Deriving
+  // it from the input rate would over-report the 0.025x ones by 4x. Cache
+  // *writes* keep the usual 1.25x / 2x multipliers, which is why only the read
+  // is stored here.
   //
-  // The `fable` alias points at 5.1 because that is what the CLI's own `fable`
-  // resolves to — verified against 2.1.258 by reading `modelUsage.canonicalModel`
-  // back from a real turn, not inferred from the release note. (A Claude apps
-  // gateway session still resolves `fable` to Fable 5 while gateways catch up;
-  // that is the gateway's mapping, not this registry's.)
+  // The `fable` alias points at 5.2 because that is what the CLI's own `fable`
+  // resolves to — verified against 2.1.321 by reading `modelUsage` back from a
+  // real turn, not inferred from the release note. (A Claude apps gateway
+  // session may still resolve `fable` to an older Fable while gateways catch
+  // up; that is the gateway's mapping, not this registry's.)
+  {
+    id: 'claude-fable-5-2',
+    engine: 'claude',
+    provider: 'anthropic',
+    pricing: { input: 8, output: 40, cached: 0.2 },
+    aliases: ['fable'],
+    contextWindow: 1_000_000,
+  },
+  {
+    id: 'claude-mythos-5-2',
+    engine: 'claude',
+    provider: 'anthropic',
+    pricing: { input: 8, output: 40, cached: 0.2 },
+    contextWindow: 1_000_000,
+  },
   {
     id: 'claude-fable-5-1',
     engine: 'claude',
     provider: 'anthropic',
     pricing: { input: 10, output: 50, cached: 0.25 },
-    aliases: ['fable'],
     contextWindow: 1_000_000,
   },
   {

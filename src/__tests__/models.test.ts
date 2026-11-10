@@ -373,13 +373,25 @@ describe('claude-fable-5', () => {
   });
 
   it('no longer owns the `fable` alias, which tracks the CLI default', () => {
-    // The CLI's own `fable` resolves to 5.1 as of 2.1.258, read back from a real
-    // turn's `modelUsage.canonicalModel`. An alias left pointing at the previous
-    // generation is the drift that has bitten this registry repeatedly — it
-    // costs alias sessions at the wrong model's rates without failing.
-    expect(resolveAlias('fable')).toBe('claude-fable-5-1');
-    expect(resolveEngineAndModel('fable')).toEqual({ engine: 'claude', model: 'claude-fable-5-1' });
-    expect(lookupModel('claude-fable-5')!.aliases ?? []).not.toContain('fable');
+    // The CLI's own `fable` resolves to 5.2 as of 2.1.321, read back from a real
+    // turn's `modelUsage`. An alias left pointing at the previous generation is
+    // the drift that has bitten this registry repeatedly — it costs alias
+    // sessions at the wrong model's rates without failing.
+    expect(resolveAlias('fable')).toBe('claude-fable-5-2');
+    expect(resolveEngineAndModel('fable')).toEqual({ engine: 'claude', model: 'claude-fable-5-2' });
+    for (const id of ['claude-fable-5', 'claude-fable-5-1']) {
+      expect(lookupModel(id)!.aliases ?? []).not.toContain('fable');
+    }
+  });
+
+  it('registers the 5.2 generation at $8/$40 with $0.20 cache reads', () => {
+    // 5.2 is cheaper than 5.1 per token and keeps the 0.025x cache-read rate.
+    for (const id of ['claude-fable-5-2', 'claude-mythos-5-2']) {
+      const m = lookupModel(id);
+      expect(m, `${id} is unregistered`).toBeDefined();
+      expect(m!.contextWindow).toBe(1_000_000);
+      expect(m!.pricing).toEqual({ input: 8, output: 40, cached: 0.2 });
+    }
   });
 
   it('prices 5.1 cache reads at the 0.025x exception, not the usual 0.1x', () => {

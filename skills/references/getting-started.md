@@ -116,7 +116,7 @@ Quick config for any client:
 | ------------ | -------------------------------------------------------------------------------------- |
 | API Base URL | `http://127.0.0.1:18796/v1`                                                            |
 | API Key      | The server token (from `~/.openclaw/server-token`), or any string if auth is disabled  |
-| Model        | `claude-fable-5-1`, `claude-opus-5-5`, `claude-sonnet-5-5`, `gpt-5.5`, `agy-pro`, etc. |
+| Model        | `claude-fable-5-2`, `claude-opus-5-5`, `claude-sonnet-5-5`, `gpt-5.5`, `agy-pro`, etc. |
 
 See [openai-compat.md](./openai-compat.md) for the full session-keying rules, `X-Session-Reset` semantics, the legacy-heuristic env var, and the `/v1/sessions` inspection endpoint.
 
