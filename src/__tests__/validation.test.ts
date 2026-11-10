@@ -139,6 +139,64 @@ describe('validateRegex', () => {
     expect(regex.test(input)).toBe(false);
     expect(Date.now() - start).toBeLessThan(100);
   });
+
+  it('stays linear on long input', () => {
+    const regex = validateRegex('(a+)+$');
+    const input = 'a'.repeat(100_000) + '!';
+    const start = Date.now();
+    expect(regex.test(input)).toBe(false);
+    expect(Date.now() - start).toBeLessThan(2000);
+  });
+
+  it('rejects lookbehind and backreferences', () => {
+    expect(() => validateRegex('(?<=a)b')).toThrow('Invalid regex pattern');
+    expect(() => validateRegex('(a)\\1')).toThrow('Invalid regex pattern');
+  });
+
+  it('accepts JavaScript escape syntax and named groups', () => {
+    expect(validateRegex('caf\\u00e9').test('CAFÉ')).toBe(true);
+    expect(validateRegex('(?<word>abc)').test('xABCx')).toBe(true);
+  });
+
+  it('rejects escapes RE2 does not define instead of reading them as literals', () => {
+    for (const pattern of ['(?<n>a)\\k<n>', '\\8', '\\e', '\\q', '\\c', '\\ca', '[\\ca]', '\\u{L}', '\\x{L}']) {
+      expect(() => validateRegex(pattern), pattern).toThrow('Invalid regex pattern');
+    }
+    expect(validateRegex('[\\cA]').test('\x01')).toBe(true);
+  });
+
+  it('reads a ] right after [ or [^ as a class member, as RE2 does', () => {
+    expect(validateRegex('[]a]').test(']')).toBe(true);
+    expect(validateRegex('token=[^]\\s"]+').test('token=abc] x')).toBe(true);
+    expect(() => validateRegex('[]')).toThrow('Invalid regex pattern');
+    expect(() => validateRegex('[^]')).toThrow('Invalid regex pattern');
+  });
+
+  it('accepts Unicode property long names and scripts', () => {
+    expect(validateRegex('\\p{Letter}+').test('é')).toBe(true);
+    expect(validateRegex('\\p{Uppercase_Letter}').test('x')).toBe(true); // case-insensitive
+    expect(validateRegex('\\p{Script=Greek}').test('α')).toBe(true);
+    expect(validateRegex('\\p{sc=Greek}').test('a')).toBe(false);
+  });
+
+  it('rejects \\C, which matches one UTF-8 byte rather than a character', () => {
+    expect(() => validateRegex('\\C')).toThrow('Invalid regex pattern');
+  });
+
+  it('reads \\u with one to three hex digits as a code point', () => {
+    expect(validateRegex('\\u41').test('a')).toBe(true);
+    expect(validateRegex('\\u41').test('u41')).toBe(false);
+  });
+
+  it('folds non-ASCII case', () => {
+    expect(validateRegex('ÄBC').test('äbc')).toBe(true);
+  });
+
+  it('is not stateful between calls', () => {
+    const regex = validateRegex('abc');
+    expect(regex.test('abc')).toBe(true);
+    expect(regex.test('abc')).toBe(true);
+  });
 });
 
 // ─── validateName ───────────────────────────────────────────────────────────

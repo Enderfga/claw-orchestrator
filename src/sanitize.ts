@@ -1,4 +1,4 @@
-import RE2 from 're2';
+import { compileSafeRegex, type SafeRegex } from './validation.js';
 
 /**
  * Shared stderr secret redaction.
@@ -9,7 +9,7 @@ import RE2 from 're2';
  * slightly different subset), which meant every new engine grew another
  * divergent, weaker copy. This module is the single source of truth; engines
  * call sanitizeSecrets(), and persistent-custom-session's buildSanitizer()
- * extends SECRET_PATTERNS with user-configured RE2 patterns.
+ * extends SECRET_PATTERNS with user-configured RE2-syntax patterns.
  */
 
 export const SECRET_PATTERNS: ReadonlyArray<{ re: RegExp; replacement: string }> = [
@@ -66,12 +66,12 @@ export interface SanitizerOptions {
 
 /** Build a sanitizer from common secret patterns plus optional config patterns. */
 export function buildSanitizer(options: SanitizerOptions = {}): (text: string) => string {
-  const patterns: Array<{ re: RegExp; replacement: string }> = [...SECRET_PATTERNS];
+  const extra: SafeRegex[] = [];
   for (const pattern of options.extraPatterns || []) {
     try {
       // RE2 runs in linear time and never backtracks, so user-supplied sanitize
       // patterns cannot trigger ReDoS on attacker-influenced output.
-      patterns.push({ re: new RE2(pattern, 'g') as unknown as RegExp, replacement: '***' });
+      extra.push(compileSafeRegex(pattern));
     } catch (err) {
       const label = options.label ? `[${options.label}] ` : '';
       console.warn(`${label}ignoring invalid sanitizePattern ${JSON.stringify(pattern)}: ${(err as Error).message}`);
@@ -79,11 +79,8 @@ export function buildSanitizer(options: SanitizerOptions = {}): (text: string) =
   }
 
   return (text: string): string => {
-    let result = text;
-    for (const { re, replacement } of patterns) {
-      re.lastIndex = 0;
-      result = result.replace(re, replacement);
-    }
+    let result = sanitizeSecrets(text);
+    for (const re of extra) result = re.replaceAll(result, '***');
     return result;
   };
 }

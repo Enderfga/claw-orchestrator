@@ -16,7 +16,6 @@ import { execEngine } from './engine-spawn.js';
 const execFileAsync = promisify(execFile);
 import * as http from 'node:http';
 import { createRequire } from 'node:module';
-import RE2 from 're2';
 
 const _require = createRequire(import.meta.url);
 function getPluginVersion(): string {
@@ -167,7 +166,7 @@ import {
 import { checkBudget, isBudgetExceeded } from './budget.js';
 import { withFileLock } from './kernel/file-lock.js';
 import { InboxManager, type SessionLookup } from './inbox-manager.js';
-import { sanitizeCwd, validateName } from './validation.js';
+import { compileSafeRegex, sanitizeCwd, validateName } from './validation.js';
 import { PersistentClaudeSession } from './persistent-session.js';
 import {
   cloneTranscript,
@@ -1997,7 +1996,7 @@ export class SessionManager {
   ): Promise<Array<{ time: string; type: string; content: string }>> {
     const managed = this._getSession(name);
     const history = managed.session.getHistory(GREP_HISTORY_FETCH);
-    const regex = new RE2(pattern, 'i');
+    const regex = compileSafeRegex(pattern, { ignoreCase: true });
     return history
       .filter((ev) => regex.test(JSON.stringify(ev)))
       .slice(0, limit)
