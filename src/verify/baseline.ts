@@ -15,7 +15,11 @@
  * Here the base commit is recorded when the run starts, and the change set is
  * tracked-diff ∪ untracked-files. Nothing mutates the caller's index: untracked
  * files are rendered with `git diff --no-index /dev/null <file>`, which emits a
- * proper new-file patch without an `add -N`.
+ * proper new-file patch without an `add -N`, and tracked changes come from the
+ * plumbing `git diff-index`. Porcelain `git diff` refreshes stale stat data (a
+ * file an editor or a build touched without changing it) and writes .git/index
+ * back under index.lock, which a commit running in the same repository at that
+ * moment fails on; `git diff-index` compares the same content and never writes.
  */
 
 import crypto from 'node:crypto';
@@ -72,7 +76,7 @@ export async function changedFilesSince(cwd: string, baseSha: string | undefined
   const files: ChangedFile[] = [];
 
   if (baseSha) {
-    const r = await exec('git', ['-C', cwd, 'diff', '--numstat', '--no-renames', baseSha, '--'], {
+    const r = await exec('git', ['-C', cwd, 'diff-index', '--numstat', '--no-renames', baseSha, '--'], {
       timeoutMs: GIT_TIMEOUT_MS,
     });
     if (r.code === 0) {
@@ -104,14 +108,14 @@ export async function changedFilesSince(cwd: string, baseSha: string | undefined
 }
 
 /**
- * A unified patch covering the same set: `git diff <base>` for tracked changes,
+ * A unified patch covering the same set: `git diff-index -p <base>` for tracked changes,
  * then a synthetic new-file patch per untracked file appended after it.
  */
 export async function capturePatch(cwd: string, baseSha: string | undefined): Promise<string> {
   const parts: string[] = [];
 
   if (baseSha) {
-    const r = await exec('git', ['-C', cwd, 'diff', '--unified=3', '--no-renames', baseSha, '--'], {
+    const r = await exec('git', ['-C', cwd, 'diff-index', '-p', '--unified=3', '--no-renames', baseSha, '--'], {
       timeoutMs: GIT_TIMEOUT_MS,
     });
     if (r.code === 0 && r.out.trim()) parts.push(r.out.replace(/\n*$/, '\n'));
@@ -145,19 +149,22 @@ export async function capturePatch(cwd: string, baseSha: string | undefined): Pr
  * and a stale verdict sailed through. The common case — an agent editing a file
  * it had already edited — was exactly the case it missed.
  *
- * So this hashes content: HEAD, the full `git diff HEAD` patch (which covers
- * staged and unstaged changes to tracked files), and the path plus bytes of
- * every untracked file.
+ * So this hashes content: HEAD, the full `git diff-index -p HEAD` patch (which
+ * covers staged and unstaged changes to tracked files), and the path plus bytes
+ * of every untracked file. Like the rest of this module it only reads: plumbing
+ * diff and `git --no-optional-locks status` leave the caller's index alone.
  *
  * Returns undefined outside a repo — a caller that cannot fingerprint must not
  * assume the tree held still.
  */
 export async function treeFingerprint(cwd: string): Promise<string | undefined> {
-  const status = await exec('git', ['-C', cwd, 'status', '--porcelain'], { timeoutMs: GIT_TIMEOUT_MS });
+  const status = await exec('git', ['--no-optional-locks', '-C', cwd, 'status', '--porcelain'], {
+    timeoutMs: GIT_TIMEOUT_MS,
+  });
   if (status.code !== 0) return undefined;
 
   const head = await exec('git', ['-C', cwd, 'rev-parse', 'HEAD'], { timeoutMs: GIT_TIMEOUT_MS });
-  const tracked = await exec('git', ['-C', cwd, 'diff', 'HEAD'], { timeoutMs: GIT_TIMEOUT_MS });
+  const tracked = await exec('git', ['-C', cwd, 'diff-index', '-p', 'HEAD'], { timeoutMs: GIT_TIMEOUT_MS });
 
   const hash = crypto.createHash('sha256');
   hash.update(head.code === 0 ? head.out.trim() : 'no-head');
