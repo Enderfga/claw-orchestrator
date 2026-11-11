@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [7.21.4] - 2026-11-11
+
 ### Fixed
 
 - **UltraApp's router no longer passes the dashboard's auth cookie to apps.** Browsers scope cookies by
@@ -14,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `:19000`, which forwarded it, and with it the server's full-control token, to every app backend; a
   backend could also overwrite it with its own `Set-Cookie`. The router now removes `clawo_auth` from the
   request's `Cookie` header and drops any `Set-Cookie` for it from the response. Other cookies pass through.
+  (#174, thanks @ajmtrz)
 
 ## [7.21.3] - 2026-11-11
 
