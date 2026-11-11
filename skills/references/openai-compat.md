@@ -63,7 +63,8 @@ Without the hash fallback, unkeyed callers (for example OpenClaw's main agent, c
 The model is mixed into the hash so that two callers with the same system prompt but different requested models (e.g. one wants `opus`, another wants `sonnet`) get separate sessions rather than responses from the wrong model.
 
 The full plugin-side session name is `openai-<key>`. The key becomes a directory
-name — the bridge starts each session in `os.tmpdir()/openclaw-compat-<name>` —
+name — the bridge starts each session in `~/.claw-orchestrator/compat/<name>`, a
+directory of mode 0700 that must belong to the server's user —
 so a key that is not 1–64 characters of `[A-Za-z0-9._-]` without `..` is replaced
 by a hash of itself (`k-<16 hex>`). An ordinary id is used unchanged; a key
 containing path separators cannot choose where the session runs.
@@ -423,7 +424,7 @@ Sample response:
       "key": "sys-a3f81c9d0b27",
       "session_name": "openai-sys-a3f81c9d0b27",
       "model": "claude-opus-5-5",
-      "cwd": "/tmp/openclaw-compat-openai-sys-a3f81c9d0b27",
+      "cwd": "/home/me/.claw-orchestrator/compat/openai-sys-a3f81c9d0b27",
       "created": "2026-04-09T03:12:18.441Z",
       "turns": 68,
       "turns_succeeded": 14,

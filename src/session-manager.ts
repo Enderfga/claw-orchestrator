@@ -1877,7 +1877,8 @@ export class SessionManager {
     // previously started run's spec — a subflow referencing a template by name
     // without arguments has nothing to run.
     const record = loadRun(name);
-    return record?.spec;
+    if (!record?.spec || hasInternalNodes(record.spec)) return undefined;
+    return record.spec;
   }
 
   /**
@@ -1897,6 +1898,7 @@ export class SessionManager {
     spec: WorkflowSpec,
     opts: { runId?: string; cwd?: string; contract?: unknown } = {},
   ): Promise<RunRecord> {
+    refuseInternalNodes(spec);
     return this.kernel.start(spec, opts);
   }
 
@@ -4976,5 +4978,29 @@ export class SessionManager {
       }
     }
     if (pruned) this._debouncedSave();
+  }
+}
+
+/**
+ * Node kinds only UltraApp's own build pipeline places. Their fields (the app's
+ * directories, slug and version) are trusted as UltraApp wrote them, so a
+ * caller's spec may not use them, directly or inside an inline subflow, and a
+ * subflow may not name a stored run that does.
+ */
+const INTERNAL_NODE_KINDS: ReadonlySet<string> = new Set(['ultraapp_synth', 'ultraapp_deploy']);
+
+function hasInternalNodes(spec: WorkflowSpec): boolean {
+  return (spec.nodes ?? []).some(
+    (n) =>
+      INTERNAL_NODE_KINDS.has(n.kind) ||
+      (n.kind === 'subflow' && typeof n.workflow === 'object' && n.workflow !== null && hasInternalNodes(n.workflow)),
+  );
+}
+
+function refuseInternalNodes(spec: WorkflowSpec): void {
+  if (spec && Array.isArray(spec.nodes) && hasInternalNodes(spec)) {
+    throw new Error(
+      `Workflow '${spec.name}' uses a node kind internal to UltraApp (${[...INTERNAL_NODE_KINDS].join(', ')})`,
+    );
   }
 }

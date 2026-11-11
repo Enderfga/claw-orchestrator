@@ -85,12 +85,23 @@ export async function extractMetadata(p: string, opts: ExtractMetaOptions = {}):
   } catch {
     /* missing file — return empty */
   }
-  const fileRes = await runner('file', [p]);
+  // `--` and the `file:` protocol: a path is only ever a path, never an option or a URL.
+  const fileRes = await runner('file', ['--', p]);
   if (fileRes.ok) {
     const m = fileRes.stdout.trim();
     meta.fileType = m.includes(': ') ? m.slice(m.indexOf(': ') + 2) : m;
   }
-  const ffRes = await runner('ffprobe', ['-v', 'quiet', '-print_format', 'json', '-show_format', '-show_streams', p]);
+  const ffRes = await runner('ffprobe', [
+    '-v',
+    'quiet',
+    '-protocol_whitelist',
+    'file',
+    '-print_format',
+    'json',
+    '-show_format',
+    '-show_streams',
+    `file:${p}`,
+  ]);
   if (ffRes.ok && ffRes.stdout.trim().length > 0) {
     try {
       meta.ffprobe = JSON.parse(ffRes.stdout);

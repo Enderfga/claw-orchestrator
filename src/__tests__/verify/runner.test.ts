@@ -134,6 +134,18 @@ describe('file checks', () => {
     expect((await runChecks(bad, ctx()))[0].passed).toBe(false);
   });
 
+  // The file is whatever the agent wrote, so the matcher is RE2, which matches in
+  // linear time. Native RegExp accepts both of these; RE2 refuses them.
+  it('refuses lookarounds and backreferences as an invalid matcher', async () => {
+    fs.writeFileSync(path.join(tmp, 'a.txt'), 'abab');
+    for (const matches of ['(?<=a)b', '(ab)\\1']) {
+      const c = normalizeContract({ checks: [{ type: 'file', path: 'a.txt', matches }] })!;
+      const [r] = await runChecks(c, ctx());
+      expect(r.passed).toBe(false);
+      expect(r.detail).toContain('invalid matcher');
+    }
+  });
+
   it('reports an invalid matcher rather than throwing out of the run', async () => {
     fs.writeFileSync(path.join(tmp, 'a.txt'), 'x');
     const c = normalizeContract({ checks: [{ type: 'file', path: 'a.txt', matches: '([' }] })!;

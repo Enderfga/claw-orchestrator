@@ -42,7 +42,9 @@ Concretely: there is no shell string anywhere. A `command` check is argv.
 Each check may also carry an `id` (default `<type>-<n>`, used in the evidence) and
 `required`. The contract itself is `{ id?, checks, fixOnFailureRounds?,
 protectTests? }`. `forbidPaths` and `requirePaths` are path prefixes matched by
-whole segments (`src` covers `src/a.ts`, not `srcfoo/a.ts`), not globs.
+whole segments (`src` covers `src/a.ts`, not `srcfoo/a.ts`), not globs. A `file`
+check's `matches` is compiled with RE2, so matching takes linear time whatever
+the file holds; lookarounds and backreferences are refused as an invalid matcher.
 
 As the `contract` argument of `workflow_start` or `verify_run`:
 

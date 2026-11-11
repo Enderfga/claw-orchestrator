@@ -117,7 +117,9 @@ Browsers scope cookies by host, not port, so the dashboard's `clawo_auth` cookie
 the server token, is also sent to the router when both are opened under the same hostname. The
 router removes it from the `Cookie` header before forwarding and drops any `Set-Cookie` for it
 from the app's response, so an app backend neither receives nor replaces it. Other cookies pass
-through unchanged. In `host` mode the app still runs as the same OS user, which can read
+through unchanged. For the same reason it removes `Proxy-Authorization`, and an `Authorization`
+header that carries the server token, as a reverse proxy adding the token to every request for the
+host would send; an app's own `Authorization` passes through. In `host` mode the app still runs as the same OS user, which can read
 `~/.openclaw/server-token`, and it inherits the server's environment, including
 `OPENCLAW_SERVER_TOKEN` when set. Only `docker` mode, which passes the app nothing but
 `BASE_PATH`, separates an app from the token.

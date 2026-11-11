@@ -234,6 +234,33 @@ function sseSender(res: http.ServerResponse): (event: string, data: unknown) => 
 /** Test seam: the guard is invisible from outside, and an unguarded write throws where nothing catches it. */
 export const __sseSenderForTest = sseSender;
 
+/** Compare a presented secret with the expected one in constant time. */
+export function sameSecret(presented: string | null | undefined, expected: string): boolean {
+  if (typeof presented !== 'string') return false;
+  const a = Buffer.from(presented);
+  const b = Buffer.from(expected);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+/**
+ * Where `/login` sends the browser: a path on this server, never another site.
+ * Resolved the way a browser resolves `Location`, so `/\\evil.com`, a tab or
+ * newline inside `//`, and `/.//evil.com` cannot turn into another host.
+ */
+export function loginRedirectTarget(raw: string | null | undefined): string {
+  const fallback = '/dashboard';
+  if (!raw || !raw.startsWith('/')) return fallback;
+  const base = 'http://clawo.invalid';
+  let u: URL;
+  try {
+    u = new URL(raw, base);
+  } catch {
+    return fallback;
+  }
+  if (u.origin !== base || u.pathname.startsWith('//')) return fallback;
+  return u.pathname + u.search + u.hash;
+}
+
 export class EmbeddedServer {
   private server: http.Server | null = null;
   private manager: SessionManager;
@@ -266,6 +293,19 @@ export class EmbeddedServer {
    * We accept any 32+ hex-char string (the format crypto.randomBytes(32)
    * produces) — anything else is treated as garbage and rotated out.
    */
+  /**
+   * The token a request must carry right now, or undefined when auth is off.
+   * Read fresh: another clawo instance can rewrite the token file mid-life (see
+   * the request handler). The UltraApp router asks for it too, to keep it from
+   * app backends.
+   */
+  controlToken(): string | undefined {
+    if (!this.authToken) return undefined;
+    const env = process.env.OPENCLAW_SERVER_TOKEN;
+    if (typeof env === 'string' && env !== '' && env !== 'disabled') return env;
+    return this._readPersistedToken() ?? this.authToken;
+  }
+
   private _readPersistedToken(): string | null {
     const tokenPath = path.join(os.homedir(), '.openclaw', 'server-token');
     try {
@@ -494,22 +534,16 @@ export class EmbeddedServer {
     // would then inject a token we no longer hold, and we would 401 everything
     // it forwards.
     if (this.authToken && path !== '/health') {
-      const envExplicit =
-        typeof process.env.OPENCLAW_SERVER_TOKEN === 'string' &&
-        process.env.OPENCLAW_SERVER_TOKEN !== '' &&
-        process.env.OPENCLAW_SERVER_TOKEN !== 'disabled';
-      const liveToken = envExplicit
-        ? (process.env.OPENCLAW_SERVER_TOKEN as string)
-        : (this._readPersistedToken() ?? this.authToken);
+      const liveToken = this.controlToken() as string;
 
       const authHeader = req.headers.authorization || '';
       const queryToken = url.searchParams.get('token');
       const cookieHeader = req.headers.cookie || '';
       const cookieToken = /(?:^|;\s*)clawo_auth=([^;]+)/.exec(cookieHeader)?.[1];
 
-      const bearerOk = authHeader === `Bearer ${liveToken}`;
-      const queryOk = queryToken === liveToken;
-      const cookieOk = cookieToken === liveToken;
+      const bearerOk = sameSecret(authHeader, `Bearer ${liveToken}`);
+      const queryOk = sameSecret(queryToken, liveToken);
+      const cookieOk = sameSecret(cookieToken, liveToken);
 
       if (!bearerOk && !queryOk && !cookieOk) {
         res.writeHead(401, { 'Content-Type': 'application/json' });
@@ -852,10 +886,7 @@ export class EmbeddedServer {
       if (path === '/login') {
         // Auth gate above already passed (queryOk set the cookie via Set-Cookie),
         // so reaching here means the token is valid.
-        const raw = query.get('redirect') || '/dashboard';
-        // Same-origin only: must start with '/', not '//', and contain no scheme.
-        const safe = /^\/(?!\/)/.test(raw) && !/^\/[a-z][a-z0-9+.-]*:/i.test(raw) ? raw : '/dashboard';
-        res.writeHead(302, { Location: safe });
+        res.writeHead(302, { Location: loginRedirectTarget(query.get('redirect')) });
         res.end();
         return;
       }

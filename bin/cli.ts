@@ -140,9 +140,12 @@ program
     // Boot the ultraapp reverse-proxy router on port 19000 (with fallbacks).
     // Best-effort — failure here doesn't block serve mode; ultraapp builds
     // will simply rest at build-complete instead of progressing to deploy.
+    // `server` is created below; the router only asks for the token per request.
+    let controlToken: () => string | undefined = () => undefined;
     const router = new UltraappRouter({
       port: 19000,
       mapPath: path.join(defaultStoreRoot(), '_router.json'),
+      controlToken: () => controlToken(),
     });
     let routerStartedPort: number | null = null;
     try {
@@ -154,6 +157,7 @@ program
     }
 
     const server = new EmbeddedServer(manager, parseInt(opts.port), opts.host);
+    controlToken = () => server.controlToken();
     const port = await server.start();
     // start() resolves 0 when the port is taken, which lets the plugin defer to
     // a server already running. Here nothing else would serve, and the router

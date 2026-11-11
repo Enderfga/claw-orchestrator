@@ -247,3 +247,23 @@ describe('formatEvidence', () => {
     expect(failureLines('one\ntwo\n\nthree\nfour\nfive')).toEqual(['two', 'three', 'four', 'five']);
   });
 });
+
+// The id reaches readEvidence from a request (`?evidenceId=`).
+describe('evidence ids', () => {
+  it('are single names, never paths', () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'ev-ids-'));
+    try {
+      const runDir = path.join(base, 'run');
+      const planted = path.join(base, 'planted');
+      fs.mkdirSync(planted, { recursive: true });
+      fs.writeFileSync(path.join(planted, 'bundle.json'), JSON.stringify({ verdict: 'passed' }));
+      for (const id of ['../../planted', '../planted', '..', '.', 'a/b', '']) {
+        expect(() => evidenceDir(runDir, id)).toThrow(/Invalid evidence id/);
+        expect(readEvidence(runDir, id)).toBeUndefined();
+      }
+      expect(evidenceDir(runDir, makeEvidenceId('verify', 1, 2))).toBe(path.join(runDir, 'evidence', 'verify-v01-02'));
+    } finally {
+      fs.rmSync(base, { recursive: true, force: true });
+    }
+  });
+});

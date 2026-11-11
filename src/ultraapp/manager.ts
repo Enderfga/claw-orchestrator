@@ -11,6 +11,7 @@ import {
   ingestUpload,
   validateLocalPath,
   defaultAllowedRoots,
+  type FileMetadata,
 } from './files.js';
 import { applyPatch, type PatchOp } from './json-patch.js';
 import { UltraappBuildQueue } from './build.js';
@@ -283,6 +284,19 @@ export class UltraappManager {
     });
     this.fireDriveTurn(run, `[system] User added file: ${ref}. You may call extract_metadata.`);
     return { ref };
+  }
+
+  /**
+   * `extract_metadata` for the interview model. The model names the file, so it
+   * reaches only files the user added to this run (`addFile` records each one);
+   * any other path is refused rather than read, stat'ed or handed to `file` and
+   * `ffprobe`.
+   */
+  private async extractAddedFileMetadata(runId: string, ref: string): Promise<FileMetadata> {
+    const chat = await this.opts.store.readChat(runId);
+    const added = chat.some((e) => e.role === 'system' && e.text.startsWith('[file added]') && e.payload?.ref === ref);
+    if (!added) throw new Error(`extract_metadata: ${JSON.stringify(ref)} is not a file added to this run`);
+    return defaultExtractMetadata(ref);
   }
 
   subscribe(runId: string, listener: (ev: RunEvent) => void): () => void {
@@ -964,7 +978,7 @@ export class UltraappManager {
         const results = await runToolCalls({
           runId: run.runId,
           store: this.opts.store,
-          extractMetadata: defaultExtractMetadata,
+          extractMetadata: (ref) => this.extractAddedFileMetadata(run.runId, ref),
           calls: parsed.toolCalls,
         });
         const spec = await this.opts.store.readSpec(run.runId);

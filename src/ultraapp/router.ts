@@ -38,6 +38,13 @@ export interface UltraappRouterOptions {
   mapPath: string;
   /** Try up to this many subsequent ports if `port` is taken; default 99. */
   fallbackPorts?: number;
+  /**
+   * The server's full-control token, asked for on every request because it can
+   * change. An `Authorization` header that carries it — a reverse proxy adding
+   * the server's token to every request for the host does that — is removed
+   * before the app sees the request; an app's own `Authorization` passes through.
+   */
+  controlToken?: () => string | undefined;
 }
 
 export class UltraappRouter {
@@ -45,6 +52,7 @@ export class UltraappRouter {
   private readonly mapPath: string;
   private readonly basePort: number;
   private readonly fallbackPorts: number;
+  private readonly controlToken: (() => string | undefined) | undefined;
   private server: http.Server | null = null;
   private actualPort: number = 0;
 
@@ -52,6 +60,7 @@ export class UltraappRouter {
     this.mapPath = opts.mapPath;
     this.basePort = opts.port;
     this.fallbackPorts = opts.fallbackPorts ?? 99;
+    this.controlToken = opts.controlToken;
     this.loadFromDisk();
   }
 
@@ -133,9 +142,14 @@ export class UltraappRouter {
     // itself owns prefix-stripping. Stripping here would double-strip and
     // 404 every request.
     // The dashboard's control cookie is removed on the way in and refused on
-    // the way out: a generated app is not trusted with the server's token.
+    // the way out: a generated app is not trusted with the server's token. Nor
+    // with credentials meant for this hop: `Proxy-Authorization` is addressed
+    // to a proxy, and an `Authorization` carrying the server's token is too.
     const headers: http.OutgoingHttpHeaders = { ...req.headers, 'x-forwarded-prefix': `/forge/${slug}` };
     delete headers.cookie;
+    delete headers['proxy-authorization'];
+    const token = this.controlToken?.();
+    if (token && req.headers.authorization?.includes(token)) delete headers.authorization;
     const cookie = stripControlCookie(req.headers.cookie);
     if (cookie) headers.cookie = cookie;
     const proxy = http.request(

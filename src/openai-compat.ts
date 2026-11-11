@@ -271,12 +271,11 @@ export function resolveSessionKey(body: OpenAIChatCompletionRequest, headers: ht
 /**
  * A session key reaches us verbatim from the caller — the `x-session-id` header
  * or the `user` field — and the name derived from it becomes a DIRECTORY name:
- * `handleChatCompletion` builds `os.tmpdir()/openclaw-compat-<name>` and calls
- * `mkdirSync(..., {recursive: true})`, then starts the session there under
- * `permissionMode: 'bypassPermissions'`. A key carrying path separators
- * therefore both creates a directory anywhere the process can write and points
- * a permissionless agent at it — measured: `x-session-id: ../../../../etc/x`
- * resolved outside the temp dir entirely.
+ * `handleChatCompletion` runs the session in `compatSessionDir(<name>)` under
+ * `permissionMode: 'bypassPermissions'`. A key carrying path separators would
+ * both create a directory anywhere the process can write and point a
+ * permissionless agent at it — measured, when the directory still lived in the
+ * temp dir: `x-session-id: ../../../../etc/x` resolved outside it entirely.
  *
  * Keys that are already safe pass through unchanged, so a caller using an
  * ordinary id keeps the session name it has always had. Anything else is
@@ -963,6 +962,32 @@ export function __seededConversationCount(): number {
   return seededConversations.size;
 }
 
+/**
+ * The directory an OpenAI-compat session runs in, under the server's own data
+ * directory: `~/.claw-orchestrator/compat/<session>`, mode 0700. Not the system
+ * temp dir: on a shared host its names are predictable and anyone can create
+ * them first, or put a CLAUDE.md above them, and the session runs there with
+ * bypassPermissions. A directory that is a symlink or belongs to someone else
+ * is refused.
+ */
+export function compatSessionDir(sessionName: string): string {
+  const root = path.join(os.homedir(), '.claw-orchestrator', 'compat');
+  fs.mkdirSync(root, { recursive: true, mode: 0o700 });
+  const dir = path.join(root, sessionName);
+  try {
+    fs.mkdirSync(dir, { mode: 0o700 });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+  }
+  for (const d of [root, dir]) {
+    const st = fs.lstatSync(d);
+    const foreign = typeof process.getuid === 'function' && st.uid !== process.getuid();
+    if (!st.isDirectory() || foreign)
+      throw new Error(`OpenAI-compat session directory ${d} is not this user's own directory`);
+  }
+  return dir;
+}
+
 export async function handleChatCompletion(
   manager: SessionManagerLike,
   body: Record<string, unknown>,
@@ -1055,10 +1080,9 @@ export async function handleChatCompletion(
   const needsCreate = !sessionExists || extracted.isNewConversation;
   if (needsCreate) {
     // OpenAI-compat sessions are API proxies, not coding sessions.
-    // Use a neutral empty temp dir so the CLI doesn't load CLAUDE.md,
+    // Use a neutral empty dir so the CLI doesn't load CLAUDE.md,
     // git state, or project context from wherever `serve` was started.
-    const sessionCwd = path.join(os.tmpdir(), `openclaw-compat-${sessionName}`);
-    if (!fs.existsSync(sessionCwd)) fs.mkdirSync(sessionCwd, { recursive: true });
+    const sessionCwd = compatSessionDir(sessionName);
     const sessionConfig: Record<string, unknown> = {
       name: sessionName,
       cwd: sessionCwd,

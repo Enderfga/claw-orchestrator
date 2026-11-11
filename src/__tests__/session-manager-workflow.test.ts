@@ -70,6 +70,30 @@ function stubAgents(m: SessionManager, result: { ok: boolean; output?: string } 
 }
 
 describe('workflow lifecycle', () => {
+  // Their directories, slug and version are trusted as UltraApp wrote them.
+  it("refuses UltraApp's internal node kinds in a caller's spec, inline subflows included", async () => {
+    const deploy = {
+      id: 'd',
+      kind: 'ultraapp_deploy',
+      appRunId: 'ua-x',
+      runDir: tmp,
+      slug: 'demo',
+      version: '../../..',
+      codebasePath: tmp,
+    };
+    await expect(manager.workflowStart({ name: 'x', cwd: tmp, nodes: [deploy] } as never)).rejects.toThrow(
+      /internal to UltraApp/,
+    );
+    const nested = {
+      id: 's',
+      kind: 'subflow',
+      workflow: { name: 'inner', nodes: [{ ...deploy, kind: 'ultraapp_synth' }] },
+    };
+    await expect(manager.workflowStart({ name: 'x', cwd: tmp, nodes: [nested] } as never)).rejects.toThrow(
+      /internal to UltraApp/,
+    );
+  });
+
   it('completes as unverified when no contract is declared', async () => {
     const kernel = stubAgents(manager);
     const rec = await manager.workflowStart({ name: 'x', cwd: tmp, nodes: [{ id: 'a', kind: 'agent', prompt: 'go' }] });

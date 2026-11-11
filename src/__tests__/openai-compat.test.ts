@@ -4,6 +4,8 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as path from 'node:path';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as http from 'node:http';
 import * as net from 'node:net';
 import {
@@ -24,6 +26,7 @@ import {
   noToolsSystemPrompt,
   buildSessionSystemPrompt,
   handleChatCompletion,
+  compatSessionDir,
   __resetSeededConversations,
   __seededConversationCount,
 } from '../openai-compat.js';
@@ -381,19 +384,32 @@ describe('sessionNameFromKey', () => {
     expect(sessionNameFromKey('default')).toBe('openai-default');
   });
 
-  // The name becomes a directory: handleChatCompletion builds
-  // `os.tmpdir()/openclaw-compat-<name>`, mkdirs it recursively, and starts the
-  // session there under bypassPermissions. The key is whatever the caller put in
-  // `x-session-id` or `user`. Measured before the fix: the path resolved to
-  // `/var/folders/xy/etc/newdir` — outside the temp dir entirely.
+  // The name becomes a directory: handleChatCompletion runs the session in
+  // `compatSessionDir(<name>)` under bypassPermissions. The key is whatever the
+  // caller put in `x-session-id` or `user`. Measured before the fix: the path
+  // resolved to `/var/folders/xy/etc/newdir` — outside the temp dir entirely.
   it('cannot carry a path out of the directory it names', () => {
-    const os = { tmpdir: () => '/tmp' };
+    const root = path.join(os.homedir(), '.claw-orchestrator', 'compat');
     for (const evil of ['../../../../etc/newdir', '../..', 'a/b', 'a\\b', '..', '.', 'x/../../../y', 'nul\u0000byte']) {
       const name = sessionNameFromKey(evil);
-      const dir = path.join(os.tmpdir(), `openclaw-compat-${name}`);
-      expect(path.dirname(dir)).toBe(os.tmpdir());
+      expect(path.dirname(compatSessionDir(name))).toBe(root);
       expect(name).not.toContain('/');
       expect(name).not.toContain('..');
+    }
+  });
+
+  // On a shared host the system temp dir lets anyone create the directory first.
+  it('runs sessions in a private directory of this user, and refuses one that is not', () => {
+    const dir = compatSessionDir('openai-private');
+    expect(fs.statSync(dir).mode & 0o777).toBe(0o700);
+    expect(fs.statSync(path.dirname(dir)).mode & 0o777).toBe(0o700);
+    expect(compatSessionDir('openai-private')).toBe(dir);
+    const elsewhere = fs.mkdtempSync(path.join(os.tmpdir(), 'compat-elsewhere-'));
+    try {
+      fs.symlinkSync(elsewhere, path.join(path.dirname(dir), 'openai-planted'));
+      expect(() => compatSessionDir('openai-planted')).toThrow(/not this user's own directory/);
+    } finally {
+      fs.rmSync(elsewhere, { recursive: true, force: true });
     }
   });
 

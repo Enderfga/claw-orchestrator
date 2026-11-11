@@ -16,6 +16,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { Logger } from '../logger.js';
+import { compileSafeRegex, type SafeRegex } from '../validation.js';
 import { exec as realExec, lastLines, type ExecResult } from '../kernel/exec.js';
 import { changedFilesSince, isUnder, resolveIn } from './baseline.js';
 import { checkProtectedTests, contractScripts, type TestSnapshot } from './protected-tests.js';
@@ -309,9 +310,11 @@ function runFileCheck(
         detail: `${spec.path} unreadable: ${(e as Error).message}`,
       };
     }
-    let re: RegExp;
+    // RE2 (linear time): the text matched is whatever the agent wrote, and a
+    // backtracking pattern over it could hold the server's event loop.
+    let re: SafeRegex;
     try {
-      re = new RegExp(spec.matches);
+      re = compileSafeRegex(spec.matches);
     } catch (e) {
       return { passed: false, durationMs: Date.now() - startedAt, detail: `invalid matcher: ${(e as Error).message}` };
     }

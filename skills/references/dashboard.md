@@ -121,7 +121,8 @@ proxyHTTP(req, res, 18796);
 The `/login?token=...&redirect=/dash` endpoint exists as a fallback for
 quick one-shot setups (works locally and through proxies that DON'T inject
 the Bearer for you), but the proxy-injects-Bearer pattern is preferred
-because users never see or paste the token.
+because users never see or paste the token. `redirect` must be a path on this
+server; anything that would resolve to another host goes to `/dashboard`.
 
 The token file is written only after the server has bound its port, so a
 second process that fails to bind does not overwrite the running server's

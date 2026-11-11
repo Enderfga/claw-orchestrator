@@ -11,7 +11,12 @@ import * as net from 'node:net';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { EmbeddedServer, __sseSenderForTest as sseSenderForTest } from '../embedded-server.js';
+import {
+  EmbeddedServer,
+  __sseSenderForTest as sseSenderForTest,
+  loginRedirectTarget,
+  sameSecret,
+} from '../embedded-server.js';
 import type { SessionManager } from '../session-manager.js';
 import { resolveAlias } from '../models.js';
 import { useIsolatedHome } from './helpers/isolate-home.js';
@@ -1134,5 +1139,40 @@ describe('EmbeddedServer — workflow event stream', () => {
 
     const unknown = await readStream('/workflow/nope/events');
     expect(unknown).not.toContain('event: snapshot');
+  });
+});
+
+describe('/login redirect target', () => {
+  // The value is URL-decoded before it gets here, and browsers drop tabs and
+  // newlines and read `\\` as `/` when they resolve `Location`.
+  it.each([
+    '//evil.com',
+    '/\\evil.com',
+    '/\t/evil.com',
+    '/\n/evil.com',
+    '/.//evil.com',
+    '/a/..//evil.com',
+    'https://evil.com',
+    'evil.com',
+    '',
+  ])('keeps %j on this server', (raw) => {
+    const target = loginRedirectTarget(raw);
+    expect(new URL(target, 'http://127.0.0.1:18796').host).toBe('127.0.0.1:18796');
+    expect(target.startsWith('//')).toBe(false);
+  });
+
+  it('passes an ordinary path through with its query and fragment', () => {
+    expect(loginRedirectTarget('/dashboard?tab=runs#r1')).toBe('/dashboard?tab=runs#r1');
+    expect(loginRedirectTarget(null)).toBe('/dashboard');
+  });
+});
+
+describe('sameSecret', () => {
+  it('matches only the exact secret', () => {
+    expect(sameSecret('Bearer abc', 'Bearer abc')).toBe(true);
+    expect(sameSecret('Bearer abd', 'Bearer abc')).toBe(false);
+    expect(sameSecret('Bearer ab', 'Bearer abc')).toBe(false);
+    expect(sameSecret(undefined, 'abc')).toBe(false);
+    expect(sameSecret(null, 'abc')).toBe(false);
   });
 });

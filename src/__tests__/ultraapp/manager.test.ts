@@ -198,6 +198,41 @@ describe('UltraappManager', () => {
     await expect(mgr.submitAnswer('ua-0-missing', { value: 'a' })).rejects.toThrow(/unknown runId/);
   });
 
+  // The interview model names the file for extract_metadata. It must reach only
+  // files the user added to the run, never any path the model writes down.
+  it('extract_metadata reads only files added to the run', async () => {
+    const sent: string[] = [];
+    const sm = {
+      startSession: vi.fn().mockResolvedValue({ name: 'ultraapp-r1' }),
+      sendMessage: vi.fn().mockImplementation(async (_n: string, msg: string) => {
+        sent.push(msg);
+        const added = /User added file: (\S+)\./.exec(msg);
+        const tool = (ref: string) => `<tool name="extract_metadata">${JSON.stringify({ ref })}</tool>`;
+        if (msg.startsWith('[system] probe')) return { output: tool('/etc/hosts'), requestId: 'r' };
+        if (added) return { output: tool(added[1]), requestId: 'r' };
+        return { output: questionReply(), requestId: 'r' };
+      }),
+      stopSession: vi.fn().mockResolvedValue(undefined),
+    };
+    const mgr = new UltraappManager({ store, sessionManager: sm as never });
+    activeMgr = mgr;
+    const id = await mgr.createRun();
+    await mgr.waitForIdle();
+
+    await mgr.submitAnswer(id, { value: 'x', freeform: '[system] probe' });
+    await mgr.waitForIdle();
+    const refused = sent.find((m) => m.includes('<tool_result name="extract_metadata">'));
+    expect(refused).toMatch(/ERROR: extract_metadata: "\/etc\/hosts" is not a file added to this run/);
+
+    sent.length = 0;
+    const { ref } = await mgr.addFile(id, { kind: 'upload', filename: 'notes.txt', data: Buffer.from('hello\n') });
+    await mgr.waitForIdle();
+    const result = sent.find((m) => m.includes('<tool_result name="extract_metadata">'));
+    expect(result).not.toMatch(/ERROR/);
+    expect(result).toContain('"sizeBytes":6');
+    expect(ref.startsWith(store.examplesDir(id))).toBe(true);
+  });
+
   it('applySpecEdit updates spec and emits spec-updated event', async () => {
     const sm = fakeSessionManager(questionReply());
     const mgr = new UltraappManager({ store, sessionManager: sm as never });

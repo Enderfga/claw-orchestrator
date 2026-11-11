@@ -43,7 +43,15 @@ export function evidenceRoot(runDir: string): string {
   return path.join(runDir, 'evidence');
 }
 
+/**
+ * One directory under the run's evidence root. The id can come from a request
+ * (`?evidenceId=`), so it must be a single name like the ones `makeEvidenceId`
+ * produces, never a path.
+ */
 export function evidenceDir(runDir: string, evidenceId: string): string {
+  if (!/^[\w.-]+$/.test(evidenceId) || evidenceId === '.' || evidenceId === '..') {
+    throw new Error(`Invalid evidence id ${JSON.stringify(evidenceId)}`);
+  }
   return path.join(evidenceRoot(runDir), evidenceId);
 }
 

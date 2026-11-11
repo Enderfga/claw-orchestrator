@@ -180,6 +180,48 @@ describe('UltraappRouter', () => {
     });
   });
 
+  // A reverse proxy that adds the server's token to every request for the host
+  // would hand it to the app; `Proxy-Authorization` is addressed to a proxy.
+  it("keeps the server's token and proxy credentials from the app, and passes the app's own Authorization", async () => {
+    const seen: Array<{ auth?: string; proxy?: string }> = [];
+    const echoPort = await freePort();
+    const echo = await new Promise<http.Server>((resolve) => {
+      const srv = http.createServer((req, res) => {
+        seen.push({ auth: req.headers.authorization, proxy: req.headers['proxy-authorization'] as string | undefined });
+        res.end('ok');
+      });
+      srv.listen(echoPort, '127.0.0.1', () => resolve(srv));
+    });
+    const guardedPort = await freePort();
+    const guarded = new UltraappRouter({
+      port: guardedPort,
+      mapPath: path.join(path.dirname(mapPath), 'guarded.json'),
+      fallbackPorts: 10,
+      controlToken: () => 'CONTROL-TOKEN',
+    });
+    const port = await guarded.start();
+    guarded.register('g', echoPort);
+    const get = (headers: Record<string, string>) =>
+      new Promise<void>((resolve, reject) => {
+        http
+          .get({ host: '127.0.0.1', port, path: '/forge/g/x', headers }, (res) => {
+            res.resume();
+            res.on('end', () => resolve());
+          })
+          .on('error', reject);
+      });
+    try {
+      await get({ authorization: 'Bearer CONTROL-TOKEN', 'proxy-authorization': 'Basic cHJveHk6cHc=' });
+      await get({ authorization: 'Bearer sk-app-own-key' });
+      expect(seen).toEqual(
+        [{}, { auth: 'Bearer sk-app-own-key' }].map((e) => ({ auth: undefined, proxy: undefined, ...e })),
+      );
+    } finally {
+      await guarded.stop();
+      await new Promise<void>((r) => echo.close(() => r()));
+    }
+  });
+
   it('falls back to next free port when basePort taken', async () => {
     const blocker = http.createServer().listen(0, '127.0.0.1');
     await new Promise<void>((r) => blocker.on('listening', () => r()));
