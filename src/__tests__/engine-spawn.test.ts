@@ -106,6 +106,43 @@ describe('spawnEngine', () => {
     }
   });
 
+  // An engine never needs the orchestrator's control token, and it would sit
+  // in the environment of every engine CLI, ACP agent and custom engine.
+  it('keeps the server token out of the engine environment, for spawn and exec alike', async () => {
+    const script =
+      'process.stdout.write(JSON.stringify([process.env.OPENCLAW_SERVER_TOKEN, process.env.CLAWO_AUTH_TOKEN, process.env.KEEP_ME]))';
+    const env = {
+      ...process.env,
+      OPENCLAW_SERVER_TOKEN: 'server-secret',
+      CLAWO_AUTH_TOKEN: 'client-secret',
+      KEEP_ME: 'kept',
+    };
+    const child = spawnEngine(process.execPath, ['-e', script], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+    const { stdout } = await capture(child);
+    expect(JSON.parse(stdout)).toEqual([null, null, 'kept']);
+    const exec = await execEngine(process.execPath, ['-e', script], { env });
+    expect(JSON.parse(exec.stdout)).toEqual([null, null, 'kept']);
+    // The caller's env object is not modified.
+    expect(env.OPENCLAW_SERVER_TOKEN).toBe('server-secret');
+  });
+
+  it('keeps the server token out when the engine inherits process.env', async () => {
+    const script = 'process.stdout.write(String(process.env.OPENCLAW_SERVER_TOKEN))';
+    const saved = process.env.OPENCLAW_SERVER_TOKEN;
+    process.env.OPENCLAW_SERVER_TOKEN = 'server-secret';
+    try {
+      const { stdout } = await capture(
+        spawnEngine(process.execPath, ['-e', script], { stdio: ['ignore', 'pipe', 'pipe'] }),
+      );
+      expect(stdout).toBe('undefined');
+      expect((await execEngine(process.execPath, ['-e', script])).stdout).toBe('undefined');
+      expect(process.env.OPENCLAW_SERVER_TOKEN).toBe('server-secret');
+    } finally {
+      if (saved === undefined) delete process.env.OPENCLAW_SERVER_TOKEN;
+      else process.env.OPENCLAW_SERVER_TOKEN = saved;
+    }
+  });
+
   it.runIf(isWin)('keeps argv intact through a .cmd shim in a path with spaces', async () => {
     const { cmdPath, dir } = writeCmdFixture();
     try {

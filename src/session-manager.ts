@@ -8,12 +8,10 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { execFile, execFileSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
-import { promisify } from 'node:util';
 import { execEngine } from './engine-spawn.js';
 
-const execFileAsync = promisify(execFile);
 import * as http from 'node:http';
 import { createRequire } from 'node:module';
 
@@ -2828,7 +2826,7 @@ export class SessionManager {
    */
   async pluginDetails(name: string): Promise<{ stdout: string; stderr: string }> {
     if (!name || typeof name !== 'string') throw new Error('plugin name required');
-    const { stdout, stderr } = await execFileAsync(this.pluginConfig.claudeBin, ['plugin', 'details', name], {
+    const { stdout, stderr } = await execEngine(this.pluginConfig.claudeBin, ['plugin', 'details', name], {
       maxBuffer: 8 * 1024 * 1024,
     });
     return { stdout, stderr };
@@ -2843,7 +2841,7 @@ export class SessionManager {
     const args = ['agents', '--json'];
     if (opts.all) args.push('--all');
     if (opts.cwd) args.push('--cwd', path.resolve(opts.cwd));
-    const { stdout } = await execFileAsync(this.pluginConfig.claudeBin, args, {
+    const { stdout } = await execEngine(this.pluginConfig.claudeBin, args, {
       maxBuffer: 16 * 1024 * 1024,
       timeout: 30_000,
     });
@@ -3053,7 +3051,7 @@ export class SessionManager {
     if (dryRun) args.push('--dry-run');
     else args.push('--yes');
     if (!opts.all && opts.path) args.push(path.resolve(opts.path));
-    const { stdout, stderr } = await execFileAsync(this.pluginConfig.claudeBin, args, {
+    const { stdout, stderr } = await execEngine(this.pluginConfig.claudeBin, args, {
       maxBuffer: 8 * 1024 * 1024,
     });
     return { stdout, stderr, dryRun };

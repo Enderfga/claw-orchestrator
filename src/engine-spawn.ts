@@ -135,6 +135,25 @@ export function killEngineTree(child: ChildProcess): void {
 }
 
 /**
+ * The orchestrator's own control credential: the server token, and the name the
+ * `clawo` CLI also reads it from. No engine needs it, and every engine CLI, ACP
+ * agent and custom engine would otherwise inherit it with the rest of the
+ * server's environment.
+ */
+const SERVER_CREDENTIAL_VARS = ['OPENCLAW_SERVER_TOKEN', 'CLAWO_AUTH_TOKEN'] as const;
+
+/** The environment an engine runs with: the given one (or the server's), minus the server's credential, PWD at cwd. */
+function engineEnv(base: NodeJS.ProcessEnv | undefined, cwd: string | undefined): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...(base ?? process.env) };
+  for (const name of SERVER_CREDENTIAL_VARS) delete env[name];
+  // `cwd` moves the process but leaves the inherited PWD naming the parent's
+  // directory, and some engines trust PWD: opencode resolves its project from
+  // it, so a session started by a server ran in the server's directory.
+  if (cwd) env.PWD = resolvePath(cwd);
+  return env;
+}
+
+/**
  * Streaming spawn for engine CLIs. Same signature and return type as
  * `node:child_process` spawn, so call sites change by one import line.
  *
@@ -150,10 +169,7 @@ export function spawnEngine(
 ): ChildProcess {
   const { launcher, ...spawnOptions } = options;
   const cwd = typeof spawnOptions.cwd === 'string' ? spawnOptions.cwd : undefined;
-  // `cwd` moves the process but leaves the inherited PWD naming the parent's
-  // directory, and some engines trust PWD: opencode resolves its project from
-  // it, so a session started by a server ran in the server's directory.
-  const env = cwd ? { ...(spawnOptions.env ?? process.env), PWD: resolvePath(cwd) } : (spawnOptions.env ?? process.env);
+  const env = engineEnv(spawnOptions.env, cwd);
   if (launcher && launcher.length > 0) {
     // The launcher is what gets spawned, so it decides whether this argv goes
     // through cmd.exe.
@@ -207,7 +223,7 @@ export function execEngine(bin: string, args: string[], opts: ExecEngineOptions 
 
     let child: ChildProcess;
     try {
-      const childEnv = cwd ? { ...(env ?? process.env), PWD: resolvePath(cwd) } : (env ?? process.env);
+      const childEnv = engineEnv(env, cwd);
       child = crossSpawn(bin, prepareArgs(bin, args, childEnv, cwd), {
         cwd,
         env: childEnv,
