@@ -972,6 +972,30 @@ describe('EmbeddedServer', () => {
       expect(res.status).toBe(400);
       expect((res.body as Record<string, string>).error).toContain('Invalid JSON');
     });
+
+    // `//[/` is a network-path reference with an invalid host, so `new URL()`
+    // throws on it. Thrown from the request listener, that took down the whole
+    // process (the OpenClaw Gateway, for the plugin) before any token check.
+    it.each([
+      ['enabled', 'secret-token'],
+      ['disabled', 'disabled'],
+    ])('answers 400 to a request target that is not a valid URL, auth %s, and keeps serving', async (_, token) => {
+      process.env.OPENCLAW_SERVER_TOKEN = token;
+      port = await getFreePort();
+      server = new EmbeddedServer(manager, port);
+      await server.start();
+
+      const res = await rawRequest(port, '//[/', { method: 'GET' });
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({ ok: false, error: 'Invalid request target' });
+
+      const next = await request(port, '/session/list', {
+        method: 'POST',
+        body: {},
+        headers: { Authorization: 'Bearer secret-token' },
+      });
+      expect(next.status).toBe(200);
+    });
   });
 });
 
