@@ -14,6 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   running in the same repository at that moment could fail on the lock. The check now runs
   `git --no-optional-locks status`, which reads the same state and leaves the index alone.
 
+### Docs
+
+- **A security policy.** `SECURITY.md` says which releases get security fixes (only the latest release line), how to
+  report a vulnerability privately through GitHub, and what is in and out of scope, with the documented security
+  model of the embedded server's token listed as out of scope.
+
 ## [7.22.1] - 2026-11-11
 
 ### Fixed
