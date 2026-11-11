@@ -16,9 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Docs
 
-- **A security policy.** `SECURITY.md` says which releases get security fixes (only the latest release line), how to
-  report a vulnerability privately through GitHub, and what is in and out of scope, with the documented security
-  model of the embedded server's token listed as out of scope.
+- **A security policy.** `SECURITY.md` says which releases get security fixes (only the latest minor release
+  line), how to report a vulnerability privately through GitHub, and what is in and out of scope: the documented
+  security model of the embedded server's token, and what an engine session does within the settings it was given
+  (prompt injection included), are out of scope; a way past either is in scope.
 
 ## [7.22.1] - 2026-11-11
 
