@@ -110,6 +110,7 @@ clawo session-start [name] [options]
 | `--enable-auto-mode`            | Enable auto permission mode                                                                                 |
 | `--resume-session-id <id>`      | Resume an earlier conversation by the engine's own id (Claude session id, Codex thread id, …)               |
 | `--base-url <url>`              | Custom API endpoint (for proxy)                                                                             |
+| `--claude-account <name>`       | Claude engine: run under this account from `claude-accounts.json`, or `auto` (see multi-engine.md)          |
 | `--add-dir <dirs>`              | Comma-separated additional working directories                                                              |
 | `--custom-engine <preset>`      | With `-e custom`: the id of a bundled engine preset (see [`clawo engines`](#clawo-engines))                 |
 | `--acp-agent <preset>`          | With `-e acp`: the id of a bundled ACP agent preset, e.g. `kimi-code`, `dsh`                                |

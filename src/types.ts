@@ -305,6 +305,15 @@ export interface SessionConfig {
   engine?: EngineType;
   model?: string;
   baseUrl?: string;
+  /**
+   * Claude engine only. The Claude account to run under, by name from the
+   * server's `claude-accounts.json`, or `auto` for the first available account in
+   * its rotation. A session on an account in the rotation moves to the next one
+   * when it reaches its usage limit and continues the same conversation. Absent:
+   * the file's `default`, else the CLI's own login. The credential is resolved by
+   * the server and never part of a session config (see claude-accounts.ts).
+   */
+  claudeAccount?: string;
   permissionMode: PermissionMode;
   // Tool control
   allowedTools?: string[];
@@ -679,6 +688,8 @@ export interface SessionInfo {
   budgetUsd?: number;
   /** True once `costUsd` reached `budgetUsd` — further turns are refused. */
   budgetExhausted?: boolean;
+  /** The Claude account the session is running under now, when it runs under one. */
+  claudeAccount?: string;
 }
 
 /** A tool call the engine refused to run during a turn. */

@@ -54,6 +54,8 @@ interface PersistedSession {
   sandboxMode?: SessionConfig['sandboxMode'];
   autoCompactPercent?: number;
   chrome?: boolean;
+  /** The Claude account the caller asked for (a name or `auto`), not the one it moved to. */
+  claudeAccount?: string;
   originalCreated: string;
   lastResumed: string;
   lastActivity: number;
@@ -171,6 +173,15 @@ import { InboxManager, type SessionLookup } from './inbox-manager.js';
 import { compileSafeRegex, sanitizeCwd, validateName } from './validation.js';
 import { PersistentClaudeSession } from './persistent-session.js';
 import {
+  ClaudeAccountPool,
+  accountEnv,
+  claudeAccountsFile,
+  loadClaudeAccounts,
+  readAccountSecret,
+  type AccountState,
+  type ClaudeAccount,
+} from './claude-accounts.js';
+import {
   cloneTranscript,
   DEFAULT_HANDOFF_CHARS,
   MIN_HANDOFF_CHARS,
@@ -267,6 +278,8 @@ interface ManagedSession {
   cwd: string;
   claudeSessionId?: string;
   skipPersistence?: boolean;
+  /** The Claude account the session runs under now; it changes when the session rotates. */
+  account?: string;
   /**
    * Per-session send chain. Concurrent sendMessage() calls on the same session
    * MUST serialize, otherwise PersistentClaudeSession's single _streamCallbacks
@@ -1236,6 +1249,7 @@ export class SessionManager {
       sandboxMode: config.sandboxMode ?? persisted?.sandboxMode,
       autoCompactPercent: config.autoCompactPercent ?? persisted?.autoCompactPercent,
       chrome: config.chrome ?? persisted?.chrome,
+      claudeAccount: config.claudeAccount ?? persisted?.claudeAccount,
       ...config,
       ...(resumeId ? { resumeSessionId: resumeId } : {}),
     };
@@ -1253,6 +1267,13 @@ export class SessionManager {
     // Circuit breaker — reject early if engine is in backoff
     this._circuitBreaker.check(engine);
 
+    // The Claude account the session runs under, resolved before anything spawns:
+    // a missing credential fails the start instead of falling back to another login.
+    // Only a session that takes an account awaits anything here: an extra await on
+    // every claude start would reorder concurrent starts.
+    const pick = engine === 'claude' ? this._pickStartAccount(fullConfig) : undefined;
+    const account = pick ? { name: pick.name, env: accountEnv(pick, await readAccountSecret(pick)) } : undefined;
+
     // Auto-inject proxy baseUrl for non-Claude models on the claude engine.
     // Starts a local proxy server that converts Anthropic → OpenAI format
     // and forwards to the OpenClaw gateway. Zero config required.
@@ -1266,6 +1287,7 @@ export class SessionManager {
       }
     }
     const session = this._createSession(engine, fullConfig);
+    if (account && session instanceof PersistentClaudeSession) session.setAccountEnv(account.env);
 
     session.on(SESSION_EVENT.LOG, (...args: unknown[]) => this.logger.info(`[Session:${name}]`, ...args));
 
@@ -1295,6 +1317,7 @@ export class SessionManager {
       cwd: fullConfig.cwd,
       claudeSessionId: this._sessionResumeId(engine, session),
       skipPersistence: skipPersist,
+      ...(account ? { account: account.name } : {}),
     };
 
     release();
@@ -1376,6 +1399,12 @@ export class SessionManager {
         }
       }
 
+      // Leave an account the pool already knows is spent before the turn hits it.
+      // Awaited only when there is a move to make, so a session without an
+      // account sends on the same tick it always did.
+      const leaving = this._rotateBeforeTurn(name, managed);
+      if (leaving) await leaving;
+
       const sendOpts: Record<string, unknown> = {
         waitForComplete: true,
         timeout: options.timeout || TURN_TIMEOUT_MS,
@@ -1420,7 +1449,13 @@ export class SessionManager {
         // front of its first message; after that the engine holds it itself.
         const outgoing = managed.pendingHandoff ? `${managed.pendingHandoff}\n\n${message}` : message;
         onDispatch?.();
-        const result = await managed.session.send(outgoing, sendOpts);
+        let result = await managed.session.send(outgoing, sendOpts);
+        // An account that refused the turn: continue the conversation under the next
+        // account in the rotation and send the turn again, at most once per account.
+        for (let tries = this._rotationSize(); tries > 0; tries--) {
+          if (!(await this._rotateAfterTurn(name, managed))) break;
+          result = await managed.session.send(outgoing, sendOpts);
+        }
         const after = this._statsSnapshot(managed);
         const usage = {
           tokensIn: Math.max(0, after.tokensIn - ledgerBefore.tokensIn),
@@ -1556,6 +1591,7 @@ export class SessionManager {
       effort: source.config.effort,
       maxBudgetUsd: source.config.maxBudgetUsd,
       autoCompactPercent: source.config.autoCompactPercent,
+      claudeAccount: source.config.claudeAccount,
       systemPrompt: source.config.systemPrompt,
       appendSystemPrompt: source.config.appendSystemPrompt,
       addDir: source.config.addDir,
@@ -2095,6 +2131,180 @@ export class SessionManager {
       }
       throw new Error(`Failed to switch model for '${name}': ${(err as Error).message}`);
     }
+  }
+
+  // ─── Claude accounts ─────────────────────────────────────────────────────
+
+  /** The accounts file as last read, keyed by path and mtime so an edit is picked up. */
+  private _accounts: { file: string; mtimeMs: number; pool: ClaudeAccountPool | null } | undefined;
+  /** Per-account usage, kept across reloads of the accounts file. */
+  private readonly _accountState = new Map<string, AccountState>();
+
+  /** The account pool from `claude-accounts.json`, or null without one. Throws on an invalid file. */
+  private _accountPool(): ClaudeAccountPool | null {
+    const file = claudeAccountsFile();
+    let mtimeMs = -1;
+    try {
+      mtimeMs = fs.statSync(file).mtimeMs;
+    } catch {
+      /* no file: no accounts */
+    }
+    if (this._accounts?.file === file && this._accounts.mtimeMs === mtimeMs) return this._accounts.pool;
+    const config = mtimeMs < 0 ? null : loadClaudeAccounts(file);
+    const pool = config ? new ClaudeAccountPool(config, Date.now, this._accountState) : null;
+    this._accounts = { file, mtimeMs, pool };
+    return pool;
+  }
+
+  /**
+   * The account a starting claude session runs under; its credential is read by the caller.
+   *
+   * An account means a Claude model reached with the account's own credential,
+   * so it does not combine with a `baseUrl`, a non-Claude model (served through
+   * the built-in proxy) or `CLAWO_CLAUDE_GATEWAY`. Asking for one there is an
+   * error; the file's `default` simply does not apply. A named account the pool
+   * already knows is spent starts the session on the next one in the rotation.
+   */
+  private _pickStartAccount(config: SessionConfig): ClaudeAccount | undefined {
+    const explicit = config.claudeAccount;
+    let pool: ClaudeAccountPool | null;
+    try {
+      pool = this._accountPool();
+    } catch (err) {
+      if (explicit !== undefined) throw err;
+      this.logger.warn(`[SessionManager] Claude accounts ignored: ${(err as Error).message}`);
+      return undefined;
+    }
+    const want = explicit ?? pool?.defaultAccount;
+    if (want === undefined) return undefined;
+    const direct =
+      !config.baseUrl && !claudeGatewayMode() && (!config.resolvedModel || isClaudeModel(config.resolvedModel));
+    if (!direct) {
+      if (explicit === undefined) return undefined;
+      throw new Error(
+        `claudeAccount '${explicit}' runs a Claude model under the account's own credential; it cannot be combined with baseUrl, a non-Claude model, or CLAWO_CLAUDE_GATEWAY`,
+      );
+    }
+    if (!pool) throw new Error(`Claude account '${want}' requested, but ${claudeAccountsFile()} does not exist`);
+    let name = want === 'auto' ? (pool.pick() ?? pool.rotation[0]) : want;
+    if (want !== 'auto' && pool.inRotation(name) && !pool.available(name)) name = pool.pick(name) ?? name;
+    const account = pool.account(name);
+    if (!account) throw new Error(`Unknown Claude account '${name}' (not in ${claudeAccountsFile()})`);
+    return account;
+  }
+
+  /**
+   * The pool, when this session can move between accounts: it runs under an
+   * account in the rotation, and its conversation is saved, so another process
+   * can resume it. A session started with `noSessionPersistence` keeps no
+   * transcript, and moving it would silently drop its history.
+   */
+  private _rotationPool(managed: ManagedSession): ClaudeAccountPool | null {
+    if (!managed.account || !(managed.session instanceof PersistentClaudeSession)) return null;
+    if (managed.config.noSessionPersistence) return null;
+    let pool: ClaudeAccountPool | null;
+    try {
+      pool = this._accountPool();
+    } catch {
+      return null;
+    }
+    return pool?.inRotation(managed.account) ? pool : null;
+  }
+
+  private _rotationSize(): number {
+    try {
+      return this._accountPool()?.rotation.length ?? 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  /** Before a turn: leave an account the pool knows is spent, when another is available. */
+  private _rotateBeforeTurn(name: string, managed: ManagedSession): Promise<void> | undefined {
+    const pool = this._rotationPool(managed);
+    if (!pool || pool.available(managed.account!)) return undefined;
+    return (async () => {
+      for (let next = pool.pick(managed.account); next; next = pool.pick(managed.account)) {
+        if (await this._switchAccount(name, managed, pool, next)) return;
+      }
+    })();
+  }
+
+  /**
+   * After a turn: record what it reported about the account's usage, and when
+   * the account refused the turn, move the session to the next available account.
+   * True when it moved, so the caller sends the turn again.
+   */
+  private async _rotateAfterTurn(name: string, managed: ManagedSession): Promise<boolean> {
+    if (!managed.account || !(managed.session instanceof PersistentClaudeSession)) return false;
+    const usage = managed.session.accountUsage;
+    if (!usage) return false;
+    let pool: ClaudeAccountPool | null;
+    try {
+      pool = this._accountPool();
+    } catch {
+      return false;
+    }
+    pool?.record(managed.account, usage);
+    if (!usage.limited) return false;
+    const rotation = this._rotationPool(managed);
+    if (!rotation) return false;
+    for (let next = rotation.pick(managed.account); next; next = rotation.pick(managed.account)) {
+      if (await this._switchAccount(name, managed, rotation, next)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Restart the session's CLI under `next`, resuming the same conversation. An
+   * account whose credential cannot be read, or whose process does not start,
+   * is set aside for an hour; a failed start puts the session back on the account
+   * it had, so a session is never left without a process.
+   */
+  private async _switchAccount(
+    name: string,
+    managed: ManagedSession,
+    pool: ClaudeAccountPool,
+    next: string,
+  ): Promise<boolean> {
+    const session = managed.session as PersistentClaudeSession;
+    const from = managed.account;
+    const target = pool.account(next);
+    if (!target) return false;
+    let env: Record<string, string>;
+    try {
+      env = accountEnv(target, await readAccountSecret(target));
+    } catch (err) {
+      this.logger.warn(`[SessionManager] ${name}: Claude account '${next}' unusable: ${(err as Error).message}`);
+      pool.record(next, { limited: true });
+      return false;
+    }
+    try {
+      await session.switchAccount(env);
+    } catch (err) {
+      this.logger.warn(
+        `[SessionManager] ${name}: moving to Claude account '${next}' failed: ${(err as Error).message}`,
+      );
+      pool.record(next, { limited: true });
+      const back = from ? pool.account(from) : undefined;
+      if (!back) throw err;
+      await session.switchAccount(accountEnv(back, await readAccountSecret(back)));
+      this._trackPid(name, session);
+      return false;
+    }
+    managed.account = next;
+    this._trackPid(name, session);
+    this.logger.info(`[SessionManager] ${name}: Claude account '${from}' -> '${next}'`);
+    return true;
+  }
+
+  /** Record a session's current process for orphan cleanup, after it was replaced. */
+  private _trackPid(name: string, session: ISession): void {
+    if (!session.pid) return;
+    this._activePids.set(name, session.pid);
+    const command = processCommand(session.pid);
+    if (command) this._pidCommands.set(session.pid, command);
+    this._savePids();
   }
 
   /**
@@ -3047,6 +3257,7 @@ export class SessionManager {
       sandboxMode: managed.config.sandboxMode,
       autoCompactPercent: managed.config.autoCompactPercent,
       chrome: managed.config.chrome,
+      claudeAccount: managed.config.claudeAccount,
       originalCreated: existing?.originalCreated || managed.created,
       lastResumed: new Date().toISOString(),
       lastActivity: managed.lastActivity,
@@ -3261,6 +3472,7 @@ export class SessionManager {
       paused: false,
       stats,
       costUsd: Math.round(costUsd * 10000) / 10000,
+      ...(managed.account ? { claudeAccount: managed.account } : {}),
     };
     if (managed.config.maxBudgetUsd) {
       info.budgetUsd = managed.config.maxBudgetUsd;
