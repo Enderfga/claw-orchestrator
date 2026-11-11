@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **A request target that is not a valid URL no longer stops the HTTP server's process.** The server parsed
+  the target with `new URL()` before any other check and outside any `try`, so a target such as `//[/` (a
+  network-path reference with an invalid host) threw from the request listener, uncaught, and ended the
+  process, which for the OpenClaw plugin is the Gateway, with no token needed. The target is now parsed
+  once, and a target that does not parse is answered 400.
+
 ## [7.22.0] - 2026-11-11
 
 ### Added

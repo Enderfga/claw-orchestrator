@@ -502,12 +502,26 @@ export class EmbeddedServer {
       }
     }
 
+    // Parsed once, here, before anything reads it. `new URL()` throws on a target
+    // such as `//[/` (a network-path reference with an invalid host), and a throw
+    // from this listener is uncaught: it would end the process, which for the
+    // plugin is the OpenClaw Gateway, before any token check.
+    let url: URL;
+    try {
+      url = new URL(req.url || '/', `http://localhost:${this.port}`);
+    } catch {
+      req.resume();
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: 'Invalid request target' }));
+      return;
+    }
+    const path = url.pathname;
+
     // CORS — localhost by default; with auth on, /v1/ paths allow all origins
     // (for webchat frontends) and OPENCLAW_CORS_ORIGINS=* allows all paths.
     const origin = req.headers.origin || '';
-    const urlPath = new URL(req.url || '/', `http://localhost:${this.port}`).pathname;
     const corsAllowAll = process.env.OPENCLAW_CORS_ORIGINS === '*';
-    const isV1Path = urlPath.startsWith('/v1/');
+    const isV1Path = path.startsWith('/v1/');
     const isLocalhost = LOOPBACK_ORIGIN.test(origin);
     if (isLocalhost || (!authOff && (isV1Path || corsAllowAll))) {
       res.setHeader('Access-Control-Allow-Origin', origin || '*');
@@ -522,9 +536,6 @@ export class EmbeddedServer {
       res.end();
       return;
     }
-
-    const url = new URL(req.url || '/', `http://localhost:${this.port}`);
-    const path = url.pathname;
 
     // Auth: accept Bearer header, `clawo_auth` cookie, or `?token=` query.
     // We re-read ~/.openclaw/server-token PER REQUEST (64-byte read, kernel
