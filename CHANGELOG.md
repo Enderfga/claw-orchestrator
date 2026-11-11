@@ -5,15 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [7.22.1] - 2026-11-11
 
 ### Fixed
 
-- **A request target that is not a valid URL no longer stops the HTTP server's process.** The server parsed
-  the target with `new URL()` before any other check and outside any `try`, so a target such as `//[/` (a
-  network-path reference with an invalid host) threw from the request listener, uncaught, and ended the
-  process, which for the OpenClaw plugin is the Gateway, with no token needed. The target is now parsed
-  once, and a target that does not parse is answered 400.
+- **A malformed request target no longer ends the server.** The embedded server parsed each request's target
+  before authentication and outside any error handling, and `new URL` throws on some targets (`//[/`): one
+  such request ended the process, which under OpenClaw is the gateway, with no token needed. The target is
+  now parsed once, and one that does not parse is answered with 400 (#176, thanks @ajmtrz), as is one that
+  is not a path (`//host/...`). Every request also runs inside a boundary that fails only that request, and
+  a route that fails after it has started answering closes the connection instead of throwing again.
+- **`/health` answers before anything else reads the request.** It is the one route open without a token,
+  yet it buffered up to 5 MB of a POST body and counted against the rate limit that authenticated clients
+  from the same address share, so unauthenticated requests could fill the heap or keep those clients at
+  429. It now answers without reading a body and is not rate-limited, and a request the rate limit refuses
+  no longer extends the window.
+- **The UltraApp router survives an app that fails mid-response.** When an app reset the connection after
+  its response had started, the router wrote a second status line and the server process exited. It now
+  closes the client's connection instead, and a status or header Node will not forward becomes a 502.
+- **A `codex-app` session that cannot start `codex` fails to start, instead of ending the process.** A
+  failed spawn, such as `codex` missing from the gateway's `PATH`, raised an `'error'` event nothing
+  listened to; under OpenClaw that ended the gateway.
+- **Writing to an engine CLI that has just exited fails the turn, not the process.** The Claude, custom and
+  `codex-app` wrappers had no listener for errors on the CLI's stdin, so an EPIPE ended the process, and a
+  session error raised between turns, with nothing listening, did the same. Both are now logged, and only
+  the turn in flight fails.
+- **`<tool_calls>` blocks in OpenAI-compatible replies are found in linear time.** The pattern that found
+  them backtracked on a long run of whitespace with no closing tag (4,000 spaces took about 9 seconds), so
+  model output could hold the server's event loop.
+- **A streaming OpenAI-compatible reply is not written to after it has ended,** which raised an error
+  nothing listened to.
+- **UltraApp's host runtime reports an app it cannot start** (`npm` or `node` missing from `PATH`) instead
+  of ending the server.
 
 ## [7.22.0] - 2026-11-11
 
