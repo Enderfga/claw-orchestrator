@@ -416,6 +416,30 @@ describe('autoloopStart dirty worktree preflight', () => {
     assertRejectedBeforeSideEffects(mgr, runId, thrown);
   });
 
+  // The preflight only reads the workspace. A plain `git status` also refreshes
+  // stale stat data and rewrites .git/index under index.lock, which can make a
+  // commit running in the same repository at that moment fail on the lock.
+  it('leaves the Git index untouched while checking the workspace', async () => {
+    const workspace = createTempRepo();
+    repos.push(workspace);
+    // Same bytes, newer mtime: stat data in the index is now stale.
+    const later = new Date(Date.now() + 60_000);
+    fs.utimesSync(path.join(workspace, 'README.md'), later, later);
+    fs.writeFileSync(path.join(workspace, 'untracked.txt'), 'dirt\n');
+    const indexPath = path.join(workspace, '.git', 'index');
+    const indexBefore = fs.readFileSync(indexPath);
+
+    const runId = 'index-untouched';
+    let thrown: unknown;
+    try {
+      await mgr.autoloopStart({ runId, workspace, plannerEngine: 'codex' });
+    } catch (err) {
+      thrown = err;
+    }
+    assertRejectedBeforeSideEffects(mgr, runId, thrown);
+    expect(fs.readFileSync(indexPath).equals(indexBefore)).toBe(true);
+  });
+
   it('starts on a clean temp repo and creates the Planner session', async () => {
     const workspace = createTempRepo();
     repos.push(workspace);
