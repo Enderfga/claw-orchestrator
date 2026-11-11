@@ -107,7 +107,18 @@ export class UltraappRouter {
 
   private listenOn(port: number): Promise<void> {
     return new Promise((resolve, reject) => {
-      const srv = http.createServer((req, res) => this.handle(req, res));
+      // A throw while proxying fails that request, not the server process.
+      const srv = http.createServer((req, res) => {
+        try {
+          this.handle(req, res);
+        } catch (err) {
+          if (res.headersSent) res.destroy();
+          else {
+            res.writeHead(502, { 'Content-Type': 'text/plain' });
+            res.end(`proxy error: ${(err as Error).message}`);
+          }
+        }
+      });
       const onError = (err: Error) => {
         srv.removeListener('error', onError);
         reject(err);

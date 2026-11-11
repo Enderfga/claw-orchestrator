@@ -15,6 +15,7 @@ import {
   EmbeddedServer,
   __sseSenderForTest as sseSenderForTest,
   loginRedirectTarget,
+  parseRequestTarget,
   sameSecret,
 } from '../embedded-server.js';
 import type { SessionManager } from '../session-manager.js';
@@ -192,6 +193,38 @@ describe('EmbeddedServer', () => {
       const res = await request(port, '/health');
       expect(res.status).toBe(200);
       expect((res.body as Record<string, boolean>).ok).toBe(true);
+    });
+  });
+
+  // `new URL` throws on some request targets, and the first parse ran before
+  // authentication with nothing around it: one such request ended the process,
+  // which in the OpenClaw plugin is the gateway.
+  describe('malformed request targets', () => {
+    function raw(target: string): Promise<string> {
+      return new Promise((resolve, reject) => {
+        const sock = net.connect(port, '127.0.0.1', () => {
+          sock.write(`GET ${target} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n`);
+        });
+        let data = '';
+        sock.on('data', (d) => (data += d));
+        sock.on('end', () => resolve(data));
+        sock.on('error', reject);
+      });
+    }
+
+    it.each([
+      ['with auth on', 'secret-token'],
+      ['with auth off', 'disabled'],
+    ])('answers 400 and keeps serving, %s', async (_label, token) => {
+      process.env.OPENCLAW_SERVER_TOKEN = token;
+      port = await getFreePort();
+      server = new EmbeddedServer(manager, port);
+      await server.start();
+
+      for (const target of ['//[/', '//[::1', '//evil.com/x']) {
+        expect(await raw(target)).toMatch(/^HTTP\/1\.1 400 /);
+      }
+      expect((await request(port, '/health')).status).toBe(200);
     });
   });
 
@@ -1198,5 +1231,15 @@ describe('sameSecret', () => {
     expect(sameSecret('Bearer ab', 'Bearer abc')).toBe(false);
     expect(sameSecret(undefined, 'abc')).toBe(false);
     expect(sameSecret(null, 'abc')).toBe(false);
+  });
+});
+
+describe('parseRequestTarget', () => {
+  it('accepts origin-form paths and refuses everything else', () => {
+    expect(parseRequestTarget('/session/list?x=1', 1)!.pathname).toBe('/session/list');
+    expect(parseRequestTarget(undefined, 1)!.pathname).toBe('/');
+    for (const t of ['//[/', '//evil.com/x', 'http://evil.com/', '*', 'session/list']) {
+      expect(parseRequestTarget(t, 1)).toBeUndefined();
+    }
   });
 });

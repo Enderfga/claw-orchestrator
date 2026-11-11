@@ -234,6 +234,36 @@ function sseSender(res: http.ServerResponse): (event: string, data: unknown) => 
 /** Test seam: the guard is invisible from outside, and an unguarded write throws where nothing catches it. */
 export const __sseSenderForTest = sseSender;
 
+/**
+ * The request target as a URL, or undefined when it is not an origin-form path
+ * this server serves. `//host/...` is a network-path reference, not a path, and
+ * some targets make `new URL` throw.
+ */
+export function parseRequestTarget(target: string | undefined, port: number): URL | undefined {
+  const raw = target || '/';
+  if (!raw.startsWith('/') || raw.startsWith('//')) return undefined;
+  try {
+    return new URL(raw, `http://localhost:${port}`);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Fail one request that threw outside a route's own handling, and keep serving. */
+function failRequest(res: http.ServerResponse, err: unknown): void {
+  console.warn(`[embedded-server] request failed: ${boundedErrorReason(err)}`);
+  try {
+    if (res.headersSent) {
+      res.destroy();
+      return;
+    }
+    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: false, error: 'Internal error' }));
+  } catch {
+    res.destroy();
+  }
+}
+
 /** Compare a presented secret with the expected one in constant time. */
 export function sameSecret(presented: string | null | undefined, expected: string): boolean {
   if (typeof presented !== 'string') return false;
@@ -379,7 +409,16 @@ export class EmbeddedServer {
     this._rateLimitCleanupTimer.unref();
 
     return new Promise((resolve, reject) => {
-      this.server = http.createServer((req, res) => this.handleRequest(req, res));
+      // The boundary every request passes: a throw in the handler fails that
+      // request, never the process. In the OpenClaw plugin the process is the
+      // gateway itself.
+      this.server = http.createServer((req, res) => {
+        try {
+          this.handleRequest(req, res);
+        } catch (err) {
+          failRequest(res, err);
+        }
+      });
 
       this.server.on('error', (err: NodeJS.ErrnoException) => {
         // start() failed after the rate-limit timer was armed — clear it so it
@@ -505,11 +544,10 @@ export class EmbeddedServer {
     // Parsed once, here, before anything reads it. `new URL()` throws on a target
     // such as `//[/` (a network-path reference with an invalid host), and a throw
     // from this listener is uncaught: it would end the process, which for the
-    // plugin is the OpenClaw Gateway, before any token check.
-    let url: URL;
-    try {
-      url = new URL(req.url || '/', `http://localhost:${this.port}`);
-    } catch {
+    // plugin is the OpenClaw Gateway, before any token check. A target that
+    // parses but is not a path (`//host/...`) is refused too.
+    const url = parseRequestTarget(req.url, this.port);
+    if (!url) {
       req.resume();
       res.writeHead(400, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: false, error: 'Invalid request target' }));
@@ -646,10 +684,10 @@ export class EmbeddedServer {
           res.end(JSON.stringify({ ok: false, error: 'Invalid JSON' }));
           return;
         }
-        this.route(path, parsed, url.searchParams, res, req.headers);
+        this.route(path, parsed, url.searchParams, res, req.headers).catch((err) => failRequest(res, err));
       });
     } else {
-      this.route(path, {}, url.searchParams, res, req.headers);
+      this.route(path, {}, url.searchParams, res, req.headers).catch((err) => failRequest(res, err));
     }
   }
 
@@ -1718,7 +1756,10 @@ export class EmbeddedServer {
       }
     } catch (err) {
       const message = (err as Error).message;
-      if (path.startsWith('/v1/')) {
+      // A route that already answered, or opened a stream, cannot get a 500 too.
+      if (res.headersSent) {
+        res.destroy();
+      } else if (path.startsWith('/v1/')) {
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: { message, type: 'server_error', code: null } }));
       } else {
