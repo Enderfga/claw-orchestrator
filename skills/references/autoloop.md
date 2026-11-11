@@ -122,6 +122,9 @@ index-clean modified (` M`) files under `tasks/<id>/` are ignored when
 `tasks/<id>/goal.json` is a regular file, so a second run can start after a
 committed ledger was appended to. This also holds when the workspace is a
 subdirectory of the repository; changes outside the workspace still refuse.
+The check only reads: it runs `git status` with `--no-optional-locks`, so it
+never rewrites the repository's index, and a commit running in the same
+repository at that moment cannot fail on `index.lock` because of it.
 Ignored paths and non-Git workspaces start normally.
 
 Once that check passes, start keeps the run's ledger out of Git before writing

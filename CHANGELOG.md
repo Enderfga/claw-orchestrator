@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Starting an autoloop no longer rewrites the workspace's Git index.** The dirty-worktree check before a start
+  ran a plain `git status`, which refreshes stale stat data and writes `.git/index` under `index.lock`; a commit
+  running in the same repository at that moment could fail on the lock. The check now runs
+  `git --no-optional-locks status`, which reads the same state and leaves the index alone.
+
 ## [7.22.1] - 2026-11-11
 
 ### Fixed

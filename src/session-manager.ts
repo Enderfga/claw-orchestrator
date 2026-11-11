@@ -833,6 +833,9 @@ function applyAutoloopFreshStartBoundary(
   opts: { invalidRunId: 'defer' | 'refuse' },
 ): void {
   // Refuse a dirty git worktree before the run directory or Planner exists.
+  // --no-optional-locks: this check only reads, so it must not refresh and
+  // rewrite .git/index under index.lock, which a commit running in the same
+  // repository at that moment would then fail on.
   // --porcelain=v1 -z keeps paths literal (spaces/quotes). --untracked-files=all
   // overrides status.showUntrackedFiles=no, while --ignore-submodules=none
   // prevents repository config from hiding submodule dirt; do not pass
@@ -852,7 +855,16 @@ function applyAutoloopFreshStartBoundary(
   try {
     porcelain = execFileSync(
       'git',
-      ['-C', workspace, 'status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignore-submodules=none'],
+      [
+        '--no-optional-locks',
+        '-C',
+        workspace,
+        'status',
+        '--porcelain=v1',
+        '-z',
+        '--untracked-files=all',
+        '--ignore-submodules=none',
+      ],
       {
         encoding: 'utf8',
         stdio: ['ignore', 'pipe', 'pipe'],
