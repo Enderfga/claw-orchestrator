@@ -34,13 +34,23 @@ function applyOne(doc: unknown, op: PatchOp): unknown {
   throw new Error(`unsupported op ${op.op}`);
 }
 
+// Segments that reach an object's prototype rather than its own data. Patches
+// come from the interview model and from manual edits, and the spec they edit
+// lives in the gateway process, so a path through these would change every
+// object there.
+const PROTOTYPE_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
+
 function parsePath(path: string): string[] {
   if (path === '') return [];
-  if (!path.startsWith('/')) throw new Error(`bad path ${path}`);
-  return path
+  if (typeof path !== 'string' || !path.startsWith('/')) throw new Error(`bad path ${String(path)}`);
+  const tokens = path
     .slice(1)
     .split('/')
     .map((t) => t.replace(/~1/g, '/').replace(/~0/g, '~'));
+  for (const t of tokens) {
+    if (PROTOTYPE_KEYS.has(t)) throw new Error(`path segment ${t} is not allowed`);
+  }
+  return tokens;
 }
 
 function walk(doc: unknown, tokens: string[]): unknown {
@@ -50,7 +60,8 @@ function walk(doc: unknown, tokens: string[]): unknown {
       const i = t === '-' ? cur.length : Number(t);
       cur = cur[i];
     } else if (cur && typeof cur === 'object') {
-      cur = (cur as Record<string, unknown>)[t];
+      // Own properties only: an inherited one is not part of the document.
+      cur = Object.hasOwn(cur, t) ? (cur as Record<string, unknown>)[t] : undefined;
     } else {
       throw new Error(`cannot walk into ${typeof cur} at ${t}`);
     }
