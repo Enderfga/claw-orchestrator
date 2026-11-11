@@ -2,12 +2,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { spawn, spawnSync } from 'node:child_process';
 import {
   ClaudeAccountPool,
   accountEnv,
   defaultTokenEnv,
   loadClaudeAccounts,
   readAccountSecret,
+  removeAccountSettings,
+  writeAccountSettings,
   type ClaudeAccountsConfig,
 } from '../claude-accounts.js';
 
@@ -76,9 +79,35 @@ describe('loadClaudeAccounts', () => {
     ['default auto without a rotation', { accounts: { a: {} }, default: 'auto' }, /non-empty `rotation`/],
     ['an unknown default', { accounts: { a: {} }, default: 'b' }, /unknown account "b"/],
     ['switchAt out of range', { accounts: { a: {} }, switchAt: 1.5 }, /switchAt/],
+    [
+      'a gateway on another host over plain http',
+      { accounts: { g: { kind: 'gateway', baseUrl: 'http://gw.example.com:8080' } } },
+      /must use https unless it is on this machine/,
+    ],
   ])('rejects %s', (_label, doc, error) => {
     write(doc);
     expect(() => loadClaudeAccounts(file)).toThrow(error);
+  });
+
+  it.each(['http://localhost:8080', 'http://127.0.0.1:8080', 'http://[::1]:8080', 'https://gw.example.com'])(
+    'accepts a gateway at %s',
+    (baseUrl) => {
+      write({ accounts: { g: { kind: 'gateway', baseUrl } } });
+      expect(loadClaudeAccounts(file)!.accounts.g.baseUrl).toBe(baseUrl);
+    },
+  );
+
+  // The file names commands to run and endpoints to send credentials to.
+  it.runIf(typeof process.getuid === 'function')('refuses a file that group or others can write', () => {
+    write({ accounts: { a: {} } });
+    for (const mode of [0o664, 0o646, 0o666]) {
+      fs.chmodSync(file, mode);
+      expect(() => loadClaudeAccounts(file)).toThrow(/must not be writable by group or others/);
+    }
+    for (const mode of [0o600, 0o644]) {
+      fs.chmodSync(file, mode);
+      expect(loadClaudeAccounts(file)).not.toBeNull();
+    }
   });
 });
 
@@ -197,4 +226,59 @@ describe('ClaudeAccountPool', () => {
     for (const n of ['a', 'b', 'c']) pool.record(n, { limited: true, resetsAt: t + 10_000 });
     expect(pool.pick()).toBeUndefined();
   });
+});
+
+describe('the credential file', () => {
+  const tmp = os.tmpdir();
+
+  it('is 0600 in a 0700 directory named for this process, and goes when removed', () => {
+    const { dir, file } = writeAccountSettings({ env: { X: '1' } });
+    expect(path.basename(dir)).toMatch(new RegExp(`^clawo-account-${process.pid}-`));
+    expect(JSON.parse(fs.readFileSync(file, 'utf8'))).toEqual({ env: { X: '1' } });
+    if (process.platform !== 'win32') {
+      expect(fs.statSync(dir).mode & 0o777).toBe(0o700);
+      expect(fs.statSync(file).mode & 0o777).toBe(0o600);
+    }
+    removeAccountSettings(dir);
+    expect(fs.existsSync(dir)).toBe(false);
+  });
+
+  it("is removed after a crash by the next server, and a live server's is kept", async () => {
+    const dead = spawnSync(process.execPath, ['-e', '']).pid;
+    const stale = fs.mkdtempSync(path.join(tmp, `clawo-account-${dead}-`));
+    const live = fs.mkdtempSync(path.join(tmp, `clawo-account-${process.ppid}-`));
+    vi.resetModules();
+    const fresh = await import('../claude-accounts.js');
+    const { dir } = fresh.writeAccountSettings({});
+    try {
+      expect(fs.existsSync(stale)).toBe(false);
+      expect(fs.existsSync(live)).toBe(true);
+    } finally {
+      fresh.removeAccountSettings(dir);
+      fs.rmSync(live, { recursive: true, force: true });
+      fs.rmSync(stale, { recursive: true, force: true });
+    }
+  });
+
+  it('is removed when the server exits with it still in use', async () => {
+    const mod = new URL('../claude-accounts.ts', import.meta.url).href;
+    const child = spawn(
+      process.execPath,
+      [
+        '--import',
+        'tsx',
+        '--input-type=module',
+        '-e',
+        `const m = await import(${JSON.stringify(mod)}); console.log(m.writeAccountSettings({}).dir);`,
+      ],
+      { stdio: ['ignore', 'pipe', 'pipe'] },
+    );
+    let out = '';
+    child.stdout.on('data', (d) => (out += d));
+    const code = await new Promise((resolve) => child.on('close', resolve));
+    expect(code).toBe(0);
+    const dir = out.trim();
+    expect(path.basename(dir)).toMatch(/^clawo-account-\d+-/);
+    expect(fs.existsSync(dir)).toBe(false);
+  }, 30_000);
 });

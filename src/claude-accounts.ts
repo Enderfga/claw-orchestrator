@@ -28,6 +28,11 @@
  * `CLAWO_CLAUDE_TOKEN_<NAME>`) or the stdout of a command the file names
  * (`tokenCommand`, an argv). Requests only ever name an account; a secret never
  * travels in a request, a session config, the session registry or a status reply.
+ *
+ * The file decides which commands run and where credentials are sent, so it is
+ * trusted like the user's own Claude Code settings, and only when nobody else
+ * could have written it: it must belong to the server's user and not be
+ * writable by group or others. A gateway on another host must use https.
  */
 
 import * as fs from 'node:fs';
@@ -79,14 +84,48 @@ function fail(file: string, message: string): never {
   throw new Error(`Claude accounts file ${file}: ${message}`);
 }
 
+/**
+ * Refuse a file someone else could have written: it names commands to run and
+ * endpoints to send credentials to. POSIX only; Windows has no mode bits to read.
+ */
+function checkOwnership(file: string, st: fs.Stats): void {
+  if (typeof process.getuid !== 'function') return;
+  if (st.uid !== process.getuid()) fail(file, 'must belong to the user the server runs as');
+  if (st.mode & 0o022) fail(file, 'must not be writable by group or others (chmod 600)');
+}
+
+/** https, or plain http to this machine only, so a credential never crosses a network in clear. */
+function secureEndpoint(url: string): boolean {
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    return false;
+  }
+  if (u.protocol === 'https:') return true;
+  const host = u.hostname.replace(/^\[|\]$/g, '');
+  return u.protocol === 'http:' && (host === 'localhost' || host === '::1' || /^127(?:\.\d{1,3}){3}$/.test(host));
+}
+
 /** Read and validate the accounts file. A missing file means no accounts; a bad one throws. */
 export function loadClaudeAccounts(file: string = claudeAccountsFile()): ClaudeAccountsConfig | null {
   let raw: string;
+  let fd: number;
   try {
-    raw = fs.readFileSync(file, 'utf8');
+    fd = fs.openSync(file, 'r');
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
     fail(file, `cannot be read: ${(err as Error).message}`);
+  }
+  try {
+    // Checked on the open descriptor, so the file judged is the file read.
+    checkOwnership(file, fs.fstatSync(fd));
+    raw = fs.readFileSync(fd, 'utf8');
+  } catch (err) {
+    if ((err as Error).message.startsWith('Claude accounts file')) throw err;
+    fail(file, `cannot be read: ${(err as Error).message}`);
+  } finally {
+    fs.closeSync(fd);
   }
   let parsed: unknown;
   try {
@@ -121,6 +160,9 @@ export function loadClaudeAccounts(file: string = claudeAccountsFile()): ClaudeA
     if (kind === 'gateway') {
       if (typeof a.baseUrl !== 'string' || !/^https?:\/\//.test(a.baseUrl)) {
         fail(file, `gateway account "${name}" needs an http(s) baseUrl`);
+      }
+      if (!secureEndpoint(a.baseUrl)) {
+        fail(file, `gateway account "${name}": baseUrl must use https unless it is on this machine`);
       }
     } else if (a.baseUrl !== undefined || a.env !== undefined) {
       fail(file, `account "${name}": baseUrl and env apply to gateway accounts only`);
@@ -309,5 +351,86 @@ export class ClaudeAccountPool {
   /** The first available account in rotation order, skipping `except`. */
   pick(except?: string): string | undefined {
     return this.config.rotation.find((n) => n !== except && this.available(n));
+  }
+}
+
+// ─── The credential file a session's CLI reads ─────────────────────────────
+
+const SETTINGS_DIR = /^clawo-account-(\d+)-[A-Za-z0-9]+$/;
+const liveSettingsDirs = new Set<string>();
+let sweptStale = false;
+
+/**
+ * Write the `--settings` file a session's CLI takes its credential from: mode
+ * 0600 in a new 0700 directory. The directory name carries this process's pid,
+ * so the first write removes directories a server that has since died left
+ * behind, and the ones still here when this process exits are removed then.
+ */
+export function writeAccountSettings(settings: Record<string, unknown>): { dir: string; file: string } {
+  sweepStaleAccountSettings();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), `clawo-account-${process.pid}-`));
+  fs.chmodSync(dir, 0o700);
+  const file = path.join(dir, 'settings.json');
+  fs.writeFileSync(file, JSON.stringify(settings), { mode: 0o600 });
+  if (liveSettingsDirs.size === 0) process.once('exit', removeLiveAccountSettings);
+  liveSettingsDirs.add(dir);
+  return { dir, file };
+}
+
+/** Remove a directory `writeAccountSettings` made. */
+export function removeAccountSettings(dir: string): void {
+  liveSettingsDirs.delete(dir);
+  if (liveSettingsDirs.size === 0) process.removeListener('exit', removeLiveAccountSettings);
+  try {
+    fs.rmSync(dir, { recursive: true, force: true });
+  } catch {
+    /* best effort: the directory is private and holds one small file */
+  }
+}
+
+function removeLiveAccountSettings(): void {
+  for (const dir of liveSettingsDirs) {
+    try {
+      fs.rmSync(dir, { recursive: true, force: true });
+    } catch {
+      /* exiting anyway */
+    }
+  }
+  liveSettingsDirs.clear();
+}
+
+function sweepStaleAccountSettings(): void {
+  if (sweptStale) return;
+  sweptStale = true;
+  const tmp = os.tmpdir();
+  let names: string[];
+  try {
+    names = fs.readdirSync(tmp);
+  } catch {
+    return;
+  }
+  const uid = typeof process.getuid === 'function' ? process.getuid() : undefined;
+  for (const name of names) {
+    const m = SETTINGS_DIR.exec(name);
+    if (!m) continue;
+    const pid = Number(m[1]);
+    if (pid === process.pid || processAlive(pid)) continue;
+    const dir = path.join(tmp, name);
+    try {
+      const st = fs.lstatSync(dir);
+      if (!st.isDirectory() || (uid !== undefined && st.uid !== uid)) continue;
+      fs.rmSync(dir, { recursive: true, force: true });
+    } catch {
+      /* someone else's, or already gone */
+    }
+  }
+}
+
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'EPERM';
   }
 }

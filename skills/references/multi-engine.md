@@ -104,15 +104,20 @@ continues under another account by its own session id. Accounts are listed in
 
 - **Kinds.** `oauth` is a subscription token from `claude setup-token`; `apiKey` an Anthropic API key,
   billed per use; `gateway` an Anthropic-compatible endpoint (`baseUrl`) with its own auth token, plus
-  any environment it needs (`env`).
+  any environment it needs (`env`). A gateway on another host must use https; plain http is accepted
+  only on this machine (`localhost`, `127.0.0.0/8`, `::1`).
+- **The file is trusted like your Claude Code settings.** It names commands the server runs and
+  endpoints it sends credentials to, so the server reads it only when it belongs to the server's user
+  and neither group nor others can write it (`chmod 600`); otherwise sessions that need it fail to
+  start, naming the file.
 - **Credentials** come from the server's own environment, `tokenEnv` (default
-  `CLAWO_CLAUDE_TOKEN_<NAME>`), or from the stdout of `tokenCommand`, an argv. A session is never
-  started on another login when an account's credential is missing; the start fails and names the
-  source. The credential reaches the CLI in a `--settings` file with mode 0600 in a private
-  directory, removed when the process ends: a `--settings` value outranks the `env` of the user's
-  settings file, which in turn outranks the process environment. The other kinds' variables are set
-  to neutral values in the same file, so a gateway or token configured in the user settings does not
-  win over the account.
+  `CLAWO_CLAUDE_TOKEN_<NAME>`), or from the stdout of `tokenCommand`, an argv run without a shell. A
+  session is never started on another login when an account's credential is missing; the start fails
+  and names the source. The credential reaches the CLI in a `--settings` file with mode 0600 in a
+  private directory, removed when the process ends, when the server exits, or, after a crash, by the
+  next server: a `--settings` value outranks the `env` of the user's settings file, which in turn
+  outranks the process environment. The other kinds' variables are set to neutral values in the same
+  file, so a gateway or token configured in the user settings does not win over the account.
 - **Choosing.** `claudeAccount` on `session_start` names an account, or `auto` for the first available
   account in `rotation`; `default` applies the same to sessions that name none, and without it they
   use the CLI's own login. An account runs a Claude model against the account's own endpoint, so it

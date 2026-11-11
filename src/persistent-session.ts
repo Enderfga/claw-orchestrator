@@ -11,7 +11,6 @@ import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import * as readline from 'node:readline';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 
 import {
@@ -29,7 +28,7 @@ import {
 } from './types.js';
 import { resolveAlias, getContextWindow, isClaudeModel, claudeGatewayMode, gatewayModelPricing } from './models.js';
 import { sanitizeSecrets } from './sanitize.js';
-import type { AccountUsage } from './claude-accounts.js';
+import { removeAccountSettings, writeAccountSettings, type AccountUsage } from './claude-accounts.js';
 
 import {
   CONTEXT_HIGH_THRESHOLD,
@@ -226,7 +225,8 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
    * the process environment loses to one written there by another tool, and a
    * `--settings` value outranks both (measured on 2.1.322). It goes in a 0600
    * file in a private directory rather than inline JSON, which any process could
-   * read off the command line; stop() removes it.
+   * read off the command line; stop() removes it, and so does the server's
+   * exit or, after a crash, the next server.
    */
   private buildAccountSettingsArgs(injected: Record<string, unknown>, settings: string | undefined): string[] {
     let merged: Record<string, unknown> | undefined;
@@ -244,10 +244,7 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
     const obj = { ...base, ...injected, env: { ...userEnv, ...this._accountEnv } };
 
     this.removeAccountSettings();
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'clawo-account-'));
-    fs.chmodSync(dir, 0o700);
-    const file = path.join(dir, 'settings.json');
-    fs.writeFileSync(file, JSON.stringify(obj), { mode: 0o600 });
+    const { dir, file } = writeAccountSettings(obj);
     this._accountSettingsDir = dir;
     // Settings that could not be read are passed on as given, ahead of ours.
     return settings && !merged ? ['--settings', settings, '--settings', file] : ['--settings', file];
@@ -255,11 +252,7 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
 
   private removeAccountSettings(): void {
     if (!this._accountSettingsDir) return;
-    try {
-      fs.rmSync(this._accountSettingsDir, { recursive: true, force: true });
-    } catch {
-      /* best effort: the directory is private and holds one small file */
-    }
+    removeAccountSettings(this._accountSettingsDir);
     this._accountSettingsDir = undefined;
   }
 
