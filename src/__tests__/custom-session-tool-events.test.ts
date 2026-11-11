@@ -55,7 +55,12 @@ function createMockProc() {
   const proc = new EventEmitter() as EventEmitter & {
     stdout: Readable;
     stderr: Readable;
-    stdin: { writable: boolean; write: (s: string, cb?: (e?: Error) => void) => boolean; end: () => void };
+    stdin: {
+      writable: boolean;
+      write: (s: string, cb?: (e?: Error) => void) => boolean;
+      end: () => void;
+      on: () => void;
+    };
     written: string[];
     kill: ReturnType<typeof vi.fn>;
     unref: () => void;
@@ -68,6 +73,7 @@ function createMockProc() {
   proc.written = [];
   proc.stdin = {
     writable: true,
+    on() {},
     write(s: string, cb?: (e?: Error) => void) {
       proc.written.push(s);
       cb?.();

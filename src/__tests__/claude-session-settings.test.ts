@@ -26,7 +26,7 @@ function createMockProcess() {
   const proc = new EventEmitter() as EventEmitter & {
     stdout: Readable;
     stderr: EventEmitter;
-    stdin: { write: ReturnType<typeof vi.fn>; end: ReturnType<typeof vi.fn> };
+    stdin: { write: ReturnType<typeof vi.fn>; end: ReturnType<typeof vi.fn>; on: ReturnType<typeof vi.fn> };
     kill: ReturnType<typeof vi.fn>;
     unref: ReturnType<typeof vi.fn>;
     pid: number;
@@ -35,7 +35,7 @@ function createMockProcess() {
   };
   proc.stdout = new Readable({ read() {} });
   proc.stderr = new EventEmitter();
-  proc.stdin = { write: vi.fn(), end: vi.fn() };
+  proc.stdin = { write: vi.fn(), end: vi.fn(), on: vi.fn() };
   proc.kill = vi.fn();
   proc.unref = vi.fn();
   proc.pid = 4242;

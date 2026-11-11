@@ -132,6 +132,17 @@ export async function hostRun(args: HostRunArgs): Promise<DockerRunResult> {
     detached: true,
     stdio: 'ignore',
   });
+  // A failed spawn (npm or node not on PATH, the directory gone) reports on a
+  // later tick as 'error', which with no listener would end the server; wait
+  // for it or for 'spawn' before recording anything.
+  const failed = await new Promise<Error | undefined>((resolve) => {
+    child.once('spawn', () => resolve(undefined));
+    child.once('error', resolve);
+  });
+  child.on('error', () => {
+    /* the app is detached and on its own; later errors are not the server's */
+  });
+  if (failed) return { ok: false, error: `could not start ${cmd}: ${failed.message}` };
   child.unref();
   const pid = child.pid;
   if (typeof pid !== 'number') {

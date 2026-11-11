@@ -126,6 +126,9 @@ export class UltraappRouter {
       srv.on('error', onError);
       srv.listen(port, '127.0.0.1', () => {
         srv.removeListener('error', onError);
+        // A server error after listening must not go unheard: with no listener,
+        // the emit would throw out of the event loop.
+        srv.on('error', (err) => console.warn(`[ultraapp] router error: ${err.message}`));
         this.server = srv;
         resolve();
       });
@@ -176,13 +179,31 @@ export class UltraappRouter {
         const setCookie = br.headers['set-cookie']?.filter((c) => cookieName(c) !== CONTROL_COOKIE);
         if (setCookie?.length) out['set-cookie'] = setCookie;
         else delete out['set-cookie'];
-        res.writeHead(br.statusCode ?? 502, out);
+        try {
+          res.writeHead(br.statusCode ?? 502, out);
+        } catch (e) {
+          // A status or header the app sent that Node will not write.
+          br.destroy();
+          res.writeHead(502, { 'Content-Type': 'text/plain' });
+          res.end(`proxy error: ${(e as Error).message}`);
+          return;
+        }
         br.pipe(res);
       },
     );
+    // The app can fail after its response has started (it closes the connection
+    // while the client is still sending, or dies mid-body); by then there is no
+    // 502 to send, only a connection to close.
     proxy.on('error', (e) => {
+      if (res.headersSent) {
+        res.destroy();
+        return;
+      }
       res.writeHead(502, { 'Content-Type': 'text/plain' });
       res.end(`proxy error: ${e.message}`);
+    });
+    res.on('close', () => {
+      if (!res.writableFinished) proxy.destroy();
     });
     req.pipe(proxy);
   }

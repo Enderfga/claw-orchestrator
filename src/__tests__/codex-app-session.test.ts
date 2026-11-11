@@ -31,7 +31,7 @@ function createMockProc(responder: (msg: WrittenMsg) => Record<string, unknown> 
   const proc = new EventEmitter() as EventEmitter & {
     stdout: Readable;
     stderr: EventEmitter;
-    stdin: { writable: boolean; write: (s: string, cb?: (e?: Error) => void) => boolean };
+    stdin: EventEmitter & { writable: boolean; write: (s: string, cb?: (e?: Error) => void) => boolean };
     kill: ReturnType<typeof vi.fn>;
     pid: number;
     written: WrittenMsg[];
@@ -41,7 +41,7 @@ function createMockProc(responder: (msg: WrittenMsg) => Record<string, unknown> 
   proc.kill = vi.fn();
   proc.pid = 7777;
   proc.written = written;
-  proc.stdin = {
+  proc.stdin = Object.assign(new EventEmitter(), {
     writable: true,
     write(s: string, cb?: (e?: Error) => void) {
       for (const line of s.split('\n')) {
@@ -62,7 +62,7 @@ function createMockProc(responder: (msg: WrittenMsg) => Record<string, unknown> 
       cb?.();
       return true;
     },
-  };
+  });
   return proc;
 }
 
@@ -95,6 +95,22 @@ describe('PersistentCodexAppServerSession v2 RPCs', () => {
     proc.stderr.emit('data', Buffer.from('OPENAI_API_KEY=sk-live-0123456789abcdef\n'));
     expect(logs.join('')).toContain('OPENAI_API_KEY=***');
     expect(logs.join('')).not.toContain('0123456789abcdef');
+  });
+
+  // Inside OpenClaw the session runs in the gateway process. A spawn that fails
+  // (codex not on the gateway's PATH) emits 'error', and with no listener that
+  // ended the gateway; it must fail the start instead.
+  it('fails the start, rather than the process, when codex cannot be spawned', async () => {
+    const proc = createMockProc(() => undefined);
+    mockSpawn.mockReturnValue(proc);
+    const session = new PersistentCodexAppServerSession({ name: 't', cwd: '/tmp', engine: 'codex-app' });
+    const started = session.start();
+    const enoent = Object.assign(new Error('spawn codex ENOENT'), { code: 'ENOENT' });
+    proc.emit('error', enoent);
+    await expect(started).rejects.toThrow(/ENOENT/);
+    expect(session.isReady).toBe(false);
+    // A dying process's stdin raises its own 'error'; that must be heard too.
+    expect(() => proc.stdin.emit('error', new Error('write EPIPE'))).not.toThrow();
   });
 
   it('thread/start handshake captures the thread id', async () => {

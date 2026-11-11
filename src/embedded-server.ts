@@ -312,9 +312,12 @@ export class EmbeddedServer {
     const now = Date.now();
     const window = this._rateWindows.get(ip) || [];
     const recent = window.filter((t) => now - t < RATE_LIMIT_WINDOW_MS);
-    recent.push(now);
     this._rateWindows.set(ip, recent);
-    return recent.length <= this._rateLimit;
+    // A refused request is not recorded: the window stays at most the limit
+    // long, and a client over it is let back in as soon as the window allows.
+    if (recent.length >= this._rateLimit) return false;
+    recent.push(now);
+    return true;
   }
 
   /**
@@ -575,6 +578,19 @@ export class EmbeddedServer {
       return;
     }
 
+    // Health answers before authentication, rate limiting and body reading. It
+    // needs none of them, and it is the one route open without a token, so a
+    // request to it must neither have its body buffered nor count against the
+    // rate limit that authenticated clients from the same address share.
+    if (path === '/health') {
+      req.resume();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({ ok: true, version: this.manager.getVersion(), sessions: this.manager.listSessions().length }),
+      );
+      return;
+    }
+
     // Auth: accept Bearer header, `clawo_auth` cookie, or `?token=` query.
     // We re-read ~/.openclaw/server-token PER REQUEST (64-byte read, kernel
     // page cache, microseconds). Necessary because another clawo instance
@@ -582,7 +598,7 @@ export class EmbeddedServer {
     // mid-life; a reverse proxy that reads the file fresh on every request
     // would then inject a token we no longer hold, and we would 401 everything
     // it forwards.
-    if (this.authToken && path !== '/health') {
+    if (this.authToken) {
       const liveToken = this.controlToken() as string;
 
       const authHeader = req.headers.authorization || '';
@@ -867,13 +883,6 @@ export class EmbeddedServer {
           body as Record<string, string>,
         );
         json(200, { ok: true, path: p });
-        return;
-      }
-
-      // ─── Health ──────────────────────────────────────────────────
-
-      if (path === '/health') {
-        json(200, { ok: true, version: this.manager.getVersion(), sessions: this.manager.listSessions().length });
         return;
       }
 

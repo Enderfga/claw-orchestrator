@@ -257,20 +257,35 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
       this.emit(SESSION_EVENT.LOG, `[codex-app-stderr] ${sanitizeSecrets(data.toString())}`);
     });
 
-    this.proc.on('exit', (code) => {
+    // Ends the process's part in this session once, whether it exited or never
+    // started. Pending requests and the turn are rejected so callers don't hang.
+    let ended = false;
+    const end = (code: number | null, reason: string): void => {
+      if (ended) return;
+      ended = true;
       this._isReady = false;
-      // Reject any pending requests so callers don't hang.
       for (const pending of this.pendingRequests.values()) {
-        pending.reject(new Error(`codex app-server exited (code=${code}) before responding`));
+        pending.reject(new Error(`codex app-server ${reason} before responding`));
       }
       this.pendingRequests.clear();
       if (this.turnReject) {
-        this.turnReject(new Error(`codex app-server exited mid-turn (code=${code})`));
+        this.turnReject(new Error(`codex app-server ${reason} mid-turn`));
         this.turnReject = null;
         this.turnResolve = null;
       }
       this.emit(SESSION_EVENT.CLOSE, code ?? 0);
+    };
+    this.proc.on('exit', (code) => end(code, `exited (code=${code})`));
+    // Every 'error' needs a listener: an unheard one throws out of the event
+    // loop, and inside OpenClaw that loop is the gateway's. A spawn that fails
+    // (codex not on PATH) raises one here, and writing to a process that has
+    // just died raises one on stdin.
+    this.proc.on('error', (err) => {
+      this.emit(SESSION_EVENT.LOG, `[codex-app] process error: ${err.message}`);
+      end(null, `failed (${err.message})`);
     });
+    this.proc.stdin?.on('error', (err) => this.emit(SESSION_EVENT.LOG, `[codex-app] stdin: ${err.message}`));
+    this._rl.on('error', (err) => this.emit(SESSION_EVENT.LOG, `[codex-app] stdout: ${err.message}`));
 
     // 1. initialize
     await this._request('initialize', {

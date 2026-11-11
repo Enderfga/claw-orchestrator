@@ -222,6 +222,43 @@ describe('UltraappRouter', () => {
     }
   });
 
+  // The app can fail after its response has started. The router answered that
+  // with a second writeHead, which threw out of the event loop.
+  it('survives an app that resets the connection after its response has started', async () => {
+    const appPort = await freePort();
+    const app = await new Promise<http.Server>((resolve) => {
+      const srv = http.createServer((req, res) => {
+        if (req.url === '/forge/r/ok') {
+          res.end('fine');
+          return;
+        }
+        res.writeHead(200, { 'Content-Type': 'text/plain' });
+        res.write('partial');
+        setTimeout(() => req.socket.resetAndDestroy(), 20);
+      });
+      srv.listen(appPort, '127.0.0.1', () => resolve(srv));
+    });
+    router.register('r', appPort);
+    const get = (p: string) =>
+      new Promise<{ status: number; body: string; error?: string }>((resolve) => {
+        const req = http.get({ host: '127.0.0.1', port: routerPort, path: p }, (res) => {
+          let body = '';
+          res.on('data', (d) => (body += d));
+          res.on('end', () => resolve({ status: res.statusCode ?? 0, body }));
+          res.on('error', (e) => resolve({ status: res.statusCode ?? 0, body, error: e.message }));
+          res.on('aborted', () => resolve({ status: res.statusCode ?? 0, body, error: 'aborted' }));
+        });
+        req.on('error', (e) => resolve({ status: 0, body: '', error: e.message }));
+      });
+    try {
+      const broken = await get('/forge/r/x');
+      expect(broken.status).toBe(200);
+      expect(await get('/forge/r/ok')).toEqual({ status: 200, body: 'fine' });
+    } finally {
+      await new Promise<void>((r) => app.close(() => r()));
+    }
+  });
+
   it('falls back to next free port when basePort taken', async () => {
     const blocker = http.createServer().listen(0, '127.0.0.1');
     await new Promise<void>((r) => blocker.on('listening', () => r()));

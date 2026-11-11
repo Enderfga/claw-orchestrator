@@ -533,7 +533,7 @@ describe('EmbeddedServer', () => {
       await server.start();
 
       for (let i = 0; i < 5; i++) {
-        const res = await request(port, '/health');
+        const res = await request(port, '/session/list', { method: 'POST', body: {} });
         expect(res.status).toBe(200);
       }
     });
@@ -544,11 +544,32 @@ describe('EmbeddedServer', () => {
       server = new EmbeddedServer(manager, port);
       await server.start();
 
-      await request(port, '/health');
-      await request(port, '/health');
-      const res = await request(port, '/health');
+      await request(port, '/session/list', { method: 'POST', body: {} });
+      await request(port, '/session/list', { method: 'POST', body: {} });
+      const res = await request(port, '/session/list', { method: 'POST', body: {} });
       expect(res.status).toBe(429);
       expect((res.body as Record<string, string>).error).toContain('Rate limit');
+    });
+
+    // /health is open without a token. Counting it let anyone exhaust the limit
+    // that authenticated clients from the same address (127.0.0.1, or a reverse
+    // proxy) share, and its POST body was buffered before anything checked it.
+    it('does not count /health, and answers it without reading a body', async () => {
+      process.env.OPENCLAW_SERVER_TOKEN = 'secret-token';
+      process.env.OPENCLAW_RATE_LIMIT = '3';
+      port = await getFreePort();
+      server = new EmbeddedServer(manager, port);
+      await server.start();
+
+      for (let i = 0; i < 20; i++) expect((await request(port, '/health')).status).toBe(200);
+      const post = await request(port, '/health', { method: 'POST', body: { pad: 'x'.repeat(1024 * 1024) } });
+      expect(post.status).toBe(200);
+      const authed = await request(port, '/session/list', {
+        method: 'POST',
+        body: {},
+        headers: { Authorization: 'Bearer secret-token' },
+      });
+      expect(authed.status).toBe(200);
     });
   });
 

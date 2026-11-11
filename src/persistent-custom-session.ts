@@ -150,6 +150,16 @@ export class PersistentCustomSession extends EventEmitter implements ISession {
     return this._isBusy;
   }
 
+  /**
+   * 'error' reaches listeners only. With none attached — between turns nothing
+   * listens — an emitted 'error' throws out of the event loop, which in the
+   * OpenClaw plugin is the gateway's.
+   */
+  private _emitError(err: Error): void {
+    if (this.listenerCount(SESSION_EVENT.ERROR) > 0) this.emit(SESSION_EVENT.ERROR, err);
+    else this.emit(SESSION_EVENT.LOG, `[custom] ${err.message}`);
+  }
+
   // ─── Start ───────────────────────────────────────────────────────────────
 
   async start(): Promise<this> {
@@ -258,12 +268,15 @@ export class PersistentCustomSession extends EventEmitter implements ISession {
       }
     });
     this._rl.on('error', (err: Error) => {
-      this.emit(SESSION_EVENT.ERROR, new Error(`readline error: ${err.message}`));
+      this._emitError(new Error(`readline error: ${err.message}`));
     });
 
     this.proc.stderr?.on('data', (data: Buffer) => {
       this.emit(SESSION_EVENT.LOG, `[${this.engineConfig.name}-stderr] ${this.sanitize(data.toString())}`);
     });
+    // Writing to a CLI that has just died raises 'error' on stdin as well as in
+    // the write callback; unheard, it would throw out of the event loop.
+    this.proc.stdin?.on('error', (err) => this.emit(SESSION_EVENT.LOG, `[stdin] ${err.message}`));
 
     this.proc.on('close', (code) => {
       this._isReady = false;
@@ -279,7 +292,7 @@ export class PersistentCustomSession extends EventEmitter implements ISession {
       }
       this._rl = null;
       this.proc = null;
-      this.emit(SESSION_EVENT.ERROR, err);
+      this._emitError(err);
     });
 
     // Wait for ready
@@ -410,7 +423,7 @@ export class PersistentCustomSession extends EventEmitter implements ISession {
       throw new Error('Session stdin is not writable (process may have exited). Call start() first.');
     }
     stdin.write(JSON.stringify(payload) + '\n', (err) => {
-      if (err) this.emit(SESSION_EVENT.ERROR, new Error(`Failed to write to stdin: ${err.message}`));
+      if (err) this._emitError(new Error(`Failed to write to stdin: ${err.message}`));
     });
 
     if (options.callbacks) this._streamCallbacks = options.callbacks;
@@ -438,7 +451,7 @@ export class PersistentCustomSession extends EventEmitter implements ISession {
     const textMessage = typeof message === 'string' ? message : JSON.stringify(message);
 
     if (!options.waitForComplete) {
-      this._runOneShot(textMessage, options).catch((err) => this.emit(SESSION_EVENT.ERROR, err));
+      this._runOneShot(textMessage, options).catch((err) => this._emitError(err));
       return { requestId, sent: true };
     }
 
@@ -712,10 +725,7 @@ export class PersistentCustomSession extends EventEmitter implements ISession {
         break;
 
       case 'error':
-        this.emit(
-          SESSION_EVENT.ERROR,
-          new Error(String((event as Record<string, unknown>).error) || JSON.stringify(event)),
-        );
+        this._emitError(new Error(String((event as Record<string, unknown>).error) || JSON.stringify(event)));
         break;
 
       case 'result': {

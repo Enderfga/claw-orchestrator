@@ -204,7 +204,11 @@ export abstract class BaseOneShotSession extends EventEmitter implements ISessio
       const before = this._stats.tokensIn;
       this._run(textMessage, options)
         .then(() => this._recordTurnInputTokens(before))
-        .catch((err) => this.emit(SESSION_EVENT.ERROR, err));
+        .catch((err) => {
+          // Fire-and-forget: nothing may be listening, and an unheard 'error' throws.
+          if (this.listenerCount(SESSION_EVENT.ERROR) > 0) this.emit(SESSION_EVENT.ERROR, err);
+          else this.emit(SESSION_EVENT.LOG, `[error] ${(err as Error).message}`);
+        });
       return { requestId, sent: true };
     }
 

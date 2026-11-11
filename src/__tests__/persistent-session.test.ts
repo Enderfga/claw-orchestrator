@@ -30,7 +30,7 @@ class MockProcess extends EventEmitter {
   pid = 12345;
   killed = false;
   exitCode: number | null = null;
-  stdin = { write: vi.fn(), end: vi.fn() };
+  stdin = { write: vi.fn(), end: vi.fn(), on: vi.fn() };
   stdout = createMockStream();
   stderr = createMockStream();
   unref = vi.fn();

@@ -256,6 +256,16 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
     this._accountSettingsDir = undefined;
   }
 
+  /**
+   * 'error' reaches listeners only. With none attached — between turns nothing
+   * listens — an emitted 'error' throws out of the event loop, which in the
+   * OpenClaw plugin is the gateway's.
+   */
+  private _emitError(err: Error): void {
+    if (this.listenerCount(SESSION_EVENT.ERROR) > 0) this.emit(SESSION_EVENT.ERROR, err);
+    else this.emit(SESSION_EVENT.LOG, `[claude] ${err.message}`);
+  }
+
   // ─── Start ───────────────────────────────────────────────────────────────
 
   async start(): Promise<this> {
@@ -510,12 +520,15 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
     // close) makes readline emit an unhandled 'error' that crashes the monitor
     // process itself — exactly what Recovery > Complexity forbids.
     this._rl.on('error', (err: Error) => {
-      this.emit(SESSION_EVENT.ERROR, new Error(`readline error: ${err.message}`));
+      this._emitError(new Error(`readline error: ${err.message}`));
     });
 
     this.proc.stderr?.on('data', (data: Buffer) => {
       this.emit(SESSION_EVENT.LOG, `[stderr] ${sanitizeSecrets(data.toString())}`);
     });
+    // Writing to a CLI that has just died raises 'error' on stdin as well as in
+    // the write callback; unheard, it would throw out of the event loop.
+    this.proc.stdin?.on('error', (err) => this.emit(SESSION_EVENT.LOG, `[stdin] ${err.message}`));
 
     // Both handlers belong to this process only. switchAccount() replaces the
     // process in place, and the old one's `close` lands after the new one has
@@ -543,7 +556,7 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
       }
       this._rl = null;
       this.proc = null;
-      this.emit(SESSION_EVENT.ERROR, err);
+      this._emitError(err);
     });
 
     // Wait for ready
@@ -753,10 +766,7 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
         break;
 
       case 'error':
-        this.emit(
-          SESSION_EVENT.ERROR,
-          new Error(String((event as Record<string, unknown>).error) || JSON.stringify(event)),
-        );
+        this._emitError(new Error(String((event as Record<string, unknown>).error) || JSON.stringify(event)));
         break;
 
       case 'result': {
@@ -868,7 +878,7 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
     // Pass an error callback so a broken pipe / closed stdin surfaces instead of
     // silently dropping the write and leaving waitForComplete callers hung.
     stdin.write(JSON.stringify(payload) + '\n', (err) => {
-      if (err) this.emit(SESSION_EVENT.ERROR, new Error(`Failed to write to stdin: ${err.message}`));
+      if (err) this._emitError(new Error(`Failed to write to stdin: ${err.message}`));
     });
 
     if (options.callbacks) this._streamCallbacks = options.callbacks;
@@ -903,7 +913,7 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
       request: { subtype: 'interrupt' },
     };
     stdin.write(JSON.stringify(payload) + '\n', (err) => {
-      if (err) this.emit(SESSION_EVENT.ERROR, new Error(`Failed to write to stdin: ${err.message}`));
+      if (err) this._emitError(new Error(`Failed to write to stdin: ${err.message}`));
     });
     return true;
   }

@@ -718,6 +718,23 @@ describe('buildToolPromptBlock', () => {
 // ─── parseToolCallsFromText ─────────────────────────────────────────────────
 
 describe('parseToolCallsFromText', () => {
+  // The text is model output. The former pattern backtracked cubically on an
+  // opening tag followed by whitespace and no closing tag: 4,000 spaces took ~9 s.
+  it('scans in linear time when a block is never closed', () => {
+    const text = 'before <tool_calls>' + ' '.repeat(4_000) + ' after';
+    const started = Date.now();
+    const r = parseToolCallsFromText(text);
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(r.toolCalls).toEqual([]);
+  });
+
+  it('reads several blocks and keeps the text around them', () => {
+    const r = parseToolCallsFromText(
+      'a <tool_calls> [{"name":"x","arguments":{}}] </tool_calls> b <tool_calls>[{"name":"y"}]</tool_calls> c',
+    );
+    expect(r.toolCalls.map((c) => c.function.name)).toEqual(['x', 'y']);
+  });
+
   it('returns text-only when no tool_calls tags', () => {
     const result = parseToolCallsFromText('Hello, world!');
     expect(result.textContent).toBe('Hello, world!');

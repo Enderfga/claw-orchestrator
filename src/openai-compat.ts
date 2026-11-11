@@ -364,21 +364,30 @@ export interface ParsedToolCalls {
  * Returns both the extracted text content (before/after tags) and any tool calls found.
  */
 export function parseToolCallsFromText(text: string): ParsedToolCalls {
-  // Match ALL <tool_calls> blocks (model may output multiple)
-  const tagRegex = /<tool_calls>\s*([\s\S]*?)\s*<\/tool_calls>/g;
+  // Every <tool_calls> block (the model may output several), found with indexOf
+  // rather than a regular expression: `<tool_calls>\s*([\s\S]*?)\s*<\/tool_calls>`
+  // backtracks cubically on a long run of whitespace with no closing tag, and the
+  // text is model output.
+  const OPEN = '<tool_calls>';
+  const CLOSE = '</tool_calls>';
   const allCalls: OpenAIToolCall[] = [];
   let lastIndex = 0;
   const textParts: string[] = [];
-  let m: RegExpExecArray | null;
 
-  while ((m = tagRegex.exec(text)) !== null) {
+  for (;;) {
+    const start = text.indexOf(OPEN, lastIndex);
+    if (start < 0) break;
+    const close = text.indexOf(CLOSE, start + OPEN.length);
+    if (close < 0) break;
+    const block = text.slice(start, close + CLOSE.length);
+    const inner = text.slice(start + OPEN.length, close);
     // Collect text before this block
-    const before = text.slice(lastIndex, m.index).trim();
+    const before = text.slice(lastIndex, start).trim();
     if (before) textParts.push(before);
-    lastIndex = m.index + m[0].length;
+    lastIndex = close + CLOSE.length;
 
     try {
-      const parsed = JSON.parse(m[1].trim()) as unknown;
+      const parsed = JSON.parse(inner.trim()) as unknown;
       const arr = Array.isArray(parsed) ? parsed : [parsed];
       for (const raw of arr) {
         const call = raw as Record<string, unknown>;
@@ -402,7 +411,7 @@ export function parseToolCallsFromText(text: string): ParsedToolCalls {
       }
     } catch {
       // One block failed — keep its text as content
-      textParts.push(m[0]);
+      textParts.push(block);
     }
   }
 
@@ -1418,9 +1427,16 @@ async function handleStreaming(
   res.on('close', () => {
     clientDisconnected = true;
   });
+  // A write after end() does not throw: it emits ERR_STREAM_WRITE_AFTER_END
+  // later, which with no listener would end the process. `end()` comes before
+  // `'close'`, and a chunk can still arrive after the turn has been settled.
+  const writable = (): boolean => !clientDisconnected && !res.writableEnded && !res.destroyed;
+  res.on('error', () => {
+    clientDisconnected = true;
+  });
 
   const writeSSE = (data: string) => {
-    if (!clientDisconnected) {
+    if (writable()) {
       try {
         res.write(`data: ${data}\n\n`);
       } catch {
@@ -1434,7 +1450,7 @@ async function handleStreaming(
 
   // SSE keepalive heartbeat
   const heartbeatTimer = setInterval(() => {
-    if (!clientDisconnected) {
+    if (writable()) {
       try {
         res.write(': keepalive\n\n');
       } catch {
