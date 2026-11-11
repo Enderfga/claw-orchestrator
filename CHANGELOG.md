@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ran a plain `git status`, which refreshes stale stat data and writes `.git/index` under `index.lock`; a commit
   running in the same repository at that moment could fail on the lock. The check now runs
   `git --no-optional-locks status`, which reads the same state and leaves the index alone.
+- **Engine CLIs no longer inherit the server's token.** Every engine CLI, ACP agent and custom engine started with
+  the server's whole environment, so a token given through `OPENCLAW_SERVER_TOKEN` (or `CLAWO_AUTH_TOKEN`, which
+  the `clawo` CLI reads) reached each of them, and anything that logs or reports its environment. Engines, and the
+  one-shot Claude CLI calls (`plugin details`, `agents`, `project purge`), now start without both variables, even
+  when a preset's `env` sets them; the rest of the environment is passed as before. A `clawo` command run inside a
+  session reads the token from `~/.openclaw/server-token`.
 
 ### Docs
 
