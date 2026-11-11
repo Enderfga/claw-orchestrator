@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [7.22.0] - 2026-11-11
 
 ### Added
 
@@ -18,8 +18,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rotation moves to the next account when its account refuses a turn, or before a turn once the account
   passes `switchAt` of a usage window, and continues the same conversation: every account shares the one
   Claude Code configuration directory, so only the credential changes. The credential reaches the CLI in a
-  private `--settings` file, never on the command line or in a session's config, registry entry or status.
-  Based on the account profiles proposed in #164, thanks @wagnerglorenz.
+  private `--settings` file, never on the command line or in a session's config, registry entry or status,
+  and the file is removed when the process ends, when the server exits, or, after a crash, by the next
+  server. The accounts file is read only when it belongs to the server's user and nobody else can write it,
+  and a gateway on another host must use https. Based on the account profiles proposed in #164, thanks
+  @wagnerglorenz.
+
+### Fixed
+
+- **UltraApp's patcher changes files only inside the app's worktree.** The file names in the model's diff
+  were joined to the worktree path as written, so a name with `..` segments, or one leading through a
+  symlink, could create, change or delete a file elsewhere. Every target must now resolve inside the
+  worktree, through symlinks too, and the whole diff is checked before anything is written: a diff with
+  one refused or conflicting file changes nothing.
+- **UltraApp spec patches cannot reach `Object.prototype`.** A JSON Patch path through `__proto__`, from
+  the interview's `update_spec` or a manual spec edit, wrote to the prototype every object in the server
+  process shares. Paths with a `__proto__`, `prototype` or `constructor` segment are refused, and a patch
+  follows only an object's own properties.
+- **UltraApp's `extract_metadata` reads only files added to the run.** The interview model names the file,
+  and any path it wrote reached `stat`, `file` and `ffprobe`, an option-shaped name or a URL included. The
+  tool now reaches only the files the user added; `file` is given `--`, and `ffprobe` only the `file:`
+  protocol.
+- **`workflow_start` refuses UltraApp's internal node kinds.** A caller's spec could place `ultraapp_synth`
+  or `ultraapp_deploy` with directories, a slug and a version of its own, and a deploy stage then wrote
+  outside the run's directory. Both kinds are refused in a caller's spec, inline subflows included, and a
+  subflow cannot name a stored run that uses them.
+- **UltraApp's router keeps more credentials from apps.** Besides the `clawo_auth` cookie, it now removes
+  `Proxy-Authorization`, and an `Authorization` header that carries the server token, as a reverse proxy
+  adding the token to every request for the host sends. An app's own `Authorization` passes through.
+- **OpenAI-compatible sessions run in a private directory.** Each one ran in
+  `<temp dir>/openclaw-compat-<name>`, whose name is predictable: on a host shared with other users,
+  someone else could create it first, or put a `CLAUDE.md` above it, before a `bypassPermissions` session
+  started there. Sessions now run in `~/.claw-orchestrator/compat/<name>`, mode 0700, and a directory that
+  is a symlink or belongs to another user is refused.
+- **`/login` redirects only within the server.** A `redirect` such as `/\evil.com`, or one with a tab inside
+  `//`, passed the check and took the browser to another host. The target is now resolved the way a
+  browser resolves it and must stay on this server.
+- **A `file` check's `matches` is compiled with RE2.** A backtracking regular expression ran over a file the
+  agent wrote, and a pattern could hold the server's event loop on it. Matching now takes linear time;
+  lookarounds and backreferences are refused as an invalid matcher.
+- **An evidence id names one bundle.** `GET /workflow/<id>/evidence?evidenceId=` accepted a path and read a
+  `bundle.json` from another directory. Evidence ids are single names now.
+- **The server token is compared in constant time.**
 
 ## [7.21.4] - 2026-11-11
 
