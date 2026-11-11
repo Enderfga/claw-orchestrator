@@ -80,6 +80,53 @@ await manager.startSession({
 });
 ```
 
+#### Claude accounts and rotation
+
+One server can run Claude sessions under several Claude accounts, and move a session to another
+account when one reaches its usage limit. Every account keeps the one Claude Code configuration
+directory, so skills, hooks, settings and conversation transcripts are shared, and a conversation
+continues under another account by its own session id. Accounts are listed in
+`~/.claw-orchestrator/claude-accounts.json` (`CLAWO_CLAUDE_ACCOUNTS` relocates it):
+
+```json
+{
+  "accounts": {
+    "team": { "kind": "oauth" },
+    "max": { "kind": "oauth", "tokenCommand": ["security", "find-generic-password", "-s", "claude-max", "-w"] },
+    "payg": { "kind": "apiKey", "tokenEnv": "ANTHROPIC_BACKUP_KEY" },
+    "gateway": { "kind": "gateway", "baseUrl": "http://127.0.0.1:8080" }
+  },
+  "rotation": ["team", "max", "payg", "gateway"],
+  "default": "auto",
+  "switchAt": 0.95
+}
+```
+
+- **Kinds.** `oauth` is a subscription token from `claude setup-token`; `apiKey` an Anthropic API key,
+  billed per use; `gateway` an Anthropic-compatible endpoint (`baseUrl`) with its own auth token, plus
+  any environment it needs (`env`).
+- **Credentials** come from the server's own environment, `tokenEnv` (default
+  `CLAWO_CLAUDE_TOKEN_<NAME>`), or from the stdout of `tokenCommand`, an argv. A session is never
+  started on another login when an account's credential is missing; the start fails and names the
+  source. The credential reaches the CLI in a `--settings` file with mode 0600 in a private
+  directory, removed when the process ends: a `--settings` value outranks the `env` of the user's
+  settings file, which in turn outranks the process environment. The other kinds' variables are set
+  to neutral values in the same file, so a gateway or token configured in the user settings does not
+  win over the account.
+- **Choosing.** `claudeAccount` on `session_start` names an account, or `auto` for the first available
+  account in `rotation`; `default` applies the same to sessions that name none, and without it they
+  use the CLI's own login. An account runs a Claude model against the account's own endpoint, so it
+  cannot be combined with `baseUrl`, a non-Claude model (served through the built-in proxy) or
+  `CLAWO_CLAUDE_GATEWAY`; the default simply does not apply to such sessions. The session's status
+  reports the account it runs under (`claudeAccount`).
+- **Rotation.** A session on an account in `rotation` moves to the next available one, in rotation
+  order, when the account refuses a turn (`usage_limit_reached`), and the turn is sent again on the
+  same conversation, at most once per account. It also moves before a turn once any of the account's
+  usage windows has reached `switchAt`, as reported by the CLI after every turn. A refused account is
+  skipped until its window resets, and the server shares this across its sessions. An account outside
+  `rotation` never moves. A session started with `noSessionPersistence` keeps no transcript to
+  resume, so it does not move either: its turn fails with the limit.
+
 ### OpenAI Codex (`engine: 'codex'`)
 
 Wraps the `codex exec` subcommand. Each `send()` spawns a new process. Tested with `codex` CLI **0.167.0**.

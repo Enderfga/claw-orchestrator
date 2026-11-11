@@ -176,6 +176,14 @@ await manager.switchModel('my-task', 'opus'); // back to powerful model
 
 The switch is refused while a turn is running, for a model the registry does not know (a `provider/model` string is accepted), and for a session with no resume id yet — except `agy`, which then restarts fresh. If the restart fails, the session is restarted with its old configuration and the call throws. `setModel()` only changes the stored model, which takes effect at the next restart.
 
+### Claude Account Rotation
+
+A `claude` session on an account in the server's rotation (`claudeAccount`) moves to another account
+on its own: when the account refuses a turn at its usage limit, or before a turn once the account is
+near it. The CLI process restarts under the new account's credential and resumes the same
+conversation by its session id, so history is kept, and a refused turn is sent again. The session's
+status names the account it runs under. See [multi-engine.md](./multi-engine.md#claude-accounts-and-rotation).
+
 ### Tool Management
 
 Add/remove tool permissions at runtime with `updateTools()` (tool: `session_update_tools`), which restarts the session the same way:

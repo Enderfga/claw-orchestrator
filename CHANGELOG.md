@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Claude sessions can run under several Claude accounts, and move to another one at the usage limit.**
+  Accounts are listed in `~/.claw-orchestrator/claude-accounts.json`: subscription tokens from
+  `claude setup-token`, Anthropic API keys, or Anthropic-compatible gateways, each with its secret in the
+  server's environment or the output of a command. `claudeAccount` on `session_start` (and
+  `clawo session-start --claude-account`) names one, or `auto` for the first available account in the
+  file's rotation; the file's `default` covers sessions that name none. A session on an account in the
+  rotation moves to the next account when its account refuses a turn, or before a turn once the account
+  passes `switchAt` of a usage window, and continues the same conversation: every account shares the one
+  Claude Code configuration directory, so only the credential changes. The credential reaches the CLI in a
+  private `--settings` file, never on the command line or in a session's config, registry entry or status.
+  Based on the account profiles proposed in #164, thanks @wagnerglorenz.
+
 ## [7.21.4] - 2026-11-11
 
 ### Fixed

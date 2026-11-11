@@ -11,6 +11,7 @@ import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import * as readline from 'node:readline';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 
 import {
@@ -28,6 +29,7 @@ import {
 } from './types.js';
 import { resolveAlias, getContextWindow, isClaudeModel, claudeGatewayMode, gatewayModelPricing } from './models.js';
 import { sanitizeSecrets } from './sanitize.js';
+import type { AccountUsage } from './claude-accounts.js';
 
 import {
   CONTEXT_HIGH_THRESHOLD,
@@ -112,6 +114,12 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
   private _lastTurnPromptTokens = 0;
   /** Prompt of the current turn's latest request on this conversation (0 until one arrives). */
   private _turnRequestPromptTokens = 0;
+  /** Credential environment of the Claude account this session runs under; see setAccountEnv(). */
+  private _accountEnv: Record<string, string> | undefined;
+  /** Private directory holding the settings file that carries the account's credential. */
+  private _accountSettingsDir: string | undefined;
+  /** The account's usage as the current turn reported it. */
+  private _turnUsage: AccountUsage | undefined;
 
   public sessionId?: string;
   public stats: InternalStats;
@@ -159,6 +167,20 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
   }
 
   /**
+   * Run under a Claude account: the environment its credential needs. Set by the
+   * session manager before start(), never taken from a session config, so a
+   * secret is not persisted or reported anywhere a config is.
+   */
+  setAccountEnv(env: Record<string, string> | undefined): void {
+    this._accountEnv = env && Object.keys(env).length ? { ...env } : undefined;
+  }
+
+  /** What the last turn reported about the account's usage, if anything. */
+  get accountUsage(): AccountUsage | undefined {
+    return this._turnUsage;
+  }
+
+  /**
    * Build the `--settings` argv fragment, merging in the session options that are
    * expressed as settings keys rather than flags.
    *
@@ -180,6 +202,7 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
     if (this.options.crossSessionInbound) injected.crossSessionInbound = this.options.crossSessionInbound;
 
     const settings = this.options.settings;
+    if (this._accountEnv) return this.buildAccountSettingsArgs(injected, settings);
     if (!Object.keys(injected).length) return settings ? ['--settings', settings] : [];
     if (!settings) return ['--settings', JSON.stringify(injected)];
 
@@ -193,6 +216,51 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
       // Couldn't parse/read to merge — keep the user's settings and add ours separately.
       return ['--settings', settings, '--settings', JSON.stringify(injected)];
     }
+  }
+
+  /**
+   * `--settings` for a session that runs under a Claude account.
+   *
+   * The credential has to travel in `--settings`: the CLI applies the `env` of
+   * the user's settings file over its own process environment, so a token in
+   * the process environment loses to one written there by another tool, and a
+   * `--settings` value outranks both (measured on 2.1.322). It goes in a 0600
+   * file in a private directory rather than inline JSON, which any process could
+   * read off the command line; stop() removes it.
+   */
+  private buildAccountSettingsArgs(injected: Record<string, unknown>, settings: string | undefined): string[] {
+    let merged: Record<string, unknown> | undefined;
+    if (settings) {
+      const trimmed = settings.trim();
+      try {
+        const raw = trimmed.startsWith('{') ? trimmed : fs.readFileSync(trimmed, 'utf8');
+        merged = JSON.parse(raw) as Record<string, unknown>;
+      } catch {
+        merged = undefined;
+      }
+    }
+    const base = merged ?? {};
+    const userEnv = (base.env && typeof base.env === 'object' ? base.env : {}) as Record<string, unknown>;
+    const obj = { ...base, ...injected, env: { ...userEnv, ...this._accountEnv } };
+
+    this.removeAccountSettings();
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'clawo-account-'));
+    fs.chmodSync(dir, 0o700);
+    const file = path.join(dir, 'settings.json');
+    fs.writeFileSync(file, JSON.stringify(obj), { mode: 0o600 });
+    this._accountSettingsDir = dir;
+    // Settings that could not be read are passed on as given, ahead of ours.
+    return settings && !merged ? ['--settings', settings, '--settings', file] : ['--settings', file];
+  }
+
+  private removeAccountSettings(): void {
+    if (!this._accountSettingsDir) return;
+    try {
+      fs.rmSync(this._accountSettingsDir, { recursive: true, force: true });
+    } catch {
+      /* best effort: the directory is private and holds one small file */
+    }
+    this._accountSettingsDir = undefined;
   }
 
   // ─── Start ───────────────────────────────────────────────────────────────
@@ -456,12 +524,22 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
       this.emit(SESSION_EVENT.LOG, `[stderr] ${sanitizeSecrets(data.toString())}`);
     });
 
+    // Both handlers belong to this process only. switchAccount() replaces the
+    // process in place, and the old one's `close` lands after the new one has
+    // started; acting on it would mark the new process dead and delete its
+    // credential file.
+    const child = this.proc;
+    const superseded = () => this.proc !== null && this.proc !== child;
+
     this.proc.on('close', (code) => {
+      if (superseded()) return;
       this._isReady = false;
+      this.removeAccountSettings();
       this.emit(SESSION_EVENT.CLOSE, code);
     });
 
     this.proc.on('error', (err) => {
+      if (superseded()) return;
       // Spawn/runtime failure: drop references so a later send() fails the
       // readiness check instead of writing to a dead process.
       this._isReady = false;
@@ -676,6 +754,11 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
         this.emit(SESSION_EVENT.TOOL_RESULT, event);
         break;
 
+      case 'rate_limit_event':
+        this._noteRateLimit((event as Record<string, unknown>).rate_limit_info);
+        this.emit(SESSION_EVENT.EVENT, event);
+        break;
+
       case 'error':
         this.emit(
           SESSION_EVENT.ERROR,
@@ -686,6 +769,11 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
       case 'result': {
         const usage = (event as Record<string, unknown>).usage as Record<string, number> | undefined;
         if (usage) this._applyTurnUsage(usage, true);
+        // A turn the account refused: the CLI answers it itself (model `<synthetic>`)
+        // with `api_error: usage_limit_reached` and HTTP 429 (measured on 2.1.322).
+        if ((event as Record<string, unknown>).api_error === 'usage_limit_reached') {
+          this._turnUsage = { ...this._turnUsage, limited: true };
+        }
         this._applyReportedCost((event as Record<string, unknown>).total_cost_usd);
         this._captureContextWindow((event as Record<string, unknown>).modelUsage);
         // A turn this session did not send ends with a result too: a background
@@ -747,6 +835,7 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
     this._msgProvisional = { in: 0, out: 0, cacheRead: 0, cacheCreate: 0, cacheCreate1h: 0 };
     this._turnApplied = { in: 0, out: 0, cacheRead: 0, cacheCreate: 0, cacheCreate1h: 0 };
     this._turnRequestPromptTokens = 0;
+    this._turnUsage = undefined;
 
     let finalMessage = typeof message === 'string' ? message : message;
     if (typeof finalMessage === 'string') {
@@ -1056,6 +1145,33 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
 
   stop(): void {
     this._fireHook('onStop', { cost: this.getCost(), stats: this.getStats() });
+    this._endProcess();
+    this._isPaused = false;
+    this.emit(SESSION_EVENT.CLOSE, 143);
+  }
+
+  /**
+   * Continue this conversation under another Claude account.
+   *
+   * The CLI reads its credential once, at start, so the process is restarted:
+   * same session id via `--resume`, new credential, never `--fork-session` (a
+   * fork would start a new conversation). Statistics and spend carry over; the
+   * cost baseline handles the resumed process reporting the session's totals.
+   */
+  async switchAccount(env: Record<string, string>): Promise<void> {
+    const id = this.sessionId;
+    if (!id) throw new Error('This session has no conversation id to continue under another account');
+    this._endProcess();
+    this.options.resumeSessionId = id;
+    delete this.options.claudeResumeId;
+    this.options.forkSession = false;
+    this.setAccountEnv(env);
+    await this.start();
+  }
+
+  /** End the CLI process and drop its credential file; the session object stays usable. */
+  private _endProcess(): void {
+    this.removeAccountSettings();
     if (this._rl) {
       this._rl.close();
       this._rl = null;
@@ -1097,8 +1213,6 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
       this.proc = null;
     }
     this._isReady = false;
-    this._isPaused = false;
-    this.emit(SESSION_EVENT.CLOSE, 143);
   }
 
   // ─── Private ─────────────────────────────────────────────────────────────
@@ -1187,6 +1301,31 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
     const prompt =
       num(usage.input_tokens) + num(usage.cache_read_input_tokens) + num(usage.cache_creation_input_tokens);
     if (prompt > 0) this._turnRequestPromptTokens = prompt;
+  }
+
+  /**
+   * Read a `rate_limit_event`: whether the account refused the turn, its highest
+   * window utilization, and when the window that limits it resets. The CLI emits
+   * one per turn, `status: allowed` with each window's utilization, or
+   * `rejected` once a limit is reached.
+   */
+  private _noteRateLimit(info: unknown): void {
+    if (!info || typeof info !== 'object') return;
+    const i = info as Record<string, unknown>;
+    let utilization: number | undefined;
+    const windows = i.unifiedWindows;
+    if (windows && typeof windows === 'object') {
+      for (const w of Object.values(windows as Record<string, unknown>)) {
+        const u = (w as Record<string, unknown> | null)?.utilization;
+        if (typeof u === 'number' && Number.isFinite(u)) utilization = Math.max(utilization ?? 0, u);
+      }
+    }
+    const resetsAt = typeof i.resetsAt === 'number' && i.resetsAt > 0 ? i.resetsAt * 1000 : undefined;
+    this._turnUsage = {
+      limited: i.status === 'rejected' || !!this._turnUsage?.limited,
+      ...(utilization !== undefined ? { utilization } : {}),
+      ...(resetsAt !== undefined ? { resetsAt } : {}),
+    };
   }
 
   /**
