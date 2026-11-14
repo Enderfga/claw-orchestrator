@@ -71,6 +71,9 @@ describe('lookupModel', () => {
       'gemini-3-flash-preview',
       'gemini-3.5-flash',
       'gemini-3.1-pro',
+      'gemini-4-carbon',
+      'gemini-4-argon',
+      'gemini-4-hydrogen',
       'gemini-2.5-pro',
       'gemini-2.5-flash',
       'composer-2',
@@ -118,7 +121,7 @@ describe('resolveEngineAndModel', () => {
   it('resolves aliases to canonical id', () => {
     expect(resolveEngineAndModel('opus')).toEqual({ engine: 'claude', model: 'claude-opus-5-5' });
     expect(resolveEngineAndModel('gemini-flash')).toEqual({ engine: 'gemini', model: 'gemini-3-flash-preview' });
-    expect(resolveEngineAndModel('agy-pro')).toEqual({ engine: 'agy', model: 'gemini-3.1-pro' });
+    expect(resolveEngineAndModel('agy-pro')).toEqual({ engine: 'agy', model: 'gemini-4-argon' });
   });
 
   it('uses the agy/ prefix to force the Antigravity engine', () => {
@@ -126,7 +129,7 @@ describe('resolveEngineAndModel', () => {
       engine: 'agy',
       model: 'gemini-3.5-flash',
     });
-    expect(resolveEngineAndModel('agy/agy-pro')).toEqual({ engine: 'agy', model: 'gemini-3.1-pro' });
+    expect(resolveEngineAndModel('agy/agy-pro')).toEqual({ engine: 'agy', model: 'gemini-4-argon' });
     expect(resolveEngineAndModel('agy/claude-sonnet-5')).toEqual({
       engine: 'agy',
       model: 'claude-sonnet-5',

@@ -10,6 +10,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { EventEmitter } from 'node:events';
 import { Readable } from 'node:stream';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 
 // Mock child_process before importing the session
 const mockSpawn = vi.fn();
@@ -160,43 +162,67 @@ describe('PersistentAgySession', () => {
       expect(spawnArgs).not.toContain('--dangerously-skip-permissions');
     });
 
-    it('uses --sandbox for default permissionMode', async () => {
-      const session = new PersistentAgySession({ name: 'test', cwd: '/tmp', permissionMode: 'default' });
+    async function argsFor(config: Record<string, unknown>): Promise<string[]> {
+      const session = new PersistentAgySession({ name: 'test', cwd: '/tmp', ...config } as never);
       await session.start();
-
       const sendPromise = session.send('hello', { waitForComplete: true });
       setTimeout(() => succeedProc(mockProc), 10);
       await sendPromise;
+      return mockSpawn.mock.calls.at(-1)![1] as string[];
+    }
+    const settingsOf = (args: string[]) =>
+      args.includes('--settings') ? JSON.parse(args[args.indexOf('--settings') + 1]) : undefined;
 
-      const spawnArgs = mockSpawn.mock.calls[0][1] as string[];
-      expect(spawnArgs).toContain('--sandbox');
-      expect(spawnArgs).not.toContain('--dangerously-skip-permissions');
+    // agy 1.5.7 made Auto the default mode of a headless run, where its reviewer
+    // lets commands run that the session was not given. Every mode is named, and
+    // the ones that ask for permission pin agy's Default mode (agentMode "").
+    it.each(['default', 'manual', 'dontAsk'])('runs %s in the sandbox, in agy Default mode', async (permissionMode) => {
+      const args = await argsFor({ permissionMode });
+      expect(args).toContain('--sandbox');
+      expect(args).not.toContain('--mode');
+      expect(args).not.toContain('--dangerously-skip-permissions');
+      expect(settingsOf(args)).toEqual({ agentMode: '' });
     });
 
-    it('uses --sandbox for manual permissionMode (CLI 2.1.200+ name for default)', async () => {
-      const session = new PersistentAgySession({ name: 'test', cwd: '/tmp', permissionMode: 'manual' });
-      await session.start();
-
-      const sendPromise = session.send('hello', { waitForComplete: true });
-      setTimeout(() => succeedProc(mockProc), 10);
-      await sendPromise;
-
-      const spawnArgs = mockSpawn.mock.calls[0][1] as string[];
-      expect(spawnArgs).toContain('--sandbox');
-      expect(spawnArgs).not.toContain('--dangerously-skip-permissions');
+    it.each([
+      ['acceptEdits', 'accept-edits'],
+      ['auto', 'auto'],
+      ['plan', 'plan'],
+    ])('passes %s as --mode %s', async (permissionMode, agyMode) => {
+      const args = await argsFor({ permissionMode });
+      expect(args[args.indexOf('--mode') + 1]).toBe(agyMode);
+      expect(args).not.toContain('--sandbox');
+      expect(args).not.toContain('--settings');
     });
 
-    it('omits permission flags for other permission modes', async () => {
-      const session = new PersistentAgySession({ name: 'test', cwd: '/tmp', permissionMode: 'acceptEdits' });
+    // agy reads only the last --settings, so the mode goes into the caller's.
+    it("merges Default mode into the caller's inline settings", async () => {
+      const args = await argsFor({ permissionMode: 'default', settings: '{"model":"m","agentMode":"auto"}' });
+      expect(settingsOf(args)).toEqual({ model: 'm', agentMode: '' });
+    });
+
+    it("merges Default mode into the caller's settings file", async () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-settings-'));
+      try {
+        const file = path.join(dir, 'settings.json');
+        fs.writeFileSync(file, '{"trustedWorkspaces":["/w"]}');
+        const args = await argsFor({ permissionMode: 'manual', settings: file });
+        expect(args.filter((a) => a === '--settings')).toHaveLength(1);
+        expect(settingsOf(args)).toEqual({ trustedWorkspaces: ['/w'], agentMode: '' });
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('fails the turn rather than run without Default mode when settings are not a JSON object', async () => {
+      const session = new PersistentAgySession({
+        name: 'test',
+        cwd: '/tmp',
+        permissionMode: 'default',
+        settings: '/no/such/settings.json',
+      } as never);
       await session.start();
-
-      const sendPromise = session.send('hello', { waitForComplete: true });
-      setTimeout(() => succeedProc(mockProc), 10);
-      await sendPromise;
-
-      const spawnArgs = mockSpawn.mock.calls[0][1] as string[];
-      expect(spawnArgs).not.toContain('--sandbox');
-      expect(spawnArgs).not.toContain('--dangerously-skip-permissions');
+      await expect(session.send('hello', { waitForComplete: true })).rejects.toThrow(/must be a JSON object/);
     });
 
     it('derives --print-timeout from the send timeout', async () => {
@@ -247,7 +273,7 @@ describe('PersistentAgySession', () => {
       const spawnArgs = mockSpawn.mock.calls[0][1] as string[];
       const idx = spawnArgs.indexOf('--model');
       expect(idx).toBeGreaterThan(-1);
-      expect(spawnArgs[idx + 1]).toBe('gemini-3.1-pro');
+      expect(spawnArgs[idx + 1]).toBe('gemini-4-argon');
     });
 
     it('passes the session reasoning effort to agy', async () => {
@@ -305,6 +331,43 @@ describe('PersistentAgySession', () => {
       const spawnArgs = mockSpawn.mock.calls[0][1] as string[];
       const idx = spawnArgs.indexOf('--effort');
       expect(spawnArgs[idx + 1]).toBe('high');
+    });
+
+    // gemini-4-hydrogen is the one model with a tier above high (agy 1.5.9).
+    it.each([
+      ['gemini-4-hydrogen', 'xhigh', 'xhigh'],
+      ['gemini-4-hydrogen', 'max', 'xhigh'],
+      ['gemini-4-argon', 'xhigh', 'high'],
+    ] as const)('gives %s %s effort as agy %s', async (model, effort, expected) => {
+      const session = new PersistentAgySession({
+        name: 'test',
+        cwd: '/tmp',
+        permissionMode: 'bypassPermissions',
+        model,
+        effort,
+      });
+      await session.start();
+      const sendPromise = session.send('hello', { waitForComplete: true });
+      setTimeout(() => succeedProc(mockProc), 10);
+      await sendPromise;
+      const spawnArgs = mockSpawn.mock.calls[0][1] as string[];
+      expect(spawnArgs[spawnArgs.indexOf('--effort') + 1]).toBe(expected);
+    });
+
+    it('keeps an xhigh-qualified slug as given', async () => {
+      const session = new PersistentAgySession({
+        name: 'test',
+        cwd: '/tmp',
+        permissionMode: 'bypassPermissions',
+        model: 'gemini-4-hydrogen-xhigh',
+      });
+      await session.start();
+      const sendPromise = session.send('hello', { waitForComplete: true });
+      setTimeout(() => succeedProc(mockProc), 10);
+      await sendPromise;
+      const spawnArgs = mockSpawn.mock.calls[0][1] as string[];
+      expect(spawnArgs[spawnArgs.indexOf('--model') + 1]).toBe('gemini-4-hydrogen-xhigh');
+      expect(spawnArgs).not.toContain('--effort');
     });
 
     it('uses agy high for an unsuffixed model when effort is auto', async () => {
@@ -877,6 +940,32 @@ describe('PersistentAgySession', () => {
       expect(session.conversationId).toBe('11111111-2222-3333-4444-555555555555');
     });
 
+    // agy's input_tokens leaves the cache reads out; they used to be dropped from
+    // the cost, so a turn that read most of its prompt from cache looked free.
+    it('prices cache reads on their own, at the cached rate', async () => {
+      const session = new PersistentAgySession({ name: 'test', cwd: '/tmp', model: 'gemini-3.8-flash' });
+      await session.start();
+      const p = session.send('hello', { waitForComplete: true });
+      setTimeout(() => {
+        feedText(
+          mockProc,
+          JSON.stringify({
+            event: 'result',
+            result: {
+              conversation_id: '11111111-2222-3333-4444-555555555555',
+              status: 'SUCCESS',
+              response: 'OK',
+              usage: { input_tokens: 1_000_000, output_tokens: 1_000_000, cache_read_tokens: 2_000_000 },
+            },
+          }) + '\n',
+        );
+        closeProc(mockProc, 0);
+      }, 10);
+      await p;
+      // 1M input at $0.75 + 2M cache reads at $0.075 + 1M output at $3.75
+      expect(session.getStats().costUsd).toBeCloseTo(0.75 + 0.15 + 3.75, 6);
+    });
+
     it("measures the context by the turn's last request, not the turn's summed usage", async () => {
       // agy's `result.usage` sums every request of the turn, and `input_tokens`
       // leaves the cached reads out. Each `agent_response` step reports its own
@@ -1042,13 +1131,19 @@ describe('PersistentAgySession', () => {
     });
 
     it('prices an effort-qualified slug as its base model', async () => {
-      const session = new PersistentAgySession({ name: 'test', cwd: '/tmp', model: 'gemini-3.1-pro-high' });
+      const session = new PersistentAgySession({ name: 'test', cwd: '/tmp', model: 'gemini-4-argon-high' });
       await session.start();
 
-      // gemini-3.1-pro is $2/$12; the Flash fallback it used to get is $0.75/$3.75
+      // gemini-4-argon is $2/$10; the Flash fallback it would get is $0.75/$3.75
       const cost = session.getCost();
       expect(cost.pricing.inputPer1M).toBe(2);
-      expect(cost.pricing.outputPer1M).toBe(12);
+      expect(cost.pricing.outputPer1M).toBe(10);
+    });
+
+    it('prices an xhigh-qualified slug as its base model too', async () => {
+      const session = new PersistentAgySession({ name: 'test', cwd: '/tmp', model: 'gemini-4-hydrogen-xhigh' });
+      await session.start();
+      expect(session.getCost().pricing.inputPer1M).toBe(1.5);
     });
 
     it('getCost() uses gemini-3.8-flash pricing by default', async () => {

@@ -122,7 +122,11 @@ export class PersistentAgySession extends BaseOneShotSession {
       // default cannot be read back and adopted. Re-check `agy models` when
       // the next tier appears.
       defaultModel: 'gemini-3.8-flash',
-      supportsCachedTokens: false,
+      // agy's `input_tokens` leaves out `cache_read_tokens` (the prompt is their
+      // sum), so cache reads are counted and priced on their own; before, they
+      // were dropped from the cost altogether.
+      supportsCachedTokens: true,
+      inputIncludesCachedTokens: false,
       engineDisplayName: 'Antigravity',
     });
     // Non-UUID ids (synthetic session ids from persistence/restart paths) are
@@ -153,7 +157,7 @@ export class PersistentAgySession extends BaseOneShotSession {
   /**
    * Build the agy spawn args for this turn.
    *
-   * First turn:    `agy -p <msg> --log-file <tmp> [--sandbox|--dangerously-skip-permissions] [--model M] [--effort E] --print-timeout Ns`
+   * First turn:    `agy -p <msg> --log-file <tmp> [--mode M|--sandbox|--dangerously-skip-permissions] [--model M] [--effort E] [--settings S] --print-timeout Ns`
    * Resume turns:  same + `--conversation <id>`
    */
   private _buildArgs(message: string, timeoutMs: number, turnEffort?: EffortLevel): string[] {
@@ -165,45 +169,57 @@ export class PersistentAgySession extends BaseOneShotSession {
     // before emitting any event.
     const args: string[] = ['-p', message, '--output-format', 'stream-json', '--log-file', this._logFile];
 
-    // Permission mode. agy has no fine-grained permission flags (verified on
-    // 1.0.16): bypass maps to --dangerously-skip-permissions, `default` maps
-    // to --sandbox (terminal-restricted). Other modes run agy's own default
-    // approval behavior — which blocks on unapproved tools in print mode, so
-    // bypassPermissions (the SessionConfig default) is the practical choice
-    // for headless work.
+    // Permission mode, always named rather than left to agy's own default: agy
+    // 1.5.7 moved that default to Auto, where an LLM reviewer lets commands run
+    // that the session was not given. Measured on 1.5.9: with `--sandbox` alone a
+    // headless run wrote outside its workspace; with `agentMode: ""` (agy's
+    // Default mode, set through --settings because --mode has no value for it)
+    // every command that needs permission is refused, as headless mode cannot
+    // ask. bypassPermissions stays the SessionConfig default for headless work.
+    const mode = this.options.permissionMode;
+    let agentMode: string | undefined;
     if (this.options.sandboxMode === 'read-only') {
       args.push('--mode', 'plan');
-    } else if (this.options.permissionMode === 'bypassPermissions' || this.options.dangerouslySkipPermissions) {
+    } else if (mode === 'bypassPermissions' || this.options.dangerouslySkipPermissions) {
       args.push('--dangerously-skip-permissions');
-    } else if (this.options.permissionMode === 'default' || this.options.permissionMode === 'manual') {
+    } else if (mode === 'plan') {
+      args.push('--mode', 'plan');
+    } else if (mode === 'acceptEdits') {
+      args.push('--mode', 'accept-edits');
+    } else if (mode === 'auto') {
+      args.push('--mode', 'auto');
+    } else if (mode === 'default' || mode === 'manual' || mode === 'dontAsk') {
       args.push('--sandbox');
+      agentMode = '';
     }
 
     // Use the SessionManager-resolved model when available so documented
-    // aliases (agy-pro → gemini-3.1-pro) do not silently fall back to agy's
+    // aliases (agy-pro → gemini-4-argon) do not silently fall back to agy's
     // default model.
-    // agy 1.1.5+ exposes reasoning variants through --effort. Its accepted
-    // values are narrower than the engine-agnostic EffortLevel union: only
-    // low|medium|high are valid (agy 1.1.21 lists them in its own rejection).
-    // Preserve the caller's intent by clamping everything above that to agy's
-    // ceiling. A per-turn override wins over the session default, matching
-    // session_send's documented contract.
+    // agy 1.1.5+ exposes reasoning variants through --effort. Its tiers are
+    // narrower than the engine-agnostic EffortLevel union and differ by model:
+    // low|medium|high everywhere, and xhigh only on gemini-4-hydrogen (agy
+    // 1.5.9 refuses `gemini-4-argon --effort xhigh`, naming the tiers it has).
+    // Preserve the caller's intent by clamping everything above a model's top
+    // tier to that tier. A per-turn override wins over the session default,
+    // matching session_send's documented contract.
     //
     // Current agy also requires an effort when --model is an unsuffixed base
     // slug, so the provider-specific meaning of auto is high in that case. A
-    // fully-qualified `-low|-medium|-high` slug already carries its effort and
-    // needs no flag. If a caller overrides such a slug to a different effort,
-    // strip the suffix first: agy rejects conflicting --model/--effort pairs.
+    // fully-qualified `-low|-medium|-high|-xhigh` slug already carries its
+    // effort and needs no flag. If a caller overrides such a slug to a different
+    // effort, strip the suffix first: agy rejects conflicting --model/--effort pairs.
     const configuredModel = this.options.resolvedModel || this.options.model;
     let model = configuredModel ? this.resolveModel(configuredModel.replace(/^agy\//, '')) : undefined;
     const requestedEffort = turnEffort ?? this.options.effort;
+    const topTier = model && /^gemini-4-hydrogen(?:-|$)/.test(model) ? 'xhigh' : 'high';
     const explicitEffort =
       requestedEffort === 'max' || requestedEffort === 'xhigh' || requestedEffort === 'ultra'
-        ? 'high'
+        ? topTier
         : requestedEffort === 'auto'
           ? undefined
           : requestedEffort;
-    const modelEffortMatch = model?.match(/-(low|medium|high)$/);
+    const modelEffortMatch = model?.match(/-(low|medium|high|xhigh)$/);
     if (model && modelEffortMatch && explicitEffort && modelEffortMatch[1] !== explicitEffort) {
       model = model.slice(0, -modelEffortMatch[0].length);
     }
@@ -216,13 +232,44 @@ export class PersistentAgySession extends BaseOneShotSession {
 
     // agy 1.4.12 takes the same `settings` value as Claude Code: inline JSON or a
     // file path, applied to this run only and never saved.
-    if (this.options.settings) args.push('--settings', this.options.settings);
+    const settings = this._settingsArg(agentMode);
+    if (settings) args.push('--settings', settings);
 
     // 1.2.6 changed the default for a headless run from 5 minutes to unlimited,
     // so passing this is also what keeps a stuck turn from running forever.
     args.push('--print-timeout', `${agyPrintTimeoutSec(timeoutMs)}s`);
 
     return args;
+  }
+
+  /**
+   * The `--settings` value for this run. agy reads only the last `--settings`
+   * it is given (a second one replaces the first, measured on 1.5.9), so a mode
+   * the permission mode needs is merged into the caller's settings, not passed
+   * beside them. Settings that cannot be read as a JSON object fail the turn:
+   * running without the mode would quietly widen what the session may do.
+   */
+  private _settingsArg(agentMode: string | undefined): string | undefined {
+    const given = this.options.settings;
+    if (agentMode === undefined) return given;
+    let base: Record<string, unknown> = {};
+    if (given) {
+      const trimmed = given.trim();
+      // The reason is not repeated: a JSON parse error quotes the text it read,
+      // which for a file path is the start of whatever file it names.
+      const refused = new Error(
+        `agy settings must be a JSON object, inline or in a file, for permissionMode '${this.options.permissionMode}'`,
+      );
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(trimmed.startsWith('{') ? trimmed : fs.readFileSync(trimmed, 'utf8'));
+      } catch {
+        throw refused;
+      }
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw refused;
+      base = parsed as Record<string, unknown>;
+    }
+    return JSON.stringify({ ...base, agentMode });
   }
 
   /**
@@ -488,12 +535,12 @@ export class PersistentAgySession extends BaseOneShotSession {
   // ── Pricing ────────────────────────────────────────────────
 
   /**
-   * An effort-qualified slug (`gemini-3.1-pro-high`) is priced as the base
+   * An effort-qualified slug (`gemini-4-argon-high`) is priced as the base
    * model it qualifies. Looked up verbatim it is unknown, and fell back to
    * the Flash default: a Pro turn billed at Flash rates.
    */
   private _baseModel(model: string | undefined): string | undefined {
-    return model?.replace(/-(low|medium|high)$/, '');
+    return model?.replace(/-(low|medium|high|xhigh)$/, '');
   }
 
   protected override _getModelPricing() {

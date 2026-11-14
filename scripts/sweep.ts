@@ -528,6 +528,20 @@ async function xaiPrices(): Promise<{ prices: PublishedPrice[]; note?: string }>
   return prices.length ? { prices } : { prices: [], note: 'xai pricing table parsed empty — format changed?' };
 }
 
+/**
+ * What `agy models` lists as selectable for the signed-in account, with effort
+ * suffixes stripped: agy lists only effort-qualified slugs
+ * (`gemini-4-hydrogen-xhigh`), and the registry holds the base model.
+ */
+async function agyModelBases(): Promise<Set<string> | null> {
+  const r = await run('agy', ['models'], { timeoutMs: 60_000 });
+  const bases = new Set<string>();
+  for (const m of r.out.matchAll(/^([a-z0-9][a-z0-9.-]+)\t/gm)) {
+    bases.add(m[1].replace(/-(?:low|medium|high|xhigh|max)$/, ''));
+  }
+  return bases.size ? bases : null;
+}
+
 /** What `grok models` lists as selectable for the logged-in account. */
 async function grokModelIds(): Promise<Set<string> | null> {
   const r = await run('grok', ['models'], { timeoutMs: 60_000 });
@@ -619,10 +633,11 @@ async function sweepRegistry(codexBin: string, claudeBin: string): Promise<Regis
   // check cannot quietly stop matching when the registry's internals move.
   // `lookupModel` also resolves aliases, so the id equality below matters: it
   // keeps an alias from being compared against the entry it points at.
-  const { lookupModel } = (await import(path.join(ROOT, 'src', 'models.ts'))) as {
+  const { lookupModel, getAliases } = (await import(path.join(ROOT, 'src', 'models.ts'))) as {
     lookupModel: (
       id: string,
-    ) => { id: string; pricing: { input: number; output: number; cached?: number } } | undefined;
+    ) => { id: string; engine: string; pricing: { input: number; output: number; cached?: number } } | undefined;
+    getAliases: () => Record<string, string>;
   };
   const registered = (id: string) => {
     const m = lookupModel(id);
@@ -680,6 +695,30 @@ async function sweepRegistry(codexBin: string, claudeBin: string): Promise<Regis
     .filter((p) => selectable(p) && !registered(p.id))
     .map((p) => p.id)
     .sort();
+
+  // agy is checked against its own list in both directions, since this sweep
+  // fetches no Google price table. A Gemini model agy offers that the registry
+  // lacks would be priced as the Flash default and measured against the wrong
+  // window. An agy alias whose model agy no longer offers is worse: every turn
+  // that names it fails. `agy-pro` pointed at gemini-3.1-pro for a week after
+  // agy 1.5.8 dropped it, and this sweep reported nothing. The Claude and
+  // GPT-OSS models agy proxies, and its orchestrator entry, are not Gemini
+  // API models and are left out.
+  const agyBases = await agyModelBases();
+  if (!agyBases) {
+    notes.push('missing-model check NOT run for agy — `agy models` listed no model');
+  } else {
+    for (const base of [...agyBases].sort()) {
+      if (base.startsWith('gemini-') && !base.includes('orchestrator') && !registered(base)) {
+        unregistered.push(`${base} (agy)`);
+      }
+    }
+    for (const [alias, target] of Object.entries(getAliases())) {
+      if (lookupModel(target)?.engine === 'agy' && !agyBases.has(target)) {
+        notes.push(`agy alias ${alias} → ${target}, which \`agy models\` no longer lists`);
+      }
+    }
+  }
 
   return { checked, drift, unregistered, notes };
 }

@@ -45,7 +45,7 @@ as options (see the notes under [Antigravity](#google-antigravity-engine-agy) an
 
 ### Claude Code (`engine: 'claude'`)
 
-Default engine. Long-running subprocess with streaming JSON I/O. Tested with Claude Code CLI **2.1.322**.
+Default engine. Long-running subprocess with streaming JSON I/O. Tested with Claude Code CLI **2.1.325**.
 
 - Persistent multi-turn conversations
 - Real-time streaming (text, tool_use, tool_result, system events)
@@ -134,7 +134,7 @@ continues under another account by its own session id. Accounts are listed in
 
 ### OpenAI Codex (`engine: 'codex'`)
 
-Wraps the `codex exec` subcommand. Each `send()` spawns a new process. Tested with `codex` CLI **0.167.0**.
+Wraps the `codex exec` subcommand. Each `send()` spawns a new process. Tested with `codex` CLI **0.169.0**.
 
 - Non-interactive execution via `codex exec --sandbox workspace-write --skip-git-repo-check --json`
 - Real `usage` from the `turn.completed` JSON event (input, output, cached, reasoning tokens). **These are cumulative over the thread, not per turn**, so they replace the session totals rather than being added to them; subtracting consecutive values gives one turn's prompt
@@ -145,6 +145,7 @@ Wraps the `codex exec` subcommand. Each `send()` spawns a new process. Tested wi
 - `jsonSchema` → `--output-schema <file>` (written to a temp file, accepted by `exec` and `exec resume`)
 - `noSessionPersistence` → `--ephemeral` (accepted by `exec` and `exec resume`); `ignoreUserConfig` → `--ignore-user-config`, which stops `$CODEX_HOME/config.toml` from choosing the model for an orchestrated run (auth still resolves from `CODEX_HOME`); `addDir` → `--add-dir` on the first turn only, since `exec resume` rejects it and the resumed thread keeps the roots it opened with
 - `codexProfile` → `--profile <name>` (named config profile from `~/.codex/config.toml`), first turn only
+- Project trust: since codex 0.169.0 a run loads a project's own configuration and MCP servers (`.codex/` in the project) only in a directory codex trusts, whatever the sandbox mode; the user's `~/.codex/config.toml` applies everywhere. The wrapper does not pass `--trust`, which saves the trust for every later run. Trust a project once with `codex exec --trust` or under `[projects]` in `~/.codex/config.toml`
 - `--worktree` is not passed. With it, codex writes the turn's edits to `~/.codex/worktrees/<hash>/<repo>` instead of the session's `cwd`, while acceptance contracts, evidence diffs and the baseline change set all read the session's `cwd`. Council's per-agent git worktrees cover the isolation use case
 - Continuity: the `thread_id` from the first turn's `thread.started` event is captured and reused via `codex exec resume <id>` for later sends, so the model sees prior turns. The id is persisted too, so a restarted session (and `resumeSessionId`) resumes the same thread
 - `sandboxMode` maps to `--sandbox <mode>` on the first turn (default `workspace-write`). A resumed thread does not keep it, and `codex exec resume` rejects `--sandbox`, so the policy is restated as `-c sandbox_mode="<mode>"` on every resumed turn
@@ -172,7 +173,7 @@ await manager.startSession({
 
 ### OpenAI Codex App-Server (`engine: 'codex-app'`)
 
-Wraps `codex app-server --listen stdio:// --enable goals` as a long-running JSON-RPC subprocess. **Required for `/goal` long-horizon objective support** — Codex's exec subcommand has no goal surface. Tested with `codex` CLI **0.167.0**.
+Wraps `codex app-server --listen stdio:// --enable goals` as a long-running JSON-RPC subprocess. **Required for `/goal` long-horizon objective support** — Codex's exec subcommand has no goal surface. Tested with `codex` CLI **0.169.0**.
 
 - Long-running subprocess; one `codex app-server` per session
 - JSON-RPC 2.0 over stdio with v2 protocol method names (`initialize`, `thread/start`, `turn/start`, ...)
@@ -204,13 +205,15 @@ await manager.codexGoal('codex-goal-task', { action: 'set', objective: 'build a 
 
 Wraps Google's **Antigravity CLI** (`agy`) — the successor to Gemini CLI (consumer
 Gemini CLI tiers stopped serving 2026-06-18). Each `send()` spawns a new process
-in print mode, with the message as the `-p` argument. Tested with `agy` **1.5.3**.
+in print mode, with the message as the `-p` argument. Tested with `agy` **1.5.9**.
 
 - One-shot execution per message (no persistent subprocess)
 - **Structured output and real usage** — `--output-format stream-json` emits an
   `init` event with the conversation id, progress events, and a final `result`
-  with the response plus input/output/cache-read token counts. Plain text and
-  estimated usage remain as compatibility fallbacks when a result event is absent.
+  with the response plus input/output/cache-read token counts. agy's input count
+  leaves the cache reads out, so they are counted and priced separately, at the
+  model's cached rate. Plain text and estimated usage remain as compatibility
+  fallbacks when a result event is absent.
 - **Real conversation continuity**: the engine captures the id from stream-json
   and resumes with `--conversation <id>` on later sends. A private `--log-file`
   scrape remains as a fallback for turns that die before emitting `init`. Seed it
@@ -226,26 +229,34 @@ in print mode, with the message as the `-p` argument. Tested with `agy` **1.5.3*
 - `appendSystemPrompt`: agy has no system-prompt flag, so it is placed at the top
   of the first message of each new conversation.
 - **Reasoning effort**: session `effort` and per-turn `session_send` overrides map
-  to `--effort`. agy accepts `low`, `medium`, and `high`; everything above that
-  (`xhigh`, `max`, `ultra`) clamps to `high`. agy requires an effort with unsuffixed base
-  slugs such as `gemini-3.7-flash`, so `auto` resolves those to `high`; a model
-  already ending in `-low`, `-medium`, or `-high` keeps that qualified effort.
+  to `--effort`. agy accepts `low`, `medium` and `high`, and `xhigh` on
+  `gemini-4-hydrogen` only; anything above a model's top tier (`xhigh`, `max`,
+  `ultra`) clamps to that tier. agy requires an effort with unsuffixed base
+  slugs such as `gemini-3.8-flash`, so `auto` resolves those to `high`; a model
+  already ending in `-low`, `-medium`, `-high` or `-xhigh` keeps that qualified effort.
   Per-turn overrides also work with qualified slugs: the adapter removes a
   conflicting suffix before passing the new `--effort`, avoiding agy's conflict
   error.
 
-  Tiers are not uniform across agy models — `gemini-3.1-pro` (the `agy-pro`
-  alias) offers `low` and `high` only, so `effort: 'medium'` on it fails with
-  `gemini-3.1-pro has no "medium" effort (available: low, high)`. The adapter
-  passes the requested effort through rather than substituting a tier the caller
-  did not ask for; run `agy models` to see the tiers a slug actually exposes.
+  Tiers are not uniform across agy models — `gemini-4-argon` (the `agy-pro`
+  alias) has no `xhigh`, and agy names the tiers a model has when it refuses one.
+  The adapter passes `low`, `medium` and `high` through rather than substituting a
+  tier the caller did not ask for; run `agy models` to see the tiers a slug actually exposes.
 
-- Permission modes: `bypassPermissions` (or `dangerouslySkipPermissions`) →
-  `--dangerously-skip-permissions`, `default` and `manual` → `--sandbox`
-  (terminal-restricted), and
-  `sandboxMode: 'read-only'` → `--mode plan` (takes precedence). Other modes
-  run agy's own approval flow, which can block in headless print mode. A caller
-  must explicitly choose `bypassPermissions` for a write-enabled session; it is
+- Permission modes are always passed explicitly, because agy's own default for a
+  headless run is Auto mode (since 1.5.7), where its reviewer can let a command run
+  that the session was not given:
+  - `bypassPermissions` (or `dangerouslySkipPermissions`) → `--dangerously-skip-permissions`;
+  - `default`, `manual` and `dontAsk` → `--sandbox` (terminal-restricted) in agy's
+    Default mode (`"agentMode": ""` merged into `--settings`). A headless run cannot
+    ask, so every tool call that needs permission is refused;
+  - `acceptEdits` → `--mode accept-edits`, `auto` → `--mode auto`, `plan` → `--mode plan`;
+  - `sandboxMode: 'read-only'` → `--mode plan` (takes precedence).
+
+  Since agy reads only the last `--settings` it is given, the Default mode is merged
+  into the session's own `settings`, which must then be a JSON object, inline or in a
+  file; anything else fails the turn rather than run without it. A caller must
+  explicitly choose `bypassPermissions` for a write-enabled session; it is
   not a recovery mechanism. In particular, an Autoloop Planner stays on
   `--mode plan` when its preserved conversation is resumed.
 - `settings` is passed as `--settings`: settings.json keys as inline JSON or a file path, for this run only. agy refuses a key it does not know.
@@ -259,15 +270,17 @@ in print mode, with the message as the `-p` argument. Tested with `agy` **1.5.3*
 - Do not rely on an unknown `--model` falling back: current agy versions can
   report `status: ERROR` with no usable response. The adapter rejects result
   errors, non-success statuses, and empty responses. `agy-flash` and the engine
-  default resolve to `gemini-3.8-flash`; `agy-pro` resolves to
-  `gemini-3.1-pro`. The registry also describes the 3.5/3.6/3.7 Flash API
-  families for pricing and routing, but agy's own `agy models` output decides
-  which slugs are executable. agy also proxies Claude and GPT-OSS models, which
+  default resolve to `gemini-3.8-flash`; `agy-pro` resolves to `gemini-4-argon`,
+  the Pro-class Gemini 4 model every agy sign-in offers. `gemini-4-hydrogen` and,
+  with a `GEMINI_API_KEY`, `gemini-4-carbon` are registered too. The registry also
+  describes the 3.5/3.6/3.7 Flash and 3.1 Pro API models for pricing and routing,
+  but agy's own `agy models` output decides which slugs are executable (agy 1.5.8
+  dropped `gemini-3.1-pro`). agy also proxies Claude and GPT-OSS models, which
   pass through unregistered. The `agy/` prefix forces Antigravity routing for
   provider-like model strings.
 - Consumer auth is a one-time `agy` Google OAuth login (subscription quotas, no
   per-token billing — registry pricing mirrors Gemini API rates as a value proxy).
-  An effort-qualified slug such as `gemini-3.1-pro-high` is priced as its base model
+  An effort-qualified slug such as `gemini-4-argon-high` is priced as its base model
 - Requires `agy` installed: `curl -fsSL https://antigravity.google/cli/install.sh | bash`
 - Binary: `agy` (set `AGY_BIN` env var to override)
 

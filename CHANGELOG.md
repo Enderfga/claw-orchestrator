@@ -7,12 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Gemini 4 on Antigravity.** `gemini-4-carbon`, `gemini-4-argon` and `gemini-4-hydrogen` are registered with
+  their Gemini API prices and 1M context, and `effort: 'xhigh'` reaches `gemini-4-hydrogen`, the one agy model
+  with that tier. `npx tsx scripts/sweep.ts` now checks `agy models` against the registry, and fails when an agy
+  alias names a model agy no longer lists.
+
 ### Fixed
 
+- **Antigravity sessions in `default`, `manual` or `dontAsk` mode stay in agy's Default mode.** agy 1.5.7 made
+  Auto the default mode of a headless run, where its reviewer can let a command run that the session was not
+  given: with `--sandbox` alone, a run wrote a file outside its workspace. These modes now also pass agy's
+  Default mode (`"agentMode": ""`, merged into the session's `settings`, which must then be a JSON object), so
+  every tool call that needs permission is refused; `acceptEdits`, `auto` and `plan` pass the matching `--mode`.
+- **`agy-pro` works again.** It named `gemini-3.1-pro`, which agy 1.5.8 dropped, so every turn on it failed. It
+  now names `gemini-4-argon`, the Pro-class Gemini 4 model every agy sign-in offers.
+- **Antigravity turns count their cache reads.** agy reports cache reads apart from input tokens, and the cost
+  left them out; they are now priced at the model's cached rate.
 - **Starting an autoloop no longer rewrites the workspace's Git index.** The dirty-worktree check before a start
   ran a plain `git status`, which refreshes stale stat data and writes `.git/index` under `index.lock`; a commit
   running in the same repository at that moment could fail on the lock. The check now runs
   `git --no-optional-locks status`, which reads the same state and leaves the index alone.
+
+### Changed
+
+- Tested with Claude Code 2.1.325, Codex 0.169.0 and Antigravity 1.5.9 (Grok Build 1.0.77 and OpenCode 1.19.5
+  unchanged). Codex 0.169.0 loads a project's own configuration and MCP servers only in a directory it trusts;
+  `multi-engine.md` says how to trust one.
 
 ### Docs
 

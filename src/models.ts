@@ -449,12 +449,43 @@ const MODELS: ModelDef[] = [
   // Prices are the Gemini API paid-tier list rates for the same models. The three
   // newest Flash tiers are $0.75/$3.75 today and are scheduled to double on
   // 2027-01-01; the scheduled number is deliberately NOT priced, because a
-  // future rate is not what a turn run today costs.
+  // future rate is not what a turn run today costs. The same holds for Gemini 4
+  // Argon and Carbon, $2/$10 until 2026-11-30 and $4/$20 from 2026-12-01.
+  //
+  // Gemini 4 (agy 1.5.8, `agy models` on 1.5.9): Carbon is the strongest
+  // reasoning model and is offered only with a GEMINI_API_KEY; Argon is the
+  // efficient Pro-class model every sign-in gets, so `agy-pro` names it; Hydrogen
+  // is the general-purpose fast model and the only one with an `xhigh` tier.
+  // gemini-3.1-pro left agy's list in the same release — agy now refuses it as
+  // an unknown model — and stays registered only as a real API model with a
+  // real price.
+  {
+    id: 'gemini-4-carbon',
+    engine: 'agy',
+    provider: 'google',
+    pricing: { input: 2, output: 10, cached: 0.1 },
+    contextWindow: 1_000_000,
+  },
+  {
+    id: 'gemini-4-argon',
+    engine: 'agy',
+    provider: 'google',
+    pricing: { input: 2, output: 10, cached: 0.1 },
+    aliases: ['agy-pro'],
+    contextWindow: 1_000_000,
+  },
+  {
+    id: 'gemini-4-hydrogen',
+    engine: 'agy',
+    provider: 'google',
+    pricing: { input: 1.5, output: 7.5, cached: 0.075 },
+    contextWindow: 1_000_000,
+  },
   {
     id: 'gemini-3.8-flash',
     engine: 'agy',
     provider: 'google',
-    pricing: { input: 0.75, output: 3.75 },
+    pricing: { input: 0.75, output: 3.75, cached: 0.075 },
     aliases: ['agy-flash'],
     contextWindow: 1_000_000,
   },
@@ -469,7 +500,7 @@ const MODELS: ModelDef[] = [
     id: 'gemini-3.6-flash',
     engine: 'agy',
     provider: 'google',
-    pricing: { input: 0.75, output: 3.75 },
+    pricing: { input: 0.75, output: 3.75, cached: 0.075 },
     contextWindow: 1_000_000,
   },
   {
@@ -483,8 +514,7 @@ const MODELS: ModelDef[] = [
     id: 'gemini-3.1-pro',
     engine: 'agy',
     provider: 'google',
-    pricing: { input: 2, output: 12 },
-    aliases: ['agy-pro'],
+    pricing: { input: 2, output: 12, cached: 0.2 },
     contextWindow: 1_000_000,
   },
 
