@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [7.23.0] - 2026-11-14
 
 ### Added
 
@@ -28,7 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Starting an autoloop no longer rewrites the workspace's Git index.** The dirty-worktree check before a start
   ran a plain `git status`, which refreshes stale stat data and writes `.git/index` under `index.lock`; a commit
   running in the same repository at that moment could fail on the lock. The check now runs
-  `git --no-optional-locks status`, which reads the same state and leaves the index alone.
+  `git --no-optional-locks status`, which reads the same state and leaves the index alone. (#177, thanks @ajmtrz)
 
 ### Changed
 
@@ -41,7 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A security policy.** `SECURITY.md` says which releases get security fixes (only the latest minor release
   line), how to report a vulnerability privately through GitHub, and what is in and out of scope: the documented
   security model of the embedded server's token, and what an engine session does within the settings it was given
-  (prompt injection included), are out of scope; a way past either is in scope.
+  (prompt injection included), are out of scope; a way past either is in scope. (#178, #179, thanks @ajmtrz)
 
 ## [7.22.1] - 2026-11-11
 
