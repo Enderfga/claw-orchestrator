@@ -222,6 +222,26 @@ export function resolveSessionKey(body: OpenAIChatCompletionRequest, headers: ht
   const headerKey = headers['x-session-id'];
   if (typeof headerKey === 'string' && headerKey.trim()) return headerKey.trim();
   if (body.user && body.user.trim()) return body.user.trim();
+  const { model: modelTag, system: sys, tools: toolsFingerprint } = sessionKeyInputs(body);
+  if (sys || modelTag || toolsFingerprint) {
+    return (
+      'sys-' +
+      createHash('sha1')
+        .update(modelTag + '\n' + sys + '\n' + toolsFingerprint)
+        .digest('hex')
+        .slice(0, 12)
+    );
+  }
+  return 'default';
+}
+
+/**
+ * What a session key without an explicit name is hashed from: the model, the system prompt and a
+ * fingerprint of the tool list. A caller can change any of them in the middle of one conversation
+ * (OpenClaw changes its tool list between calls of a single run), which is why a tool round is
+ * routed by the tool call it answers rather than by this key — see routeToolResults().
+ */
+export function sessionKeyInputs(body: OpenAIChatCompletionRequest): { model: string; system: string; tools: string } {
   const sys = (body.messages || [])
     .filter((m) => m && m.role === 'system')
     .map((m) => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content)))
@@ -255,16 +275,7 @@ export function resolveSessionKey(body: OpenAIChatCompletionRequest, headers: ht
         })
         .filter(Boolean)
         .join('|');
-  if (sys || modelTag || toolsFingerprint) {
-    return (
-      'sys-' +
-      createHash('sha1')
-        .update(modelTag + '\n' + sys + '\n' + toolsFingerprint)
-        .digest('hex')
-        .slice(0, 12)
-    );
-  }
-  return 'default';
+  return { model: modelTag, system: sys, tools: toolsFingerprint };
 }
 
 /** Build the full session name from a key */
@@ -351,6 +362,10 @@ export function buildToolReminderBlock(): string {
     '</available_tools>'
   );
 }
+
+/** Leads the full tool block when a session's tool list changed mid-conversation. */
+export const TOOLS_CHANGED_NOTE =
+  'The tools available to you have changed since earlier in this conversation. The list below replaces the earlier one.';
 
 export interface ParsedToolCalls {
   textContent: string | null;
@@ -961,9 +976,119 @@ function threadHoldsConversation(sessionName: string, messages: OpenAIChatMessag
   return seeded === fingerprintUserTurns(messages.slice(0, lastUserIndex));
 }
 
+/**
+ * Which session issued each tool call this bridge has returned, and which calls each session is
+ * waiting to hear back about.
+ *
+ * A request carrying tool results has to reach the session that asked for them. The session key
+ * cannot say which one that is: without an explicit name it is a hash of the model, system prompt
+ * and tool list, and a caller can change those inside one run. OpenClaw changes its tool list
+ * between calls of a run; with the list in the key, one run alternated between two hashes, two
+ * sessions each issued calls, and each was handed the other's results.
+ *
+ * Keyed by canonicalToolCallId(), because callers do not always echo an id byte for byte (OpenClaw
+ * returns `call_ab12…` as `callab12…`). Both maps are bounded like seededConversations; losing an
+ * entry costs routing by key, the behaviour before this existed.
+ */
+const toolCallOwners = new Map<string, string>();
+const awaitingToolResults = new Map<string, Set<string>>();
+/** The tool-list fingerprint each session's prompt currently describes; see the tool injection. */
+const sessionToolFingerprints = new Map<string, string>();
+/** The key inputs of the request that created each session, for the routing log line. */
+const sessionCreatedFrom = new Map<string, { model: string; system: string; tools: string }>();
+const MAX_TOOL_CALL_OWNERS = 5000;
+
+function boundedSet<V>(map: Map<string, V>, key: string, value: V, max: number): void {
+  map.delete(key);
+  map.set(key, value);
+  if (map.size > max) {
+    const oldest = map.keys().next();
+    if (!oldest.done) map.delete(oldest.value);
+  }
+}
+
+/**
+ * The part of a tool call id that survives a caller rewriting it: the 24 hex digits this bridge puts
+ * in every id it issues (`call_<24 hex>`), or, for any other id, its letters and digits.
+ */
+export function canonicalToolCallId(id: string): string {
+  const core = /[0-9a-f]{24}/i.exec(id)?.[0];
+  return (core ?? id.replace(/[^A-Za-z0-9]/g, '')).toLowerCase();
+}
+
+/** Record the calls a session just returned; a reply with none means it waits for nothing. */
+function recordIssuedToolCalls(sessionName: string, calls: OpenAIToolCall[]): void {
+  const ids = calls.map((c) => canonicalToolCallId(c.id)).filter(Boolean);
+  if (ids.length) boundedSet(awaitingToolResults, sessionName, new Set(ids), MAX_SEEDED_CONVERSATIONS);
+  else awaitingToolResults.delete(sessionName);
+  for (const id of ids) boundedSet(toolCallOwners, id, sessionName, MAX_TOOL_CALL_OWNERS);
+}
+
+function forgetSessionRouting(sessionName: string): void {
+  awaitingToolResults.delete(sessionName);
+  sessionToolFingerprints.delete(sessionName);
+  sessionCreatedFrom.delete(sessionName);
+}
+
+/** The ids the request's latest tool round answers: the `tool` messages after its last `assistant`. */
+function latestToolResultIds(messages: OpenAIChatMessage[]): string[] {
+  const lastAssistant = messages.map((m) => m.role).lastIndexOf('assistant');
+  return messages
+    .slice(lastAssistant + 1)
+    .filter((m) => m.role === 'tool' && typeof m.tool_call_id === 'string' && m.tool_call_id)
+    .map((m) => canonicalToolCallId(m.tool_call_id as string));
+}
+
+export type ToolResultRoute = { session: string; rerouted: boolean } | { error: string };
+
+/**
+ * Where a request goes when it carries tool results: to the session that issued those calls, or
+ * nowhere. `keyedSession` is the session its key names, and `explicitKey` says whether the caller
+ * named it (`X-Session-Id` or `user`) or it was hashed.
+ *
+ * - Results that answer calls of one known session go to it. A hashed key that names another
+ *   session is overruled; an explicit one is refused, because the caller asked for a session these
+ *   results do not belong to.
+ * - Results that answer calls of two sessions are refused: no single session asked for them.
+ * - Results nobody is known to have asked for (this process restarted, or the ids were rewritten
+ *   beyond recognition) go by key, unless that session is waiting for other calls — then they would
+ *   be answered with someone else's output, so they are refused.
+ */
+export function routeToolResults(
+  keyedSession: string,
+  messages: OpenAIChatMessage[],
+  explicitKey: boolean,
+): ToolResultRoute {
+  const ids = latestToolResultIds(messages);
+  if (!ids.length) return { session: keyedSession, rerouted: false };
+  const owners = new Set(ids.map((id) => toolCallOwners.get(id)).filter((o): o is string => !!o));
+  if (owners.size > 1) {
+    return { error: `these tool results answer tool calls from more than one session (${[...owners].join(', ')})` };
+  }
+  if (owners.size === 1) {
+    const owner = [...owners][0];
+    if (owner === keyedSession) return { session: owner, rerouted: false };
+    if (explicitKey) {
+      return {
+        error: `these tool results answer tool calls issued by session '${owner}', not '${keyedSession}', the session this request names`,
+      };
+    }
+    return { session: owner, rerouted: true };
+  }
+  const awaiting = awaitingToolResults.get(keyedSession);
+  if (awaiting?.size && !ids.some((id) => awaiting.has(id))) {
+    return { error: `these tool results do not answer the tool calls session '${keyedSession}' is waiting for` };
+  }
+  return { session: keyedSession, rerouted: false };
+}
+
 /** Test seam: the map is module state, and a suite that shares it across cases tests the wrong thing. */
 export function __resetSeededConversations(): void {
   seededConversations.clear();
+  toolCallOwners.clear();
+  awaitingToolResults.clear();
+  sessionToolFingerprints.clear();
+  sessionCreatedFrom.clear();
 }
 
 /** Test seam: the eviction bound is invisible from outside, and an unbounded map leaks in silence. */
@@ -1039,8 +1164,33 @@ export async function handleChatCompletion(
   const modelStr = request.model || OPENAI_COMPAT_DEFAULT_MODEL;
   const { engine, model: resolvedModel } = resolveEngineAndModel(modelStr);
   const sessionKey = resolveSessionKey(request, headers);
-  const sessionName = sessionNameFromKey(sessionKey);
+  let sessionName = sessionNameFromKey(sessionKey);
   const isStreaming = request.stream === true;
+  const keyInputs = sessionKeyInputs(request);
+
+  // A tool round goes to the session that issued its calls, whatever the key says; results that
+  // match no session's calls are refused rather than handed to one. See routeToolResults().
+  const headerKey = headers['x-session-id'];
+  const explicitKey = (typeof headerKey === 'string' && !!headerKey.trim()) || !!request.user?.trim();
+  const route = routeToolResults(sessionName, request.messages, explicitKey);
+  if ('error' in route) {
+    res.writeHead(409, { 'Content-Type': 'application/json' });
+    res.end(
+      JSON.stringify({ error: { message: route.error, type: 'invalid_request_error', code: 'tool_call_mismatch' } }),
+    );
+    return;
+  }
+  if (route.rerouted) {
+    const created = sessionCreatedFrom.get(route.session);
+    const changed = created
+      ? (['model', 'system', 'tools'] as const).filter((k) => created[k] !== keyInputs[k]).join(', ') || 'nothing'
+      : 'unknown (session created before this process started tracking it)';
+    console.warn(
+      `[openai-compat] ${new Date().toISOString()} tool results for '${route.session}' arrived under key '${sessionName}'; ` +
+        `routed to the session that issued the calls. Changed since that session was created: ${changed}`,
+    );
+    sessionName = route.session;
+  }
 
   // Resolved before extracting, because the extraction needs to know whether the engine's
   // conversation already holds the earlier tool results. In the tool-loop branch
@@ -1078,6 +1228,7 @@ export async function handleChatCompletion(
   // If new conversation detected and session exists, stop old one first
   if (extracted.isNewConversation && sessionExists) {
     seededConversations.delete(sessionName);
+    forgetSessionRouting(sessionName);
     try {
       await manager.stopSession(sessionName);
     } catch {
@@ -1124,6 +1275,8 @@ export async function handleChatCompletion(
     }
     try {
       await manager.startSession(sessionConfig);
+      boundedSet(sessionToolFingerprints, sessionName, keyInputs.tools, MAX_SEEDED_CONVERSATIONS);
+      boundedSet(sessionCreatedFrom, sessionName, keyInputs, MAX_SEEDED_CONVERSATIONS);
     } catch (err) {
       res.writeHead(503, { 'Content-Type': 'application/json' });
       res.end(
@@ -1204,12 +1357,12 @@ export async function handleChatCompletion(
   //
   // A fresh session always gets the full block regardless of engine, so a thread
   // is never created without the definitions (this also covers the case where a
-  // session was evicted and is being recreated mid-conversation). A caller with
-  // no explicit key (no `X-Session-Id`, no `user`) that changes its tool list
-  // mid-conversation also lands on the full block: the tool list is part of the
-  // hashed key, so a different list resolves to a different session, which is a
-  // fresh create. An explicit key names the session by itself, so a changed list
-  // stays on the same session and a resumed thread gets only the reminder.
+  // session was evicted and is being recreated mid-conversation). A session that
+  // continues under a changed tool list gets the full new block once (see
+  // `toolsChanged` above): a tool round routed to the session that issued its
+  // calls, and any turn under an explicit key. A caller with no explicit key that
+  // changes its tool list on a new user turn still resolves to another session,
+  // which is a fresh create.
   //
   // OPENAI_COMPAT_TOOLS_PER_MESSAGE is the exception — its whole purpose is to
   // re-send the full list every turn so the tool set can change within one
@@ -1217,7 +1370,20 @@ export async function handleChatCompletion(
   // hash), so it keeps getting full blocks.
   const hasTools = !!request.tools?.length;
   const perMessageMode = isToolsPerMessageModeEnabled();
-  const injectToolsPerTurn = hasTools && (engine !== 'claude' || perMessageMode);
+  // A session that continues under a changed tool list — a tool round routed to its issuer, or an
+  // explicit key — would otherwise keep describing the list it was created with, and its model
+  // could neither see a tool the caller added nor know one was taken away. The new list goes out
+  // in full once, and the session is held to it from then on.
+  const knownTools = sessionToolFingerprints.get(sessionName);
+  const toolsChanged = !needsCreate && !perMessageMode && knownTools !== undefined && knownTools !== keyInputs.tools;
+  if (toolsChanged) {
+    boundedSet(sessionToolFingerprints, sessionName, keyInputs.tools, MAX_SEEDED_CONVERSATIONS);
+    const changedBlock = hasTools
+      ? buildToolPromptBlock(request.tools)
+      : '<available_tools>\nNo tools are available any more. Respond with text only.\n</available_tools>';
+    userMessage = `${TOOLS_CHANGED_NOTE}\n${changedBlock}\n\n${userMessage}`;
+  }
+  const injectToolsPerTurn = hasTools && !toolsChanged && (engine !== 'claude' || perMessageMode);
   if (injectToolsPerTurn) {
     let schemasAlreadyInThread = false;
     if (!needsCreate && !perMessageMode && engineHasNativeConversation(engine)) {
@@ -1377,6 +1543,7 @@ async function handleNonStreaming(
     // Parse tool_calls from response text when caller provided tools
     if (hasTools) {
       const parsed = parseToolCallsFromText(result.output);
+      recordIssuedToolCalls(sessionName, parsed.toolCalls);
       const response = formatCompletionResponse(
         completionId,
         model,
@@ -1388,6 +1555,7 @@ async function handleNonStreaming(
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(response));
     } else {
+      recordIssuedToolCalls(sessionName, []);
       const response = formatCompletionResponse(completionId, model, result.output, tokensIn, tokensOut);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(response));
@@ -1509,8 +1677,10 @@ async function handleStreaming(
 
     // An engine with no delta channel left the buffer empty; its reply is the return value.
     const toolText = bufferedText || result.output;
+    if (!hasTools) recordIssuedToolCalls(sessionName, []);
     if (hasTools && toolText) {
       const parsed = parseToolCallsFromText(toolText);
+      recordIssuedToolCalls(sessionName, parsed.toolCalls);
 
       if (parsed.toolCalls.length > 0) {
         // Emit text content if any

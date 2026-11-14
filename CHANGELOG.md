@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **A tool round over the OpenAI-compatible endpoint reaches the session that issued its calls.** A caller with
+  no session id is keyed by a hash of its model, system prompt and tool list, so a caller that changed its tool
+  list inside one run hashed to a second session: the two sessions were each handed the other's tool results,
+  and the run went on with outputs it had not asked for. Tool results are now routed by the tool call ids they
+  answer (matched by their 24 hex digits, so an id echoed without its underscore still matches); a session that
+  continues under a changed tool list is given the new list in full, on any engine and under an explicit key
+  too; and results that no single session asked for are refused with `409` (`code: "tool_call_mismatch"`)
+  instead of being delivered.
+
 ## [7.23.0] - 2026-11-14
 
 ### Added

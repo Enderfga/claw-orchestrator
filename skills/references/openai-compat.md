@@ -158,10 +158,13 @@ without it the CLI starts doing the work directly.
 
 A fresh session always gets the full block, so a thread is never created without
 the definitions — including when a session was evicted and is being recreated. A
-caller with no explicit key (no `X-Session-Id`, no `user`) that changes its tool
-list mid-conversation also gets the full block, because the tool list is part of
-the hashed key, so a different list resolves to a different session. With an
-explicit key it does not — see [Known limitations](#known-limitations).
+session that continues under a changed tool list also gets the full new block,
+once, headed by a note that it replaces the earlier list, on any engine: a tool
+round routed to the session that issued its calls (see
+[Tool results on the way back](#tool-results-on-the-way-back)), and any turn under
+an explicit key (`X-Session-Id` or `user`). A caller with no explicit key that
+changes its tool list on a new `user` turn resolves to another session instead,
+because the tool list is part of the hashed key.
 
 The caller's own system prompt follows exactly the same rule on these engines: it
 is prepended to the message, and skipped only while the conversation it was sent
@@ -321,6 +324,25 @@ the map empty) costs a replayed block, never a dropped one.
 
 ## Tool results on the way back
 
+A tool round goes to the session that issued the calls it answers, whatever session the request's
+key names. The bridge records the session behind every tool call id it returns, and matches the ids
+of the request's latest round (its `tool` messages after the last `assistant` one) against that
+record by the 24 hex digits in each id, so a caller that drops the underscore (OpenClaw returns
+`call_ab12…` as `callab12…`) still matches. Without that, an unkeyed caller whose system prompt or
+tool list changes inside one run hashes to a second session, and each session is handed the other's
+results. A round is refused with `409` and `code: "tool_call_mismatch"` instead of being delivered
+when:
+
+- its results answer calls from more than one session;
+- the caller named a session explicitly (`X-Session-Id` or `user`) and the calls were issued by
+  another one;
+- nothing is known about its ids and the session its key names is waiting for results of its own
+  calls.
+
+Results nobody is known to have asked for, sent to a session that waits for nothing (for example
+after the server restarted), go by key as before. A routed round is logged with a timestamp and the
+key inputs (model, system prompt, tools) that changed since the session was created.
+
 A `tool` role message in the caller's array is the result of a call the model asked for on an
 earlier turn. The `tool` messages that are in scope are serialized into one `<tool_results>` block
 and prepended to the caller's latest `user` text in the message the CLI receives.
@@ -382,13 +404,12 @@ sends one round at a time.
   the system prompt is skipped if the thread is live, and tool results are scoped as for a live
   thread. Every other shape, `[..., tool, user]` included, honours it. To reset in the middle of a
   tool loop, send the header on a turn that ends in a `user` message.
-- **With an explicit key, a changed system prompt or tool list does not reach a live session.**
-  `X-Session-Id` and `user` are used as the key as they are, with no fingerprint of the system prompt
-  or the tools, so the request lands on the existing session. On `claude` both were fixed when that
-  session was created. On `codex`, `codex-app`, `agy`, `opencode` and `grok`, once the thread is live,
-  the system prompt is not re-sent and the tools get only the short reminder. Send
-  `X-Session-Reset: 1` with the changed request, or use a new key. `OPENAI_COMPAT_TOOLS_PER_MESSAGE=1`
-  re-sends the tool schemas every turn instead; it does not change the system prompt.
+- **A changed system prompt does not reach a live session.** With an explicit key, and on a tool
+  round routed to the session that issued its calls, the request lands on the existing session. On
+  `claude` the system prompt was fixed when that session was created; on `codex`, `codex-app`, `agy`,
+  `opencode` and `grok`, once the thread is live, it is not re-sent. A changed tool list does reach
+  it (see [Tool definitions](#tool-definitions-and-where-they-live)). Send `X-Session-Reset: 1` with
+  the changed request, or use a new key.
 
 ## Environment variables
 
@@ -516,6 +537,7 @@ Errors from the bridge itself use the OpenAI error envelope:
 | Status | `type`                  | When                                                                                          |
 | ------ | ----------------------- | --------------------------------------------------------------------------------------------- |
 | 400    | `invalid_request_error` | `messages` empty/missing, no user message, invalid `max_tokens`                               |
+| 409    | `invalid_request_error` | Tool results that no single session asked for (`code: "tool_call_mismatch"`)                 |
 | 404    | `invalid_request_error` | Unknown `/v1/*` path                                                                          |
 | 503    | `server_error`          | Failed to start a new session (session limit reached, model unavailable, CLI crashed at boot) |
 | 502    | `upstream_error`        | The CLI finished the turn with an error                                                       |
