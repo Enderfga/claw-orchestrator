@@ -742,7 +742,8 @@ retried automatically.
 ### `autoloop_status`
 
 Get the current state: `status`, `iter`, `push_log_count`, `subagents_spawned`, `status_reason`,
-`pending_dispatch`, `unconfirmed_chat` and the recent phase errors and metrics. Returns `{ ok, state }`.
+`pending_dispatch`, `unconfirmed_chat`, `parked` (the identities of messages held during a pause, present only
+while there are any) and the recent phase errors and metrics. Returns `{ ok, state }`.
 
 | Parameter | Type   | Required |
 | --------- | ------ | -------- |

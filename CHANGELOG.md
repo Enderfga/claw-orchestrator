@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`autoloop_status` lists the messages a paused run is holding.** While a run is paused, messages for its agents
+  are parked and delivered on resume, but nothing showed what was waiting, so an operator deciding whether to
+  resume or stop could not see what resuming would deliver. The status now carries `parked`: one entry per held
+  message, in delivery order, with its `msg_id`, `type`, `from`, `to`, `iter` and `ts` and never its text. It is
+  present only while something is parked.
+
 ## [7.25.2] - 2026-11-19
 
 ### Fixed
