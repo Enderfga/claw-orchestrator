@@ -732,6 +732,150 @@ describe('ClaudeAgentDispatcher — recoverable send timeout and dispatch identi
     expect(calls.stopSession).toHaveBeenCalledTimes(1);
   });
 
+  it('does not reset or re-send to a role after the run is shut down mid-turn', async () => {
+    vi.useFakeTimers();
+    const { dispatcher, calls } = makeDispatcher();
+    let rejectSend!: (err: Error) => void;
+    calls.sendMessage.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectSend = reject;
+        }),
+    );
+    // Stopping a session interrupts its in-flight turn, as the real manager does.
+    calls.stopSession.mockImplementation(async () => {
+      rejectSend?.(new Error('session interrupted'));
+    });
+    const message = fixedIdentity(
+      Msg.directive(0, { goal: 'g', constraints: [], success_criteria: [], max_attempts: 1 }),
+      'logical-cancelled-mid-turn',
+    );
+
+    const pending = dispatcher.deliver(message);
+    void pending.catch(() => undefined);
+    await vi.waitFor(() => expect(calls.sendMessage).toHaveBeenCalledTimes(1));
+    const startsBeforeCancel = calls.startSession.mock.calls.length;
+
+    await dispatcher.shutdown('cancelled');
+    await vi.runAllTimersAsync();
+    const replies = await pending;
+
+    expect(replies).toHaveLength(1);
+    expect(replies[0].type).toBe('phase_error');
+    expect(calls.sendMessage).toHaveBeenCalledTimes(1);
+    expect(calls.startSession).toHaveBeenCalledTimes(startsBeforeCancel);
+    const ledger = path.join(tmpRoot, 'tasks', 'r1', 'decisions.jsonl');
+    const kinds = fs
+      .readFileSync(ledger, 'utf8')
+      .trim()
+      .split('\n')
+      .map((line) => (JSON.parse(line) as { kind: string }).kind);
+    expect(kinds).not.toContain('reset_agent');
+  });
+
+  it('does not re-send when the run is shut down during the reset-and-retry settle delay', async () => {
+    vi.useFakeTimers();
+    const { dispatcher, calls } = makeDispatcher();
+    calls.sendMessage.mockRejectedValueOnce(new Error('subprocess died'));
+    const message = fixedIdentity(
+      Msg.directive(0, { goal: 'g', constraints: [], success_criteria: [], max_attempts: 1 }),
+      'logical-cancelled-during-retry',
+    );
+
+    const pending = dispatcher.deliver(message);
+    void pending.catch(() => undefined);
+    // The reset has stopped and restarted the role; the retry waits on its settle delay.
+    await vi.waitFor(() => expect(calls.stopSession).toHaveBeenCalledTimes(1));
+    await dispatcher.shutdown('cancelled');
+    await vi.runAllTimersAsync();
+    const replies = await pending;
+
+    expect(replies).toHaveLength(1);
+    expect(replies[0].type).toBe('phase_error');
+    expect(calls.sendMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not restart a role reset after shutdown', async () => {
+    const { dispatcher, calls } = makeDispatcher();
+    await dispatcher.shutdown('cancelled');
+    const starts = calls.startSession.mock.calls.length;
+
+    await dispatcher.resetAgent('coder', { eagerRestart: true });
+
+    expect(calls.startSession).toHaveBeenCalledTimes(starts);
+  });
+
+  /**
+   * A manager stub that tracks live names: the Coder's start number `nth`
+   * (0 = first start, 1 = the reset's restart) is held open, and `stopSession`
+   * throws for a name that is not live yet, as SessionManager does.
+   */
+  function holdCoderStart(calls: StubCalls, nth: number): { release: () => void; live: Set<string> } {
+    const live = new Set<string>();
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let holds = 0;
+    calls.startSession.mockImplementation(async (config: { name: string }) => {
+      if (config.name.endsWith('-coder') && holds++ === nth) await held;
+      live.add(config.name);
+      return { name: config.name, state: 'ready' };
+    });
+    calls.stopSession.mockImplementation(async (name: string) => {
+      if (!live.delete(name)) throw new Error(`Session '${name}' not found`);
+    });
+    calls.hasSession.mockImplementation((name: string) => live.has(name));
+    return { release, live };
+  }
+
+  it('stops a Coder whose reset restart completes after shutdown', async () => {
+    vi.useFakeTimers();
+    const { dispatcher, calls } = makeDispatcher();
+    const { release, live } = holdCoderStart(calls, 1);
+    calls.sendMessage.mockRejectedValueOnce(new Error('subprocess died'));
+    const message = fixedIdentity(
+      Msg.directive(0, { goal: 'g', constraints: [], success_criteria: [], max_attempts: 1 }),
+      'logical-restart-pending-at-shutdown',
+    );
+
+    const pending = dispatcher.deliver(message);
+    void pending.catch(() => undefined);
+    // The ordinary failure reset the Coder; its restart is now waiting on startSession.
+    await vi.waitFor(() => expect(calls.startSession).toHaveBeenCalledTimes(2));
+    expect(live.has('autoloop-r1-coder')).toBe(false);
+
+    await dispatcher.shutdown('cancelled');
+    release();
+    await vi.runAllTimersAsync();
+    await pending.catch(() => undefined);
+
+    expect(live.has('autoloop-r1-coder')).toBe(false);
+    expect(calls.sendMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops a Coder whose first start completes after shutdown, and sends it nothing', async () => {
+    const { dispatcher, calls } = makeDispatcher();
+    const { release, live } = holdCoderStart(calls, 0);
+    const message = fixedIdentity(
+      Msg.directive(0, { goal: 'g', constraints: [], success_criteria: [], max_attempts: 1 }),
+      'logical-first-start-pending-at-shutdown',
+    );
+
+    const pending = dispatcher.deliver(message);
+    void pending.catch(() => undefined);
+    await vi.waitFor(() =>
+      expect(calls.startSession.mock.calls.some((c) => (c[0] as { name: string }).name.endsWith('-coder'))).toBe(true),
+    );
+
+    await dispatcher.shutdown('cancelled');
+    release();
+    await pending.catch(() => undefined);
+
+    expect(live.has('autoloop-r1-coder')).toBe(false);
+    expect(calls.sendMessage).not.toHaveBeenCalled();
+  });
+
   it('coalesces concurrent and later re-delivery of one logical dispatch, while distinct identities still send', async () => {
     const { dispatcher, calls } = makeDispatcher();
     let resolveSend!: (value: { output: string; error: undefined }) => void;

@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Cancelling or stopping an autoloop run no longer starts the Coder or Reviewer again.** Stopping the run stops
+  its sessions, which interrupts a turn in progress. The dispatcher took that interruption for a crashed subprocess
+  and ran its recovery: it reset the role, which started a new session, and sent the same turn again. So a run that
+  had just been cancelled could have a new writer working in its workspace. Once the run is stopped, an interrupted
+  turn now ends as a failed dispatch with no reset or retry, and a reset no longer starts a new session. A role
+  session that was still starting when the run stopped, whether a reset's restart or a role's first start, is
+  stopped as soon as it is up, because the stop could not reach it earlier, and nothing is sent to it.
+
 ## [7.23.4] - 2026-11-15
 
 ### Fixed

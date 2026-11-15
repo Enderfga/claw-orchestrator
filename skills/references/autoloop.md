@@ -231,6 +231,12 @@ still live (or liveness cannot be checked), the reset fails without clearing the
 role's started state or attempting a replacement. If the manager confirms that
 the old name is already absent, reset may continue and create the replacement.
 
+Stopping or cancelling a run closes its agents for good. A Coder or Reviewer turn that the stop
+interrupts ends the run's dispatch as a failure. It is not reset or sent again, and a reset after
+the stop does not start a new session. A session that was still starting when the run stopped is stopped
+as soon as it is up. The session-failure recovery (one reset, one retry) applies
+only while the run is live.
+
 ## Plugin tools
 
 | Tool                   | Args                                                                                                                                                            | What                                                                                                                                |
