@@ -14,6 +14,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
+import { withoutServerCredential } from './kernel/secrets.js';
 import { changedFilesSince } from './verify/baseline.js';
 import { EventEmitter } from 'node:events';
 import * as fs from 'node:fs';
@@ -118,6 +119,9 @@ function spawnAsync(
     const child = spawn(cmd, args, {
       stdio: ['pipe', 'pipe', 'pipe'],
       cwd: opts.cwd,
+      // Council's git calls run the project repository's hooks: never with the
+      // server's credential.
+      env: withoutServerCredential(process.env),
     });
     let stdout = '';
     let stderr = '';
