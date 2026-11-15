@@ -3,11 +3,22 @@
  */
 
 import type { AnyAutoloopMessage, PushChannel, PushLevel, SendTimeoutPayload } from './messages.js';
+import type { EffortLevel, EngineType } from '../types.js';
 
 export type AutoloopStatus = 'planning' | 'running' | 'paused' | 'terminated' | 'crashed';
 
 /** The three autoloop roles. Single source of truth — dispatcher and SessionManager both use it. */
 export type AutoloopRoleName = 'planner' | 'coder' | 'reviewer';
+
+/** A role's engine, model and effort as an operator rebind sets it and the run record keeps it. Non-secret. */
+export interface AutoloopRoleBinding {
+  engine: EngineType;
+  model?: string;
+  effort?: EffortLevel;
+}
+
+/** The rebound roles of a run. */
+export type AutoloopRoleBindings = Partial<Record<AutoloopRoleName, AutoloopRoleBinding>>;
 
 export interface AutoloopState {
   run_id: string;

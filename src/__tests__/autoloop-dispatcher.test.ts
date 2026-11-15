@@ -2512,3 +2512,166 @@ describe('planner-control-revision', () => {
     }
   });
 });
+
+describe('ClaudeAgentDispatcher — role rebind', () => {
+  const directive = (id: string): AnyAutoloopMessage =>
+    fixedIdentity(Msg.directive(0, { goal: 'g', constraints: [], success_criteria: [], max_attempts: 1 }), id);
+  const startsOf = (calls: StubCalls, role: string): Array<Record<string, unknown>> =>
+    calls.startSession.mock.calls
+      .map((c) => c[0] as Record<string, unknown>)
+      .filter((c) => (c.name as string).endsWith(`-${role}`));
+  const decisions = (ledgerDir: string): Array<{ kind: string; payload: Record<string, unknown> }> =>
+    fs
+      .readFileSync(path.join(ledgerDir, 'decisions.jsonl'), 'utf8')
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as { kind: string; payload: Record<string, unknown> });
+
+  it('applies a Coder rebind before its next directive, never during a turn in progress', async () => {
+    const applied: unknown[] = [];
+    const { dispatcher, calls, ledgerDir } = makeDispatcher({
+      coderEngine: 'codex',
+      coderModel: 'gpt-a',
+      onRoleBindingApplied: (role, binding) => applied.push([role, binding]),
+    });
+    await dispatcher.spawnSubagents();
+    let finishTurn!: (value: { output: string; error: undefined }) => void;
+    calls.sendMessage.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishTurn = resolve;
+        }),
+    );
+    const first = dispatcher.deliver(directive('rebind-turn-1'));
+    await vi.waitFor(() => expect(calls.sendMessage).toHaveBeenCalledTimes(1));
+
+    const result = dispatcher.requestRoleRebind('coder', { model: 'gpt-b' });
+    expect(result).toEqual({ binding: { engine: 'codex', model: 'gpt-b', effort: undefined }, keepConversation: true });
+    expect(dispatcher.pendingRoleRebind('coder')).toEqual({ engine: 'codex', model: 'gpt-b', effort: undefined });
+    expect(calls.stopSession).not.toHaveBeenCalled();
+
+    finishTurn({ output: '', error: undefined });
+    await first;
+    expect(calls.stopSession).not.toHaveBeenCalled();
+
+    await dispatcher.deliver(directive('rebind-turn-2'));
+    expect(calls.stopSession).toHaveBeenCalledWith('autoloop-r1-coder', { keepPersisted: true });
+    const coderStarts = startsOf(calls, 'coder');
+    expect(coderStarts.map((c) => c.model)).toEqual(['gpt-a', 'gpt-b']);
+    expect(dispatcher.pendingRoleRebind('coder')).toBeUndefined();
+    expect(applied).toEqual([['coder', { engine: 'codex', model: 'gpt-b', effort: undefined }]]);
+    const kinds = decisions(ledgerDir).map((d) => d.kind);
+    expect(kinds.indexOf('rebind_requested')).toBeLessThan(kinds.indexOf('rebind_applied'));
+  });
+
+  it('starts a new conversation when the engine changes, and drops the old resume reference', async () => {
+    const { dispatcher, calls } = makeDispatcher({ coderEngine: 'codex', coderModel: 'gpt-a' });
+    await dispatcher.spawnSubagents();
+
+    const result = dispatcher.requestRoleRebind('coder', { engine: 'claude' });
+    expect(result.keepConversation).toBe(false);
+    // The old engine's model does not carry over to the new engine.
+    expect(result.binding).toEqual({ engine: 'claude', model: undefined, effort: undefined });
+    await dispatcher.deliver(directive('rebind-engine'));
+
+    expect(calls.stopSession).toHaveBeenCalledWith('autoloop-r1-coder', {});
+    expect(startsOf(calls, 'coder').map((c) => c.engine)).toEqual(['codex', 'claude']);
+  });
+
+  it('requires force to move the Planner to another engine, and keeps its conversation on the same engine', async () => {
+    const { dispatcher, calls } = makeDispatcher();
+    await dispatcher.deliver(Msg.chat(0, { text: 'hello' }));
+
+    expect(() => dispatcher.requestRoleRebind('planner', { engine: 'codex' })).toThrow(/pass force: true/);
+    expect(dispatcher.pendingRoleRebind('planner')).toBeUndefined();
+
+    dispatcher.requestRoleRebind('planner', { model: 'sonnet' });
+    await dispatcher.deliver(Msg.chat(0, { text: 'again' }));
+    expect(calls.stopSession).toHaveBeenLastCalledWith('autoloop-r1-planner', { keepPersisted: true });
+    expect(startsOf(calls, 'planner').map((c) => c.model)).toEqual(['opus', 'sonnet']);
+
+    dispatcher.requestRoleRebind('planner', { engine: 'codex' }, { force: true });
+    await dispatcher.deliver(Msg.chat(0, { text: 'third' }));
+    expect(calls.stopSession).toHaveBeenLastCalledWith('autoloop-r1-planner', {});
+    expect(startsOf(calls, 'planner').map((c) => c.engine)).toEqual(['claude', 'claude', 'codex']);
+  });
+
+  it('replaces a pending rebind with a later one, and withdraws it on a request back to the current binding', async () => {
+    const { dispatcher, calls, ledgerDir } = makeDispatcher({ coderEngine: 'codex', coderModel: 'gpt-a' });
+    await dispatcher.spawnSubagents();
+
+    dispatcher.requestRoleRebind('coder', { model: 'gpt-b' });
+    dispatcher.requestRoleRebind('coder', { model: 'gpt-c' });
+    expect(dispatcher.pendingRoleRebind('coder')?.model).toBe('gpt-c');
+
+    dispatcher.requestRoleRebind('coder', { model: 'gpt-a' });
+    expect(dispatcher.pendingRoleRebind('coder')).toBeUndefined();
+    expect(
+      decisions(ledgerDir)
+        .filter((d) => d.kind === 'rebind_requested')
+        .at(-1)?.payload.withdrawn,
+    ).toBe(true);
+    expect(() => dispatcher.requestRoleRebind('coder', { model: 'gpt-a' })).toThrow(/already bound/);
+
+    await dispatcher.deliver(directive('rebind-withdrawn'));
+    expect(calls.stopSession).not.toHaveBeenCalled();
+    expect(startsOf(calls, 'coder').map((c) => c.model)).toEqual(['gpt-a']);
+  });
+
+  it('keeps the rebind pending and fails the delivery when the old session cannot be stopped', async () => {
+    const { dispatcher, calls } = makeDispatcher({ coderEngine: 'codex', coderModel: 'gpt-a' });
+    await dispatcher.spawnSubagents();
+    dispatcher.requestRoleRebind('coder', { model: 'gpt-b' });
+    calls.stopSession.mockRejectedValueOnce(new Error('coder still live'));
+
+    await expect(dispatcher.deliver(directive('rebind-stop-fails'))).rejects.toThrow('coder still live');
+
+    expect(dispatcher.pendingRoleRebind('coder')?.model).toBe('gpt-b');
+    expect(calls.sendMessage).not.toHaveBeenCalled();
+    expect(startsOf(calls, 'coder').map((c) => c.model)).toEqual(['gpt-a']);
+  });
+
+  it("keeps a rebound role's binding when the Planner spawns subagents again", async () => {
+    const { dispatcher, calls, ledgerDir } = makeDispatcher({ coderEngine: 'codex', coderModel: 'gpt-a' });
+    await dispatcher.spawnSubagents({ coder_engine: 'codex', coder_model: 'gpt-a' });
+    dispatcher.requestRoleRebind('coder', { model: 'gpt-b' });
+    await dispatcher.deliver(directive('rebind-then-respawn'));
+
+    // Repeating its original spawn used to be a no-op; it must not now fail or undo the rebind.
+    await dispatcher.spawnSubagents({ coder_engine: 'codex', coder_model: 'gpt-a' });
+
+    expect(startsOf(calls, 'coder').map((c) => c.model)).toEqual(['gpt-a', 'gpt-b']);
+    const spawns = decisions(ledgerDir).filter((d) => d.kind === 'spawn_subagents');
+    expect(spawns.at(-1)?.payload).toMatchObject({ coder_model: 'gpt-b', superseded_by_rebind: ['coder'] });
+  });
+
+  it('applies a binding restored on resume over the Planner spawn choice', async () => {
+    const { dispatcher, calls } = makeDispatcher({ coderEngine: 'codex', coderModel: 'gpt-b', boundRoles: ['coder'] });
+
+    await dispatcher.spawnSubagents({ coder_engine: 'claude', coder_model: 'sonnet', reviewer_engine: 'codex' });
+
+    expect(startsOf(calls, 'coder')).toEqual([expect.objectContaining({ engine: 'codex', model: 'gpt-b' })]);
+    // A role that was not rebound still takes the Planner's choice.
+    expect(startsOf(calls, 'reviewer')).toEqual([expect.objectContaining({ engine: 'codex' })]);
+  });
+
+  it('naming the current engine withdraws a pending engine change and keeps the current model', async () => {
+    const { dispatcher } = makeDispatcher({ coderEngine: 'codex', coderModel: 'gpt-a' });
+    await dispatcher.spawnSubagents();
+    dispatcher.requestRoleRebind('coder', { engine: 'claude' });
+
+    const back = dispatcher.requestRoleRebind('coder', { engine: 'codex' });
+
+    expect(back.binding).toMatchObject({ engine: 'codex', model: 'gpt-a' });
+    expect(dispatcher.pendingRoleRebind('coder')).toBeUndefined();
+  });
+
+  it('refuses custom engines and a stopped run', async () => {
+    const { dispatcher } = makeDispatcher({ coderEngine: 'codex' });
+    await dispatcher.spawnSubagents();
+    expect(() => dispatcher.requestRoleRebind('coder', { engine: 'custom' })).toThrow(/custom engines/);
+
+    await dispatcher.shutdown('cancelled');
+    expect(() => dispatcher.requestRoleRebind('coder', { model: 'x' })).toThrow(/has stopped/);
+  });
+});

@@ -136,7 +136,12 @@ import { CircuitBreaker } from './circuit-breaker.js';
 import { detectRepoLang } from './kernel/repo.js';
 import { RunKernel, runDir as kernelRunDir } from './kernel/engine.js';
 import { registerDefaultExecutors } from './kernel/nodes/index.js';
-import { autoloopStateFromRecord, makeAutoloopExecutor, type AutoloopHandle } from './kernel/nodes/autoloop.js';
+import {
+  autoloopBindingConfig,
+  autoloopStateFromRecord,
+  makeAutoloopExecutor,
+  type AutoloopHandle,
+} from './kernel/nodes/autoloop.js';
 import { isValidRunId, loadRun, readNodeOutput, runExists, type RunSummary } from './kernel/store.js';
 import {
   LEGACY_NODE,
@@ -237,7 +242,7 @@ import { Fanout, type FanoutConfig, type FanoutSession, type FanoutAgentSpec } f
 import { AutoloopRunner, type AutoloopInputSnapshot } from './autoloop/runner.js';
 import { boundedErrorReason } from './sanitize.js';
 import { ClaudeAgentDispatcher, type ClaudeAgentDispatcherConfig } from './autoloop/dispatcher.js';
-import type { AutoloopState, PushPolicy } from './autoloop/types.js';
+import type { AutoloopRoleBinding, AutoloopRoleBindings, AutoloopState, PushPolicy } from './autoloop/types.js';
 import {
   DEFAULT_PUSH_POLICY,
   DEFAULT_SEND_TIMEOUT_MS,
@@ -1249,8 +1254,13 @@ export class SessionManager {
     const skipPersist = !!(config.skipPersistence || config.noSessionPersistence);
     const persisted = skipPersist ? undefined : this.persistedSessions.get(name);
     // Unified: only use resumeSessionId (claudeResumeId is an internal alias, not exposed)
-    const resumeId = config.resumeSessionId ?? persisted?.claudeSessionId;
     const engine: EngineType = config.engine || persisted?.engine || 'claude';
+    // A resume id belongs to the engine that issued it. A start under the same
+    // name on another engine (an Autoloop role rebound to a new engine) begins a
+    // new conversation instead of handing that engine a foreign id.
+    const persistedResumeId =
+      persisted && (persisted.engine ?? 'claude') === engine ? persisted.claudeSessionId : undefined;
+    const resumeId = config.resumeSessionId ?? persistedResumeId;
 
     // ORDER IS LOAD-BEARING — do not "fix" it by moving `...config` up.
     //
@@ -1859,9 +1869,12 @@ export class SessionManager {
       kernel.setExecutor(
         'autoloop',
         makeAutoloopExecutor({
-          boot: (config, secrets, { freshStart, restoredInput }) =>
+          boot: (config, secrets, { freshStart, restoredInput, roleBindings }) =>
             this._bootAutoloop({
               ...(config as Parameters<SessionManager['_bootAutoloop']>[0]),
+              // Rebinds applied earlier in the run replace the start-time choice
+              // for their role; the spec keeps the run as it was started.
+              ...autoloopBindingConfig(roleBindings),
               // Custom-engine configs never reach the spec, so they come from
               // the run's in-memory secret bag — supplied at start, and
               // re-supplied by the caller on a resume.
@@ -1872,6 +1885,7 @@ export class SessionManager {
               // `_freshStart: true` from config/secrets intact.
               _freshStart: freshStart,
               _restoredInput: restoredInput,
+              _roleBindings: roleBindings,
             }),
           ready: (key, value) => {
             const deferred = this._autoloopReady.get(key);
@@ -1882,9 +1896,17 @@ export class SessionManager {
           waitForExit: (handle, signal) => this._awaitAutoloopExit(handle, signal),
           registerPublisher: (runId, publish) => this._autoloopPublishers.set(runId, publish),
           unregisterPublisher: (runId) => this._autoloopPublishers.delete(runId),
+          release: (runId) => {
+            this._autoloopSelection.delete(runId);
+            this._autoloopRoleBindings.delete(runId);
+          },
           extra: (runId) => {
             const roleSelection = this._autoloopSelection.get(runId);
-            return roleSelection ? { roleSelection } : {};
+            const roleBindings = this._autoloopRoleBindings.get(runId);
+            return {
+              ...(roleSelection ? { roleSelection } : {}),
+              ...(roleBindings && Object.keys(roleBindings).length > 0 ? { roleBindings } : {}),
+            };
           },
         }),
       );
@@ -3885,6 +3907,8 @@ export class SessionManager {
   private _autoloopStarting = new Map<string, string>();
   /** Latest role selection per run, published into the node payload. */
   private _autoloopSelection = new Map<string, unknown>();
+  /** Role rebinds applied in each live run, published so a resume keeps them. */
+  private _autoloopRoleBindings = new Map<string, AutoloopRoleBindings>();
   /** Per-run checkpoint refreshers, registered by the autoloop node executor. */
   private _autoloopPublishers = new Map<string, () => boolean>();
 
@@ -4231,6 +4255,8 @@ export class SessionManager {
     _freshStart?: boolean;
     /** Validated accepted-chat fields from the stored checkpoint. Never stored as config. */
     _restoredInput?: AutoloopInputSnapshot;
+    /** Role rebinds restored from the checkpoint; already merged into the role fields above. */
+    _roleBindings?: AutoloopRoleBindings;
   }): Promise<{
     runner: AutoloopRunner;
     dispatcher: ClaudeAgentDispatcher;
@@ -4252,6 +4278,11 @@ export class SessionManager {
       }
     }
     const ledgerDir = path.join(opts.workspace, 'tasks', opts.runId);
+    if (opts._roleBindings && Object.keys(opts._roleBindings).length > 0) {
+      this._autoloopRoleBindings.set(opts.runId, { ...opts._roleBindings });
+    } else {
+      this._autoloopRoleBindings.delete(opts.runId);
+    }
     if (opts._freshStart === true) {
       applyAutoloopFreshStartBoundary(opts.workspace, opts.runId, { invalidRunId: 'refuse' });
     }
@@ -4303,6 +4334,17 @@ export class SessionManager {
         // payload the `autoloop_status` projection reads.
         this._autoloopSelection.set(runId, selection);
         this._autoloopPublishers.get(runId)?.();
+      },
+      boundRoles: Object.keys(opts._roleBindings ?? {}) as AutoloopRoleName[],
+      onRoleBindingApplied: (role, binding) => {
+        this._autoloopRoleBindings.set(runId, { ...this._autoloopRoleBindings.get(runId), [role]: binding });
+        const selection = this._autoloopSelection.get(runId) as Record<string, unknown> | undefined;
+        if (selection && role !== 'planner') this._autoloopSelection.set(runId, { ...selection, [role]: binding });
+        if (this._autoloopPublishers.get(runId)?.() === false) {
+          this.logger.warn?.(
+            `[autoloop/${runId}] ${role} rebind applied but not checkpointed; a resume would not keep it`,
+          );
+        }
       },
     };
     const dispatcher = new ClaudeAgentDispatcher(dispatcherConfig);
@@ -4613,6 +4655,40 @@ export class SessionManager {
       .list({ workflow: 'autoloop' })
       .map((r) => this.autoloopStatus(r.runId))
       .filter((s): s is AutoloopState => Boolean(s));
+  }
+
+  /**
+   * Change the engine, model or effort of one role of a live run. The change
+   * applies before the role's next delivery, never during a turn; see
+   * `ClaudeAgentDispatcher.requestRoleRebind`. Coder and Reviewer can be
+   * rebound once `spawn_subagents` has chosen them.
+   */
+  autoloopRebindRole(
+    runId: string,
+    role: AutoloopRoleName,
+    target: { engine?: EngineType; model?: string; effort?: EffortLevel },
+    opts: { force?: boolean } = {},
+  ): { role: AutoloopRoleName; binding: AutoloopRoleBinding; keepConversation: boolean; pending: boolean } {
+    if (role !== 'planner' && role !== 'coder' && role !== 'reviewer') {
+      throw new Error(`Unknown autoloop role '${String(role)}'`);
+    }
+    if (target.engine === undefined && target.model === undefined && target.effort === undefined) {
+      throw new Error('Name at least one of engine, model or effort');
+    }
+    if (target.engine !== undefined) validateAutoloopRole(role, target.engine, undefined);
+    validateAutoloopEffort(role, target.effort);
+    const ctx = this.kernel.handle<AutoloopHandle & { runner: AutoloopRunner; dispatcher: ClaudeAgentDispatcher }>(
+      runId,
+      LEGACY_NODE,
+    );
+    if (!ctx) throw new Error(`Autoloop run '${runId}' is not running in this process`);
+    const status = ctx.runner.state.status;
+    if (status === 'terminated' || status === 'crashed') throw new Error(`Autoloop run '${runId}' has stopped`);
+    if (role !== 'planner' && !ctx.runner.state.subagents_spawned) {
+      throw new Error('Coder and Reviewer are chosen by spawn_subagents; rebind them after they have been spawned');
+    }
+    const { binding, keepConversation } = ctx.dispatcher.requestRoleRebind(role, target, opts);
+    return { role, binding, keepConversation, pending: ctx.dispatcher.pendingRoleRebind(role) !== undefined };
   }
 
   async autoloopResetAgent(

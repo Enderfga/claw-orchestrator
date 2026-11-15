@@ -79,6 +79,7 @@ export const TOOL_ANNOTATIONS: Record<string, ToolAnnotation> = {
   autoloop_chat: { openWorldHint: true },
   autoloop_resume: { openWorldHint: true },
   autoloop_reset_agent: {},
+  autoloop_rebind_role: {},
   codex_resume: { openWorldHint: true },
   codex_review: { openWorldHint: true },
   codex_goal_set: { openWorldHint: true },
