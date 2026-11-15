@@ -5,18 +5,6 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
-
-### Fixed
-
-- **Reading a run's changes no longer rewrites the workspace's Git index.** The change set, the patch and the
-  tree fingerprint (used by verification, workflow `verifier` nodes, the patch Autoloop hands its Reviewer and
-  Council's changed-file list) were read with porcelain `git diff` and `git status`, which refresh the stat data
-  of a file that was touched but not changed and write `.git/index` under `index.lock`; a commit running in the
-  same repository at that moment could fail on the lock. They now use the plumbing `git diff-index` and
-  `git --no-optional-locks status`, which never write the index and give the same output (with default Git
-  configuration; plumbing also ignores presentation settings such as `diff.noprefix` or `color.diff`).
-
 ## [7.23.3] - 2026-11-15
 
 ### Fixed
@@ -28,6 +16,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `CLAWO_AUTH_TOKEN`, even when the caller passes its own `env`; the rest of the environment is passed as before. A
   `tokenCommand` that read either variable no longer sees it. Engines and these commands share one list of the
   server's credential variables (`kernel/secrets.ts`). (#181, thanks @ajmtrz)
+- **Reading a run's changes no longer rewrites the workspace's Git index.** The change set, the patch and the
+  tree fingerprint (used by verification, workflow `verifier` nodes, the patch Autoloop hands its Reviewer and
+  Council's changed-file list) were read with porcelain `git diff` and `git status`, which refresh the stat data
+  of a file that was touched but not changed and write `.git/index` under `index.lock`; a commit running in the
+  same repository at that moment could fail on the lock. They now use the plumbing `git diff-index` and
+  `git --no-optional-locks status`, which never write the index and give the same output (with default Git
+  configuration; plumbing also ignores presentation settings such as `diff.noprefix` or `color.diff`).
+  (#182, thanks @ajmtrz)
 
 ## [7.23.2] - 2026-11-15
 
