@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [7.23.4] - 2026-11-15
 
 ### Fixed
 
@@ -14,12 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mode, which runs `npm install` and `npm run build` (with the generated app's lifecycle scripts) and then the app
   itself, and the autoloop's iteration and plan commits, whose `git commit` runs the workspace's hooks. Both now
   start without `OPENCLAW_SERVER_TOKEN` and `CLAWO_AUTH_TOKEN`, even when the deploy's `env` or build args set them;
-  the rest of the environment is passed as before.
+  the rest of the environment is passed as before. (#184, thanks @ajmtrz)
 - **Council's git calls and the session manager's Git reads no longer inherit the server's token.** Council runs
   `git commit`, `checkout` and `worktree add` in its project repository, which run that repository's hooks, and the
   session manager reads an autoloop workspace with git, where repository config such as `core.fsmonitor` can run a
   command. Both started those processes with the server's whole environment; they now start without
-  `OPENCLAW_SERVER_TOKEN` and `CLAWO_AUTH_TOKEN`, and the rest of the environment is passed as before.
+  `OPENCLAW_SERVER_TOKEN` and `CLAWO_AUTH_TOKEN`, and the rest of the environment is passed as before. (#185, thanks @ajmtrz)
 
 ## [7.23.3] - 2026-11-15
 
