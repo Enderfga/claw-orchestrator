@@ -137,6 +137,11 @@ SSH key.
   layer you trust in front (Cloudflare Access, Tailscale, mTLS) and let the proxy inject the token, as
   [dashboard.md](./dashboard.md#hosted-access-via-reverse-proxy-recommended) describes. Never put the token in a
   shared URL.
+- **Engines:** engine CLIs (sessions and the one-shot Claude CLI management calls), ACP agents and custom engines
+  run as the server's user with its environment, minus `OPENCLAW_SERVER_TOKEN` and `CLAWO_AUTH_TOKEN`, even when a
+  preset's or agent's own `env` sets them: no engine needs the server's token, so it is not handed to them. They
+  can still read the token file, like any process of that user, and a `clawo` command run inside a session reads
+  the token from that file.
 - **Rotating a leaked token:** delete the token file and restart the server (under OpenClaw, the Gateway), or
   change `OPENCLAW_SERVER_TOKEN` when the token comes from there.
 
