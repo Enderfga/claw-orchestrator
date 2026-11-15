@@ -25,6 +25,32 @@ afterEach(() => {
 const ctx = () => ({ cwd: tmp, artifactDir: path.join(tmp, '.artifacts') });
 
 describe('command checks', () => {
+  // A command check usually runs code the agent wrote, so it must not inherit
+  // the server's token with the rest of the server's environment.
+  it.skipIf(process.platform === 'win32')('do not see the server token', async () => {
+    const saved = { server: process.env.OPENCLAW_SERVER_TOKEN, cli: process.env.CLAWO_AUTH_TOKEN };
+    process.env.OPENCLAW_SERVER_TOKEN = 'server-secret';
+    process.env.CLAWO_AUTH_TOKEN = 'cli-secret';
+    try {
+      const c = normalizeContract({
+        checks: [
+          {
+            type: 'command',
+            cmd: 'sh',
+            args: ['-c', 'test -z "${OPENCLAW_SERVER_TOKEN+set}" && test -z "${CLAWO_AUTH_TOKEN+set}"'],
+          },
+        ],
+      })!;
+      const [r] = await runChecks(c, ctx());
+      expect(r.passed).toBe(true);
+    } finally {
+      if (saved.server === undefined) delete process.env.OPENCLAW_SERVER_TOKEN;
+      else process.env.OPENCLAW_SERVER_TOKEN = saved.server;
+      if (saved.cli === undefined) delete process.env.CLAWO_AUTH_TOKEN;
+      else process.env.CLAWO_AUTH_TOKEN = saved.cli;
+    }
+  });
+
   it('passes on exit 0', async () => {
     const c = normalizeContract({ checks: [{ type: 'command', cmd: 'true' }] })!;
     const [r] = await runChecks(c, ctx());

@@ -83,6 +83,37 @@ describe('kernel exec', () => {
   });
 });
 
+describe('exec environment', () => {
+  it.skipIf(process.platform === 'win32')('drops both token names from the inherited environment', async () => {
+    const saved = { server: process.env.OPENCLAW_SERVER_TOKEN, cli: process.env.CLAWO_AUTH_TOKEN };
+    process.env.OPENCLAW_SERVER_TOKEN = 'server-secret';
+    process.env.CLAWO_AUTH_TOKEN = 'cli-secret';
+    try {
+      const r = await exec('sh', ['-c', 'printf "%s|%s" "${OPENCLAW_SERVER_TOKEN-unset}" "${CLAWO_AUTH_TOKEN-unset}"']);
+      expect(r.out).toBe('unset|unset');
+    } finally {
+      if (saved.server === undefined) delete process.env.OPENCLAW_SERVER_TOKEN;
+      else process.env.OPENCLAW_SERVER_TOKEN = saved.server;
+      if (saved.cli === undefined) delete process.env.CLAWO_AUTH_TOKEN;
+      else process.env.CLAWO_AUTH_TOKEN = saved.cli;
+    }
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'drops both token names from an explicit env and keeps the rest',
+    async () => {
+      const r = await exec(
+        'sh',
+        ['-c', 'printf "%s|%s|%s" "${OPENCLAW_SERVER_TOKEN-unset}" "${CLAWO_AUTH_TOKEN-unset}" "$KEEP"'],
+        {
+          env: { PATH: process.env.PATH, OPENCLAW_SERVER_TOKEN: 'a', CLAWO_AUTH_TOKEN: 'b', KEEP: 'kept' },
+        },
+      );
+      expect(r.out).toBe('unset|unset|kept');
+    },
+  );
+});
+
 describe('exec robustness', () => {
   it('survives a child that exits without reading its input', async () => {
     const r = await exec('sh', ['-c', 'exit 3'], { input: 'x'.repeat(8 * 1024 * 1024) });

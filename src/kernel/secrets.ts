@@ -53,3 +53,19 @@ export function resolveSecretRefs(
   }
   return out;
 }
+
+/**
+ * The orchestrator's own control credential: the server token, and the name the
+ * `clawo` CLI also reads it from. No child the server starts needs it — not an
+ * engine CLI, ACP agent or custom engine, and not a contract's command check,
+ * which usually runs code the agent wrote — and each would otherwise inherit it
+ * with the rest of the server's environment.
+ */
+export const SERVER_CREDENTIAL_VARS = ['OPENCLAW_SERVER_TOKEN', 'CLAWO_AUTH_TOKEN'] as const;
+
+/** A copy of `env` without the server's credential. */
+export function withoutServerCredential(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = { ...env };
+  for (const name of SERVER_CREDENTIAL_VARS) delete out[name];
+  return out;
+}
