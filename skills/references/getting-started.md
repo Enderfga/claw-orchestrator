@@ -149,6 +149,9 @@ SSH key.
 - **Agent-written code elsewhere:** UltraApp's host mode (`npm install`, `npm run build` and the running app) and the
   autoloop's commits, which run the workspace's Git hooks, start without both variables too, even when the deploy's
   `env` or build args set them. They can still read the token file, like any process of that user.
+- **Git in agent workspaces:** Council's git calls in its project repository (which run that repository's hooks) and
+  the session manager's Git reads of an autoloop workspace (which repository config such as `core.fsmonitor` can
+  turn into a command) start without both variables too.
 - **Rotating a leaked token:** delete the token file and restart the server (under OpenClaw, the Gateway), or
   change `OPENCLAW_SERVER_TOKEN` when the token comes from there.
 

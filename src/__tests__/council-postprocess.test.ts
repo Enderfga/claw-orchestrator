@@ -509,3 +509,49 @@ describe('programRoot', () => {
     expect(programRoot(path.join(pkg, 'src', 'council.ts'))).toBe(pkg);
   });
 });
+
+// Council's git calls run in the project repository, whose hooks and config the
+// agents can write, so they must not inherit the server's token. A `git` shim
+// first on PATH records what every git call sees, then runs the real git.
+describe.skipIf(process.platform === 'win32')('council git environment', () => {
+  it('does not pass the server token to git', async () => {
+    const { execFileSync } = await import('node:child_process');
+    const fsm = await import('node:fs');
+    const osm = await import('node:os');
+    const pathm = await import('node:path');
+    const realGit = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
+    const dir = fsm.mkdtempSync(pathm.join(osm.tmpdir(), 'clawo-council-env-'));
+    const repo = pathm.join(dir, 'repo');
+    const shim = pathm.join(dir, 'bin');
+    const seen = pathm.join(dir, 'seen.txt');
+    fsm.mkdirSync(repo);
+    fsm.mkdirSync(shim);
+    execFileSync(realGit, ['init', '-q'], { cwd: repo });
+    fsm.writeFileSync(
+      pathm.join(shim, 'git'),
+      `#!/bin/sh\nprintf '%s|%s\\n' "\${OPENCLAW_SERVER_TOKEN-unset}" "\${CLAWO_AUTH_TOKEN-unset}" >> ${JSON.stringify(seen)}\nexec ${JSON.stringify(realGit)} "$@"\n`,
+    );
+    fsm.chmodSync(pathm.join(shim, 'git'), 0o755);
+    const saved = {
+      path: process.env.PATH,
+      server: process.env.OPENCLAW_SERVER_TOKEN,
+      cli: process.env.CLAWO_AUTH_TOKEN,
+    };
+    process.env.PATH = `${shim}${pathm.delimiter}${process.env.PATH}`;
+    process.env.OPENCLAW_SERVER_TOKEN = 'server-secret';
+    process.env.CLAWO_AUTH_TOKEN = 'cli-secret';
+    try {
+      await councilWorktreePaths(repo);
+      const lines = fsm.readFileSync(seen, 'utf8').trim().split('\n');
+      expect(lines.length).toBeGreaterThan(0);
+      expect(new Set(lines)).toEqual(new Set(['unset|unset']));
+    } finally {
+      process.env.PATH = saved.path;
+      if (saved.server === undefined) delete process.env.OPENCLAW_SERVER_TOKEN;
+      else process.env.OPENCLAW_SERVER_TOKEN = saved.server;
+      if (saved.cli === undefined) delete process.env.CLAWO_AUTH_TOKEN;
+      else process.env.CLAWO_AUTH_TOKEN = saved.cli;
+      fsm.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

@@ -9,6 +9,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { execFileSync } from 'node:child_process';
+import { withoutServerCredential } from './kernel/secrets.js';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { execEngine } from './engine-spawn.js';
 
@@ -622,6 +623,15 @@ function isAllowedAutoloopLedgerStatus(x: string, y: string): boolean {
 }
 
 /** True for an index gitlink, false for an ordinary path, null when Git cannot answer. */
+/**
+ * Environment for the Git reads in this module: C locale, and never the server's
+ * credential, because repository config such as `core.fsmonitor` can run a
+ * command from the workspace.
+ */
+function gitReadEnv(): NodeJS.ProcessEnv {
+  return withoutServerCredential({ ...process.env, LC_ALL: 'C' });
+}
+
 function isTrackedGitlink(workspace: string, filePath: string): boolean | null {
   try {
     const record = execFileSync(
@@ -630,7 +640,7 @@ function isTrackedGitlink(workspace: string, filePath: string): boolean | null {
       {
         encoding: 'utf8',
         stdio: ['ignore', 'pipe', 'pipe'],
-        env: { ...process.env, LC_ALL: 'C' },
+        env: gitReadEnv(),
       },
     );
     return record.startsWith('160000 ');
@@ -657,10 +667,12 @@ function readVerifiedGitShowPrefix(workspace: string): string | null {
   try {
     const toplevel = execFileSync('git', ['-C', workspace, 'rev-parse', '--show-toplevel'], {
       encoding: 'utf8',
+      env: withoutServerCredential(process.env),
       stdio: ['ignore', 'pipe', 'pipe'],
     }).replace(/\r?\n$/, '');
     const prefix = execFileSync('git', ['-C', workspace, 'rev-parse', '--show-prefix'], {
       encoding: 'utf8',
+      env: withoutServerCredential(process.env),
       stdio: ['ignore', 'pipe', 'pipe'],
     }).replace(/\r?\n$/, '');
     const resolvedTop = fs.realpathSync(toplevel);
@@ -752,7 +764,7 @@ function ensureRealAutoloopDir(absPath: string): void {
 function ensureAutoloopRunLedgerIgnored(workspace: string, runId: string): void {
   if (!isValidRunId(runId)) return;
   const relLedger = path.posix.join('tasks', runId);
-  const gitEnv = { ...process.env, LC_ALL: 'C' };
+  const gitEnv = gitReadEnv();
   let tracked: string;
   try {
     tracked = execFileSync('git', ['-C', workspace, '--literal-pathspecs', 'ls-files', '-z', '--', relLedger], {
@@ -866,7 +878,7 @@ function applyAutoloopFreshStartBoundary(
       {
         encoding: 'utf8',
         stdio: ['ignore', 'pipe', 'pipe'],
-        env: { ...process.env, LC_ALL: 'C' },
+        env: gitReadEnv(),
       },
     );
     inGitRepository = true;
@@ -4403,6 +4415,7 @@ export class SessionManager {
     try {
       subject = execFileSync('git', ['-C', workspace, 'log', '-1', '--format=%s'], {
         encoding: 'utf8',
+        env: withoutServerCredential(process.env),
       }).trim();
     } catch {
       return;

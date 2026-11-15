@@ -180,6 +180,38 @@ describe('autoloopStart dirty worktree preflight', () => {
     }
   });
 
+  // The start preflight reads the workspace with git, and repository config
+  // such as core.fsmonitor can run a command from it: that command must not
+  // see the server's token.
+  it.skipIf(process.platform === 'win32')('runs its git reads without the server token', async () => {
+    const workspace = createTempRepo();
+    repos.push(workspace);
+    const seen = path.join(os.tmpdir(), `clawo-fsmonitor-${path.basename(workspace)}.txt`);
+    const monitor = path.join(workspace, '..', `${path.basename(workspace)}-fsmonitor.sh`);
+    fs.writeFileSync(
+      monitor,
+      `#!/bin/sh\nprintf '%s|%s\\n' "\${OPENCLAW_SERVER_TOKEN-unset}" "\${CLAWO_AUTH_TOKEN-unset}" >> ${JSON.stringify(seen)}\nexit 1\n`,
+    );
+    fs.chmodSync(monitor, 0o755);
+    execFileSync('git', ['-C', workspace, 'config', 'core.fsmonitor', monitor]);
+    const saved = { server: process.env.OPENCLAW_SERVER_TOKEN, cli: process.env.CLAWO_AUTH_TOKEN };
+    process.env.OPENCLAW_SERVER_TOKEN = 'server-secret';
+    process.env.CLAWO_AUTH_TOKEN = 'cli-secret';
+    try {
+      await mgr.autoloopStart({ runId: 'fsmonitor-env', workspace, plannerEngine: 'codex' }).catch(() => undefined);
+      const lines = fs.readFileSync(seen, 'utf8').trim().split('\n');
+      expect(lines.length).toBeGreaterThan(0);
+      expect(new Set(lines)).toEqual(new Set(['unset|unset']));
+    } finally {
+      if (saved.server === undefined) delete process.env.OPENCLAW_SERVER_TOKEN;
+      else process.env.OPENCLAW_SERVER_TOKEN = saved.server;
+      if (saved.cli === undefined) delete process.env.CLAWO_AUTH_TOKEN;
+      else process.env.CLAWO_AUTH_TOKEN = saved.cli;
+      fs.rmSync(seen, { force: true });
+      fs.rmSync(monitor, { force: true });
+    }
+  });
+
   it('rejects unstaged tracked dirt before runDir or Planner session, leaving tree unchanged', async () => {
     const workspace = createTempRepo();
     repos.push(workspace);
