@@ -93,10 +93,14 @@ kernel records `git rev-parse HEAD` when a run starts and diffs against that.
 `verify_run` takes the baseline as `baseSha`; without one, `diff_policy` sees
 untracked files only.
 
-The change set is **tracked changes ∪ untracked files**: `git diff <base>` (so
+The change set is **tracked changes ∪ untracked files**: `git diff-index <base>` (so
 commits made during the run count too) plus every untracked file that
 `.gitignore` does not exclude. That union matters: a bare `git diff` lists tracked
-modifications only, so files an agent _created_ are invisible to it.
+modifications only, so files an agent _created_ are invisible to it. Reading the
+change set, the patch and the tree fingerprint never writes the repository's index:
+they use the plumbing `git diff-index` and `git --no-optional-locks status`, so a
+commit running in the same repository at that moment cannot fail on `index.lock`
+because of them.
 
 `requirePaths: ["."]` means "the run must have changed something".
 

@@ -14,7 +14,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { exec } from '../../kernel/exec.js';
-import { capturePatch, captureBaseline, changedFilesSince, isUnder } from '../../verify/baseline.js';
+import { capturePatch, captureBaseline, changedFilesSince, isUnder, treeFingerprint } from '../../verify/baseline.js';
 import { runChecks } from '../../verify/runner.js';
 import { normalizeContract } from '../../verify/contract.js';
 
@@ -124,6 +124,46 @@ describe('capturePatch', () => {
   it('is empty when nothing changed', async () => {
     const base = await captureBaseline(repo);
     expect((await capturePatch(repo, base)).trim()).toBe('');
+  });
+});
+
+// Verification only reads the tree. Porcelain `git diff` and `git status`
+// refresh stale stat data and write .git/index back under index.lock, so a
+// commit running in the same repository at that moment could fail on the lock.
+describe('reading the tree leaves the Git index alone', () => {
+  // `same.txt` is unchanged since the base but its stat data is stale (same
+  // bytes, newer mtime), as an editor or a build tool leaves it. That is what
+  // makes porcelain `git diff` refresh the index and write it back.
+  async function withStaleStat(): Promise<{ base: string | undefined; indexBefore: Buffer; indexPath: string }> {
+    fs.writeFileSync(path.join(repo, 'same.txt'), 'same\n');
+    await git('add', 'same.txt');
+    await git('commit', '-m', 'add same');
+    const base = await captureBaseline(repo);
+    fs.writeFileSync(path.join(repo, 'existing.txt'), 'one\ntwo\n');
+    const later = new Date(Date.now() + 60_000);
+    fs.utimesSync(path.join(repo, 'same.txt'), later, later);
+    const indexPath = path.join(repo, '.git', 'index');
+    return { base, indexBefore: fs.readFileSync(indexPath), indexPath };
+  }
+
+  it('changedFilesSince', async () => {
+    const { base, indexBefore, indexPath } = await withStaleStat();
+    const files = await changedFilesSince(repo, base);
+    expect(files.map((f) => f.path)).toEqual(['existing.txt']);
+    expect(fs.readFileSync(indexPath).equals(indexBefore)).toBe(true);
+  });
+
+  it('capturePatch', async () => {
+    const { base, indexBefore, indexPath } = await withStaleStat();
+    const patch = await capturePatch(repo, base);
+    expect(patch).toContain('+two');
+    expect(fs.readFileSync(indexPath).equals(indexBefore)).toBe(true);
+  });
+
+  it('treeFingerprint', async () => {
+    const { indexBefore, indexPath } = await withStaleStat();
+    expect(await treeFingerprint(repo)).toMatch(/^[0-9a-f]{64}$/);
+    expect(fs.readFileSync(indexPath).equals(indexBefore)).toBe(true);
   });
 });
 
