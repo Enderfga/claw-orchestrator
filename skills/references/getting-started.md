@@ -142,6 +142,10 @@ SSH key.
   preset's or agent's own `env` sets them: no engine needs the server's token, so it is not handed to them. They
   can still read the token file, like any process of that user, and a `clawo` command run inside a session reads
   the token from that file.
+- **Commands:** commands run through `kernel/exec.ts` (a contract's `command` checks, which usually run code the
+  agent wrote, the Git reads behind verification, a screenshot check's browser and a Claude account's
+  `tokenCommand`) also start without `OPENCLAW_SERVER_TOKEN` and `CLAWO_AUTH_TOKEN`, even when the caller passes its
+  own `env`; the rest of the environment is passed as before.
 - **Rotating a leaked token:** delete the token file and restart the server (under OpenClaw, the Gateway), or
   change `OPENCLAW_SERVER_TOKEN` when the token comes from there.
 

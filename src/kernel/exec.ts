@@ -19,6 +19,7 @@
 import { spawn } from 'node:child_process';
 import { resolve as resolvePath } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
+import { withoutServerCredential } from './secrets.js';
 
 export interface ExecResult {
   code: number | null;
@@ -67,6 +68,13 @@ function killTree(pid: number | undefined): void {
   }
 }
 
+/** The environment a command runs with: the given one (or the server's), minus the server's credential, PWD at cwd. */
+function execEnv(base: NodeJS.ProcessEnv | undefined, cwd: string | undefined): NodeJS.ProcessEnv {
+  const env = withoutServerCredential(base ?? process.env);
+  if (cwd) env.PWD = resolvePath(cwd);
+  return env;
+}
+
 /** Run a command. Never throws: a spawn failure comes back as `code: null` with the message in `err`. */
 export function exec(cmd: string, args: string[] = [], opts: ExecOptions = {}): Promise<ExecResult> {
   const cap = opts.maxCaptureBytes ?? MAX_CAPTURE_BYTES;
@@ -91,9 +99,10 @@ export function exec(cmd: string, args: string[] = [], opts: ExecOptions = {}): 
     try {
       child = spawn(cmd, args, {
         cwd: opts.cwd,
-        // Keep PWD in step with cwd: a check script that reads $PWD would
-        // otherwise see the server's directory.
-        env: opts.cwd ? { ...(opts.env ?? process.env), PWD: resolvePath(opts.cwd) } : (opts.env ?? process.env),
+        // Never the server's credential: a contract's command check usually runs
+        // code the agent wrote. Keep PWD in step with cwd: a check script that
+        // reads $PWD would otherwise see the server's directory.
+        env: execEnv(opts.env, opts.cwd),
         stdio: [opts.input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
         // Own process group, so the timeout can take the whole tree down.
         detached: process.platform !== 'win32',

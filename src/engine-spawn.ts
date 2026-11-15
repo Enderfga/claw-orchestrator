@@ -32,6 +32,7 @@ import crossSpawn from 'cross-spawn';
 import { statSync } from 'node:fs';
 import { isAbsolute, join, resolve as resolvePath } from 'node:path';
 import { execFileSync, type ChildProcess, type SpawnOptions } from 'node:child_process';
+import { withoutServerCredential } from './kernel/secrets.js';
 
 /** Extensions CreateProcess runs directly — everything else needs cmd.exe. */
 const DIRECT_EXEC_EXTS = new Set(['.exe', '.com']);
@@ -134,18 +135,9 @@ export function killEngineTree(child: ChildProcess): void {
   }
 }
 
-/**
- * The orchestrator's own control credential: the server token, and the name the
- * `clawo` CLI also reads it from. No engine needs it, and every engine CLI, ACP
- * agent and custom engine would otherwise inherit it with the rest of the
- * server's environment.
- */
-const SERVER_CREDENTIAL_VARS = ['OPENCLAW_SERVER_TOKEN', 'CLAWO_AUTH_TOKEN'] as const;
-
 /** The environment an engine runs with: the given one (or the server's), minus the server's credential, PWD at cwd. */
 function engineEnv(base: NodeJS.ProcessEnv | undefined, cwd: string | undefined): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...(base ?? process.env) };
-  for (const name of SERVER_CREDENTIAL_VARS) delete env[name];
+  const env = withoutServerCredential(base ?? process.env);
   // `cwd` moves the process but leaves the inherited PWD naming the parent's
   // directory, and some engines trust PWD: opencode resolves its project from
   // it, so a session started by a server ran in the server's directory.

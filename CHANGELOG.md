@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Contract command checks no longer inherit the server's token.** The engines stopped receiving it in 7.23.2,
+  but commands run through `kernel/exec.ts` still started with the server's whole environment: a contract's
+  `command` checks, which usually run code the agent wrote, the Git reads behind verification, a screenshot check's
+  browser, and a Claude account's `tokenCommand`. They now start without `OPENCLAW_SERVER_TOKEN` and
+  `CLAWO_AUTH_TOKEN`, even when the caller passes its own `env`; the rest of the environment is passed as before. A
+  `tokenCommand` that read either variable no longer sees it. Engines and these commands share one list of the
+  server's credential variables (`kernel/secrets.ts`).
+
 ## [7.23.2] - 2026-11-15
 
 ### Fixed
