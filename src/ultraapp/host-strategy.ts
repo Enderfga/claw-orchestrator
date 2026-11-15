@@ -19,6 +19,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { BuildResult, DockerRunResult, PsResult } from './docker.js';
+import { withoutServerCredential } from '../kernel/secrets.js';
 
 const STATE_FILE = path.join(os.homedir(), '.claw-orchestrator', 'host-procs.json');
 
@@ -105,8 +106,9 @@ export async function hostRun(args: HostRunArgs): Promise<DockerRunResult> {
   if (!fs.existsSync(path.join(cwd, 'package.json'))) {
     return { ok: false, error: `no package.json at ${cwd}` };
   }
-  // Strip the contract env keys from what gets exported to the child
-  const childEnv: Record<string, string> = { ...(process.env as Record<string, string>), ...args.env };
+  // Strip the contract env keys from what gets exported to the child, and the
+  // server's credential: the generated app is code the agents wrote.
+  const childEnv = withoutServerCredential({ ...process.env, ...args.env }) as Record<string, string>;
   delete childEnv.HOST_CWD;
   childEnv.PORT = String(args.hostPort);
 
@@ -241,7 +243,9 @@ function runCmd(cmd: string, args: string[], opts: { cwd: string; env?: Record<s
   return new Promise((resolve) => {
     const child: ChildProcess = spawn(cmd, args, {
       cwd: opts.cwd,
-      env: { ...(process.env as Record<string, string>), ...(opts.env ?? {}) },
+      // `npm install` and `npm run build` run the generated app's lifecycle
+      // scripts, code the agents wrote: never with the server's credential.
+      env: withoutServerCredential({ ...process.env, ...(opts.env ?? {}) }),
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     let stdout = '';

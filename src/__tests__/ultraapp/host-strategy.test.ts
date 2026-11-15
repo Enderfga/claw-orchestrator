@@ -108,6 +108,59 @@ http.createServer((req, res) => {
     fs.rmSync(noPkg, { recursive: true, force: true });
   });
 
+  // The generated app and its lifecycle scripts are code the agents wrote:
+  // neither may inherit the server's token.
+  describe('the server token', () => {
+    const saved = { server: process.env.OPENCLAW_SERVER_TOKEN, cli: process.env.CLAWO_AUTH_TOKEN };
+    beforeEach(() => {
+      process.env.OPENCLAW_SERVER_TOKEN = 'server-secret';
+      process.env.CLAWO_AUTH_TOKEN = 'cli-secret';
+    });
+    afterEach(() => {
+      if (saved.server === undefined) delete process.env.OPENCLAW_SERVER_TOKEN;
+      else process.env.OPENCLAW_SERVER_TOKEN = saved.server;
+      if (saved.cli === undefined) delete process.env.CLAWO_AUTH_TOKEN;
+      else process.env.CLAWO_AUTH_TOKEN = saved.cli;
+    });
+
+    it.skipIf(process.platform === 'win32')('is not seen by the build scripts', async () => {
+      fs.writeFileSync(
+        path.join(cwd, 'package.json'),
+        JSON.stringify({
+          name: 'host-test-app',
+          version: '0.0.1',
+          scripts: {
+            build: `node -e "require('fs').writeFileSync('seen.txt', [process.env.OPENCLAW_SERVER_TOKEN, process.env.CLAWO_AUTH_TOKEN].map(String).join('|'))"`,
+          },
+        }),
+      );
+      const r = await hostBuild({ tag: 'demo:v1', cwd });
+      expect(r.ok).toBe(true);
+      expect(fs.readFileSync(path.join(cwd, 'seen.txt'), 'utf8')).toBe('undefined|undefined');
+    });
+
+    it.skipIf(process.platform === 'win32')('is not seen by the running app, even through its env', async () => {
+      fs.writeFileSync(
+        path.join(cwd, 'server.js'),
+        `import * as http from 'node:http';
+const port = parseInt(process.env.PORT || '3000', 10);
+http.createServer((req, res) => {
+  res.end(String(process.env.OPENCLAW_SERVER_TOKEN) + '|' + String(process.env.CLAWO_AUTH_TOKEN) + '|' + process.env.KEEP);
+}).listen(port, '127.0.0.1');
+`,
+      );
+      const run = await hostRun({
+        image: cwd,
+        name: testName,
+        hostPort: port,
+        env: { HOST_CWD: cwd, CLAWO_AUTH_TOKEN: 'via-env', KEEP: 'kept' },
+      });
+      expect(run.ok).toBe(true);
+      expect(await waitForUp(port)).toBe(true);
+      expect((await get(port, '/')).body).toBe('undefined|undefined|kept');
+    });
+  });
+
   it('hostRun → wait for up → GET / → hostStop → port frees', async () => {
     const run = await hostRun({
       image: cwd,

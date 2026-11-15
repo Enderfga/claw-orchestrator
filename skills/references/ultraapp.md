@@ -119,10 +119,10 @@ router removes it from the `Cookie` header before forwarding and drops any `Set-
 from the app's response, so an app backend neither receives nor replaces it. Other cookies pass
 through unchanged. For the same reason it removes `Proxy-Authorization`, and an `Authorization`
 header that carries the server token, as a reverse proxy adding the token to every request for the
-host would send; an app's own `Authorization` passes through. In `host` mode the app still runs as the same OS user, which can read
-`~/.openclaw/server-token`, and it inherits the server's environment, including
-`OPENCLAW_SERVER_TOKEN` when set. Only `docker` mode, which passes the app nothing but
-`BASE_PATH`, separates an app from the token.
+host would send; an app's own `Authorization` passes through. In `host` mode the app no longer inherits `OPENCLAW_SERVER_TOKEN` or
+`CLAWO_AUTH_TOKEN` from the server's environment, even through the deploy's `env`, but it still
+runs as the same OS user, which can read `~/.openclaw/server-token`. Only `docker` mode, which
+passes the app nothing but `BASE_PATH`, separates an app from the token.
 
 Slug→port map
 persists to `~/.claw-orchestrator/ultraapps/_router.json`. Host-mode pid metadata
