@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Agent-written code in UltraApp host mode and autoloop commits no longer inherits the server's token.** After
+  the command checks, two more places still started such code with the server's whole environment: UltraApp's host
+  mode, which runs `npm install` and `npm run build` (with the generated app's lifecycle scripts) and then the app
+  itself, and the autoloop's iteration and plan commits, whose `git commit` runs the workspace's hooks. Both now
+  start without `OPENCLAW_SERVER_TOKEN` and `CLAWO_AUTH_TOKEN`, even when the deploy's `env` or build args set them;
+  the rest of the environment is passed as before.
+
 ## [7.23.3] - 2026-11-15
 
 ### Fixed

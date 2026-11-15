@@ -1232,6 +1232,43 @@ describe('ClaudeAgentDispatcher — partial Coder terminal handoff', () => {
     expect(out.some((m) => m.type === 'directive_ack')).toBe(false);
   });
 
+  // `git commit` runs the workspace's hooks, which the agent can write.
+  it.skipIf(process.platform === 'win32')('G2b: the iteration commit hooks do not see the server token', async () => {
+    const ic = plannerControl('iter_complete', { summary: 'ok', eval_output: { metric: 1 }, files_changed: [] });
+    const { dispatcher, workspace } = makeDispatcher({}, { sendOutput: `done\n${ic}` });
+    const { execFileSync } = await import('node:child_process');
+    for (const args of [
+      ['init'],
+      ['config', 'user.email', 't@e'],
+      ['config', 'user.name', 't'],
+      ['commit', '--allow-empty', '-m', 'b'],
+    ]) {
+      execFileSync('git', args, { cwd: workspace });
+    }
+    const seen = path.join(workspace, '..', `hook-seen-${path.basename(workspace)}.txt`);
+    const hook = path.join(workspace, '.git', 'hooks', 'pre-commit');
+    fs.writeFileSync(
+      hook,
+      `#!/bin/sh\nprintf '%s|%s' "\${OPENCLAW_SERVER_TOKEN-unset}" "\${CLAWO_AUTH_TOKEN-unset}" > ${JSON.stringify(seen)}\n`,
+    );
+    fs.chmodSync(hook, 0o755);
+    fs.writeFileSync(path.join(workspace, 'work.txt'), 'change');
+    const saved = { server: process.env.OPENCLAW_SERVER_TOKEN, cli: process.env.CLAWO_AUTH_TOKEN };
+    process.env.OPENCLAW_SERVER_TOKEN = 'server-secret';
+    process.env.CLAWO_AUTH_TOKEN = 'cli-secret';
+    try {
+      await dispatcher.spawnSubagents();
+      await dispatcher.deliver(d0('g'));
+      expect(fs.readFileSync(seen, 'utf8')).toBe('unset|unset');
+    } finally {
+      if (saved.server === undefined) delete process.env.OPENCLAW_SERVER_TOKEN;
+      else process.env.OPENCLAW_SERVER_TOKEN = saved.server;
+      if (saved.cli === undefined) delete process.env.CLAWO_AUTH_TOKEN;
+      else process.env.CLAWO_AUTH_TOKEN = saved.cli;
+      fs.rmSync(seen, { force: true });
+    }
+  });
+
   it('G3: short clarification ack (multiline normalized)', async () => {
     const q = 'Line one?\nLine two about eval?';
     const { dispatcher, calls } = makeDispatcher(

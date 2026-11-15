@@ -146,6 +146,9 @@ SSH key.
   agent wrote, the Git reads behind verification, a screenshot check's browser and a Claude account's
   `tokenCommand`) also start without `OPENCLAW_SERVER_TOKEN` and `CLAWO_AUTH_TOKEN`, even when the caller passes its
   own `env`; the rest of the environment is passed as before.
+- **Agent-written code elsewhere:** UltraApp's host mode (`npm install`, `npm run build` and the running app) and the
+  autoloop's commits, which run the workspace's Git hooks, start without both variables too, even when the deploy's
+  `env` or build args set them. They can still read the token file, like any process of that user.
 - **Rotating a leaked token:** delete the token file and restart the server (under OpenClaw, the Gateway), or
   change `OPENCLAW_SERVER_TOKEN` when the token comes from there.
 

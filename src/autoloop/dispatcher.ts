@@ -35,6 +35,7 @@ import {
 } from '../types.js';
 import { nullLogger } from '../logger.js';
 import { spawn } from 'node:child_process';
+import { withoutServerCredential } from '../kernel/secrets.js';
 import { capturePatch, changedFilesSince } from '../verify/baseline.js';
 import { runContract } from '../verify/runner.js';
 import { writeEvidence } from '../verify/evidence.js';
@@ -1749,6 +1750,8 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
     return new Promise((resolve) => {
       const child = spawn(argv[0], argv.slice(1), {
         cwd: this.config.workspace,
+        // `git commit` runs the workspace's hooks, which the agent can write.
+        env: withoutServerCredential(process.env),
         stdio: ['ignore', 'pipe', 'pipe'],
       });
       let out = '';
@@ -1767,6 +1770,8 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
       new Promise((resolve) => {
         const child = spawn(argv[0], argv.slice(1), {
           cwd: this.config.workspace,
+          // `git commit` runs the workspace's hooks, which the agent can write.
+          env: withoutServerCredential(process.env),
           stdio: ['ignore', 'pipe', 'pipe'],
         });
         let out = '';
