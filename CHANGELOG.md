@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [7.23.2] - 2026-11-15
 
 ### Fixed
 
@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the `clawo` CLI reads) reached each of them, and anything that logs or reports its environment. Engines, and the
   one-shot Claude CLI calls (`plugin details`, `agents`, `project purge`), now start without both variables, even
   when a preset's `env` sets them; the rest of the environment is passed as before. A `clawo` command run inside a
-  session reads the token from `~/.openclaw/server-token`.
+  session reads the token from `~/.openclaw/server-token`. (#180, thanks @ajmtrz)
 
 ## [7.23.1] - 2026-11-15
 
