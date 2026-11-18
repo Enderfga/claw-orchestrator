@@ -326,6 +326,10 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
   private plannerName: string;
   private coderName: string;
   private reviewerName: string;
+  /** Set once by shutdown(); a closed dispatcher never restarts or re-sends to a role. */
+  private closed = false;
+  /** Whether that shutdown purged the persisted sessions (autoloopDelete). */
+  private closedWithPurge = false;
   private plannerStarted = false;
   private coderStarted = false;
   private reviewerStarted = false;
@@ -401,6 +405,11 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
   }
 
   async shutdown(reason: string, opts: { purge?: boolean } = {}): Promise<void> {
+    // Set before the sessions are stopped: stopping them interrupts the
+    // in-flight turn, and the send recovery path must see the run as closed
+    // when that interruption reaches it.
+    this.closed = true;
+    this.closedWithPurge = !!opts.purge;
     if (!(reason === 'start-failed' && this.config.suppressFailedStartAudit)) {
       this.appendDecisionLog({
         kind: 'terminate',
@@ -735,7 +744,7 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
       this.reviewerStarted = false;
       this.reviewerSessionPrompt = null;
     }
-    if (opts.eagerRestart) {
+    if (opts.eagerRestart && !this.closed) {
       if (agent === 'planner') await this.ensurePlanner();
       else if (agent === 'coder') await this.ensureCoder();
       else await this.ensureReviewer();
@@ -796,6 +805,10 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
       if (result.recoverable_timeout || !result.error) return result;
       throw new Error(result.error);
     } catch (err) {
+      // A turn interrupted because the run was cancelled or stopped is not a
+      // subprocess failure: resetting would start the role again after its
+      // session was stopped, and retrying would re-send work the run gave up.
+      if (this.closed) return { output: '', error: (err as Error).message, fatal: true };
       this.logger.warn?.(`[autoloop] ${agent} send threw, attempting reset+retry: ${(err as Error).message}`);
       try {
         await this.resetAgent(agent, { eagerRestart: true });
@@ -808,6 +821,7 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
       // old socket still in TIME_WAIT → ECONNREFUSED). Small jitter avoids
       // lockstep retries across concurrent runs.
       await new Promise((r) => setTimeout(r, 500 + Math.floor(Math.random() * 250)));
+      if (this.closed) return { output: '', error: (err as Error).message, fatal: true };
       try {
         const result = await this.sendAttempt(name, promptText, pending);
         if (result.recoverable_timeout || !result.error) return result;
@@ -1001,7 +1015,23 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
       // Planner can still discover, audit, and `git status` the workspace.
       disallowedTools: ['Write', 'Edit', 'MultiEdit', 'NotebookEdit'],
     });
+    if (this.closed) await this.stopRoleStartedAfterShutdown(this.plannerName);
     this.plannerStarted = true;
+  }
+
+  /**
+   * A role session can finish starting after shutdown() has run: shutdown's
+   * stopSession() for a name that is still starting finds no session. Such a
+   * session belongs to no run, so stop it the way shutdown() would have, and
+   * throw so the caller does not go on to use it.
+   */
+  private async stopRoleStartedAfterShutdown(name: string): Promise<void> {
+    try {
+      await this.config.manager.stopSession(name, { keepPersisted: !this.closedWithPurge });
+    } catch (err) {
+      this.logger.warn?.(`[autoloop] failed to stop ${name} started after shutdown: ${(err as Error).message}`);
+    }
+    throw new Error(`[autoloop] run stopped while ${name} was starting`);
   }
 
   /**
@@ -1268,6 +1298,7 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
       permissionMode: 'bypassPermissions',
       systemPrompt: this.coderSystemPrompt,
     });
+    if (this.closed) await this.stopRoleStartedAfterShutdown(this.coderName);
     this.coderStarted = true;
   }
 
@@ -1529,6 +1560,7 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
         permissionMode: 'bypassPermissions',
         systemPrompt: sessionPrompt,
       });
+      if (this.closed) await this.stopRoleStartedAfterShutdown(this.reviewerName);
       this.reviewerStarted = true;
     } catch (err) {
       this.reviewerSessionPrompt = null;
