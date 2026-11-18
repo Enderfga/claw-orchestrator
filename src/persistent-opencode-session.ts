@@ -30,7 +30,24 @@
  * permission is auto-REJECTED in non-interactive mode (it does not hang), so a
  * write-enabled session needs no skip flag. (`--dangerously-skip-permissions`,
  * `--auto`, and `--yolo` do exist as of opencode 1.4.0 if an allow-all run is
- * ever wanted — verified against 1.17.15.)
+ * ever wanted — verified against 1.17.15.) OpenCode 2's `run` rejects an `ask`
+ * the same way (measured on 2.3.2), but its default policy allows everything,
+ * paths outside the project included, where V1 asked for those.
+ *
+ * OpenCode 2 (2.x) keeps `run --format json` and the same event stream, and
+ * differs where this wrapper touches it (all measured on 2.3.2):
+ *   - `--standalone` is required. Without it `run` hands the turn to the
+ *     background service when one is running (the desktop app starts one), and
+ *     that service has its own configuration and environment: the read-only
+ *     agent this wrapper injects comes back "Agent not found".
+ *   - effort is `--model provider/model#variant`; `--variant` is gone. A variant
+ *     the model does not offer fails the turn (`Variant unavailable`) before the
+ *     model is called, where V1 ran the default.
+ *   - agent configuration is a different shape (`agents`, ordered `permissions`
+ *     rules, no `tools` map) and the shell tool is `shell`, not `bash`, so the
+ *     read-only agent has its own V2 definition.
+ *   - an `--agent` that does not exist fails the turn instead of falling back to
+ *     the default, writable agent.
  */
 
 import { execEngine, killEngineTree, spawnEngine } from './engine-spawn.js';
@@ -88,6 +105,36 @@ const READ_ONLY_AGENT_CONFIG = JSON.stringify({
   },
 });
 
+/**
+ * The same agent for OpenCode 2, as an allowlist. V2 rules are ordered and the
+ * last match wins; agent rules come after the global and project ones, so a
+ * user's own `allow` cannot reopen what this denies. Denying `*` first covers
+ * every action, including ones a plugin or MCP server adds and the
+ * `subagent` action (V1's `task`) that would hand a write to another agent,
+ * which on V2 runs under its own permissions rather than these. Measured on
+ * 2.3.2: write, a shell heredoc, delegation to a subagent and a read outside the
+ * project were all refused, and the denied tools are not offered to the model.
+ */
+const READ_ONLY_AGENT_CONFIG_V2 = JSON.stringify({
+  agents: {
+    [READ_ONLY_AGENT]: {
+      mode: 'primary',
+      description: 'claw-orchestrator read-only session',
+      permissions: [
+        { action: '*', resource: '*', effect: 'deny' },
+        { action: 'read', resource: '*', effect: 'allow' },
+        { action: 'glob', resource: '*', effect: 'allow' },
+        { action: 'grep', resource: '*', effect: 'allow' },
+        // V2's own default for secrets, which the `read` allow above would
+        // otherwise override. `ask` is rejected in a non-interactive run.
+        { action: 'read', resource: '*.env', effect: 'ask' },
+        { action: 'read', resource: '*.env.*', effect: 'ask' },
+        { action: 'read', resource: '*.env.example', effect: 'allow' },
+      ],
+    },
+  },
+});
+
 interface TurnState {
   /** Per-part latest text snapshot, keyed by part.id (preserves insertion order). */
   textParts: Map<string, string>;
@@ -96,6 +143,23 @@ interface TurnState {
   /** Tool callIDs that ended in error state. */
   erroredTools: Set<string>;
   gotUsage: boolean;
+  /** The message of the last `error` event, so a failed turn says why. */
+  errorMessage?: string;
+  /** OpenCode 2 refused the `#variant` this turn asked for (`Variant unavailable`). */
+  variantUnavailable: boolean;
+}
+
+/** The text of an `error` event: V2 sends `{ error: { type, message } }`, V1 a string or `{ data: { message } }`. */
+function errorEventMessage(event: Record<string, unknown>): string | undefined {
+  const err = event.error ?? event.message;
+  if (typeof err === 'string') return err;
+  if (err && typeof err === 'object') {
+    const e = err as { message?: unknown; data?: { message?: unknown }; name?: unknown };
+    if (typeof e.message === 'string') return e.message;
+    if (typeof e.data?.message === 'string') return e.data.message;
+    if (typeof e.name === 'string') return e.name;
+  }
+  return undefined;
 }
 
 // ─── OpenCode 2 ─────────────────────────────────────────────────────────────
@@ -118,23 +182,24 @@ function opencodeVersion(bin: string): Promise<string | undefined> {
   return v;
 }
 
-/**
- * OpenCode 2 — `opencode upgrade --major`, beta-only builds versioned
- * `0.0.0-beta-N` (as of 2026-10-11) — keeps `run --format json` but breaks this
- * wrapper three ways, each measured on 0.0.0-beta-17823:
- *   - `--variant` is gone (effort moved into `provider/model#variant`), so any
- *     session with an effort level fails every turn;
- *   - no `step_finish` event, so a turn reports no tokens and no cost;
- *   - the read-only agent could not be verified: with it, OpenCode's free
- *     tier answers 403 ("can only be used from within OpenCode").
- * Refusing up front is the honest answer until a stable V2 is wired and
- * measured; running it would silently drop effort, cost, and a read-only label.
- */
+/** OpenCode 2: a 2.x release, or one of the `0.0.0-beta-N` builds that preceded it. */
 export function isOpencodeV2(version: string | undefined): boolean {
   if (!version) return false;
-  if (/\b0\.0\.0-(beta|next|dev)/.test(version) || /\bopencode2\b/.test(version)) return true;
-  const m = version.match(/\b(\d+)\.\d+\.\d+/);
+  if (isOpencodeV2Prerelease(version)) return true;
+  // No `\b` before the major: 2.3.2 prints `opencode v2.3.2`, and there is no
+  // word boundary between the `v` and the `2`.
+  const m = version.match(/(\d+)\.\d+\.\d+/);
   return !!m && Number(m[1]) >= 2;
+}
+
+/**
+ * The OpenCode 2 builds that came before its first release (`0.0.0-beta-N`,
+ * from `opencode upgrade --major` and the `@opencode-ai/cli` npm package).
+ * Still refused: measured on 0.0.0-beta-17823 they sent no `step_finish`, so a
+ * turn had no tokens and no cost. The 2.3.2 release sends it again.
+ */
+export function isOpencodeV2Prerelease(version: string | undefined): boolean {
+  return !!version && (/\b0\.0\.0-(beta|next|dev)/.test(version) || /\bopencode2\b/.test(version));
 }
 
 // ─── PersistentOpencodeSession ──────────────────────────────────────────────
@@ -161,18 +226,32 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
    */
   private _reportedCostUsd?: number;
 
+  /** Set by start() from `opencode --version`. An unreadable version runs as V1, as before. */
+  private _v2 = false;
+
+  /**
+   * `provider/model#variant` pairs OpenCode 2 refused in this session. Each is
+   * asked for once: after the refusal the turn runs on the model's default,
+   * which is what V1 did with an effort a provider did not offer.
+   */
+  private readonly _refusedVariants = new Set<string>();
+
+  /** The "effort not sent without a model" note is logged once per session. */
+  private _loggedEffortWithoutModel = false;
+
   protected override _continuesConversation(): boolean {
     return !!this.opencodeSessionId;
   }
 
   override async start(): Promise<this> {
     const version = await opencodeVersion(this.engineBin);
-    if (isOpencodeV2(version)) {
+    if (isOpencodeV2Prerelease(version)) {
       throw new Error(
-        `OpenCode 2 (${version}) is not supported yet: it drops the per-turn usage events and the --variant flag ` +
-          'this engine relies on, and its read-only agent is unverified. claw-orchestrator is tested with OpenCode 1.x.',
+        `OpenCode 2 prerelease builds (${version}) are not supported: they send no per-turn usage events. ` +
+          'Install an OpenCode 2 release or OpenCode 1.x.',
       );
     }
+    this._v2 = isOpencodeV2(version);
     return super.start();
   }
 
@@ -214,6 +293,10 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
     // On Windows `opencode` is an npm `.cmd` shim that runs through cmd.exe,
     // which would cut a message at its first newline; stdin carries it unchanged.
     const args: string[] = ['run', '--format', 'json'];
+    // A private server for this run. Without it OpenCode 2 hands the turn to its
+    // background service when one is running, which reads its own configuration
+    // and not this process's environment (see the header).
+    if (this._v2) args.push('--standalone');
 
     // Continue OpenCode's own session rather than starting a fresh one. Verified
     // against 1.18.18: without this the second turn answers "you never asked me
@@ -234,9 +317,7 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
     }
 
     // opencode wants `provider/model` format. Only pass through if it looks correct.
-    if (this.options.model && this.options.model.includes('/')) {
-      args.push('--model', this.options.model);
-    }
+    let model = this.options.model && this.options.model.includes('/') ? this.options.model : undefined;
 
     // `--variant` is opencode's reasoning-effort knob ("provider-specific
     // reasoning effort, e.g., high, max, minimal"). Before this the engine
@@ -244,8 +325,30 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
     // floor. opencode does not validate the value — an unknown one runs the
     // turn at the provider's default rather than failing — so the level a
     // provider does not offer degrades instead of erroring.
+    //
+    // OpenCode 2 has no `--variant`: the variant joins the model as
+    // `provider/model#variant`, and one the model does not offer fails the turn.
+    // That refusal comes before the model is called, so the turn is run again
+    // without it (see the close handler) and the level degrades as on V1.
     const effort = options.effort ?? this.options.effort;
-    if (effort && effort !== 'auto') args.push('--variant', effort);
+    const wantsEffort = !!effort && effort !== 'auto';
+    let variantTried: string | undefined;
+    if (this._v2 && wantsEffort) {
+      if (model && !model.includes('#')) {
+        const withVariant = `${model}#${effort}`;
+        if (!this._refusedVariants.has(withVariant)) model = variantTried = withVariant;
+      } else if (!model && !this._loggedEffortWithoutModel) {
+        // A variant names one model's level; with no model OpenCode picks the
+        // default, and there is nothing to attach the level to.
+        this._loggedEffortWithoutModel = true;
+        this.emit(
+          SESSION_EVENT.LOG,
+          `[opencode] effort '${effort}' not sent: OpenCode 2 takes a reasoning variant only with a provider/model`,
+        );
+      }
+    }
+    if (model) args.push('--model', model);
+    if (!this._v2 && wantsEffort) args.push('--variant', effort);
 
     const timeout = options.timeout || 300_000;
 
@@ -255,6 +358,7 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
         seenTools: new Set(),
         erroredTools: new Set(),
         gotUsage: false,
+        variantUnavailable: false,
       };
       let stderr = '';
       let settled = false;
@@ -267,7 +371,12 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
       const proc = spawnEngine(this.engineBin, args, {
         launcher: this.options.launcher,
         cwd: this.options.cwd,
-        env: readOnly ? { ...process.env, OPENCODE_CONFIG_CONTENT: READ_ONLY_AGENT_CONFIG } : { ...process.env },
+        env: readOnly
+          ? {
+              ...process.env,
+              OPENCODE_CONFIG_CONTENT: this._v2 ? READ_ONLY_AGENT_CONFIG_V2 : READ_ONLY_AGENT_CONFIG,
+            }
+          : { ...process.env },
         stdio: ['pipe', 'pipe', 'pipe'],
       });
       this.currentProc = proc;
@@ -325,6 +434,18 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
         if (settled) return;
         settled = true;
 
+        // OpenCode 2 refused the variant before calling the model, so nothing ran:
+        // not a turn, and safe to run again on the model's default variant.
+        if (variantTried && state.variantUnavailable) {
+          this._refusedVariants.add(variantTried);
+          this.emit(
+            SESSION_EVENT.LOG,
+            `[opencode] ${state.errorMessage ?? `variant refused: ${variantTried}`}; running on the model's default`,
+          );
+          this._run(message, options).then(resolve, reject);
+          return;
+        }
+
         // A read-only session whose enforcement agent failed to load ran writable.
         // Refuse the result rather than hand back output produced without the
         // sandbox the caller asked for.
@@ -374,7 +495,7 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
         this.emit(SESSION_EVENT.TURN_COMPLETE, event);
 
         if (code !== 0) {
-          reject(new Error(stderr || `OpenCode exited with code ${code}`));
+          reject(new Error(state.errorMessage || stderr || `OpenCode exited with code ${code}`));
         } else {
           resolve({ text: finalText, event });
         }
@@ -495,9 +616,13 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
         break;
       }
 
-      case 'error':
-        this.emit(SESSION_EVENT.LOG, `[opencode-error] ${event.error || JSON.stringify(event)}`);
+      case 'error': {
+        const msg = errorEventMessage(event);
+        if (msg) state.errorMessage = msg;
+        if (msg && /\bVariant unavailable\b/i.test(msg)) state.variantUnavailable = true;
+        this.emit(SESSION_EVENT.LOG, `[opencode-error] ${msg ?? JSON.stringify(event)}`);
         break;
+      }
 
       default:
         // Unknown event type — ignore for forward compatibility.

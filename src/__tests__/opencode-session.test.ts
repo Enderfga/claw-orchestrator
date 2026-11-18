@@ -25,7 +25,8 @@ vi.mock('../engine-spawn.js', async (importOriginal) => ({
   },
 }));
 
-const { PersistentOpencodeSession, isOpencodeV2 } = await import('../persistent-opencode-session.js');
+const { PersistentOpencodeSession, isOpencodeV2, isOpencodeV2Prerelease } =
+  await import('../persistent-opencode-session.js');
 
 // ─── Mock Process Helper ────────────────────────────────────────────────────
 
@@ -759,26 +760,213 @@ describe('PersistentOpencodeSession', () => {
 });
 
 describe('OpenCode 2', () => {
+  const V2 = 'opencode-v2-test';
+  let proc: ReturnType<typeof createMockProcess>;
+
+  beforeEach(() => {
+    versions[V2] = 'opencode v2.3.2';
+    proc = createMockProcess();
+    mockSpawn.mockReset();
+    mockSpawn.mockReturnValue(proc);
+  });
+
+  async function oneTurn(
+    session: InstanceType<typeof PersistentOpencodeSession>,
+    p: ReturnType<typeof createMockProcess>,
+    lines: string[] = [],
+    code = 0,
+  ) {
+    const sent = session.send('hi', { waitForComplete: true });
+    setTimeout(() => {
+      feedLines(p, lines);
+      closeProc(p, code);
+    }, 10);
+    return sent;
+  }
+
   it('recognizes OpenCode 2 builds and nothing else', () => {
     expect(isOpencodeV2('opencode2 v0.0.0-beta-17823')).toBe(true);
     expect(isOpencodeV2('0.0.0-beta-19271')).toBe(true);
     expect(isOpencodeV2('2.0.0')).toBe(true);
+    expect(isOpencodeV2('opencode v2.3.2')).toBe(true);
     expect(isOpencodeV2('1.19.0')).toBe(false);
     expect(isOpencodeV2('1.18.35')).toBe(false);
     expect(isOpencodeV2(undefined)).toBe(false);
+    // Only the builds before the first release are prereleases.
+    expect(isOpencodeV2Prerelease('opencode2 v0.0.0-beta-17823')).toBe(true);
+    expect(isOpencodeV2Prerelease('0.0.0-dev-19272')).toBe(true);
+    expect(isOpencodeV2Prerelease('opencode v2.3.2')).toBe(false);
+    expect(isOpencodeV2Prerelease('1.19.6')).toBe(false);
   });
 
-  // On 0.0.0-beta-17823: no step_finish (no tokens or cost), no --variant, and
-  // the read-only agent unverifiable. Running it would drop all three silently.
-  it('refuses to start against OpenCode 2', async () => {
-    versions['opencode-v2-test'] = 'opencode2 v0.0.0-beta-17823';
-    const s = new PersistentOpencodeSession({ name: 't', cwd: '/tmp' }, 'opencode-v2-test');
-    await expect(s.start()).rejects.toThrow(/OpenCode 2 .*not supported yet/);
+  // On 0.0.0-beta-17823 there was no step_finish, so no tokens and no cost.
+  it('refuses the prerelease builds', async () => {
+    versions['opencode-beta-test'] = 'opencode2 v0.0.0-beta-17823';
+    const s = new PersistentOpencodeSession({ name: 't', cwd: '/tmp' }, 'opencode-beta-test');
+    await expect(s.start()).rejects.toThrow(/prerelease builds .*not supported/);
   });
 
-  it('starts when the version cannot be read', async () => {
+  it('starts when the version cannot be read, as OpenCode 1', async () => {
     versions['opencode-noversion-test'] = new Error('spawn ENOENT');
-    const s = new PersistentOpencodeSession({ name: 't', cwd: '/tmp' }, 'opencode-noversion-test');
+    const s = new PersistentOpencodeSession({ name: 't', cwd: '/tmp', effort: 'high' }, 'opencode-noversion-test');
     await expect(s.start()).resolves.toBe(s);
+    await oneTurn(s, proc);
+    const args = mockSpawn.mock.calls[0][1] as string[];
+    expect(args).not.toContain('--standalone');
+    expect(args[args.indexOf('--variant') + 1]).toBe('high');
+  });
+
+  it('runs a release on a private server, and still bills from step_finish', async () => {
+    const s = new PersistentOpencodeSession({ name: 't', cwd: '/tmp' }, V2);
+    await s.start();
+    await oneTurn(s, proc, [
+      envelope('text', { part: { id: 'p1', type: 'text', text: 'OK' } }),
+      envelope('step_finish', {
+        part: { type: 'step-finish', cost: 0.25, tokens: { input: 100, output: 5, cache: { read: 900, write: 0 } } },
+      }),
+    ]);
+    const args = mockSpawn.mock.calls[0][1] as string[];
+    expect(args.slice(0, 4)).toEqual(['run', '--format', 'json', '--standalone']);
+    const stats = s.getStats();
+    expect(stats.costUsd).toBe(0.25);
+    expect(stats.tokensOut).toBe(5);
+    expect(stats.cachedTokens).toBe(900);
+    // Reverse: OpenCode 1 is not given a flag it does not have.
+    const v1 = new PersistentOpencodeSession({ name: 't1', cwd: '/tmp' });
+    await v1.start();
+    const p1 = createMockProcess();
+    mockSpawn.mockReturnValue(p1);
+    await oneTurn(v1, p1);
+    expect(mockSpawn.mock.calls[1][1] as string[]).not.toContain('--standalone');
+  });
+
+  it('sends effort as the model variant, never as --variant', async () => {
+    const s = new PersistentOpencodeSession(
+      { name: 't', cwd: '/tmp', model: 'opencode/flint-40b-free', effort: 'high' },
+      V2,
+    );
+    await s.start();
+    await oneTurn(s, proc);
+    const args = mockSpawn.mock.calls[0][1] as string[];
+    expect(args[args.indexOf('--model') + 1]).toBe('opencode/flint-40b-free#high');
+    expect(args).not.toContain('--variant');
+  });
+
+  it('keeps a variant the caller already named, and sends none for auto', async () => {
+    const named = new PersistentOpencodeSession(
+      { name: 't', cwd: '/tmp', model: 'opencode/flint-40b-free#max', effort: 'high' },
+      V2,
+    );
+    await named.start();
+    await oneTurn(named, proc);
+    let args = mockSpawn.mock.calls[0][1] as string[];
+    expect(args[args.indexOf('--model') + 1]).toBe('opencode/flint-40b-free#max');
+
+    const auto = new PersistentOpencodeSession(
+      { name: 't2', cwd: '/tmp', model: 'opencode/flint-40b-free', effort: 'auto' },
+      V2,
+    );
+    await auto.start();
+    const p2 = createMockProcess();
+    mockSpawn.mockReturnValue(p2);
+    await oneTurn(auto, p2);
+    args = mockSpawn.mock.calls[1][1] as string[];
+    expect(args[args.indexOf('--model') + 1]).toBe('opencode/flint-40b-free');
+  });
+
+  it('does not send effort without a model, and says so once', async () => {
+    const s = new PersistentOpencodeSession({ name: 't', cwd: '/tmp', effort: 'high' }, V2);
+    await s.start();
+    const logs: string[] = [];
+    s.on('log', (m: string) => logs.push(m));
+    await oneTurn(s, proc);
+    const p2 = createMockProcess();
+    mockSpawn.mockReturnValue(p2);
+    await oneTurn(s, p2);
+    const args = mockSpawn.mock.calls[0][1] as string[];
+    expect(args).not.toContain('--model');
+    expect(args).not.toContain('--variant');
+    expect(logs.filter((l) => l.includes("effort 'high' not sent"))).toHaveLength(1);
+  });
+
+  it('runs a turn again on the default variant when the model has no such variant, and asks once', async () => {
+    const s = new PersistentOpencodeSession(
+      { name: 't', cwd: '/tmp', model: 'opencode/big-pickle', effort: 'high' },
+      V2,
+    );
+    await s.start();
+    const refused = createMockProcess();
+    const rerun = createMockProcess();
+    const later = createMockProcess();
+    mockSpawn.mockReturnValueOnce(refused).mockReturnValueOnce(rerun).mockReturnValueOnce(later);
+
+    const sent = s.send('hi', { waitForComplete: true });
+    setTimeout(() => {
+      feedLines(refused, [
+        envelope('error', {
+          error: { type: 'provider.no-route', message: 'Variant unavailable for opencode/big-pickle: high' },
+        }),
+      ]);
+      closeProc(refused, 1);
+      setTimeout(() => {
+        feedLines(rerun, [envelope('text', { part: { id: 'p1', type: 'text', text: 'OK' } })]);
+        closeProc(rerun, 0);
+      }, 10);
+    }, 10);
+    const result = await sent;
+
+    expect(result.text).toBe('OK');
+    const first = mockSpawn.mock.calls[0][1] as string[];
+    const second = mockSpawn.mock.calls[1][1] as string[];
+    expect(first[first.indexOf('--model') + 1]).toBe('opencode/big-pickle#high');
+    expect(second[second.indexOf('--model') + 1]).toBe('opencode/big-pickle');
+    // The refused attempt was not a turn.
+    expect(s.getStats().turns).toBe(1);
+    expect(s.getStats().turnsSucceeded).toBe(1);
+
+    // The next turn does not ask for the refused variant again.
+    await oneTurn(s, later);
+    const third = mockSpawn.mock.calls[2][1] as string[];
+    expect(third[third.indexOf('--model') + 1]).toBe('opencode/big-pickle');
+    expect(mockSpawn).toHaveBeenCalledTimes(3);
+  });
+
+  it('fails a turn with the error OpenCode 2 reported, not a bare exit code', async () => {
+    const s = new PersistentOpencodeSession({ name: 't', cwd: '/tmp' }, V2);
+    await s.start();
+    await expect(
+      oneTurn(s, proc, [envelope('error', { error: { type: 'unknown', message: 'Agent not found: "x"' } })], 1),
+    ).rejects.toThrow('Agent not found: "x"');
+  });
+
+  it('gives a read-only session an allowlist agent in the OpenCode 2 format', async () => {
+    const s = new PersistentOpencodeSession({ name: 't', cwd: '/tmp', sandboxMode: 'read-only' }, V2);
+    await s.start();
+    await oneTurn(s, proc);
+    const args = mockSpawn.mock.calls[0][1] as string[];
+    expect(args[args.indexOf('--agent') + 1]).toBe('clawo-readonly');
+    const env = (mockSpawn.mock.calls[0][2] as { env: Record<string, string> }).env;
+    const cfg = JSON.parse(env.OPENCODE_CONFIG_CONTENT) as {
+      agent?: unknown;
+      agents: Record<string, { permissions: Array<{ action: string; resource: string; effect: string }> }>;
+    };
+    // V2 reads `agents`; a V1-shaped entry is not mixed in.
+    expect(cfg.agent).toBeUndefined();
+    const rules = cfg.agents['clawo-readonly'].permissions;
+    // Everything is denied first, so `shell`, `edit`, `subagent` and any action a
+    // plugin adds are covered without being named.
+    expect(rules[0]).toEqual({ action: '*', resource: '*', effect: 'deny' });
+    const allowed = rules.filter((r) => r.effect === 'allow').map((r) => r.action);
+    expect(new Set(allowed)).toEqual(new Set(['read', 'glob', 'grep']));
+    // Reverse: OpenCode 1 still gets the V1 definition.
+    const v1 = new PersistentOpencodeSession({ name: 't1', cwd: '/tmp', sandboxMode: 'read-only' });
+    await v1.start();
+    const p1 = createMockProcess();
+    mockSpawn.mockReturnValue(p1);
+    await oneTurn(v1, p1);
+    const v1cfg = JSON.parse(
+      (mockSpawn.mock.calls[1][2] as { env: Record<string, string> }).env.OPENCODE_CONFIG_CONTENT,
+    );
+    expect(v1cfg.agent['clawo-readonly'].permission.bash).toBe('deny');
   });
 });

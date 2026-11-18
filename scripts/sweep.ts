@@ -55,7 +55,14 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 interface Engine {
   id: string;
+  /** Empty when the binary is not installed by default; see `missingBin`. */
   bin: string;
+  /** Why an empty `bin` is skipped, and how to point the sweep at one. */
+  missingBin?: string;
+  /** Pass `bin` to the wrapper's constructor, for a binary that is not on PATH as `bin`'s default. */
+  passBin?: boolean;
+  /** Flags the wrapper passes only to another major line of the same CLI, so not expected in this one's help. */
+  otherLineFlags?: string[];
   /** The wrapper whose `'--flag'` literals define what we pass. */
   wrapper: string;
   /** argv that prints the headless subcommand's help. */
@@ -121,6 +128,23 @@ const ENGINES: Engine[] = [
     upstream: () => npmLatest('opencode-ai'),
     session: { file: 'persistent-opencode-session.js', cls: 'PersistentOpencodeSession' },
     liveCwd: 'repo',
+    otherLineFlags: ['--standalone'],
+  },
+  // OpenCode 2 ships as GitHub release binaries and a curl installer, not on
+  // npm, where `opencode-ai` stays on the 1.x line. Its first release, 2.2.0,
+  // went unseen for three weeks because this sweep only asked npm. It replaces
+  // the V1 binary when installed, so it is checked through OPENCODE2_BIN.
+  {
+    id: 'opencode2',
+    bin: process.env.OPENCODE2_BIN ?? '',
+    missingBin: 'OPENCODE2_BIN is not set — point it at an OpenCode 2 binary to check its flags and run a live turn',
+    passBin: true,
+    wrapper: 'src/persistent-opencode-session.ts',
+    helpArgv: ['run', '--help'],
+    upstream: () => ghLatestStable('anomalyco/opencode', /^v(2\.\d+\.\d+)$/),
+    session: { file: 'persistent-opencode-session.js', cls: 'PersistentOpencodeSession' },
+    liveCwd: 'repo',
+    otherLineFlags: ['--variant'],
   },
 ];
 
@@ -247,13 +271,17 @@ function flagsFromWrapper(file: string): Set<string> {
   return out;
 }
 
-/** The "Tested Version" column of the engine table in AGENTS.md. */
+/**
+ * The "Tested Version" column of the engine table in AGENTS.md, keyed by CLI.
+ * A CLI cell such as `` `opencode` 2.x `` names a second major line of the same
+ * binary and is keyed `opencode2`.
+ */
 function pins(): Record<string, string> {
   const md = fs.readFileSync(path.join(ROOT, 'AGENTS.md'), 'utf8');
   const out: Record<string, string> = {};
   for (const line of md.split('\n')) {
-    const m = line.match(/^\|\s*\S+\s*\|\s*`([a-z]+)`\s*\|\s*([\d.]+)\s*\|/);
-    if (m) out[m[1]] = m[2];
+    const m = line.match(/^\|[^|]+\|\s*`([a-z]+)`(?:\s+(\d+)\.x)?\s*\|\s*([\d.]+)\s*\|/);
+    if (m) out[`${m[1]}${m[2] ?? ''}`] = m[3];
   }
   return out;
 }
@@ -274,6 +302,8 @@ interface EngineReport {
   /** Flags the binary advertises that the wrapper does not reference. */
   unreferenced: string[];
   live: { ok: boolean; ms: number; note?: string } | 'skipped';
+  /** Why the engine was only partly checked. */
+  note?: string;
 }
 
 interface Report {
@@ -286,6 +316,21 @@ interface Report {
 }
 
 async function sweepEngine(e: Engine, pinned: string | null, live: boolean): Promise<EngineReport> {
+  if (!e.bin) {
+    // The upstream lookup still runs: a newer release than the pin is the one
+    // thing this report has to say about an engine that is not installed.
+    const upstream = e.upstream ? await e.upstream() : 'n/a';
+    return {
+      id: e.id,
+      installed: null,
+      pinned,
+      upstream,
+      notAdvertised: [],
+      unreferenced: [],
+      live: 'skipped',
+      note: e.missingBin,
+    };
+  }
   const ver = await run(e.bin, ['--version']);
   const installed = installedVersion(ver.out + ver.err);
   const upstream = e.upstream ? await e.upstream() : 'n/a';
@@ -293,6 +338,7 @@ async function sweepEngine(e: Engine, pinned: string | null, live: boolean): Pro
   const help = await run(e.bin, e.helpArgv);
   const cliFlags = flagsFromHelp(help.out + help.err);
   const ours = flagsFromWrapper(e.wrapper);
+  for (const f of e.otherLineFlags ?? []) ours.delete(f);
   const notAdvertised = [...ours].filter((f) => !cliFlags.has(f)).sort();
   const unreferenced = [...cliFlags].filter((f) => !ours.has(f) && !['--help', '--version'].includes(f)).sort();
 
@@ -305,7 +351,8 @@ async function sweepEngine(e: Engine, pinned: string | null, live: boolean): Pro
     try {
       const mod = await import(path.join(ROOT, 'dist', 'src', e.session.file));
       const Cls = mod[e.session.cls];
-      const session = new Cls({ name: `sweep-${e.id}`, cwd, permissionMode: 'bypassPermissions' });
+      const config = { name: `sweep-${e.id}`, cwd, permissionMode: 'bypassPermissions' };
+      const session = e.passBin ? new Cls(config, e.bin) : new Cls(config);
       const result: Promise<unknown> = new Promise((resolve) => session.once('result', resolve));
       session.on('log', (m: unknown) => {
         const line = String(m);
@@ -769,8 +816,9 @@ async function main(): Promise<void> {
     for (const e of engines) {
       const drift = e.installed && e.pinned && e.installed !== e.pinned ? '*' : ' ';
       const up = e.upstream === 'n/a' ? 'n/a' : (e.upstream ?? '?');
-      const behind =
-        typeof e.upstream === 'string' && e.upstream !== 'n/a' && e.installed && e.upstream !== e.installed ? '!' : ' ';
+      // An engine that is not installed is compared against its pin instead.
+      const have = e.installed ?? e.pinned;
+      const behind = typeof e.upstream === 'string' && e.upstream !== 'n/a' && have && e.upstream !== have ? '!' : ' ';
       const liveS =
         e.live === 'skipped' ? 'skipped' : e.live.ok ? `ok ${(e.live.ms / 1000).toFixed(1)}s` : `FAIL ${e.live.note}`;
       console.log(
@@ -783,7 +831,10 @@ async function main(): Promise<void> {
     console.log(
       `registry: ${registry.checked} model(s) checked against published prices, ${registry.drift.length} drifted`,
     );
-    console.log(`\n* installed differs from the AGENTS.md pin    ! upstream is ahead of installed`);
+    console.log(
+      `\n* installed differs from the AGENTS.md pin    ! upstream is ahead of installed (of the pin, if not installed)`,
+    );
+    for (const e of engines) if (e.note) console.log(`  ${e.id}: ${e.note}`);
     for (const d of registry.drift)
       console.log(`  DRIFT ${d.id} ${d.field}: registry ${d.ours ?? 'not set'} vs published ${d.published}`);
     if (registry.unregistered.length)

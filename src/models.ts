@@ -333,6 +333,24 @@ const MODELS: ModelDef[] = [
     pricing: { input: 0.1, output: 0.5, cached: 0.01 },
     contextWindow: 1_050_000,
   },
+  // Codex 0.169.1 lists both GPT-6.2 models first in its picker. Sol keeps
+  // GPT-6.1 Sol's price; Astra is cheaper than GPT-6 Astra throughout, with
+  // cache reads at 5% of input. Above 272K input tokens OpenAI doubles input
+  // and cache rates and charges 1.5x output; the registry holds the base tier.
+  {
+    id: 'gpt-6.2-astra',
+    engine: 'codex',
+    provider: 'openai',
+    pricing: { input: 8, output: 40, cached: 0.4 },
+    contextWindow: 1_050_000,
+  },
+  {
+    id: 'gpt-6.2-sol',
+    engine: 'codex',
+    provider: 'openai',
+    pricing: { input: 2, output: 10, cached: 0.1 },
+    contextWindow: 1_050_000,
+  },
 
   // ── OpenAI GPT-5.2 ────────────────────────────────────────────────────
   // Previous-generation frontier model, still selectable in the Codex model

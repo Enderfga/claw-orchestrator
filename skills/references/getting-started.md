@@ -73,7 +73,7 @@ await manager.stopSession('backend-fix');
 - **OpenAI Codex CLI** — `npm install -g @openai/codex` (optional). The `codex` engine needs >= 0.119 for `codex exec resume`, which every send after the first uses. The `codex-app` engine and its goal RPCs are tested with 0.164.0
 - **Antigravity CLI** — `curl -fsSL https://antigravity.google/cli/install.sh | bash` (optional, for the `agy` engine — Google's successor to the sunset Gemini CLI)
 - **Grok Build CLI** — see `x.ai/cli` (optional, for the `grok` engine)
-- **OpenCode CLI 1.x** — `npm install -g opencode-ai` (optional, for the `opencode` engine). OpenCode 2 (the `@opencode/cli` package) is refused at session start
+- **OpenCode CLI** — `curl -fsSL https://opencode.ai/v2/install | bash` for OpenCode 2, or `npm install -g opencode-ai` for OpenCode 1.x (optional, for the `opencode` engine; both are supported). The OpenCode 2 installer replaces a V1 binary, and V1 plugins do not run on V2
 - **An ACP agent** — optional, for the `acp` engine: any agent that serves the Agent Client Protocol on stdio, such as Kimi Code (`kimi acp`), dsh (`dsh --profile acp`) or `opencode acp`
 
 Tested versions of each engine are in the [README](../../README.md#engine-compatibility).

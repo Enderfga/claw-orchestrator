@@ -45,7 +45,7 @@ as options (see the notes under [Antigravity](#google-antigravity-engine-agy) an
 
 ### Claude Code (`engine: 'claude'`)
 
-Default engine. Long-running subprocess with streaming JSON I/O. Tested with Claude Code CLI **2.1.325**.
+Default engine. Long-running subprocess with streaming JSON I/O. Tested with Claude Code CLI **2.1.327**.
 
 - Persistent multi-turn conversations
 - Real-time streaming (text, tool_use, tool_result, system events)
@@ -134,7 +134,7 @@ continues under another account by its own session id. Accounts are listed in
 
 ### OpenAI Codex (`engine: 'codex'`)
 
-Wraps the `codex exec` subcommand. Each `send()` spawns a new process. Tested with `codex` CLI **0.169.0**.
+Wraps the `codex exec` subcommand. Each `send()` spawns a new process. Tested with `codex` CLI **0.169.1**.
 
 - Non-interactive execution via `codex exec --sandbox workspace-write --skip-git-repo-check --json`
 - Real `usage` from the `turn.completed` JSON event (input, output, cached, reasoning tokens). **These are cumulative over the thread, not per turn**, so they replace the session totals rather than being added to them; subtracting consecutive values gives one turn's prompt
@@ -173,7 +173,7 @@ await manager.startSession({
 
 ### OpenAI Codex App-Server (`engine: 'codex-app'`)
 
-Wraps `codex app-server --listen stdio:// --enable goals` as a long-running JSON-RPC subprocess. **Required for `/goal` long-horizon objective support** — Codex's exec subcommand has no goal surface. Tested with `codex` CLI **0.169.0**.
+Wraps `codex app-server --listen stdio:// --enable goals` as a long-running JSON-RPC subprocess. **Required for `/goal` long-horizon objective support** — Codex's exec subcommand has no goal surface. Tested with `codex` CLI **0.169.1**.
 
 - Long-running subprocess; one `codex app-server` per session
 - JSON-RPC 2.0 over stdio with v2 protocol method names (`initialize`, `thread/start`, `turn/start`, ...)
@@ -205,7 +205,7 @@ await manager.codexGoal('codex-goal-task', { action: 'set', objective: 'build a 
 
 Wraps Google's **Antigravity CLI** (`agy`) — the successor to Gemini CLI (consumer
 Gemini CLI tiers stopped serving 2026-06-18). Each `send()` spawns a new process
-in print mode, with the message as the `-p` argument. Tested with `agy` **1.5.9**.
+in print mode, with the message as the `-p` argument. Tested with `agy` **1.5.10**.
 
 - One-shot execution per message (no persistent subprocess)
 - **Structured output and real usage** — `--output-format stream-json` emits an
@@ -259,6 +259,7 @@ in print mode, with the message as the `-p` argument. Tested with `agy` **1.5.9*
   explicitly choose `bypassPermissions` for a write-enabled session; it is
   not a recovery mechanism. In particular, an Autoloop Planner stays on
   `--mode plan` when its preserved conversation is resumed.
+
 - `settings` is passed as `--settings`: settings.json keys as inline JSON or a file path, for this run only. agy refuses a key it does not know.
 - The engine always passes `--print-timeout`, set just inside the send timeout
   (10% earlier, at most 10s). Since agy 1.2.9 a headless run whose agent started a
@@ -307,7 +308,7 @@ await manager.startSession({
 
 Wraps xAI's **Grok Build** CLI. Each `send()` spawns `grok -p <msg> --output-format streaming-json`,
 which prints one JSON object per line and exits: the reply as `text` pieces, a `usage` event per
-request, and an `end` event with the rest. Tested with `grok` **1.0.77**.
+request, and an `end` event with the rest. Tested with `grok` **1.0.88**.
 
 - **Cost comes from the engine, not from the price table.** The `end` event carries
   `total_cost_usd`, and the wrapper writes it straight into the session's spend, so the run ledger
@@ -372,7 +373,7 @@ await manager.startSession({
 
 ### OpenCode (`engine: 'opencode'`)
 
-Wraps the [OpenCode](https://github.com/anomalyco/opencode) CLI with `run --format json`. Each `send()` spawns a new process. Tested with `opencode` **1.19.5**.
+Wraps the [OpenCode](https://github.com/anomalyco/opencode) CLI with `run --format json`. Each `send()` spawns a new process. Tested with `opencode` **1.19.6** and OpenCode 2 **2.3.2**; the session reads `opencode --version` once at start and drives either line (see [OpenCode 2](#opencode-2) for what differs).
 
 - Conversation continuity: the session id from the event envelope is captured and passed back as `--session <id>` on later sends, so the model sees prior turns. `--continue` is deliberately not used: it means "the last session on this machine", which collides between concurrent sessions.
 - NDJSON event stream with envelope `{ type, timestamp, sessionID, ... }`
@@ -380,6 +381,7 @@ Wraps the [OpenCode](https://github.com/anomalyco/opencode) CLI with `run --form
 - `text` and `tool_use` are **cumulative snapshots** keyed by `part.id` / `part.callID`; the wrapper diffs them to produce streaming deltas for `onText` callbacks and counts each tool invocation once
 - Real token counts from `step_finish.part.tokens.{input,output,cache.{read,write}}`. **`input` is the uncached remainder only** — opencode's own `total` is `input + output + cache.read + cache.write` — so the cached part is billed on top of it, not carved out of it, and `contextPercent` is measured against the whole input side. On a resumed turn the uncached remainder is usually a small fraction of the cached part
 - Cost is what opencode reports on each `step_finish` (`part.cost`), so a free model costs $0; the registry estimate applies only when no cost is reported. `opencode run --format json` does not name the model it ran
+- A failed turn reports the message of opencode's `error` event when there is one
 - Reasoning effort maps to `--variant`, opencode's provider-specific effort knob. opencode does not validate the value: a level the provider does not offer runs the turn at its default rather than failing
 - `appendSystemPrompt`: opencode has no system-prompt flag, so it is placed at the top of the first message of each new conversation
 - The message is written to the subprocess's stdin, which is then closed: opencode waits for EOF before it starts
@@ -390,8 +392,8 @@ Wraps the [OpenCode](https://github.com/anomalyco/opencode) CLI with `run --form
   - OpenCode's built-in `plan` agent is not used, because it permits both `bash` and `edit`
   - if the `clawo-readonly` agent fails to load, the turn is refused rather than run with write access
   - to test a change to this config, use adversarial prompts that include asking the agent to delegate; `opencode agent list` shows compiled rules that look the same for a safe and an unsafe agent
-- Requires OpenCode 1.x: `npm install -g opencode-ai` or `brew install anomalyco/tap/opencode`. Auth via `opencode auth login` **or** any provider env var (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, etc.) — opencode picks up either path
-- **OpenCode 2 is refused at session start.** Its `run --format json` keeps the event envelope but drops `step_finish` (no tokens or cost) and the `--variant` flag, and the read-only agent could not be verified on it (measured on the `0.0.0-beta-17823` build). The session reads `opencode --version` once and refuses a 2.x or `0.0.0-beta` build with that reason; if the version cannot be read, it starts as before. OpenCode 2 is what `opencode upgrade --major`, the `@opencode/cli` npm package and the `opencode-v2` Homebrew formula install.
+- Install OpenCode 2 with `curl -fsSL https://opencode.ai/v2/install | bash`, or OpenCode 1.x with `npm install -g opencode-ai` or `brew install anomalyco/tap/opencode`. Auth via `opencode auth login` **or** any provider env var (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, etc.) — opencode picks up either path
+- The `0.0.0-beta-N` builds that preceded OpenCode 2's first release (from `opencode upgrade --major` and the `@opencode-ai/cli` npm package) are refused at session start: they send no `step_finish`, so a turn has no tokens and no cost. If the version cannot be read, the session starts as OpenCode 1.x
 - Binary: `opencode` (set `OPENCODE_BIN` env var to override). **Windows:** the npm `.cmd` shim launches through `src/engine-spawn.ts` (cross-spawn), as for codex above.
 
 ```typescript
@@ -404,6 +406,17 @@ await manager.startSession({
 ```
 
 > **Schema stability:** opencode releases nearly daily and the JSON event schema is not formally documented. The parser tolerates unknown event types and missing fields — but pin a tested `opencode` version in CI if you depend on field names.
+
+#### OpenCode 2
+
+OpenCode 2 keeps `run --format json` and the same event stream, including `step_finish` with tokens and cost. Where it differs, the wrapper follows it (measured on 2.3.2):
+
+- Every run gets `--standalone`, a private server for that run. Without it, `run` hands the turn to OpenCode's background service when one is running (the desktop app starts one), and that service uses its own configuration and environment instead of the session's
+- Effort is sent as part of the model, `--model provider/model#effort`; there is no `--variant`. A variant the model does not offer fails the turn before the model is called (`Variant unavailable`), so the wrapper runs the turn again without it and does not ask for that variant again in the session; the level degrades as it does on 1.x. A model already written as `provider/model#variant` is passed as is. Without a `provider/model`, effort is not sent, and the session logs that once
+- The read-only agent is defined in the V2 format: ordered `permissions` rules that deny every action and then allow only `read`, `glob` and `grep`, with `.env` reads left to ask (a non-interactive run rejects an ask). Agent rules apply after the user's global and project rules, so a user's `allow` cannot reopen them. Measured: a write, a shell heredoc, a delegation to a subagent and a read outside the project were each refused, and the denied tools are not offered to the model
+- An `--agent` that does not exist fails the turn, rather than falling back to the default agent as 1.x does
+- Writable sessions run under OpenCode 2's default policy, which allows file access outside the project without asking; 1.x asked, which a non-interactive run rejects. To keep the 1.x behaviour, add `{ "action": "external_directory", "resource": "*", "effect": "ask" }` to `permissions` in your OpenCode configuration
+- The shell tool is named `shell` (1.x: `bash`), and the permission actions `subagent` and `edit` replace `task`, `write` and `patch`
 
 ### ACP agents (`engine: 'acp'`)
 

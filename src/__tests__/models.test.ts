@@ -619,6 +619,17 @@ describe('models registered on 2026-09-23', () => {
     expect(lookupModel('gpt-6-astra')!.pricing).toEqual({ input: 10, output: 50, cached: 1 });
     expect(lookupModel('gpt-6-sol')!.pricing).not.toEqual(lookupModel('gpt-5.6-sol')!.pricing);
   });
+
+  it('prices GPT-6.2 at its own rates, not at the GPT-6 rows of the same names', () => {
+    expect(lookupModel('gpt-6.2-astra')!.pricing).toEqual({ input: 8, output: 40, cached: 0.4 });
+    expect(lookupModel('gpt-6.2-sol')!.pricing).toEqual({ input: 2, output: 10, cached: 0.1 });
+    for (const id of ['gpt-6.2-astra', 'gpt-6.2-sol']) {
+      expect(getContextWindow(id), id).toBe(1_050_000);
+      expect(lookupModel(id)!.engine, id).toBe('codex');
+    }
+    // Reverse: the older Astra stays at its higher rate.
+    expect(lookupModel('gpt-6.2-astra')!.pricing).not.toEqual(lookupModel('gpt-6-astra')!.pricing);
+  });
 });
 
 describe('pricing a model the registry does not know', () => {
