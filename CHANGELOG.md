@@ -5,7 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [7.24.0] - 2026-11-18
+
+### Added
+
+- **OpenCode 2.** The `opencode` engine runs OpenCode 2 releases as well as OpenCode 1.x, and tells them apart by
+  `opencode --version` at start. On 2.x every run gets `--standalone`, so a running background service (the desktop
+  app starts one) cannot take the turn with its own configuration; effort is sent as `provider/model#variant`, and a
+  turn whose variant the model does not offer runs again without it, the way an unsupported effort degrades on 1.x;
+  and a read-only session gets the `clawo-readonly` agent as a V2 allowlist that denies every action except `read`,
+  `glob` and `grep`. The `0.0.0-beta-N` builds that came before OpenCode 2's first release are still refused. On 2.x,
+  a writable session follows OpenCode 2's default policy, which allows file access outside the project;
+  `multi-engine.md` says how to keep 1.x's behaviour.
+- **GPT-6.2 Astra and Sol.** `gpt-6.2-astra` ($8/$40 per million tokens, cached $0.40) and `gpt-6.2-sol` ($2/$10,
+  cached $0.10), which Codex 0.169.1 lists, are registered at their published prices and 1.05M context.
 
 ### Fixed
 
@@ -16,6 +29,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   turn now ends as a failed dispatch with no reset or retry, and a reset no longer starts a new session. A role
   session that was still starting when the run stopped, whether a reset's restart or a role's first start, is
   stopped as soon as it is up, because the stop could not reach it earlier, and nothing is sent to it.
+  (#186, thanks @ajmtrz)
+- **A failed OpenCode turn says why.** When opencode reported the failure in an `error` event and printed nothing on
+  stderr, the turn failed with only `OpenCode exited with code 1`; it now fails with that event's message.
+
+### Changed
+
+- Tested with Claude Code 2.1.327, Codex 0.169.1, Antigravity 1.5.10, Grok Build 1.0.88, OpenCode 1.19.6 and
+  OpenCode 2.3.2. `npx tsx scripts/sweep.ts` looks up OpenCode 2 releases on GitHub, where the 2.x line is published,
+  and checks an OpenCode 2 binary named by `OPENCODE2_BIN`.
 
 ## [7.23.4] - 2026-11-15
 
