@@ -121,7 +121,7 @@ including running commands as the server's user, so keep it private; see
 - 🧪 **Acceptance contracts and evidence bundles** ([guide](./skills/references/verification.md))
 - 🔁 **Workflows, resume and the goal node** ([guide](./skills/references/workflow.md))
 - 🖥️ **Every CLI command** ([guide](./skills/references/cli.md))
-- 🧰 **All 79 tools** ([guide](./skills/references/tools.md))
+- 🧰 **All 80 tools** ([guide](./skills/references/tools.md))
 
 ## Ways to run
 
@@ -132,7 +132,7 @@ including running commands as the server's user, so keep it private; see
 | **ACP agent**                  | Zed, JetBrains, Neovim, Emacs, the VS Code ACP extension, dsh                             | `clawo acp`, then [`acp.md`](./skills/references/acp.md)                          |
 | **OpenAI-compatible endpoint** | Any OpenAI SDK client or webchat, without changing call sites                             | `POST /v1/chat/completions` ([`openai-compat.md`](./skills/references/openai-compat.md)) |
 | **TypeScript SDK**             | Embedding the runtime in your own service                                                 | `import { SessionManager } from '@enderfga/claw-orchestrator'` (below)            |
-| **OpenClaw plugin**            | Every OpenClaw agent gets all 79 tools                                                    | `curl -fsSL https://raw.githubusercontent.com/Enderfga/claw-orchestrator/main/install.sh \| bash` |
+| **OpenClaw plugin**            | Every OpenClaw agent gets all 80 tools                                                    | `curl -fsSL https://raw.githubusercontent.com/Enderfga/claw-orchestrator/main/install.sh \| bash` |
 
 ```ts
 import { SessionManager } from '@enderfga/claw-orchestrator';

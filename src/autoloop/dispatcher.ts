@@ -46,6 +46,7 @@ import {
   LEDGER_SCHEMA_VERSION,
   validateAutoloopTimeoutConfig,
   type AgentDispatcher,
+  type AutoloopRoleBinding,
   type AutoloopRoleName,
   type AutoloopState,
   type PushPolicy,
@@ -172,6 +173,13 @@ export interface ClaudeAgentDispatcherConfig {
   pushPolicyRef?: PushPolicy;
   /** Called when Planner emits spawn_subagents. S4 implements; S3 records the intent. */
   onSpawnSubagents?: (args: SpawnSubagentsArgs) => Promise<void>;
+  /**
+   * Persist a role binding applied by `requestRoleRebind`, so a resumed run
+   * starts that role with it. Non-secret: engine, model and effort only.
+   */
+  onRoleBindingApplied?: (role: AutoloopRoleName, binding: AutoloopRoleBinding) => void;
+  /** Roles whose engine/model came from an earlier rebind (restored on resume); see `boundRoles`. */
+  boundRoles?: readonly AutoloopRoleName[];
   /** Persist the effective non-secret role selection after a successful spawn. */
   onRoleSelectionChanged?: (selection: {
     coder: { engine: EngineType; model?: string; effort?: EffortLevel };
@@ -238,6 +246,13 @@ function deriveDispatchId(runId: string, env: AnyAutoloopMessage): string {
   return `dispatch_${createHash('sha256').update(identity).digest('hex')}`;
 }
 
+/** A rebind waiting for the role's next delivery. */
+interface PendingRebind {
+  selection: AutoloopRoleSelection;
+  /** Same engine: the role's conversation is kept and resumed with the new model. */
+  keepConversation: boolean;
+}
+
 interface AutoloopRoleSelection extends AgentBinding {
   engine: EngineType;
   /** User-specified model. Undefined means use the role default for Claude, otherwise the engine default. */
@@ -251,6 +266,8 @@ interface DecisionLogEntry {
   kind:
     | 'terminate'
     | 'reset_agent'
+    | 'rebind_requested'
+    | 'rebind_applied'
     | 'update_push_policy'
     | 'compact'
     | 'spawn_subagents'
@@ -330,6 +347,14 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
   private closed = false;
   /** Whether any shutdown purged the persisted sessions (autoloopDelete). */
   private closedWithPurge = false;
+  /** Operator rebinds, applied before the role's next delivery. */
+  private readonly pendingRebinds = new Map<AutoloopRoleName, PendingRebind>();
+  /**
+   * Roles an operator rebind has bound, in this process or before a resume.
+   * The Planner's `spawn_subagents` engine and model choices no longer apply
+   * to them: the operator's binding supersedes the Planner's.
+   */
+  private readonly boundRoles: Set<AutoloopRoleName>;
   private plannerStarted = false;
   private coderStarted = false;
   private reviewerStarted = false;
@@ -391,6 +416,7 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
       effort: config.reviewerEffort,
       customEngine: config.reviewerCustomEngine,
     };
+    this.boundRoles = new Set(config.boundRoles ?? []);
     this.ledgerDir = path.join(config.workspace, 'tasks', config.runId);
     this.reviewerSandboxDir = path.join(this.ledgerDir, 'reviewer_sandbox');
   }
@@ -484,6 +510,11 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
   }
 
   private async deliverOnce(env: AnyAutoloopMessage, dispatchId: string): Promise<AnyAutoloopMessage[]> {
+    // Deliveries run one at a time, so the role has no turn in flight here.
+    // Checked synchronously, so a delivery with nothing pending keeps its timing.
+    if ((env.to === 'planner' || env.to === 'coder' || env.to === 'reviewer') && this.pendingRebinds.has(env.to)) {
+      await this.applyPendingRebind(env.to);
+    }
     switch (env.to) {
       case 'planner':
         return await this.deliverToPlanner(env, dispatchId);
@@ -494,6 +525,135 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
       default:
         throw new Error(`[autoloop] unexpected dispatcher target: ${env.to}`);
     }
+  }
+
+  private selectionOf(role: AutoloopRoleName): AutoloopRoleSelection {
+    return role === 'planner' ? this.plannerSelection : role === 'coder' ? this.coderSelection : this.reviewerSelection;
+  }
+
+  private sessionNameOf(role: AutoloopRoleName): string {
+    return role === 'planner' ? this.plannerName : role === 'coder' ? this.coderName : this.reviewerName;
+  }
+
+  /**
+   * Change a role's engine, model or effort for the rest of the run. Nothing
+   * happens to a turn in progress: the change is applied before the role's
+   * next delivery, which stops its session and starts one with the new
+   * binding. On the same engine the role's conversation is resumed with the
+   * new model; on another engine the role starts a new conversation, which for
+   * the Planner requires `force` because it discards the chat with the user.
+   * A later request for the same role replaces one that has not applied yet.
+   */
+  requestRoleRebind(
+    role: AutoloopRoleName,
+    target: { engine?: EngineType; model?: string; effort?: EffortLevel },
+    opts: { force?: boolean } = {},
+  ): { binding: AutoloopRoleBinding; keepConversation: boolean } {
+    if (this.closed) throw new Error('Autoloop run has stopped');
+    const label = role[0].toUpperCase() + role.slice(1);
+    const applied = this.selectionOf(role);
+    // Naming the engine the role runs now starts from what it runs, so
+    // `{ engine }` alone can take a role back from a pending engine change.
+    const current =
+      target.engine !== undefined && target.engine === applied.engine
+        ? applied
+        : (this.pendingRebinds.get(role)?.selection ?? applied);
+    const engine = target.engine ?? current.engine;
+    if (engine === 'custom' || current.engine === 'custom') {
+      throw new Error(`${label} rebind does not support custom engines`);
+    }
+    const sameEngine = engine === current.engine;
+    const next: AutoloopRoleSelection = {
+      engine,
+      model: target.model !== undefined ? target.model : sameEngine ? current.model : undefined,
+      effort: target.effort !== undefined ? target.effort : current.effort,
+    };
+    this.validateSelection(role, next);
+    if (
+      next.engine === applied.engine &&
+      this.roleModel(role, next) === this.roleModel(role, applied) &&
+      next.effort === applied.effort
+    ) {
+      // Back to what the role already runs: withdraw a pending change, if any.
+      if (!this.pendingRebinds.delete(role)) {
+        throw new Error(`${label} is already bound to that engine, model and effort`);
+      }
+      const binding: AutoloopRoleBinding = { engine: applied.engine, model: applied.model, effort: applied.effort };
+      this.appendDecisionLog({
+        kind: 'rebind_requested',
+        actor: 'dispatcher',
+        payload: { agent: role, ...binding, model: this.roleModel(role, applied), withdrawn: true },
+      });
+      return { binding, keepConversation: true };
+    }
+    const keepConversation = next.engine === applied.engine;
+    if (role === 'planner' && !keepConversation && !opts.force) {
+      throw new Error(
+        'Changing the Planner engine starts a new Planner conversation and discards the chat with the user; pass force: true',
+      );
+    }
+    this.pendingRebinds.set(role, { selection: next, keepConversation });
+    const binding: AutoloopRoleBinding = { engine: next.engine, model: next.model, effort: next.effort };
+    this.appendDecisionLog({
+      kind: 'rebind_requested',
+      actor: 'dispatcher',
+      payload: { agent: role, ...binding, model: this.roleModel(role, next), keep_conversation: keepConversation },
+    });
+    return { binding, keepConversation };
+  }
+
+  /** The rebind waiting for a role, if any. */
+  pendingRoleRebind(role: AutoloopRoleName): AutoloopRoleBinding | undefined {
+    const pending = this.pendingRebinds.get(role);
+    return pending
+      ? { engine: pending.selection.engine, model: pending.selection.model, effort: pending.selection.effort }
+      : undefined;
+  }
+
+  /**
+   * Apply a role's pending rebind before its next delivery. Stops the role's
+   * session (keeping its resume reference when the engine is unchanged) and
+   * swaps the selection; the delivery then starts the role with it. If the
+   * session cannot be stopped, the rebind stays pending and the delivery fails,
+   * so the run never has two sessions for one role.
+   */
+  private async applyPendingRebind(role: AutoloopRoleName): Promise<void> {
+    const pending = this.pendingRebinds.get(role);
+    if (!pending || this.closed) return;
+    const name = this.sessionNameOf(role);
+    if (this.config.manager.hasSession?.(name) ?? true) {
+      try {
+        await this.config.manager.stopSession(name, pending.keepConversation ? { keepPersisted: true } : {});
+      } catch (err) {
+        if (this.config.manager.hasSession?.(name) ?? true) throw err;
+      }
+    }
+    this.pendingRebinds.delete(role);
+    this.boundRoles.add(role);
+    if (role === 'planner') {
+      this.plannerSelection = { ...this.plannerSelection, ...pending.selection };
+      this.plannerStarted = false;
+    } else if (role === 'coder') {
+      this.coderSelection = { ...this.coderSelection, ...pending.selection };
+      this.coderStarted = false;
+    } else {
+      this.reviewerSelection = { ...this.reviewerSelection, ...pending.selection };
+      this.reviewerStarted = false;
+      this.reviewerSessionPrompt = null;
+    }
+    const selection = this.selectionOf(role);
+    const binding: AutoloopRoleBinding = { engine: selection.engine, model: selection.model, effort: selection.effort };
+    this.appendDecisionLog({
+      kind: 'rebind_applied',
+      actor: 'dispatcher',
+      payload: {
+        agent: role,
+        ...binding,
+        model: this.roleModel(role, selection),
+        keep_conversation: pending.keepConversation,
+      },
+    });
+    this.config.onRoleBindingApplied?.(role, binding);
   }
 
   private roleModel(role: AutoloopRoleName, selection: AutoloopRoleSelection): string | undefined {
@@ -605,7 +765,17 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
    * Planner spawn_subagents tool (the SessionManager wires this via
    * onSpawnSubagents).
    */
-  async spawnSubagents(args: SpawnSubagentsArgs = {}): Promise<void> {
+  async spawnSubagents(requested: SpawnSubagentsArgs = {}): Promise<void> {
+    // A role an operator has rebound keeps that binding; the Planner's engine
+    // and model choices for it are recorded as superseded and not applied.
+    const superseded: AutoloopRoleName[] = [];
+    const args: SpawnSubagentsArgs = { ...requested };
+    for (const role of ['coder', 'reviewer'] as const) {
+      if (!this.boundRoles.has(role)) continue;
+      if (args[`${role}_engine`] !== undefined || args[`${role}_model`] !== undefined) superseded.push(role);
+      delete args[`${role}_engine`];
+      delete args[`${role}_model`];
+    }
     const nextCoderEngine = args.coder_engine ?? this.coderSelection.engine;
     const nextReviewerEngine = args.reviewer_engine ?? this.reviewerSelection.engine;
     const nextCoder: AutoloopRoleSelection = {
@@ -686,6 +856,7 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
         reviewer_engine: nextReviewer.engine,
         reviewer_model: this.roleModel('reviewer', nextReviewer),
         reviewer_effort: nextReviewer.effort,
+        ...(superseded.length > 0 ? { superseded_by_rebind: superseded } : {}),
       },
     });
     await this.config.onRoleSelectionChanged?.(effectiveSelection);

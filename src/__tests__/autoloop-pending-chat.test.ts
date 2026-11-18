@@ -180,8 +180,13 @@ const {
 } = await import('../autoloop/runner.js');
 const { Msg } = await import('../autoloop/messages.js');
 const { NOTICE_TEXT, isUnconfirmedChatNotice } = await import('../autoloop/dispatcher.js');
-const { AUTOLOOP_RESTORE_MALFORMED, AUTOLOOP_RESTORE_UNPERSISTED, validateStoredInput } =
-  await import('../kernel/nodes/autoloop.js');
+const {
+  AUTOLOOP_RESTORE_MALFORMED,
+  AUTOLOOP_RESTORE_UNPERSISTED,
+  autoloopBindingConfig,
+  validateStoredInput,
+  validateStoredRoleBindings,
+} = await import('../kernel/nodes/autoloop.js');
 const { boundedErrorReason } = await import('../sanitize.js');
 
 type Manager = InstanceType<typeof SessionManager>;
@@ -1957,5 +1962,39 @@ describe('boundedErrorReason (C13)', () => {
       },
     });
     expect(boundedErrorReason(throwingMessage)).toBe('unknown error');
+  });
+});
+
+describe('stored role bindings', () => {
+  it('restores well-formed bindings and maps them onto the role config fields', () => {
+    const bindings = validateStoredRoleBindings({
+      roleBindings: { coder: { engine: 'codex', model: 'gpt-b', effort: 'high' }, planner: { engine: 'claude' } },
+    });
+    expect(bindings).toEqual({
+      coder: { engine: 'codex', model: 'gpt-b', effort: 'high' },
+      planner: { engine: 'claude' },
+    });
+    expect(autoloopBindingConfig(bindings)).toEqual({
+      coderEngine: 'codex',
+      coderModel: 'gpt-b',
+      coderEffort: 'high',
+      plannerEngine: 'claude',
+      plannerModel: undefined,
+      plannerEffort: undefined,
+    });
+    expect(validateStoredRoleBindings({})).toBeUndefined();
+  });
+
+  it.each([
+    ['an unknown role', { boss: { engine: 'claude' } }],
+    ['an unknown engine', { coder: { engine: 'nope' } }],
+    ['a custom engine', { coder: { engine: 'custom' } }],
+    ['a non-string model', { coder: { engine: 'codex', model: 5 } }],
+    ['an unknown effort', { coder: { engine: 'codex', effort: 'extreme' } }],
+    ['a non-object binding', { coder: 'codex' }],
+  ])('ignores the whole set when it holds %s', (_label, roleBindings) => {
+    expect(
+      validateStoredRoleBindings({ roleBindings: { planner: { engine: 'claude' }, ...roleBindings } }),
+    ).toBeUndefined();
   });
 });

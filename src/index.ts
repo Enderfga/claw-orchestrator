@@ -2312,6 +2312,46 @@ const plugin = {
       },
     });
 
+    // ─── Tool: autoloop_rebind_role ──────────────────────────────
+
+    registerTool({
+      name: 'autoloop_rebind_role',
+      description:
+        "Change the engine, model or effort of one role (planner, coder or reviewer) of a running v2 autoloop run, without restarting the run. Applied before the role's next message, never during a turn. On the same engine the role keeps its conversation; on a new engine it starts a new one, which for the Planner needs force=true. Coder and Reviewer can be rebound once spawn_subagents has started them. Kept across a resume.",
+      parameters: {
+        type: 'object',
+        properties: {
+          run_id: { type: 'string' },
+          agent: { type: 'string', enum: ['planner', 'coder', 'reviewer'] },
+          engine: { type: 'string', description: 'Target engine (custom and acp are not supported)' },
+          model: { type: 'string', description: "Target model; omitted on a new engine means that engine's default" },
+          effort: { type: 'string', description: 'Target effort level' },
+          force: {
+            type: 'boolean',
+            description: 'Required to move the Planner to another engine (starts a new Planner conversation)',
+          },
+        },
+        required: ['run_id', 'agent'],
+      },
+      execute: async (_id, args) => {
+        try {
+          const result = getManager().autoloopRebindRole(
+            args.run_id as string,
+            args.agent as 'planner' | 'coder' | 'reviewer',
+            {
+              engine: args.engine as EngineType | undefined,
+              model: args.model as string | undefined,
+              effort: args.effort as EffortLevel | undefined,
+            },
+            { force: args.force as boolean | undefined },
+          );
+          return { ok: true, ...result };
+        } catch (err) {
+          return { ok: false, error: (err as Error).message };
+        }
+      },
+    });
+
     // ─── Tool: autoloop_stop ─────────────────────────────────────
 
     registerTool({

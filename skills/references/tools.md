@@ -1,6 +1,6 @@
 # Tools Reference
 
-All 79 tools are registered as OpenClaw plugin tools and exposed over MCP by `clawo-mcp` (see [mcp.md](./mcp.md)). The embedded HTTP server covers a subset of them.
+All 80 tools are registered as OpenClaw plugin tools and exposed over MCP by `clawo-mcp` (see [mcp.md](./mcp.md)). The embedded HTTP server covers a subset of them.
 
 ## Session Lifecycle (6)
 
@@ -615,7 +615,7 @@ Get status and findings when completed.
 
 ---
 
-## Autoloop (7)
+## Autoloop (8)
 
 Three-agent autonomous iteration loop (Planner / Coder / Reviewer) over a git workspace. See [`autoloop.md`](./autoloop.md) for the operator reference (push policy, ledger layout, smoke test).
 
@@ -764,6 +764,21 @@ Reset one role session while retaining the role's current engine/model selection
 | `agent`         | `'planner'` \| `'coder'` \| `'reviewer'` | yes      | Role to reset; Planner requires `force: true` |
 | `force`         | boolean                                  |          | Allow Planner reset                           |
 | `eager_restart` | boolean                                  |          | Start the replacement session immediately     |
+
+### `autoloop_rebind_role`
+
+Change the engine, model or effort of one role of a running run, without restarting the run. The change is
+applied before the role's next message, never during a turn. Returns
+`{ ok, role, binding, keepConversation, pending }`; see [autoloop.md](./autoloop.md#rebinding-a-role).
+
+| Parameter | Type                                     | Required | Description                                                       |
+| --------- | ---------------------------------------- | -------- | ----------------------------------------------------------------- |
+| `run_id`  | string                                   | yes      | Run id                                                            |
+| `agent`   | `'planner'` \| `'coder'` \| `'reviewer'` | yes      | Role to rebind                                                    |
+| `engine`  | string                                   |          | Target engine; `custom` and `acp` are not supported               |
+| `model`   | string                                   |          | Target model; omitted on a new engine means that engine's default |
+| `effort`  | string                                   |          | Target effort level                                               |
+| `force`   | boolean                                  |          | Required to move the Planner to another engine                    |
 
 ### `autoloop_stop`
 

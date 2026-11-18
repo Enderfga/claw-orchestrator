@@ -15,7 +15,8 @@
 
 import type { NodeContext, NodeResult } from '../engine.js';
 import type { AutoloopNode, NodeSpec, RunRecord } from '../types.js';
-import type { AutoloopState } from '../../autoloop/types.js';
+import type { AutoloopRoleBindings, AutoloopState } from '../../autoloop/types.js';
+import { EFFORT_LEVELS, ENGINE_TYPES, type EffortLevel, type EngineType } from '../../types.js';
 import {
   MAX_PENDING_CHAT,
   MAX_PENDING_CHAT_BYTES,
@@ -64,7 +65,7 @@ export interface AutoloopNodeDeps {
   boot(
     config: Record<string, unknown>,
     secrets: Record<string, unknown>,
-    opts: { freshStart: boolean; restoredInput?: AutoloopInputSnapshot },
+    opts: { freshStart: boolean; restoredInput?: AutoloopInputSnapshot; roleBindings?: AutoloopRoleBindings },
   ): Promise<AutoloopHandle>;
   /**
    * Resolve/reject the deferred the caller is waiting on.
@@ -86,6 +87,11 @@ export interface AutoloopNodeDeps {
   unregisterPublisher(runId: string): void;
   /** Extra payload to publish alongside the state (currently the role selection). */
   extra(runId: string): Record<string, unknown>;
+  /**
+   * The node is finishing, on any path, after its last publish: drop what
+   * `extra` held for the run. Called synchronously, so it adds no delay.
+   */
+  release?(runId: string): void;
 }
 
 /** The payload `autoloopStateFromRecord` reads back. */
@@ -94,10 +100,52 @@ export interface AutoloopNodeData {
   plannerSession: string;
   /** Engines/models actually in use, as chosen by `spawn_subagents`. */
   roleSelection?: Record<string, unknown>;
+  /** Role bindings applied by an operator rebind; a resume starts those roles with them. */
+  roleBindings?: AutoloopRoleBindings;
   /** Accepted chat not yet handed to the dispatcher, in order. */
   pendingChat?: ReadonlyArray<PendingChatEntry>;
   /** The accepted chat whose physical send may have started. */
   inFlightChat?: InFlightChat | null;
+}
+
+const AUTOLOOP_ROLES = ['planner', 'coder', 'reviewer'] as const;
+
+/**
+ * Read the stored role bindings. Anything malformed is ignored as a whole and
+ * the run resumes with its start-time roles, rather than with a partial or
+ * invented binding.
+ */
+export function validateStoredRoleBindings(data: unknown): AutoloopRoleBindings | undefined {
+  if (!isRecord(data) || !isRecord(data.roleBindings)) return undefined;
+  const out: AutoloopRoleBindings = {};
+  for (const [role, raw] of Object.entries(data.roleBindings)) {
+    if (!(AUTOLOOP_ROLES as readonly string[]).includes(role) || !isRecord(raw)) return undefined;
+    const { engine, model, effort } = raw;
+    if (typeof engine !== 'string' || !ENGINE_TYPES.includes(engine as EngineType) || engine === 'custom') {
+      return undefined;
+    }
+    if (model !== undefined && typeof model !== 'string') return undefined;
+    if (effort !== undefined && !EFFORT_LEVELS.includes(effort as EffortLevel)) return undefined;
+    out[role as (typeof AUTOLOOP_ROLES)[number]] = {
+      engine: engine as EngineType,
+      ...(model === undefined ? {} : { model }),
+      ...(effort === undefined ? {} : { effort: effort as EffortLevel }),
+    };
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/** The boot config fields a set of bindings replaces: `<role>Engine`, `<role>Model`, `<role>Effort`. */
+export function autoloopBindingConfig(bindings: AutoloopRoleBindings | undefined): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const role of AUTOLOOP_ROLES) {
+    const b = bindings?.[role];
+    if (!b) continue;
+    out[`${role}Engine`] = b.engine;
+    out[`${role}Model`] = b.model;
+    out[`${role}Effort`] = b.effort;
+  }
+  return out;
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -186,10 +234,15 @@ export function makeAutoloopExecutor(deps: AutoloopNodeDeps) {
     try {
       // Kernel commits visits += 1 before execute; first visit in the run is fresh.
       const freshStart = ctx.record.nodes[node.id]?.visits === 1;
-      if (!freshStart) restoredInput = validateStoredInput(ctx.record.nodes[node.id]?.data);
-      handle = await deps.boot(spec.config, ctx.secrets, { freshStart, restoredInput });
+      let roleBindings: AutoloopRoleBindings | undefined;
+      if (!freshStart) {
+        restoredInput = validateStoredInput(ctx.record.nodes[node.id]?.data);
+        roleBindings = validateStoredRoleBindings(ctx.record.nodes[node.id]?.data);
+      }
+      handle = await deps.boot(spec.config, ctx.secrets, { freshStart, restoredInput, roleBindings });
     } catch (err) {
       deps.ready(readyKey, err as Error);
+      deps.release?.(ctx.runId);
       return { ok: false, error: (err as Error).message };
     }
 
@@ -202,6 +255,7 @@ export function makeAutoloopExecutor(deps: AutoloopNodeDeps) {
       handle.runner.stop();
       await handle.dispatcher.shutdown('start-failed').catch(() => undefined);
       deps.ready(readyKey, new Error(AUTOLOOP_RESTORE_UNPERSISTED));
+      deps.release?.(ctx.runId);
       return { ok: false, error: AUTOLOOP_RESTORE_UNPERSISTED };
     }
     // The runner emits state after it writes pause fields (send timeout and
@@ -217,6 +271,7 @@ export function makeAutoloopExecutor(deps: AutoloopNodeDeps) {
       handle.runner.stop();
       await handle.dispatcher.shutdown('start-failed').catch(() => undefined);
       deps.ready(readyKey, err as Error);
+      deps.release?.(ctx.runId);
       return { ok: false, error: (err as Error).message };
     }
     deps.ready(readyKey, {
@@ -227,6 +282,9 @@ export function makeAutoloopExecutor(deps: AutoloopNodeDeps) {
 
     try {
       await deps.waitForExit(handle, ctx.signal);
+    } catch (err) {
+      deps.release?.(ctx.runId);
+      throw err;
     } finally {
       handle.runner.off('state', publish);
       deps.unregisterPublisher(ctx.runId);
@@ -234,11 +292,13 @@ export function makeAutoloopExecutor(deps: AutoloopNodeDeps) {
     publish();
 
     const status = handle.runner.state.status;
+    const data = nodePayload(handle, deps.extra(ctx.runId));
+    deps.release?.(ctx.runId);
     return {
       ok: status !== 'crashed',
       output: `autoloop ${status} at iter ${handle.runner.state.iter}`,
       error: status === 'crashed' ? (handle.runner.state.status_reason ?? 'autoloop crashed') : undefined,
-      data: nodePayload(handle, deps.extra(ctx.runId)),
+      data,
     };
   };
 }

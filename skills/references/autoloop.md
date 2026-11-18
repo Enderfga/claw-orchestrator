@@ -215,16 +215,46 @@ curl http://127.0.0.1:18796/autoloop/my-run/state -H "Authorization: Bearer $TOK
 curl -N http://127.0.0.1:18796/autoloop/my-run/events -H "Authorization: Bearer $TOKEN"
 ```
 
-Resetting an agent and stopping a run have no HTTP route; call the tools
+Resetting or rebinding an agent and stopping a run have no HTTP route; call the tools
 (plugin or MCP):
 
 ```jsonc
 // Reset the Coder if it drifts (lazy by default; eager_restart starts a fresh session now)
 autoloop_reset_agent({ "run_id": "my-run", "agent": "coder", "eager_restart": true })
 
+// Move the Coder to another model for the rest of the run
+autoloop_rebind_role({ "run_id": "my-run", "agent": "coder", "model": "gpt-6.1-sol", "effort": "high" })
+
 // Stop
 autoloop_stop({ "run_id": "my-run", "reason": "done" })
 ```
+
+### Rebinding a role
+
+`autoloop_rebind_role` (SDK `autoloopRebindRole`) changes the engine, model or effort of one role of a
+running run, so a run does not have to be stopped and started again to pick up another model.
+
+- The change waits for the role's next message. Messages to the agents are delivered one at a time, so the
+  role has no turn in flight then: its session is stopped and a new one starts with the new binding. A turn in
+  progress is not interrupted; the exception is a turn whose send already timed out, which may still be running
+  in the engine when the resumed run next delivers to that role. The result reports `pending: true` until the
+  change has been applied. If the old session cannot be stopped, the change stays pending and that delivery fails
+  like any other dispatcher error.
+- On the same engine the role keeps its conversation: the new session resumes it with the new model or effort,
+  where the engine can resume one. On another engine the role starts a new conversation. The Coder and the
+  Reviewer pick up from their memory files, as after a reset. The Planner's conversation holds the chat with
+  the user, so moving the Planner to another engine requires `force: true`.
+- The Coder and the Reviewer can be rebound once `spawn_subagents` has started them; before that the Planner
+  chooses their engines. Once a role is rebound, a later `spawn_subagents` (for example the Planner's after a
+  resume) keeps the rebind: the engine and model it names for that role are recorded in `decisions.jsonl` as
+  `superseded_by_rebind` and not applied.
+- A second request for the same role replaces one that has not been applied yet, and a request back to the
+  binding the role already runs withdraws it. Naming only the engine the role runs now starts from its current
+  model and effort, so `{ "engine": … }` alone takes a role back from a pending engine change.
+- Once applied, the binding is written to the run record, and a resumed run starts that role with it. A change
+  still pending when the run stops is not kept.
+- `custom` and `acp` engines are not supported, as source or target. The run must be live in this process.
+- Each request and each application is recorded in `decisions.jsonl` (`rebind_requested`, `rebind_applied`).
 
 Agent reset is fail-closed. If the old session cannot be stopped and its name is
 still live (or liveness cannot be checked), the reset fails without clearing the
@@ -248,6 +278,7 @@ only while the run is live.
 | `autoloop_resume`      | `run_id`, `send_timeout_ms?`, `pending_dispatch_id?`, `plannerCustomEngineRef?`, `coderCustomEngineRef?`, `reviewerCustomEngineRef?`                            | Resume via `SessionManager.autoloopResume` once; same semantics as `POST /autoloop/<id>/resume`.                                    |
 | `autoloop_stop`        | `run_id`, `reason?`                                                                                                                                             | Terminate; stops Planner / Coder / Reviewer.                                                                                        |
 | `autoloop_reset_agent` | `run_id`, `agent` ('planner' / 'coder' / 'reviewer'), `force?`, `eager_restart?`                                                                                | Reset one subagent. Planner reset requires `force: true`.                                                                           |
+| `autoloop_rebind_role` | `run_id`, `agent`, `engine?`, `model?`, `effort?`, `force?`                                                                                                     | Change one role's engine, model or effort, applied before its next message.                                                         |
 
 ## Planner-emitted control tools
 

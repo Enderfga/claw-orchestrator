@@ -344,6 +344,32 @@ describe('SessionManager', () => {
       );
     });
 
+    // ── A resume id belongs to the engine that issued it.
+    //
+    //    A start under a registered name on another engine (an autoloop role
+    //    rebound to a new engine) handed that engine the old engine's id.
+    it('does not resume a conversation from another engine under the same name', async () => {
+      const registry = (mgr as unknown as { persistedSessions: Map<string, Record<string, unknown>> })
+        .persistedSessions;
+      const entry = (name: string) => ({
+        name,
+        claudeSessionId: `${name}-claude-id`,
+        cwd: '/tmp',
+        engine: 'claude',
+        originalCreated: '2026-11-15T00:00:00.000Z',
+        lastResumed: '2026-11-15T00:00:00.000Z',
+        lastActivity: 0,
+      });
+      registry.set('moved', entry('moved'));
+      registry.set('stayed', entry('stayed'));
+
+      await mgr.startSession({ name: 'moved', cwd: '/tmp', engine: 'codex' });
+      expect(createdConfigs.at(-1)?.resumeSessionId).toBeUndefined();
+
+      await mgr.startSession({ name: 'stayed', cwd: '/tmp', engine: 'claude' });
+      expect(createdConfigs.at(-1)?.resumeSessionId).toBe('stayed-claude-id');
+    });
+
     // ── TTL cleanup must forget the PID it stopped.
     //
     //    `stopSession` deletes from `_activePids` and saves; the TTL path did
@@ -1672,6 +1698,98 @@ describe('SessionManager', () => {
       expect(createdConfigs.find((config) => config.name.endsWith('-planner'))).toMatchObject({ effort: 'high' });
       expect(createdConfigs.find((config) => config.name.endsWith('-coder'))).toMatchObject({ effort: 'ultra' });
       expect(createdConfigs.find((config) => config.name.endsWith('-reviewer'))).toMatchObject({ effort: 'low' });
+    });
+
+    it('rebinds a role at its next message, records the binding, and a resume keeps it', async () => {
+      const runId = 'rebind-resume';
+      await mgr.autoloopStart({ runId, workspace: '/tmp', coderEngine: 'codex', coderModel: 'gpt-a' });
+      const live = mgr.getAutoloop(runId)!;
+      await live.dispatcher.spawnSubagents();
+      live.runner.markSubagentsSpawned();
+
+      const result = mgr.autoloopRebindRole(runId, 'coder', { model: 'gpt-b', effort: 'high' });
+      expect(result).toEqual({
+        role: 'coder',
+        binding: { engine: 'codex', model: 'gpt-b', effort: 'high' },
+        keepConversation: true,
+        pending: true,
+      });
+      createdConfigs = [];
+      await live.dispatcher.deliver(
+        AutoloopMsg.directive(0, { goal: 'g', constraints: [], success_criteria: [], max_attempts: 1 }),
+      );
+      expect(createdConfigs.find((config) => config.name.endsWith('-coder'))).toMatchObject({
+        engine: 'codex',
+        model: 'gpt-b',
+        effort: 'high',
+      });
+      const data = mgr.workflowStatus(runId).nodes.main?.data as Record<string, unknown>;
+      expect(data.roleBindings).toEqual({ coder: { engine: 'codex', model: 'gpt-b', effort: 'high' } });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const kernel = (mgr as any).kernel;
+      kernel.cancel(runId);
+      await kernel.wait(runId);
+      createdConfigs = [];
+      await mgr.autoloopResume(runId);
+      // The Planner re-spawns with its original choice; the operator's binding wins.
+      await mgr.getAutoloop(runId)!.dispatcher.spawnSubagents({ coder_engine: 'codex', coder_model: 'gpt-a' });
+
+      expect(createdConfigs.find((config) => config.name.endsWith('-coder'))).toMatchObject({
+        engine: 'codex',
+        model: 'gpt-b',
+        effort: 'high',
+      });
+      // The spec still records the run as it was started.
+      expect(mgr.workflowStatus(runId).spec.nodes[0]).toMatchObject({ config: { coderModel: 'gpt-a' } });
+      const resumed = mgr.workflowStatus(runId).nodes.main?.data as Record<string, unknown>;
+      expect(resumed.roleBindings).toEqual({ coder: { engine: 'codex', model: 'gpt-b', effort: 'high' } });
+    });
+
+    it("forgets a run's role selection and bindings once the run ends", async () => {
+      const runId = 'rebind-release';
+      await mgr.autoloopStart({ runId, workspace: '/tmp', coderEngine: 'codex', coderModel: 'gpt-a' });
+      const live = mgr.getAutoloop(runId)!;
+      await live.dispatcher.spawnSubagents();
+      live.runner.markSubagentsSpawned();
+      mgr.autoloopRebindRole(runId, 'coder', { model: 'gpt-b' });
+      await live.dispatcher.deliver(
+        AutoloopMsg.directive(0, { goal: 'g', constraints: [], success_criteria: [], max_attempts: 1 }),
+      );
+      const maps = mgr as unknown as {
+        _autoloopSelection: Map<string, unknown>;
+        _autoloopRoleBindings: Map<string, unknown>;
+      };
+      expect(maps._autoloopSelection.has(runId)).toBe(true);
+      expect(maps._autoloopRoleBindings.has(runId)).toBe(true);
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const kernel = (mgr as any).kernel;
+      kernel.cancel(runId);
+      await kernel.wait(runId);
+
+      expect(maps._autoloopSelection.has(runId)).toBe(false);
+      expect(maps._autoloopRoleBindings.has(runId)).toBe(false);
+      // The record still holds what the last publish wrote.
+      const data = mgr.workflowStatus(runId).nodes.main?.data as Record<string, unknown>;
+      expect(data.roleBindings).toEqual({ coder: { engine: 'codex', model: 'gpt-b' } });
+      expect(data.roleSelection).toBeDefined();
+    });
+
+    it('refuses a rebind it cannot apply', async () => {
+      expect(() => mgr.autoloopRebindRole('no-such-run', 'planner', { model: 'sonnet' })).toThrow(
+        /not running in this process/,
+      );
+      await mgr.autoloopStart({ runId: 'rebind-refusals', workspace: '/tmp' });
+      expect(() => mgr.autoloopRebindRole('rebind-refusals', 'planner', {})).toThrow(/at least one/);
+      expect(() => mgr.autoloopRebindRole('rebind-refusals', 'coder', { model: 'sonnet' })).toThrow(
+        /after they have been spawned/,
+      );
+      expect(() => mgr.autoloopRebindRole('rebind-refusals', 'planner', { engine: 'acp' })).toThrow(/not supported/);
+      expect(() =>
+        mgr.autoloopRebindRole('rebind-refusals', 'planner', { effort: 'impossible' as EffortLevel }),
+      ).toThrow(/not supported/);
+      expect(() => mgr.autoloopRebindRole('rebind-refusals', 'planner', { engine: 'codex' })).toThrow(/force: true/);
     });
 
     it('suppresses a global default model for non-Claude roles with no explicit model', async () => {

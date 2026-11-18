@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`autoloop_rebind_role` changes one role's engine, model or effort in a running autoloop run.** Picking up
+  another model used to mean stopping the run and starting a new one. The tool (SDK `autoloopRebindRole`) takes
+  the run, the role and the target engine, model or effort. The change is applied before the role's next message,
+  never during a turn: its session is stopped and a new one starts with the new binding. On the same engine the
+  role keeps its conversation; on another engine it starts a new one, which for the Planner requires `force`. The
+  Coder and the Reviewer can be rebound once `spawn_subagents` has started them, and a later `spawn_subagents`
+  keeps the rebind. An applied binding is written to the run record, and a resumed run starts the role with it.
+  `custom` and `acp` engines are not supported.
+
+### Fixed
+
+- **A finished autoloop run no longer stays in the server's memory.** The role selection kept for its checkpoint,
+  and now its role bindings, stayed in two per-run maps for the life of the process. They are dropped when the run
+  ends, on every path, after the last checkpoint is written.
+- **A session started under a registered name on another engine starts a new conversation.** It used to be given
+  the previous engine's resume id, which that engine cannot use. A rebind to another engine relies on this.
+
 ## [7.24.0] - 2026-11-18
 
 ### Added

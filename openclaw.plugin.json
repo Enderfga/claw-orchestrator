@@ -156,6 +156,7 @@
       "autoloop_status",
       "autoloop_list",
       "autoloop_reset_agent",
+      "autoloop_rebind_role",
       "autoloop_stop",
       "autoloop_resume",
       "session_send_to",
