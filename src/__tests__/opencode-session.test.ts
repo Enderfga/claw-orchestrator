@@ -931,6 +931,63 @@ describe('OpenCode 2', () => {
     expect(mockSpawn).toHaveBeenCalledTimes(3);
   });
 
+  it('does not run a refused turn again once the session is stopped', async () => {
+    const s = new PersistentOpencodeSession(
+      { name: 't', cwd: '/tmp', model: 'opencode/big-pickle', effort: 'high' },
+      V2,
+    );
+    await s.start();
+    const sent = s.send('hi', { waitForComplete: true });
+    void sent.catch(() => undefined);
+    await new Promise((r) => setTimeout(r, 10));
+    feedLines(proc, [
+      envelope('error', {
+        error: { type: 'provider.no-route', message: 'Variant unavailable for opencode/big-pickle: high' },
+      }),
+    ]);
+    await new Promise((r) => setTimeout(r, 10));
+    await s.stop();
+    closeProc(proc, 1);
+    await expect(sent).rejects.toThrow(/Variant unavailable/);
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not run a turn again after a tool ran, whatever the error says', async () => {
+    const s = new PersistentOpencodeSession(
+      { name: 't', cwd: '/tmp', model: 'opencode/big-pickle', effort: 'high' },
+      V2,
+    );
+    await s.start();
+    await expect(
+      oneTurn(
+        s,
+        proc,
+        [
+          envelope('tool_use', { part: { callID: 'c1', tool: 'shell', state: { status: 'completed' } } }),
+          envelope('error', { error: { type: 'provider.no-route', message: 'Variant unavailable for x: high' } }),
+        ],
+        1,
+      ),
+    ).rejects.toThrow(/Variant unavailable/);
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+  });
+
+  it('redacts secrets in the error it reports', async () => {
+    const s = new PersistentOpencodeSession({ name: 't', cwd: '/tmp' }, V2);
+    await s.start();
+    const logs: string[] = [];
+    s.on('log', (m: string) => logs.push(m));
+    const err = await oneTurn(
+      s,
+      proc,
+      [envelope('error', { error: { type: 'unknown', message: 'upstream said ANTHROPIC_API_KEY=sk-abcdef invalid' } })],
+      1,
+    ).catch((e: Error) => e);
+    expect(String((err as Error).message)).toContain('ANTHROPIC_API_KEY=***');
+    expect(String((err as Error).message)).not.toContain('sk-abcdef');
+    expect(logs.some((l) => l.includes('sk-abcdef'))).toBe(false);
+  });
+
   it('fails a turn with the error OpenCode 2 reported, not a bare exit code', async () => {
     const s = new PersistentOpencodeSession({ name: 't', cwd: '/tmp' }, V2);
     await s.start();

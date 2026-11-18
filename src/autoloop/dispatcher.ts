@@ -328,7 +328,7 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
   private reviewerName: string;
   /** Set once by shutdown(); a closed dispatcher never restarts or re-sends to a role. */
   private closed = false;
-  /** Whether that shutdown purged the persisted sessions (autoloopDelete). */
+  /** Whether any shutdown purged the persisted sessions (autoloopDelete). */
   private closedWithPurge = false;
   private plannerStarted = false;
   private coderStarted = false;
@@ -409,7 +409,9 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
     // in-flight turn, and the send recovery path must see the run as closed
     // when that interruption reaches it.
     this.closed = true;
-    this.closedWithPurge = !!opts.purge;
+    // Sticky: deleting a run purges and then cancels it, and the cancel shuts
+    // the dispatcher down a second time without `purge`.
+    this.closedWithPurge ||= !!opts.purge;
     if (!(reason === 'start-failed' && this.config.suppressFailedStartAudit)) {
       this.appendDecisionLog({
         kind: 'terminate',

@@ -435,8 +435,10 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
         settled = true;
 
         // OpenCode 2 refused the variant before calling the model, so nothing ran:
-        // not a turn, and safe to run again on the model's default variant.
-        if (variantTried && state.variantUnavailable) {
+        // not a turn, and safe to run again on the model's default variant. Only
+        // when nothing did run (no tool, no usage), and not once the session has
+        // been stopped, which also kills this process.
+        if (variantTried && state.variantUnavailable && this.isReady && state.seenTools.size === 0 && !state.gotUsage) {
           this._refusedVariants.add(variantTried);
           this.emit(
             SESSION_EVENT.LOG,
@@ -617,10 +619,13 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
       }
 
       case 'error': {
-        const msg = errorEventMessage(event);
+        // From the child's stdout, and it reaches logs and the caller's error the
+        // way stderr does, so it is redacted the same way.
+        const raw = errorEventMessage(event);
+        const msg = raw === undefined ? undefined : sanitizeSecrets(raw);
         if (msg) state.errorMessage = msg;
         if (msg && /\bVariant unavailable\b/i.test(msg)) state.variantUnavailable = true;
-        this.emit(SESSION_EVENT.LOG, `[opencode-error] ${msg ?? JSON.stringify(event)}`);
+        this.emit(SESSION_EVENT.LOG, `[opencode-error] ${msg ?? sanitizeSecrets(JSON.stringify(event))}`);
         break;
       }
 

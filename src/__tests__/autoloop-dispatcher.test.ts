@@ -876,6 +876,31 @@ describe('ClaudeAgentDispatcher — recoverable send timeout and dispatch identi
     expect(calls.sendMessage).not.toHaveBeenCalled();
   });
 
+  it('purges a role that finishes starting after a delete, even though the cancel shuts down again without purge', async () => {
+    const { dispatcher, calls } = makeDispatcher();
+    const { release, live } = holdCoderStart(calls, 0);
+    const message = fixedIdentity(
+      Msg.directive(0, { goal: 'g', constraints: [], success_criteria: [], max_attempts: 1 }),
+      'logical-first-start-pending-at-delete',
+    );
+
+    const pending = dispatcher.deliver(message);
+    void pending.catch(() => undefined);
+    await vi.waitFor(() =>
+      expect(calls.startSession.mock.calls.some((c) => (c[0] as { name: string }).name.endsWith('-coder'))).toBe(true),
+    );
+
+    // autoloopDelete: a purging shutdown, then the kernel cancel's own shutdown.
+    await dispatcher.shutdown('user-delete', { purge: true });
+    await dispatcher.shutdown('cancelled');
+    release();
+    await pending.catch(() => undefined);
+
+    expect(live.has('autoloop-r1-coder')).toBe(false);
+    const coderStops = calls.stopSession.mock.calls.filter((c) => c[0] === 'autoloop-r1-coder');
+    expect(coderStops.at(-1)?.[1]).toEqual({ keepPersisted: false });
+  });
+
   it('coalesces concurrent and later re-delivery of one logical dispatch, while distinct identities still send', async () => {
     const { dispatcher, calls } = makeDispatcher();
     let resolveSend!: (value: { output: string; error: undefined }) => void;
