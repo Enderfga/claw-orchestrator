@@ -42,6 +42,8 @@ https://github.com/user-attachments/assets/5bf9bea8-e5ac-4632-a292-a80a45831dff
 
 ## News
 
+- **[2026-11]** v7.25.0: `autoloop_rebind_role` changes one role's engine, model or effort in a running autoloop
+  run, without restarting it.
 - **[2026-11]** v7.24.0: the `opencode` engine runs OpenCode 2 as well as OpenCode 1.x, and GPT-6.2 Astra and Sol
   are registered.
 - **[2026-11]** v7.23.0: Antigravity sessions follow agy 1.5.9: every permission mode is passed explicitly, and
