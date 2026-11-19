@@ -149,6 +149,12 @@ names four things, and all four are checked on every durable write:
   look abandoned for it. On the same host a live pid is the authority and is never
   judged stale for going quiet; the heartbeat is the fallback for a holder on
   another machine, whose lease goes stale after 60 s without a renewal.
+- **A pid names its owner only within one boot.** On Linux the lease also records
+  the host's boot id and the owner process's start time. A lease taken under
+  another boot is stale, and so is one whose pid is alive but now belongs to a
+  process started at a different time: after a reboot, or once the owner exits,
+  the pid can be reused by an unrelated process and would otherwise keep the run
+  locked. Leases without these fields are judged by the pid alone.
 - **In-process too.** Starting a run whose id is already live retires the
   previous run first. A lease cannot see inside one process, and two live runs
   sharing an id would write over each other's checkpoints.

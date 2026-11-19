@@ -416,6 +416,13 @@ export interface RunLease extends RunGuard {
   host: string;
   acquiredAt: string;
   renewedAt: string;
+  /**
+   * The host's boot id when the lease was taken (Linux). A pid recorded under
+   * another boot cannot be the owner any more, whatever process holds it now.
+   */
+  bootId?: string;
+  /** The owner process's start time, from `/proc/<pid>/stat` (Linux). Tells a reused pid from the owner. */
+  pidStartTime?: string;
 }
 
 /** What one `commit` may change. Everything durable about a run is in here. */
@@ -498,6 +505,29 @@ function processAlive(pid: number): boolean {
   }
 }
 
+/** This host's boot id, or undefined where the kernel does not expose one. */
+function currentBootId(): string | undefined {
+  try {
+    const id = fs.readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim();
+    return id || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** A process's start time in clock ticks since boot, or undefined where `/proc` cannot tell. */
+function processStartTime(pid: number): string | undefined {
+  try {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+    // The command name is parenthesised and may contain spaces or parentheses;
+    // the fields after the last ')' start at field 3, so field 22 is index 19.
+    const start = stat.slice(stat.lastIndexOf(')') + 2).split(' ')[19];
+    return start && /^\d+$/.test(start) ? start : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function readLease(runId: string): RunLease | undefined {
   if (!isValidRunId(runId)) return undefined;
   return readJson<RunLease>(leaseFile(runId));
@@ -514,7 +544,17 @@ export function readLease(runId: string): RunLease | undefined {
  */
 export function leaseIsStale(lease: RunLease | undefined, now = Date.now()): boolean {
   if (!lease) return true;
-  if (lease.host === os.hostname()) return !processAlive(lease.pid);
+  if (lease.host === os.hostname()) {
+    // A pid only names the owner within one boot and one process lifetime: after
+    // a reboot, or once the owner exits and the pid is reused, an alive pid says
+    // nothing about the owner. Leases written before these fields existed are
+    // judged by the pid alone, as before.
+    const boot = lease.bootId ? currentBootId() : undefined;
+    if (boot && boot !== lease.bootId) return true;
+    if (!processAlive(lease.pid)) return true;
+    const started = lease.pidStartTime ? processStartTime(lease.pid) : undefined;
+    return started !== undefined && started !== lease.pidStartTime;
+  }
   const age = now - Date.parse(lease.renewedAt);
   return Number.isNaN(age) || age > LEASE_TTL_MS;
 }
@@ -734,6 +774,8 @@ function acquireLocked(runId: string, ownerId: string): RunGuard {
     host: os.hostname(),
     acquiredAt: existing?.ownerId === ownerId ? existing.acquiredAt : now,
     renewedAt: now,
+    bootId: currentBootId(),
+    pidStartTime: processStartTime(process.pid),
   };
   atomicWriteJson(leaseFile(runId), lease);
   return { runId, incarnationId: lease.incarnationId, ownerId, acquisitionId: lease.acquisitionId, fence };
