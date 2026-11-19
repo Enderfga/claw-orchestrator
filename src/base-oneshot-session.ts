@@ -23,7 +23,7 @@ import {
   getModelPricing as _getModelPricingBase,
 } from './types.js';
 import { resolveAlias, getContextWindow } from './models.js';
-import { killEngineTree } from './engine-spawn.js';
+import { EngineProcessSet, killEngineTree } from './engine-spawn.js';
 import { MAX_HISTORY_ITEMS, DEFAULT_HISTORY_LIMIT, SESSION_EVENT } from './constants.js';
 
 // ─── Engine Configuration ──────────────────────────────────────────────────
@@ -90,7 +90,18 @@ export abstract class BaseOneShotSession extends EventEmitter implements ISessio
   private _turnTokensExplicit = false;
   /** Ensures the "cannot compact" warning is emitted once, not once per turn. */
   private _warnedNoCompaction = false;
-  protected currentProc: ChildProcess | null = null;
+  private _currentProc: ChildProcess | null = null;
+  /** Every process this session started, until it closes; see `EngineProcessSet`. */
+  private readonly _engineProcs = new EngineProcessSet();
+
+  protected get currentProc(): ChildProcess | null {
+    return this._currentProc;
+  }
+
+  protected set currentProc(proc: ChildProcess | null) {
+    if (proc) this._engineProcs.track(proc);
+    this._currentProc = proc;
+  }
   private currentRequestId = 0;
   private _startTime: string | null = null;
   private _history: Array<{ time: string; type: string; event: unknown }> = [];
@@ -139,7 +150,8 @@ export abstract class BaseOneShotSession extends EventEmitter implements ISessio
     return this._isPaused;
   }
   get isBusy(): boolean {
-    return this._isBusy;
+    // A timed-out turn has returned, but its process may still be running.
+    return this._isBusy || this._engineProcs.stopping;
   }
 
   // ── start() ────────────────────────────────────────────────────────────
@@ -199,6 +211,14 @@ export abstract class BaseOneShotSession extends EventEmitter implements ISessio
     // fallback. Reading it after the turn tells the ledger whether the numbers
     // it is about to record were measured or guessed.
     this._stats.tokensEstimated = false;
+
+    // The process of a turn that timed out may still be running; never start
+    // a second one beside it.
+    if (this._engineProcs.stopping) {
+      await this._engineProcs.settle(this.engineCfg.engineDisplayName);
+      // stop() may have run while this send waited.
+      if (!this._isReady) throw new Error('Session not ready. Call start() first.');
+    }
 
     if (!options.waitForComplete) {
       const before = this._stats.tokensIn;
@@ -416,6 +436,8 @@ export abstract class BaseOneShotSession extends EventEmitter implements ISessio
 
   stop(): void {
     this._cleanupProc();
+    // Also reaches a timed-out turn's process that the adapter no longer holds.
+    this._engineProcs.killAll();
     this._isReady = false;
     this._isPaused = false;
     this.emit(SESSION_EVENT.CLOSE, 143);

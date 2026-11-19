@@ -116,6 +116,8 @@ function prepareArgs(bin: string, args: string[], env: NodeJS.ProcessEnv, cwd: s
  * and bounded, so a hung taskkill cannot stall the event loop.
  */
 export function killEngineTree(child: ChildProcess): void {
+  // taskkill does not set `child.killed`, so record the request here.
+  terminationRequested.add(child);
   try {
     if (process.platform === 'win32' && child.pid) {
       try {
@@ -132,6 +134,97 @@ export function killEngineTree(child: ChildProcess): void {
     child.kill('SIGTERM');
   } catch {
     // Already exited.
+  }
+}
+
+/** Engine processes told to stop, whether through `killEngineTree` or a direct `kill`. */
+const terminationRequested = new WeakSet<ChildProcess>();
+
+function hasExited(child: ChildProcess): boolean {
+  return child.exitCode !== null || child.signalCode !== null;
+}
+
+/** How long a process told to stop gets before SIGKILL, and how long SIGKILL then gets. */
+export const STOPPED_ENGINE_GRACE_MS = 5_000;
+export const STOPPED_ENGINE_KILL_WAIT_MS = 2_000;
+
+/**
+ * The engine processes a one-shot session has started, until each one closes.
+ *
+ * A turn that times out asks its process to stop and rejects at once; the
+ * process can keep running, and writing, after that. A session holding one
+ * stays busy, and its next turn starts only once it has closed.
+ */
+export class EngineProcessSet {
+  private readonly live = new Set<ChildProcess>();
+
+  constructor(
+    private readonly graceMs = STOPPED_ENGINE_GRACE_MS,
+    private readonly killWaitMs = STOPPED_ENGINE_KILL_WAIT_MS,
+  ) {}
+
+  track(child: ChildProcess): void {
+    if (hasExited(child) || this.live.has(child)) return;
+    this.live.add(child);
+    child.once('close', () => this.live.delete(child));
+  }
+
+  /** A process this session told to stop is still running. */
+  get stopping(): boolean {
+    for (const child of this.live) if (this.isStopping(child)) return true;
+    return false;
+  }
+
+  /**
+   * Wait for every process told to stop to close: SIGKILL one that outlives
+   * the grace period, and throw if it still has not closed after that, so the
+   * caller does not start a second engine beside it. A process that was never
+   * told to stop is left alone.
+   *
+   * "Closed" means its output pipes closed too, so a process whose own
+   * children still hold them counts as running. SIGKILL reaches the process
+   * itself, not those children; when they keep running, the next turn fails
+   * here rather than starting beside them.
+   */
+  async settle(engine: string): Promise<void> {
+    for (const child of [...this.live]) {
+      if (!this.isStopping(child)) continue;
+      if (await this.waitForClose(child, this.graceMs)) continue;
+      try {
+        child.kill('SIGKILL');
+      } catch {
+        // Already exited.
+      }
+      if (await this.waitForClose(child, this.killWaitMs)) continue;
+      const pid = child.pid === undefined ? '' : ` ${child.pid}`;
+      throw new Error(
+        `${engine} process${pid} from a stopped turn has not exited; not starting another turn beside it`,
+      );
+    }
+  }
+
+  /** Ask every tracked process that has not been asked yet to stop. */
+  killAll(): void {
+    for (const child of this.live) if (!this.isStopping(child)) killEngineTree(child);
+  }
+
+  private isStopping(child: ChildProcess): boolean {
+    return child.killed || terminationRequested.has(child);
+  }
+
+  private waitForClose(child: ChildProcess, ms: number): Promise<boolean> {
+    if (!this.live.has(child)) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        child.off('close', onClose);
+        resolve(false);
+      }, ms);
+      const onClose = (): void => {
+        clearTimeout(timer);
+        resolve(true);
+      };
+      child.once('close', onClose);
+    });
   }
 }
 

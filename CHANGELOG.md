@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **A one-shot session no longer starts a new turn beside one that timed out.** On the engines that start one
+  process per message (Codex, Antigravity, Grok, OpenCode, Cursor, Gemini and one-shot custom engines), a timed-out
+  send asks its process to stop and returns at once, but the process can keep running, and writing, for a while.
+  The session reported itself idle meanwhile, so the next send started a second engine beside it. When the first
+  one then closed, it cleared the session's handle on the second, so stopping the session no longer reached the
+  engine that was running. The session now stays busy until a stopped process has exited, and the next send waits
+  for it: after 5 seconds the process gets SIGKILL, and if it has still not exited 2 seconds later, the send fails
+  instead of starting another engine.
+
 ## [7.25.0] - 2026-11-18
 
 ### Added

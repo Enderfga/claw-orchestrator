@@ -16,7 +16,7 @@
  */
 
 import { ChildProcess } from 'node:child_process';
-import { killEngineTree, spawnEngine } from './engine-spawn.js';
+import { EngineProcessSet, killEngineTree, spawnEngine } from './engine-spawn.js';
 import { EventEmitter } from 'node:events';
 import * as readline from 'node:readline';
 import * as fs from 'node:fs';
@@ -91,6 +91,8 @@ export class PersistentCustomSession extends EventEmitter implements ISession {
 
   // One-shot mode state
   private currentProc: ChildProcess | null = null;
+  /** One-shot processes until each closes; see `EngineProcessSet`. */
+  private readonly oneShotProcs = new EngineProcessSet();
   private _currentRl: readline.Interface | null = null;
 
   // Shared state
@@ -147,7 +149,8 @@ export class PersistentCustomSession extends EventEmitter implements ISession {
     return this._isPaused;
   }
   get isBusy(): boolean {
-    return this._isBusy;
+    // A timed-out one-shot turn has returned, but its process may still be running.
+    return this._isBusy || this.oneShotProcs.stopping;
   }
 
   /**
@@ -450,6 +453,14 @@ export class PersistentCustomSession extends EventEmitter implements ISession {
     const requestId = ++this.currentRequestId;
     const textMessage = typeof message === 'string' ? message : JSON.stringify(message);
 
+    // The process of a turn that timed out may still be running; never start
+    // a second one beside it.
+    if (this.oneShotProcs.stopping) {
+      await this.oneShotProcs.settle(this.engineConfig.name);
+      // stop() may have run while this send waited.
+      if (!this._isReady) throw new Error('Session not ready. Call start() first.');
+    }
+
     if (!options.waitForComplete) {
       this._runOneShot(textMessage, options).catch((err) => this._emitError(err));
       return { requestId, sent: true };
@@ -532,6 +543,7 @@ export class PersistentCustomSession extends EventEmitter implements ISession {
         stdio: ['pipe', 'pipe', 'pipe'],
       });
       this.currentProc = proc;
+      this.oneShotProcs.track(proc);
 
       const timer = setTimeout(() => {
         if (!settled) {
@@ -1075,6 +1087,7 @@ export class PersistentCustomSession extends EventEmitter implements ISession {
       killEngineTree(this.currentProc);
       this.currentProc = null;
     }
+    this.oneShotProcs.killAll();
 
     this._isReady = false;
     this._isPaused = false;

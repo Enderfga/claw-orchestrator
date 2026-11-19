@@ -49,7 +49,8 @@ vi.mock('node:child_process', async (importOriginal) => {
   };
 });
 // Engine sessions spawn through engine-spawn.js, not node:child_process.
-vi.mock('../engine-spawn.js', () => ({
+vi.mock('../engine-spawn.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../engine-spawn.js')>()),
   spawnEngine: vi.fn(() => {
     mockProc = new MockProcess();
     return mockProc;
