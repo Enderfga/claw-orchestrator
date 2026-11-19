@@ -362,6 +362,12 @@ export interface NodeRecord {
   /** Subflow nodes: the child run this node started, so it stays addressable. */
   childRunId?: string;
   /**
+   * Times a resume found this node running, i.e. its process stopped part-way
+   * through it. Execution is at-least-once, so the node runs again from the top;
+   * an agent or goal node is told so in its prompt. Cleared when the node ends.
+   */
+  interrupted?: number;
+  /**
    * Mode-specific payload, checkpointed with the run.
    *
    * This is what lets the legacy per-mode shapes (`CouncilSession`,

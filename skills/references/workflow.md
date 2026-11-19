@@ -62,6 +62,14 @@ idempotency key and no side-effect commit marker, so a node that wrote files and
 then died before its checkpoint runs again from the top. Workflows whose nodes
 are not safe to repeat need to make them safe.
 
+A resume records the interruption on the node it found running (`interrupted` in
+the node's record, a count, cleared when the node ends). An `agent` node, and a
+`goal` node that starts a new thread, then get a note ahead of their prompt: the
+step was interrupted and is running again from the beginning, so check what the
+earlier run already did — jobs it submitted, messages it sent, services it
+called, files it wrote — before doing it again. A `goal` node that picks its
+thread back up has that conversation already and gets no note.
+
 Resume is explicit — `workflow_resume` or `clawo workflow resume` — not automatic.
 Resuming a run that already ended returns it unchanged. Custom-engine configs are
 never written to disk (they can carry credentials), so a run whose agents used one

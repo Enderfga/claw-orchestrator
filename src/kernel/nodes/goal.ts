@@ -30,7 +30,7 @@ import { randomUUID } from 'node:crypto';
 import { SESSION_EVENT } from '../../constants.js';
 import type { NodeContext, NodeResult } from '../engine.js';
 import type { GoalNode, NodeSpec } from '../types.js';
-import { goalRepairBrief } from './agent.js';
+import { goalRepairBrief, interruptedNotice } from './agent.js';
 
 export type GoalStatus = 'active' | 'paused' | 'blocked' | 'usageLimited' | 'budgetLimited' | 'complete';
 
@@ -413,7 +413,10 @@ export async function executeGoalNode(node: NodeSpec, ctx: NodeContext): Promise
       // the same thread, and also a fresh thread (the old one never got a goal,
       // or the repair runs on another node), which would otherwise start blind.
       const brief = red !== undefined && red !== prior?.repairOf ? goalRepairBrief(ctx, claude) : undefined;
-      const preface = [...ctx.takeSteer(), ...(brief ? [brief] : [])];
+      // A goal that picks its thread back up (above) has the conversation of what
+      // it did; one starting a new thread after an interruption does not.
+      const interrupted = interruptedNotice(ctx, node.id);
+      const preface = [...(interrupted ? [interrupted] : []), ...ctx.takeSteer(), ...(brief ? [brief] : [])];
       if (startThread) await session!.clearGoal();
       // On Claude the condition is the caller's objective, word for word; steers
       // and the failing checks go in ahead of it as context (see setGoal there).

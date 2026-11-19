@@ -20,7 +20,10 @@
  * execution **at-least-once**, not exactly-once — there is no idempotency key,
  * no attempt lease, and no side-effect commit marker, so a node that died after
  * writing files but before its checkpoint runs again from the top. Workflows
- * whose nodes are not safe to repeat need to make them safe.
+ * whose nodes are not safe to repeat need to make them safe. A resume counts
+ * the interruption on the node (`NodeRecord.interrupted`), and an agent or goal
+ * node that runs again is told, ahead of its prompt, to check what it already
+ * did before doing it again.
  *
  * Ownership contract, equally precisely: this class never writes to a run
  * directly. It holds a `RunGuard` from the store and every change — checkpoint,
@@ -683,6 +686,9 @@ export class RunKernel extends EventEmitter {
       !txn.apply((draft) => {
         for (const n of Object.values(draft.nodes)) {
           if (n.state === 'running' || (opts.restart && wasTerminal)) {
+            // A node found running started and did not finish: whatever it did
+            // outside the run directory may already have happened.
+            if (n.state === 'running') n.interrupted = (n.interrupted ?? 0) + 1;
             n.state = 'pending';
             n.attempts = 0;
             n.error = undefined;
@@ -981,6 +987,7 @@ export class RunKernel extends EventEmitter {
         if (state === 'running') node.startedAt = ts;
         if (state === 'succeeded' || state === 'failed' || state === 'skipped' || state === 'cancelled') {
           node.endedAt = ts;
+          node.interrupted = undefined;
         }
         draft.currentNode = nodeId;
         draft.updatedAt = ts;

@@ -551,6 +551,56 @@ describe('resume', () => {
     expect(done!.state).toBe('completed');
   });
 
+  it('tells an agent node that a resume found running that it was interrupted, and only that node', async () => {
+    const prompts: Record<string, string> = {};
+    const manager = {
+      startSession: async (config: { name?: string }) => ({ name: config.name }) as never,
+      sendMessage: async (name: string, message: string) => {
+        prompts[name] = message;
+        return { output: 'done', turns: 1 } as never;
+      },
+      stopSession: async () => undefined,
+    };
+    const { registerDefaultExecutors } = await import('../../kernel/nodes/index.js');
+    const spec: WorkflowSpec = {
+      name: 'interrupted',
+      cwd: '/tmp',
+      nodes: [
+        { id: 'a', kind: 'agent', prompt: 'PROMPT-A' },
+        { id: 'b', kind: 'agent', prompt: 'PROMPT-B' },
+        { id: 'c', kind: 'agent', prompt: 'PROMPT-C' },
+      ],
+    };
+    const kernel = registerDefaultExecutors(new RunKernel({ nodeTimeoutMs: 5000, manager }));
+    const started = await kernel.start(spec);
+    await kernel.wait(started.runId);
+
+    const record = loadRun(started.runId)!;
+    record.state = 'running';
+    record.endedAt = undefined;
+    record.nodes.b.state = 'running';
+    record.nodes.c.state = 'pending';
+    record.currentNode = 'b';
+    const { acquireLease, commit, releaseLease } = await import('../../kernel/store.js');
+    const crashed = acquireLease(record.runId, 'crashed-process');
+    commit(crashed, { record });
+    releaseLease(crashed);
+    for (const k of Object.keys(prompts)) delete prompts[k];
+
+    const kernel2 = registerDefaultExecutors(new RunKernel({ nodeTimeoutMs: 5000, manager }));
+    await kernel2.resume(started.runId);
+    const done = await kernel2.wait(started.runId);
+
+    expect(done!.state).toBe('completed');
+    const sent = (id: string): string => Object.entries(prompts).find(([n]) => n.includes(`-${id}-`))![1];
+    expect(sent('b')).toMatch(/^This step was interrupted after it started/);
+    expect(sent('b')).toContain('PROMPT-B');
+    // c never started before the crash, so it is not told anything.
+    expect(sent('c')).toBe('PROMPT-C');
+    // The mark is cleared once the node has finished.
+    expect(done!.nodes.b.interrupted).toBeUndefined();
+  });
+
   it('retries the node that was in flight, since a half-finished node left no result', async () => {
     const { kernel } = makeKernel();
     const started = await kernel.start(linear);
