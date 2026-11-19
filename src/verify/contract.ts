@@ -200,9 +200,36 @@ function normalizeSpec(raw: unknown): CheckSpec | undefined {
 }
 
 /**
- * Parse an untrusted contract, dropping anything unrecognised. Returns undefined
- * when nothing usable survives, so a malformed contract fails loudly at declare
- * time rather than silently degrading to "no checks" at completion time.
+ * Why each declared check could not be used, e.g. "checks[2] (lint): type 'rm_rf' is unknown or is missing a
+ * field it needs". Entries marked `required: false` say "(optional, dropped)". Empty when every entry parses.
+ */
+export function contractProblems(raw: unknown): string[] {
+  if (!raw || typeof raw !== 'object') return ['the contract is not an object'];
+  const r = raw as Record<string, unknown>;
+  if (!Array.isArray(r.checks)) return ['the contract has no `checks` list'];
+  if (r.checks.length === 0) return ['the `checks` list is empty'];
+  const out: string[] = [];
+  r.checks.forEach((entry, i) => {
+    if (!entry || typeof entry !== 'object') {
+      out.push(`checks[${i}]: not an object`);
+      return;
+    }
+    const e = entry as Record<string, unknown>;
+    const specRaw = 'spec' in e ? e.spec : e;
+    if (normalizeSpec(specRaw)) return;
+    const t = specRaw && typeof specRaw === 'object' ? (specRaw as Record<string, unknown>).type : undefined;
+    const id = str(e.id) ? ` (${str(e.id)})` : '';
+    const why = typeof t === 'string' ? `type '${t}' is unknown or is missing a field it needs` : 'it has no `type`';
+    out.push(`checks[${i}]${id}: ${why}${e.required === false ? ' (optional, dropped)' : ''}`);
+  });
+  return out;
+}
+
+/**
+ * Parse an untrusted contract. Nothing unrecognised is carried into the executor. A required check that
+ * cannot be parsed rejects the whole contract (undefined): dropping it would let the remaining checks pass
+ * the run while one the caller asked for was never run. Only entries explicitly marked `required: false`
+ * are dropped. `contractProblems` says which entries were at fault, for the caller's error message.
  */
 export function normalizeContract(raw: unknown): AcceptanceContract | undefined {
   if (!raw || typeof raw !== 'object') return undefined;
@@ -212,11 +239,14 @@ export function normalizeContract(raw: unknown): AcceptanceContract | undefined 
   const checks: ContractCheck[] = [];
   for (let i = 0; i < rawChecks.length; i++) {
     const entry = rawChecks[i] as Record<string, unknown> | undefined;
-    if (!entry || typeof entry !== 'object') continue;
+    if (!entry || typeof entry !== 'object') return undefined;
     // Accept both `{spec: {...}}` and a bare check spec, since hand-written
     // contracts in tool calls tend to omit the wrapper.
     const spec = normalizeSpec('spec' in entry ? entry.spec : entry);
-    if (!spec) continue;
+    if (!spec) {
+      if (entry.required === false) continue;
+      return undefined;
+    }
     checks.push({
       id: str(entry.id) ?? `${spec.type}-${i + 1}`,
       spec,

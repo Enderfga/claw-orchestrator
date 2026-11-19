@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { contractPassed, normalizeContract, type CheckResult } from '../../verify/contract.js';
+import { contractPassed, contractProblems, normalizeContract, type CheckResult } from '../../verify/contract.js';
 
 const result = (over: Partial<CheckResult>): CheckResult => ({
   id: 'c',
@@ -50,15 +50,45 @@ describe('normalizeContract', () => {
     expect(c?.checks.map((x) => x.id)).toEqual(['command-1', 'command-2']);
   });
 
-  it('drops unknown check types instead of passing them through', () => {
-    const c = normalizeContract({
+  it('never passes an unknown check type through: a required one refuses the whole contract', () => {
+    const raw = {
       checks: [
         { type: 'command', cmd: 'ok' },
         { type: 'rm_rf', path: '/' },
       ],
+    };
+    expect(normalizeContract(raw)).toBeUndefined();
+    expect(contractProblems(raw)).toEqual(["checks[1]: type 'rm_rf' is unknown or is missing a field it needs"]);
+  });
+
+  it('drops an unknown check that is explicitly optional', () => {
+    const c = normalizeContract({
+      checks: [
+        { type: 'command', cmd: 'ok' },
+        { type: 'rm_rf', path: '/', required: false },
+      ],
     });
     expect(c?.checks).toHaveLength(1);
     expect(c?.checks[0].spec.type).toBe('command');
+  });
+
+  // A required check with a typo used to be dropped; the remaining checks then passed the run while the one
+  // the caller asked for never ran.
+  it('refuses a contract whose required check is missing a field, and says which', () => {
+    const raw = {
+      checks: [
+        { id: 'readme', type: 'file', path: 'README.md' },
+        { id: 'report', type: 'file' },
+      ],
+    };
+    expect(normalizeContract(raw)).toBeUndefined();
+    expect(contractProblems(raw)).toEqual([
+      "checks[1] (report): type 'file' is unknown or is missing a field it needs",
+    ]);
+  });
+
+  it('reports nothing for a contract that parses', () => {
+    expect(contractProblems({ checks: [{ type: 'command', cmd: 'make' }] })).toEqual([]);
   });
 
   it('rejects a command check with no cmd', () => {

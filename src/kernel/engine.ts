@@ -45,7 +45,7 @@
 import { EventEmitter } from 'node:events';
 import crypto from 'node:crypto';
 import { createConsoleLogger, type Logger } from '../logger.js';
-import { normalizeContract, type AcceptanceContract } from '../verify/contract.js';
+import { contractProblems, normalizeContract, type AcceptanceContract } from '../verify/contract.js';
 import { captureBaseline, treeFingerprint } from '../verify/baseline.js';
 import { needsTestSnapshot, snapshotTests, type TestSnapshot } from '../verify/protected-tests.js';
 import type { SessionManagerLike } from './agent-step.js';
@@ -363,8 +363,9 @@ function normalizeSpecContracts(spec: WorkflowSpec, override: unknown): Workflow
   const usable = (raw: unknown, what: string): AcceptanceContract => {
     const contract = normalizeContract(raw);
     if (!contract) {
+      const problems = contractProblems(raw).filter((p) => !p.endsWith('(optional, dropped)'));
       throw new Error(
-        `${what} has no recognised checks. Every check needs a \`type\` of ` +
+        `${what} was refused: ${problems.join('; ') || 'no recognised checks'}. Every check needs a \`type\` of ` +
           'command | http | screenshot | diff_policy | file, and a `command` check needs `cmd`.',
       );
     }

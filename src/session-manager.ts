@@ -159,7 +159,7 @@ import {
   splitAgentSecrets,
 } from './kernel/templates/index.js';
 import type { KernelEvent, RunRecord, RunState, WorkflowSpec } from './kernel/types.js';
-import { normalizeContract } from './verify/contract.js';
+import { contractProblems, normalizeContract } from './verify/contract.js';
 import { runContract } from './verify/runner.js';
 import { evidenceDir, listEvidence, readEvidence, writeEvidence, type EvidenceBundle } from './verify/evidence.js';
 import {
@@ -2004,7 +2004,10 @@ export class SessionManager {
    */
   async verifyRun(args: { cwd: string; contract: unknown; baseSha?: string; label?: string }): Promise<EvidenceBundle> {
     const contract = normalizeContract(args.contract);
-    if (!contract) throw new Error('verifyRun requires a contract with at least one recognised check');
+    if (!contract) {
+      const problems = contractProblems(args.contract).filter((p) => !p.endsWith('(optional, dropped)'));
+      throw new Error(`verifyRun refused the contract: ${problems.join('; ') || 'no recognised checks'}`);
+    }
     const runId = args.label || `verify-${Date.now().toString(36)}`;
     // The bundle goes under the run store, keyed by the label. A label naming a
     // workflow run would plant this evidence in that run's directory.

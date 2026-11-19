@@ -301,14 +301,14 @@ describe('contract provenance', () => {
   it('refuses a spec contract or an inline contract with no recognised checks', async () => {
     const { kernel } = makeKernel();
     await expect(kernel.start({ ...linear, contract: { checks: [{ type: 'nonsense' }] } as never })).rejects.toThrow(
-      /no recognised checks/,
+      /was refused: checks\[0\]: type 'nonsense' is unknown/,
     );
     await expect(
       kernel.start({
         ...linear,
         nodes: [...linear.nodes, { id: 'v', kind: 'verifier', contract: { checks: [{ type: 'command' }] } as never }],
       }),
-    ).rejects.toThrow(/Verifier 'v'.*no recognised checks/);
+    ).rejects.toThrow(/Verifier 'v'.*was refused: checks\[0\]: type 'command' is unknown or is missing a field/);
   });
 });
 

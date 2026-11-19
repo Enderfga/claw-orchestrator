@@ -164,7 +164,7 @@ describe('verifyRun', () => {
 
   it('refuses a contract with nothing recognisable in it', async () => {
     await expect(manager.verifyRun({ cwd: tmp, contract: { checks: [{ type: 'rm_rf' }] } })).rejects.toThrow(
-      /at least one recognised check/,
+      /refused the contract: checks\[0\]: type 'rm_rf' is unknown/,
     );
   });
 });

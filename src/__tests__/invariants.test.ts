@@ -903,7 +903,7 @@ describe('verification barrier', () => {
         { name: 'x', cwd: os.tmpdir(), nodes: [{ id: 'a', kind: 'agent', prompt: 'go' }] },
         { contract: { checks: [{ type: 'nonsense' }] } },
       ),
-    ).rejects.toThrow(/no recognised checks/);
+    ).rejects.toThrow(/was refused: checks\[0\]: type 'nonsense' is unknown/);
   });
 });
 
