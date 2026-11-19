@@ -162,6 +162,19 @@ describe('verifyRun', () => {
     expect(fs.existsSync(path.join(tmp, 'wf', rec.runId, 'evidence'))).toBe(false);
   });
 
+  // A second check under the same label used to overwrite the first bundle (both were verify-01).
+  it('keeps every check under a reused label, the newest with the highest number', async () => {
+    fs.writeFileSync(path.join(tmp, 'present.txt'), 'x');
+    const contract = { checks: [{ type: 'file', path: 'present.txt' }] };
+    const first = await manager.verifyRun({ cwd: tmp, label: 'again', contract });
+    fs.rmSync(path.join(tmp, 'present.txt'));
+    const second = await manager.verifyRun({ cwd: tmp, label: 'again', contract });
+    expect([first.evidenceId, second.evidenceId]).toEqual(['verify-01', 'verify-02']);
+    expect([first.passed, second.passed]).toEqual([true, false]);
+    const kept = fs.readdirSync(path.join(tmp, 'wf', 'again', 'evidence')).sort();
+    expect(kept).toEqual(['verify-01', 'verify-02']);
+  });
+
   it('refuses a contract with nothing recognisable in it', async () => {
     await expect(manager.verifyRun({ cwd: tmp, contract: { checks: [{ type: 'rm_rf' }] } })).rejects.toThrow(
       /refused the contract: checks\[0\]: type 'rm_rf' is unknown/,

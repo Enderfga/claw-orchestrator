@@ -161,7 +161,14 @@ import {
 import type { KernelEvent, RunRecord, RunState, WorkflowSpec } from './kernel/types.js';
 import { contractProblems, normalizeContract } from './verify/contract.js';
 import { runContract } from './verify/runner.js';
-import { evidenceDir, listEvidence, readEvidence, writeEvidence, type EvidenceBundle } from './verify/evidence.js';
+import {
+  evidenceDir,
+  listEvidence,
+  nextEvidenceId,
+  readEvidence,
+  writeEvidence,
+  type EvidenceBundle,
+} from './verify/evidence.js';
 import {
   annotateVerdicts,
   appendRunRow,
@@ -2015,7 +2022,7 @@ export class SessionManager {
       throw new Error(`verify_run label '${runId}' names an existing workflow run; choose another label`);
     }
     const dir = kernelRunDir(runId);
-    const evidenceId = 'verify-01';
+    const evidenceId = nextEvidenceId(dir, 'verify');
     const { results, rounds } = await runContract(contract, {
       cwd: args.cwd,
       artifactDir: evidenceDir(dir, evidenceId),

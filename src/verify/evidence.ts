@@ -71,6 +71,25 @@ export function makeEvidenceId(node: string, visit: number, attempt: number): st
   return `${node.replace(/[^\w.-]/g, '_')}-v${n(visit)}-${n(attempt)}`;
 }
 
+/**
+ * The next free `<prefix>-NN` under a run's evidence root. A standalone `verify_run` reusing a label used to
+ * write `verify-01` every time, so a second check replaced the first bundle and could leave its artifacts
+ * mixed into the new one; each check now gets its own directory, and the newest has the highest number.
+ */
+export function nextEvidenceId(runDir: string, prefix: string): string {
+  let n = 0;
+  const re = new RegExp(`^${prefix.replace(/[^\w-]/g, '')}-(\\d+)$`);
+  try {
+    for (const name of fs.readdirSync(evidenceRoot(runDir))) {
+      const m = re.exec(name);
+      if (m) n = Math.max(n, Number(m[1]));
+    }
+  } catch {
+    /* no evidence yet */
+  }
+  return `${prefix}-${String(n + 1).padStart(2, '0')}`;
+}
+
 export interface WriteEvidenceArgs {
   runDir: string;
   runId: string;
