@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [7.25.1] - 2026-11-19
 
 ### Fixed
 
@@ -16,7 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one then closed, it cleared the session's handle on the second, so stopping the session no longer reached the
   engine that was running. The session now stays busy until a stopped process has exited, and the next send waits
   for it: after 5 seconds the process gets SIGKILL, and if it has still not exited 2 seconds later, the send fails
-  instead of starting another engine.
+  instead of starting another engine. (#188, thanks @ajmtrz)
+
+### Docs
+
+- The README's News list keeps only milestones, one line each.
 
 ## [7.25.0] - 2026-11-18
 

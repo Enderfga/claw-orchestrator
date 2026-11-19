@@ -42,35 +42,12 @@ https://github.com/user-attachments/assets/5bf9bea8-e5ac-4632-a292-a80a45831dff
 
 ## News
 
-- **[2026-11]** v7.25.0: `autoloop_rebind_role` changes one role's engine, model or effort in a running autoloop
-  run, without restarting it.
-- **[2026-11]** v7.24.0: the `opencode` engine runs OpenCode 2 as well as OpenCode 1.x, and GPT-6.2 Astra and Sol
-  are registered.
-- **[2026-11]** v7.23.0: Antigravity sessions follow agy 1.5.9: every permission mode is passed explicitly, and
-  Gemini 4 models are registered, with `agy-pro` on Gemini 4 Argon.
-- **[2026-11]** v7.22.0: Claude sessions can run under several Claude accounts and move to the next one when
-  an account reaches its usage limit, continuing the same conversation.
-- **[2026-11]** v7.21.0: the plugin loads when OpenClaw installs it, with no native module to build.
-- **[2026-11]** v7.20.0: a fan-out agent can run as a goal, so several agents can each work a copy of a
-  project until it is done, in parallel.
-- **[2026-11]** v7.19.0: a fan-out agent can run in a directory of its own, so several agents can write code
-  in parallel, one copy each.
-- **[2026-11]** v7.18.0: `CLAWO_CLAUDE_GATEWAY=1` runs a `claude` session on any model your own
-  Anthropic-compatible gateway serves, by its own name.
-- **[2026-11]** v7.17.0: an agent can resume a paused autoloop run itself (`autoloop_resume`), and a Codex goal
-  that hits a model at capacity is resumed on its thread instead of failing.
-- **[2026-10]** v7.16.0: `clawo goal --engine claude` runs a goal on Claude Code's `/goal`, with the same
-  checkpointing, resume and verification as a Codex goal.
-- **[2026-10]** [ResearchBoost-Agent](https://github.com/AI4AI-for-Anything/ResearchBoost-Agent), an autonomous agent
-  that profiles, optimizes and validates AI training code, now runs its goal mode on Claw Orchestrator.
-- **[2026-10]** v7.14.0: any Agent Client Protocol agent runs as a session (`engine: 'acp'`), with presets for
-  Kimi Code and dsh.
-- **[2026-10]** v7.13.0: `clawo goal` keeps a Codex `/goal` running for hours on one thread, reattaches it after a
-  crash, and judges the result with your checks.
-- **[2026-09]** [Declare, Compile, Look](https://openreview.net/forum?id=Romd50Ce0w), built on Claw Orchestrator,
-  was presented as a talk at the ECCV 2026 Workshop on Multimodal Digital Agents.
-- **[2026-08]** v6.0.0: the durable run kernel and the verification plane. A run survives its own process dying, and
-  a run with an acceptance contract is judged by the runtime, not by the agent.
+- **[2026-11]** v7.22.0: Claude sessions rotate across several Claude accounts when one reaches its usage limit.
+- **[2026-10]** v7.14.0: any Agent Client Protocol agent runs as a session (`engine: 'acp'`).
+- **[2026-10]** v7.13.0: `clawo goal` keeps a Codex `/goal` running for hours, and checks the result.
+- **[2026-10]** [ResearchBoost-Agent](https://github.com/AI4AI-for-Anything/ResearchBoost-Agent) runs its goal mode on Claw Orchestrator.
+- **[2026-09]** [Declare, Compile, Look](https://openreview.net/forum?id=Romd50Ce0w), built on Claw Orchestrator, was a talk at the ECCV 2026 Workshop on Multimodal Digital Agents.
+- **[2026-08]** v6.0.0: runs survive their process dying, and the runtime, not the agent, judges a run against its acceptance contract.
 
 ## Highlights
 
