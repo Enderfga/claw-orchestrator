@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.25.2] - 2026-11-19
+
+### Fixed
+
+- **A handoff keeps the user's corrections from the middle of a long conversation.** When a transcript does not
+  fit, the handoff kept the opening request and the newest turns and left out everything in between, so a
+  correction such as "use lr 1e-4, not 3e-4" never reached the new engine. It now keeps the opening request and the
+  newest turn, then the user turns in between (newest first, each up to 2,000 characters), then the assistant
+  replies; user turns are left out only when they alone do not fit, and each gap says how many turns it held. The
+  per-session record, bounded at 1,000,000 characters, drops old replies before old user turns the same way. (#190)
+- **An agent node that a resume finds running is told it was interrupted.** Node execution is at-least-once: a node
+  whose process stopped part-way runs again from the beginning, and could repeat what it had already done outside
+  the run directory, such as submitting a cluster job. A resume now records the interruption on the node, and an
+  `agent` node, or a `goal` node that starts a new thread, gets a note ahead of its prompt to check what the earlier
+  run already did before doing it again. (#189)
+- **A contract with a required check that cannot be parsed is refused.** Such a check used to be dropped, so a
+  contract with two required checks, one of them malformed, could pass on the other alone. Only entries marked
+  `required: false` are still dropped, and the error names each entry at fault.
+- **A `verify_run` that reuses a label keeps the earlier evidence.** Each run under the label used to write the same
+  `verify-01` bundle, replacing the previous one and possibly leaving its artifacts mixed into the new one; each run
+  now gets the next free `verify-NN`.
+
 ## [7.25.1] - 2026-11-19
 
 ### Fixed
