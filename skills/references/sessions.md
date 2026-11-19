@@ -127,9 +127,13 @@ tool calls — the new agent sees the replies that described the work, and the w
 the framing tells it to check before relying on anything the history describes.
 
 **When it is too long.** Up to `maxChars` (default 240,000 characters, ~60k tokens; minimum 4,000)
-the whole conversation is sent. Past that, the opening request is kept, the newest turns fill what
-is left, and one line records how many turns in between were left out: the request says what the
-work is for, the newest turns say where it stands, and the middle is what the workspace can answer.
+the whole conversation is sent. Past that, the opening request and the newest turn are kept, then the
+user turns in between, newest first (each up to 2,000 characters), then the assistant replies, newest
+first, and each run of turns left out is marked with a line saying how many it held. The request
+says what the work is for and the newest turn where it stands; a user turn may be a correction the
+new agent must not lose, while what a reply did is in the workspace. User turns are left out only
+when they alone do not fit. The per-session record itself is bounded (1,000,000 characters) and
+drops old replies before old user turns in the same way.
 
 **A fork, not a move.** The two sessions go their separate ways. The new one starts from the
 source's record, so handing it off again carries the whole conversation rather than only its own

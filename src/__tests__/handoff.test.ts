@@ -48,6 +48,36 @@ describe('the conversation record', () => {
     expect(t.entries.length + t.omittedAfterFirst).toBe(16);
   });
 
+  it('evicts assistant replies before user turns, and marks where it evicted', () => {
+    const t = newTranscript();
+    recordExchange(t, 'user', 'OPENING: build the importer');
+    const chunk = 'x'.repeat(100_000);
+    recordExchange(t, 'assistant', `0:${chunk}`);
+    recordExchange(t, 'user', 'CORRECTION: keep the CSV header row');
+    for (let i = 1; i < 15; i++) recordExchange(t, 'assistant', `${i}:${chunk}`);
+    expect(t.chars).toBeLessThanOrEqual(MAX_TRANSCRIPT_CHARS);
+    expect(t.entries.map((e) => e.text)).toContain('CORRECTION: keep the CSV header row');
+    expect(t.omittedAfterFirst).toBeGreaterThan(0);
+    // The reply before the correction went, and the count sits where it was.
+    const correction = t.entries.findIndex((e) => e.text.startsWith('CORRECTION'));
+    expect(correction).toBe(1);
+    expect(t.entries[1].omittedBefore).toBe(1);
+    const r = renderHandoff(t, SRC);
+    expect(r.text.indexOf('OPENING')).toBeLessThan(r.text.indexOf('[… 1 earlier turn omitted …]'));
+    expect(r.text.indexOf('[… 1 earlier turn omitted …]')).toBeLessThan(r.text.indexOf('CORRECTION'));
+    expect(r.omitted).toBe(t.omittedAfterFirst + (t.entries.length - r.turns));
+  });
+
+  it('evicts user turns once no reply is left to evict', () => {
+    const t = newTranscript();
+    recordExchange(t, 'user', 'OPENING');
+    for (let i = 0; i < 15; i++) recordExchange(t, 'user', `${i}:` + 'u'.repeat(100_000));
+    expect(t.chars).toBeLessThanOrEqual(MAX_TRANSCRIPT_CHARS);
+    expect(t.entries[0].text).toBe('OPENING');
+    expect(t.entries[t.entries.length - 1].text.startsWith('14:')).toBe(true);
+    expect(t.entries.length + t.omittedAfterFirst).toBe(16);
+  });
+
   it('ignores empty text', () => {
     const t = newTranscript();
     recordExchange(t, 'assistant', '   ');
@@ -76,7 +106,7 @@ describe('rendering a handoff', () => {
     const t = newTranscript();
     recordExchange(t, 'user', 'OPENING REQUEST');
     for (let i = 1; i <= 40; i++) {
-      recordExchange(t, i % 2 ? 'assistant' : 'user', `turn ${i} ` + 'y'.repeat(1_000));
+      recordExchange(t, 'assistant', `turn ${i} ` + 'y'.repeat(1_000));
     }
     const r = renderHandoff(t, SRC, 12_000);
     expect(r.text.length).toBeLessThanOrEqual(12_000);
@@ -88,6 +118,62 @@ describe('rendering a handoff', () => {
     // The marker sits right after the pinned request, before the newest turns.
     expect(r.text.indexOf('OPENING REQUEST')).toBeLessThan(r.text.indexOf('earlier turns omitted'));
     expect(r.text.indexOf('earlier turns omitted')).toBeLessThan(r.text.indexOf('turn 40 '));
+  });
+
+  it('keeps a user correction from the middle of a conversation that does not fit', () => {
+    const t = newTranscript();
+    recordExchange(t, 'user', 'OPENING: train the model');
+    for (let i = 1; i <= 30; i++) {
+      recordExchange(t, 'assistant', `reply ${i} ` + 'r'.repeat(3_000));
+      if (i === 5) recordExchange(t, 'user', 'CORRECTION: use lr 1e-4, not 3e-4');
+    }
+    const r = renderHandoff(t, SRC, 20_000);
+    expect(r.text.length).toBeLessThanOrEqual(20_000);
+    expect(r.text).toContain('OPENING: train the model');
+    expect(r.text).toContain('CORRECTION: use lr 1e-4, not 3e-4');
+    expect(r.text).toContain('reply 30 ');
+    // The replies around it are what was left out, and each gap says how many.
+    expect(r.text).not.toContain('reply 5 ');
+    const gaps = [...r.text.matchAll(/\[… (\d+) earlier turns? omitted …\]/g)].map((m) => Number(m[1]));
+    expect(gaps.length).toBeGreaterThanOrEqual(2);
+    expect(gaps.reduce((a, b) => a + b, 0)).toBe(r.omitted);
+    expect(r.turns + r.omitted).toBe(t.entries.length);
+    // In order: opening, a gap, the correction, a gap, the newest reply.
+    const at = (s: string): number => r.text.indexOf(s);
+    expect(at('OPENING')).toBeLessThan(at('CORRECTION'));
+    expect(at('CORRECTION')).toBeLessThan(at('reply 30 '));
+  });
+
+  it('drops the oldest user turns only when the user turns alone do not fit', () => {
+    const t = newTranscript();
+    recordExchange(t, 'user', 'OPENING');
+    for (let i = 1; i <= 40; i++) {
+      recordExchange(t, 'user', `ask ${i} ` + 'u'.repeat(1_500));
+      recordExchange(t, 'assistant', `answer ${i} ` + 'a'.repeat(1_500));
+    }
+    const r = renderHandoff(t, SRC, 20_000);
+    expect(r.text.length).toBeLessThanOrEqual(20_000);
+    expect(r.text).toContain('answer 40 ');
+    expect(r.text).toContain('ask 40 ');
+    expect(r.text).toContain('ask 35 ');
+    expect(r.text).not.toContain('ask 1 ');
+    // The budget went to user turns before any older reply.
+    expect(r.text).not.toContain('answer 39 ');
+  });
+
+  it('stays within the budget for any mix of turn sizes', () => {
+    for (const size of [50, 900, 2_500, 9_000]) {
+      for (const budget of [MIN_HANDOFF_CHARS, 9_000, 30_000]) {
+        const t = newTranscript();
+        recordExchange(t, 'user', 'OPENING ' + 'o'.repeat(size));
+        for (let i = 0; i < 25; i++) {
+          recordExchange(t, i % 3 ? 'assistant' : 'user', `t${i} ` + 'q'.repeat((size * (i + 1)) % 7_000));
+        }
+        const r = renderHandoff(t, SRC, budget);
+        expect(r.text.length, `size ${size} budget ${budget}`).toBeLessThanOrEqual(budget);
+        expect(r.text).toContain('OPENING');
+      }
+    }
   });
 
   it('marks turns the record already evicted even when the rest fits', () => {

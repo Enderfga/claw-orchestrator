@@ -26,11 +26,18 @@ import { fenceHistoryTags } from './openai-compat.js';
 export interface TranscriptEntry {
   role: 'user' | 'assistant';
   text: string;
+  /** Entries the record evicted from just before this one. */
+  omittedBefore?: number;
 }
 
 export interface Transcript {
   entries: TranscriptEntry[];
-  /** Entries evicted from just after the opening request to keep the record bounded. */
+  /**
+   * Entries evicted to keep the record bounded, in total. Each eviction is also
+   * counted on the entry that followed it (`omittedBefore`), so a render can
+   * mark the gap where it was; a count not placed that way marks the gap after
+   * the opening request.
+   */
   omittedAfterFirst: number;
   /** Total characters held in `entries`. */
   chars: number;
@@ -56,6 +63,13 @@ export const MIN_HANDOFF_CHARS = 4_000;
 const PINNED_OPENING_CHARS = 8_000;
 /** Least room worth starting a turn in; with less, the turn is dropped. */
 const MIN_TURN_CHARS = 200;
+/**
+ * A user turn from the middle of a trimmed conversation is kept up to this, and
+ * head-truncated past it. User turns are usually short, and they carry the
+ * requirements and corrections the receiving engine must not lose; a long one
+ * is usually pasted output, whose head says what it was.
+ */
+const MIDDLE_USER_TURN_CHARS = 2_000;
 const ELISION = '\n[… truncated for length …]';
 
 export function newTranscript(): Transcript {
@@ -67,9 +81,11 @@ export function cloneTranscript(t: Transcript): Transcript {
 }
 
 /**
- * Append one side of an exchange. Past the cap, entries are evicted from just
- * after the opening request — the oldest middle of the conversation — never the
- * request itself and never the newest turns.
+ * Append one side of an exchange. Past the cap, entries are evicted from the
+ * middle of the conversation, oldest first — never the opening request and never
+ * the newest entry. Assistant replies go before user turns: a user turn is
+ * usually short and may be a correction ("use lr 1e-4, not 3e-4") that the
+ * receiving engine must see, while a reply's work is in the workspace.
  */
 export function recordExchange(t: Transcript, role: TranscriptEntry['role'], text: string): void {
   const clean = text.trim();
@@ -77,9 +93,14 @@ export function recordExchange(t: Transcript, role: TranscriptEntry['role'], tex
   t.entries.push({ role, text: clean });
   t.chars += clean.length;
   while (t.chars > MAX_TRANSCRIPT_CHARS && t.entries.length > 2) {
-    const [gone] = t.entries.splice(1, 1);
+    const last = t.entries.length - 1;
+    let i = t.entries.findIndex((e, j) => j >= 1 && j < last && e.role === 'assistant');
+    if (i < 0) i = 1;
+    const [gone] = t.entries.splice(i, 1);
     t.chars -= gone.text.length;
     t.omittedAfterFirst++;
+    const next = t.entries[i];
+    next.omittedBefore = (next.omittedBefore ?? 0) + (gone.omittedBefore ?? 0) + 1;
   }
 }
 
@@ -129,12 +150,15 @@ function fit(text: string, room: number): string | undefined {
  * Render a transcript for a new session on another engine.
  *
  * Everything is sent when it fits. When it does not, the opening request is
- * pinned and the newest turns fill what is left, with one line saying how many
- * turns in between were left out: the request says what the work is for, the
- * newest turns say where it stands, and the middle is what can be re-derived
- * from the workspace. Every turn's text is fenced the way openai-compat fences
- * replayed turns, so a transcript that contains the block's own tags cannot
- * close the block early and speak as a different role.
+ * pinned and the newest turn is kept, since the request says what the work is
+ * for and the newest turn where it stands. The rest of the budget goes to the
+ * user turns in between, newest first, then to assistant replies, newest first:
+ * a user turn may be a correction the receiving engine must not lose, while what
+ * a reply did can be re-derived from the workspace. User turns are dropped only
+ * when they alone do not fit. Each gap left by an omitted run of turns gets one
+ * line saying how many turns it held. Every turn's text is fenced the way
+ * openai-compat fences replayed turns, so a transcript that contains the block's
+ * own tags cannot close the block early and speak as a different role.
  */
 export function renderHandoff(t: Transcript, src: HandoffSource, maxChars = DEFAULT_HANDOFF_CHARS): HandoffRender {
   if (!t.entries.length) return { text: '', turns: 0, omitted: 0 };
@@ -143,47 +167,74 @@ export function renderHandoff(t: Transcript, src: HandoffSource, maxChars = DEFA
   const shell = '<conversation_history>\n</conversation_history>\n\n'.length + tail.length;
   let budget = Math.max(maxChars, MIN_HANDOFF_CHARS) - shell;
 
-  const renderedLen = turns.reduce((n, x) => n + frameOf(x.role) + x.text.length, 0);
-  let kept: { role: string; text: string }[];
-  let omitted = t.omittedAfterFirst;
-  let markerAfterFirst = t.omittedAfterFirst > 0;
+  // Evictions the record placed before an entry; any it did not place belong
+  // after the opening request, where the record used to evict from.
+  const evictedBefore = t.entries.map((e) => e.omittedBefore ?? 0);
+  const placed = evictedBefore.reduce((n, x) => n + x, 0);
+  if (t.omittedAfterFirst > placed && t.entries.length > 1) evictedBefore[1] += t.omittedAfterFirst - placed;
+  const unplaced = t.entries.length > 1 ? 0 : Math.max(0, t.omittedAfterFirst - placed);
 
-  if (renderedLen <= budget) {
-    kept = turns;
+  const renderedLen = turns.reduce((n, x) => n + frameOf(x.role) + x.text.length, 0);
+  const markerLen = '[… 99999 earlier turns omitted …]\n'.length;
+  const anyEvicted = evictedBefore.some((x) => x > 0);
+  const kept: Array<string | undefined> = turns.map(() => undefined);
+
+  if (renderedLen + (anyEvicted ? markerLen * turns.length : 0) <= budget) {
+    turns.forEach((x, i) => (kept[i] = x.text));
   } else {
     const opening = turns[0];
     // A quarter of the budget, capped. MIN_HANDOFF_CHARS keeps this above
     // MIN_TURN_CHARS, so the opening request always renders, if only its head.
     const pinnedRoom = Math.min(PINNED_OPENING_CHARS, Math.floor(budget / 4)) - frameOf(opening.role);
-    const pinned = { role: opening.role, text: fit(opening.text, pinnedRoom) ?? '' };
-    budget -= frameOf(pinned.role) + pinned.text.length;
-    const markerReserve = '[… 99999 earlier turns omitted …]\n'.length;
-    budget -= markerReserve;
+    kept[0] = fit(opening.text, pinnedRoom) ?? '';
+    budget -= frameOf(opening.role) + kept[0].length;
 
-    const newest: { role: string; text: string }[] = [];
-    for (let i = turns.length - 1; i >= 1; i--) {
-      const room = budget - frameOf(turns[i].role);
+    // Every kept turn after the opening may open a gap before it, and the
+    // newest kept turn may close one after it; reserve a marker for each.
+    const take = (i: number, cap: number): boolean => {
+      const room = Math.min(cap, budget - frameOf(turns[i].role) - markerLen);
       const text = fit(turns[i].text, room);
-      if (text === undefined) break;
-      newest.unshift({ role: turns[i].role, text });
-      budget -= frameOf(turns[i].role) + text.length;
-      if (text !== turns[i].text) break; // the boundary turn was cut; nothing older fits
+      if (text === undefined) return false;
+      kept[i] = text;
+      budget -= frameOf(turns[i].role) + text.length + markerLen;
+      return text === turns[i].text || room === cap;
+    };
+    budget -= markerLen;
+    const last = turns.length - 1;
+    if (last >= 1) take(last, Infinity);
+    // A user turn cut by the budget, or one that did not fit, means no older one fits.
+    for (let i = last - 1; i >= 1; i--) {
+      if (turns[i].role === 'user' && !take(i, MIDDLE_USER_TURN_CHARS)) break;
     }
-    omitted += turns.length - 1 - newest.length;
-    markerAfterFirst = omitted > 0;
-    kept = [pinned, ...newest];
+    for (let i = last - 1; i >= 1; i--) {
+      if (turns[i].role !== 'assistant') continue;
+      // The boundary reply was cut or did not fit; nothing older fits either.
+      if (!take(i, Infinity)) break;
+    }
   }
 
   const lines: string[] = [];
-  kept.forEach((turn, i) => {
-    if (turn.text) lines.push(`<${turn.role}>\n${turn.text}\n</${turn.role}>`);
-    if (i === 0 && markerAfterFirst) {
-      lines.push(`[… ${omitted} earlier turn${omitted === 1 ? '' : 's'} omitted …]`);
+  let omitted = unplaced;
+  let gap = 0;
+  const flushGap = (): void => {
+    if (gap > 0) lines.push(`[… ${gap} earlier turn${gap === 1 ? '' : 's'} omitted …]`);
+    omitted += gap;
+    gap = 0;
+  };
+  turns.forEach((turn, i) => {
+    gap += evictedBefore[i];
+    const text = kept[i];
+    if (text === undefined) {
+      gap += 1;
+      return;
     }
+    flushGap();
+    if (text) lines.push(`<${turn.role}>\n${text}\n</${turn.role}>`);
   });
+  flushGap();
   return {
     text: `<conversation_history>\n${lines.join('\n')}\n</conversation_history>\n\n${tail}`,
-    turns: kept.filter((k) => k.text).length,
+    turns: kept.filter((k) => k).length,
     omitted,
   };
 }
