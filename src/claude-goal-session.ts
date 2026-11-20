@@ -52,6 +52,8 @@ import type { GoalSession, GoalSnapshot, GoalStatus } from './kernel/nodes/goal.
 export interface ClaudeGoalHost {
   readonly sessionId?: string;
   send(message: string, options?: { waitForComplete?: boolean; timeout?: number }): Promise<unknown>;
+  /** Write a message into the turn in flight without touching its accounting; see `PersistentClaudeSession`. */
+  injectMessage?(text: string): boolean;
   interruptTurn(): boolean;
   getStats(): { tokensIn: number; tokensOut: number; cachedTokens: number; cacheCreationTokens?: number };
   on(event: string, listener: (...args: unknown[]) => void): unknown;
@@ -292,7 +294,9 @@ export class ClaudeGoalSession extends EventEmitter implements GoalSession {
 
   async steer(text: string): Promise<{ steered: boolean }> {
     if (!this._turnActive) return { steered: false };
-    // A message written during a turn is folded into it by the CLI.
+    // A message written during a turn is folded into it by the CLI. Injected
+    // rather than sent, so the turn's token accounting is not reset part-way.
+    if (this.host.injectMessage) return { steered: this.host.injectMessage(text) };
     await this.host.send(text, { waitForComplete: false });
     return { steered: true };
   }

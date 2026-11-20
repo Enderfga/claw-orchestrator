@@ -897,6 +897,33 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
   }
 
   /**
+   * Write a user message into the stream without starting a send: the CLI folds
+   * it into the turn in flight at its next tool round, or starts a turn with it
+   * when none is running. Measured on 2.1.327 with a headless stream-json
+   * session: a message written while a 35s tool call ran reached the model after
+   * that call and before the next one, in the same turn. Unlike `send()`, it
+   * leaves the turn's token accounting alone, and its id is registered so the
+   * result that answers it is recognised as this session's own.
+   */
+  injectMessage(text: string): boolean {
+    const stdin = this.proc?.stdin;
+    if (!this._isReady || !stdin || stdin.writable === false) return false;
+    const uuid = randomUUID();
+    this._unanswered.add(uuid);
+    const payload = { type: 'user', uuid, message: { role: 'user', content: [{ type: 'text', text }] } };
+    stdin.write(JSON.stringify(payload) + '\n', (err) => {
+      if (err) this._emitError(new Error(`Failed to write to stdin: ${err.message}`));
+    });
+    return true;
+  }
+
+  /** Mid-turn delivery: only while a message of this session is still unanswered. */
+  async deliverMidTurn(text: string): Promise<boolean> {
+    if (!this._isBusy && this._unanswered.size === 0) return false;
+    return this.injectMessage(text);
+  }
+
+  /**
    * Stop the running turn: stream-json's `interrupt` control request, the same
    * one the SDK sends. The CLI answers with a `control_response`, then ends the
    * turn with an `error_during_execution` result; an active `/goal` stays set.

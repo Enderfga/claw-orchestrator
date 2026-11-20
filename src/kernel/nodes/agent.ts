@@ -5,6 +5,7 @@ import { runAgentStep } from '../agent-step.js';
 import { runDir } from '../store.js';
 import type { AgentNode, NodeSpec } from '../types.js';
 import { failureLines, readEvidence } from '../../verify/evidence.js';
+import { onForum } from '../forum.js';
 
 /**
  * The run's red verdict as a list of its failing required checks, each with the
@@ -94,17 +95,40 @@ export async function executeAgentNode(node: NodeSpec, ctx: NodeContext): Promis
 
   // Steering text is prepended, not appended: an instruction that arrives while
   // the previous node ran is a correction, and corrections belong before the task.
+  const manager = ctx.manager;
+  // Attempt-scoped unless the author pinned a name deliberately: an abandoned
+  // attempt is still alive and will tear down whatever session it named.
+  const sessionName = spec.sessionName || `${ctx.runId}-${spec.id}-a${ctx.attempt}`;
+  // On a run with a forum, the agent is on it for its turn: posts pushed to it
+  // reach the turn in flight where the engine allows it.
+  return onForum(
+    ctx.record,
+    spec.id,
+    (text) => manager.deliverMidTurn?.(sessionName, text) ?? false,
+    (forumBrief) => runAgentNode(spec, ctx, sessionName, forumBrief),
+  );
+}
+
+async function runAgentNode(
+  spec: AgentNode,
+  ctx: NodeContext,
+  sessionName: string,
+  forumBrief: string | undefined,
+): Promise<NodeResult> {
   const steer = ctx.takeSteer();
   const brief = repairBrief(ctx, spec.id);
   const interrupted = interruptedNotice(ctx, spec.id);
-  const preface = [...(interrupted ? [interrupted] : []), ...steer, ...(brief ? [brief] : [])];
+  const preface = [
+    ...(interrupted ? [interrupted] : []),
+    ...(forumBrief ? [forumBrief] : []),
+    ...steer,
+    ...(brief ? [brief] : []),
+  ];
   const prompt = preface.length > 0 ? `${preface.join('\n\n')}\n\n---\n\n${spec.prompt}` : spec.prompt;
 
   const result = await runAgentStep({
-    manager: ctx.manager,
-    // Attempt-scoped unless the author pinned a name deliberately: an abandoned
-    // attempt is still alive and will tear down whatever session it named.
-    sessionName: spec.sessionName || `${ctx.runId}-${spec.id}-a${ctx.attempt}`,
+    manager: ctx.manager!,
+    sessionName,
     // A pinned name is a conversation the author wants kept: a revisit after a
     // red verifier, or another node under the same name, resumes it instead of
     // starting over. The process still stops after the turn.

@@ -339,6 +339,11 @@ export interface WorkflowSpec {
   contract?: AcceptanceContract;
   /** Loop bound. Exceeding it fails the run rather than spinning. Default 50. */
   maxNodeVisits?: number;
+  /**
+   * A forum every agent of this run shares (`kernel/forum.ts`): `true`, or a
+   * config for what is pushed to agents and what score each post carries.
+   */
+  forum?: boolean | import('./forum.js').ForumConfig;
 }
 
 // ─── Persisted records ──────────────────────────────────────────────────────
@@ -389,6 +394,12 @@ export interface ConsensusVote {
 
 export interface RunRecord {
   runId: string;
+  /**
+   * The forum this run's agent belongs to when the forum is another run's: a
+   * fan-out goal agent's child run carries its parent's forum and its own name
+   * on it, so a resume puts it back on the same forum.
+   */
+  forum?: import('./forum.js').ForumBinding;
   workflow: string;
   spec: WorkflowSpec;
   state: RunState;

@@ -321,6 +321,23 @@ describe('ClaudeGoalSession', () => {
     expect(host.sent.at(-1)).toEqual({ text: 'log the round', wait: false });
   });
 
+  // A steer through send() reset the turn's token accounting part-way; a host
+  // that can inject a message takes it that way instead.
+  it('steers through the host’s injection when it has one, not through a send', async () => {
+    const host = new FakeClaudeHost() as FakeClaudeHost & { injectMessage?: (t: string) => boolean };
+    const injected: string[] = [];
+    host.injectMessage = (t) => {
+      injected.push(t);
+      return true;
+    };
+    const s = new ClaudeGoalSession(host);
+    await s.setGoal({ objective: 'x' });
+    const sentBefore = host.sent.length;
+    expect((await s.steer('log the round')).steered).toBe(true);
+    expect(injected).toEqual(['log the round']);
+    expect(host.sent.length).toBe(sentBefore);
+  });
+
   it('refuses to resume a goal it never knew', async () => {
     const s = new ClaudeGoalSession(new FakeClaudeHost());
     await expect(s.setGoal({ status: 'active' })).rejects.toThrow(/no goal to resume/);

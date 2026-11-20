@@ -1100,4 +1100,57 @@ program
 
 // An action that throws (an unreadable --message-file, a contract that is not
 // JSON) is reported like any other failure, not as a stack trace.
+// ─── forum ──────────────────────────────────────────────────────────────────
+// The run forum (kernel/forum.ts). An agent on a run with a forum is given this
+// command, with --dir and --as filled in, in its brief; it reads and writes the
+// forum's files directly, so it works without the server and from any engine
+// that can run a shell command. `show` and `metrics` are for whoever reads the
+// run afterwards, from the run directory.
+
+program
+  .command('forum')
+  .description('Post to and read a workflow run forum (agents), or show one and its metrics')
+  .argument('<action>', 'post | list | read | show | metrics')
+  .argument('[id]', 'Post id for `read`; run id for `show` and `metrics`')
+  .option('--dir <dir>', 'The forum spool (given to each agent in its brief)')
+  .option('--as <name>', 'Your name on the forum')
+  .option('--title <title>', 'Post title, starting with a tag: WIN, FAIL, ASK, FIX, DONE, …')
+  .option('--body <text>', 'Post body')
+  .option('--body-file <file>', 'Read the body from a file')
+  .option('--re <ids...>', 'Ids of the posts this one answers')
+  .option('--json', 'Raw JSON output (show, metrics)')
+  .action(async (action: string, id: string | undefined, opts) => {
+    const forum = await import('../src/kernel/forum.js');
+    try {
+      if (action === 'show' || action === 'metrics') {
+        if (!id) return usage(`a run id is required for \`forum ${action}\``);
+        if (action === 'metrics') return console.log(JSON.stringify(forum.forumMetrics(id), null, 2));
+        const { posts, events } = forum.forumSnapshot(id);
+        if (opts.json) return console.log(JSON.stringify({ posts, events }, null, 2));
+        if (posts.length === 0) return console.log('No posts.');
+        return console.log(posts.map((p) => forum.formatPost(p)).join('\n\n────────\n\n'));
+      }
+      if (!opts.dir || !opts.as) return usage('--dir and --as are required (they are in your forum brief)');
+      if (action === 'post') {
+        if (!opts.title) return usage('--title is required');
+        const body = opts.bodyFile ? fs.readFileSync(path.resolve(opts.bodyFile), 'utf8') : opts.body;
+        const post = forum.forumPost(opts.dir, opts.as, {
+          title: opts.title,
+          body,
+          re: opts.re,
+          cwd: process.cwd(),
+        });
+        return console.log(`posted ${post.id}${post.to.length ? ` to ${post.to.map((n) => `@${n}`).join(' ')}` : ''}`);
+      }
+      if (action === 'list') return console.log(forum.forumList(opts.dir, opts.as));
+      if (action === 'read') {
+        if (!id) return usage('a post id is required for `forum read`');
+        return console.log(forum.forumRead(opts.dir, opts.as, id));
+      }
+      return usage(`unknown forum action '${action}'`);
+    } catch (err) {
+      return fail((err as Error).message);
+    }
+  });
+
 program.parseAsync().catch((e: unknown) => fail(e instanceof Error ? e.message : e));

@@ -32,6 +32,54 @@ function makeLookup(map: Map<string, { session: ISession }>): SessionLookup {
 }
 
 describe('InboxManager', () => {
+  it('hands a message to a busy session’s turn in flight when the engine takes it, and queues it otherwise', async () => {
+    const a = fakeSession();
+    const steerable = fakeSession({ busy: true });
+    const midTurn: string[] = [];
+    (steerable.session as unknown as { deliverMidTurn: (t: string) => Promise<boolean> }).deliverMidTurn = async (
+      t,
+    ) => {
+      midTurn.push(t);
+      return true;
+    };
+    const oneShot = fakeSession({ busy: true });
+    const map = new Map([
+      ['a', { session: a.session }],
+      ['b', { session: steerable.session }],
+      ['c', { session: oneShot.session }],
+    ]);
+    const im = new InboxManager();
+
+    expect(await im.sendTo('a', 'b', 'mid-turn hello', makeLookup(map))).toEqual({ delivered: true, queued: false });
+    expect(midTurn).toHaveLength(1);
+    expect(midTurn[0]).toContain('mid-turn hello');
+    expect(midTurn[0]).toContain('<cross-session-message');
+    expect(im.inbox('b')).toHaveLength(0);
+    // No way in mid-turn: queued as before.
+    expect(await im.sendTo('a', 'c', 'later', makeLookup(map))).toEqual({ delivered: false, queued: true });
+    expect(im.inbox('c')).toHaveLength(1);
+  });
+
+  it('prefers the lookup’s mid-turn delivery, and queues when it declines', async () => {
+    const a = fakeSession();
+    const b = fakeSession({ busy: true });
+    const map = new Map([
+      ['a', { session: a.session }],
+      ['b', { session: b.session }],
+    ]);
+    const im = new InboxManager();
+    const seen: string[] = [];
+    const lookup: SessionLookup = {
+      ...makeLookup(map),
+      deliverMidTurn: async (name) => {
+        seen.push(name);
+        return false;
+      },
+    };
+    expect(await im.sendTo('a', 'b', 'x', lookup)).toEqual({ delivered: false, queued: true });
+    expect(seen).toEqual(['b']);
+  });
+
   it('delivers immediately to an idle, ready session', async () => {
     const a = fakeSession();
     const b = fakeSession({ busy: false, ready: true });

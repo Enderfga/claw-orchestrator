@@ -98,6 +98,7 @@ export const TOOL_ANNOTATIONS: Record<string, ToolAnnotation> = {
   workflow_resume: { openWorldHint: true },
   workflow_approve: { openWorldHint: true },
   workflow_steer: {},
+  workflow_forum: {},
   verify_run: { openWorldHint: true },
   ultraapp_new: { openWorldHint: true },
   ultraapp_answer: { openWorldHint: true },

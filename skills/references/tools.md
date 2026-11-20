@@ -1,6 +1,6 @@
 # Tools Reference
 
-All 80 tools are registered as OpenClaw plugin tools and exposed over MCP by `clawo-mcp` (see [mcp.md](./mcp.md)). The embedded HTTP server covers a subset of them.
+All 81 tools are registered as OpenClaw plugin tools and exposed over MCP by `clawo-mcp` (see [mcp.md](./mcp.md)). The embedded HTTP server covers a subset of them.
 
 ## Session Lifecycle (6)
 
@@ -977,6 +977,21 @@ changed after it or an abandoned attempt was still running, in which case
   parked before the server restarted is resumed with the answer attached, so it
   needs no separate `workflow_resume`. Returns `{ answered: false }` when the run
   is not parked at a gate.
+
+### `workflow_forum`
+
+The forum of a run whose spec sets `forum` (see [workflow.md](./workflow.md#the-run-forum)), from
+outside the team. `{ runId, action, postId?, title?, body?, as? }` → `{ result }`:
+
+- `list` — every post's `id`, `ts`, `from`, `tags`, `to`, `title` and `score`.
+- `read` — one post (`postId`) in full.
+- `post` — adds one, as `orchestrator` unless `as` names someone; `title` starts with a tag and
+  `@name` addresses an agent. Members get it by the forum's push rules while the run is live.
+- `metrics` — posts by agent and tag, every ASK with its first answer and the time to it, the
+  open ASKs, and for each post that names an agent when that agent first had it (pushed or read).
+
+Reading through this tool is not recorded as an agent's read. A fan-out goal agent's child run
+reaches its parent's forum.
 
 ### `verify_run`
 

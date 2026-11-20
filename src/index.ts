@@ -1670,6 +1670,39 @@ const plugin = {
     });
 
     registerTool({
+      name: 'workflow_forum',
+      description:
+        "Read or post to a workflow run's forum, the board of titled posts its agents share when the spec sets `forum`. `list` returns every post's title, author, tags and score; `read` one post in full; `post` adds one (as `orchestrator` unless `as` names someone), which agents get by the forum's push rules; `metrics` returns posts by agent and tag, ASKs with the time to their first answer, open ASKs, and how long each post that names an agent took to reach it.",
+      parameters: {
+        type: 'object',
+        properties: {
+          runId: { type: 'string' },
+          action: { type: 'string', enum: ['list', 'read', 'post', 'metrics'] },
+          postId: { type: 'string', description: 'For `read`: the post id, e.g. p00012.' },
+          title: {
+            type: 'string',
+            description:
+              'For `post`: a title starting with a tag (WIN, FAIL, ASK, FIX, DONE, …); @name addresses an agent.',
+          },
+          body: { type: 'string', description: 'For `post`: the body.' },
+          as: { type: 'string', description: 'For `post`: the author name (default orchestrator).' },
+        },
+        required: ['runId', 'action'],
+      },
+      execute: async (_id, args) => ({
+        ok: true,
+        result: getManager().workflowForum({
+          runId: args.runId as string,
+          action: args.action as 'list' | 'read' | 'post' | 'metrics',
+          postId: args.postId as string | undefined,
+          title: args.title as string | undefined,
+          body: args.body as string | undefined,
+          as: args.as as string | undefined,
+        }),
+      }),
+    });
+
+    registerTool({
       name: 'workflow_approve',
       description:
         'Answer a workflow parked at a human_gate node. A run parked before a server restart is resumed with the answer attached.',

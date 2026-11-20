@@ -824,6 +824,21 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
     return { steered: false, text: r.text };
   }
 
+  /** Mid-turn delivery through `turn/steer`; false when no turn is in flight, rather than starting one. */
+  async deliverMidTurn(text: string): Promise<boolean> {
+    if (!this.threadId || !this.currentTurnId) return false;
+    try {
+      await this._request('turn/steer', {
+        threadId: this.threadId,
+        expectedTurnId: this.currentTurnId,
+        input: [{ type: 'text', text, text_elements: [] }],
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   /** Branch this thread into a new one (`thread/fork`); returns the forked thread id. */
   async forkThread(): Promise<{ threadId: string }> {
     if (!this.threadId) throw new Error('No thread id');

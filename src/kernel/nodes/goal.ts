@@ -31,6 +31,7 @@ import { SESSION_EVENT } from '../../constants.js';
 import type { NodeContext, NodeResult } from '../engine.js';
 import type { GoalNode, NodeSpec } from '../types.js';
 import { goalRepairBrief, interruptedNotice } from './agent.js';
+import { forumBrief, forumHub, forumTeamOf, resolveForum, unreadFor } from '../forum.js';
 
 export type GoalStatus = 'active' | 'paused' | 'blocked' | 'usageLimited' | 'budgetLimited' | 'complete';
 
@@ -178,7 +179,16 @@ export async function executeGoalNode(node: NodeSpec, ctx: NodeContext): Promise
   const capacityBlock =
     !claude && prior?.status === 'blocked' && TRANSIENT_ERRORS.has(prior?.lastError?.code ?? '') && !newRed;
   const finished = !!priorThread && TERMINAL.has(prior?.status ?? '') && !capacityBlock;
-  const repairing = finished && newRed;
+  // A finished goal also goes back to work, on the same thread, for word that
+  // reached it after it ended: a steer, or a forum post that names it. Without
+  // either, a revisit is the process dying after the goal ended but before this
+  // node's result was committed, and the goal's own ending stands.
+  const forum = resolveForum(ctx.record);
+  const self = forum?.agent ?? spec.id;
+  const pendingSteer = finished && !newRed ? ctx.takeSteer() : [];
+  const reopening =
+    finished && !newRed && (pendingSteer.length > 0 || (!!forum && unreadFor(forum.runId, self).length > 0));
+  const repairing = finished && (newRed || reopening);
   const resuming = !!priorThread && !finished;
   // The first visit may start on a thread the caller names; after that the
   // checkpoint decides.
@@ -389,6 +399,16 @@ export async function executeGoalNode(node: NodeSpec, ctx: NodeContext): Promise
 
   ctx.setHandle({ abort: () => undefined });
   const steers: string[] = [];
+  // On a run with a forum the goal is on it while it works: a post pushed to it
+  // joins the steers, which reach the turn in flight within a tick.
+  const forumIntro = forum ? forumBrief(forum.runId, self, forumTeamOf(forum.runId), forum.config) : undefined;
+  const leaveForum = forum
+    ? forumHub(forum.runId, forum.config).join(self, (text) => {
+        steers.push(text);
+        wake?.();
+        return true;
+      })
+    : undefined;
   try {
     const opening = await open(startThread);
     if (opening) return fail(opening);
@@ -416,7 +436,13 @@ export async function executeGoalNode(node: NodeSpec, ctx: NodeContext): Promise
       // A goal that picks its thread back up (above) has the conversation of what
       // it did; one starting a new thread after an interruption does not.
       const interrupted = interruptedNotice(ctx, node.id);
-      const preface = [...(interrupted ? [interrupted] : []), ...ctx.takeSteer(), ...(brief ? [brief] : [])];
+      const preface = [
+        ...(interrupted ? [interrupted] : []),
+        ...(forumIntro ? [forumIntro] : []),
+        ...pendingSteer,
+        ...ctx.takeSteer(),
+        ...(brief ? [brief] : []),
+      ];
       if (startThread) await session!.clearGoal();
       // On Claude the condition is the caller's objective, word for word; steers
       // and the failing checks go in ahead of it as context (see setGoal there).
@@ -528,6 +554,7 @@ export async function executeGoalNode(node: NodeSpec, ctx: NodeContext): Promise
   } catch (err) {
     return fail(`goal node failed: ${(err as Error).message}`);
   } finally {
+    leaveForum?.();
     await release();
   }
 }

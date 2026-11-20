@@ -20,6 +20,7 @@ import type { GoalSnapshot, GoalStatus, GoalNodeData } from '../../kernel/nodes/
 import { goalWorkflow } from '../../kernel/templates/index.js';
 import { acquireLease, commit, loadRun, releaseLease } from '../../kernel/store.js';
 import type { RunRecord, WorkflowSpec } from '../../kernel/types.js';
+import { ensureForumSpool, forumPost } from '../../kernel/forum.js';
 
 let tmp: string;
 const saved = process.env.CLAWO_WF_DIR;
@@ -27,11 +28,13 @@ const saved = process.env.CLAWO_WF_DIR;
 beforeEach(() => {
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'clawo-goal-'));
   process.env.CLAWO_WF_DIR = path.join(tmp, 'wf');
+  process.env.CLAWO_FORUM_SPOOL_ROOT = path.join(tmp, 'spool');
 });
 
 afterEach(() => {
   if (saved === undefined) delete process.env.CLAWO_WF_DIR;
   else process.env.CLAWO_WF_DIR = saved;
+  delete process.env.CLAWO_FORUM_SPOOL_ROOT;
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
@@ -477,6 +480,65 @@ describe('goal node after a crash', () => {
     expect(m2.starts).toHaveLength(0);
     expect(done!.nodes.goal.state).toBe('succeeded');
     expect(done!.state).toBe('completed');
+  });
+
+  it('takes a finished goal up again, on its thread, when the forum has a post for it that it has not seen', async () => {
+    const m = fakeManager(() => {
+      const s = new FakeGoalSession('thread-F');
+      s.onSet = (_p, self) => self.move('complete', { tokensUsed: 50 });
+      return s;
+    });
+    const kernel = kernelWith(m);
+    const first = await kernel.start({ ...oneGoal(), forum: true });
+    expect((await kernel.wait(first.runId))!.nodes.goal.state).toBe('succeeded');
+    // While it was done, a tester left it a FAIL.
+    forumPost(ensureForumSpool(first.runId, {}), 'tester', { title: 'FAIL @goal the boat sinks at the dock' });
+    await crashedInGoal(first.runId);
+
+    const m2 = finishesAnyGoal('thread-F');
+    const kernel2 = kernelWith(m2);
+    await kernel2.resume(first.runId);
+    const done = await kernel2.wait(first.runId);
+    expect(done!.nodes.goal.state).toBe('succeeded');
+    // Reopened on the same thread, with the post in front of the objective.
+    expect(m2.starts).toHaveLength(1);
+    expect(m2.starts[0].resumeSessionId).toBe('thread-F');
+    const objective = [...m2.sessions.values()][0].sets[0].objective ?? '';
+    expect(objective).toContain('p00001 tester: FAIL @goal the boat sinks at the dock');
+    expect(objective).toMatch(/---\n\nmake it faster$/);
+  });
+
+  it('gives a fan-out goal agent the run forum, under its own name', async () => {
+    const m = fakeManager(() => {
+      const s = new FakeGoalSession('thread-G');
+      s.onSet = (_p, self) => self.move('complete');
+      return s;
+    });
+    const kernel = kernelWith(m);
+    const run = await kernel.start({
+      name: 'team',
+      cwd: tmp,
+      forum: true,
+      nodes: [
+        {
+          id: 'parts',
+          kind: 'fanout',
+          prompt: 'build',
+          agents: [
+            { name: 'lighting', engine: 'codex', objective: 'light the scene' },
+            { name: 'sound', engine: 'codex', objective: 'add sound' },
+          ],
+        } as never,
+      ],
+    });
+    const done = await kernel.wait(run.runId);
+    expect(done!.state).toBe('completed');
+    const child = loadRun((done!.nodes.parts.data as { goalRuns: Record<string, string> }).goalRuns.lighting)!;
+    expect(child.forum).toEqual({ runId: run.runId, agent: 'lighting' });
+    const objectives = [...m.sessions.values()].map((s) => s.sets[0].objective ?? '');
+    const lighting = objectives.find((o) => o.endsWith('light the scene'))!;
+    expect(lighting).toContain('You are "lighting", one agent of a team that shares a forum with sound');
+    expect(lighting).toContain(`--as lighting`);
   });
 
   it('picks a goal blocked over capacity back up after a crash in the backoff', async () => {

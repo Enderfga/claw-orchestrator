@@ -95,6 +95,13 @@ export interface FanoutConfig {
   runId?: string;
   /** Polled before each queued agent starts and before synthesis; set by the kernel. */
   signal?: { aborted: boolean };
+  /** Text put in front of an agent's message, such as the run forum's brief for it. */
+  agentPreface?: (agent: string) => string | undefined;
+  /**
+   * Called once an agent's session is up, with the session's name; the returned
+   * function is called when the agent finishes. The run forum joins the agent here.
+   */
+  onAgentSession?: (agent: string, sessionName: string) => (() => void) | undefined;
 }
 
 export interface FanoutAgentResult {
@@ -211,6 +218,7 @@ export class Fanout {
     }
     const sessionName = `${this.session.id}-${spec.name}`;
     const start = Date.now();
+    let leave: (() => void) | undefined;
     let cwd = this.config.projectDir;
     try {
       cwd = spec.cwd ? sanitizeCwd(path.resolve(this.config.projectDir, spec.cwd))! : this.config.projectDir;
@@ -228,12 +236,19 @@ export class Fanout {
         customEngine: spec.customEngine,
         ...(spec.acpAgent === undefined ? {} : { acpAgent: spec.acpAgent }),
       });
+      leave = this.config.onAgentSession?.(spec.name, sessionName);
+      const preface = this.config.agentPreface?.(spec.name);
+      const message = agentMessage(spec, this.config.task);
       const before = this._stats(sessionName);
-      const result = await this.manager.sendMessage(sessionName, agentMessage(spec, this.config.task), {
-        timeout: this.config.agentTimeoutMs ?? DEFAULT_AGENT_TIMEOUT_MS,
-        parentRunId: this.session.id,
-        nodeKind: 'fanout',
-      });
+      const result = await this.manager.sendMessage(
+        sessionName,
+        preface ? `${preface}\n\n---\n\n${message}` : message,
+        {
+          timeout: this.config.agentTimeoutMs ?? DEFAULT_AGENT_TIMEOUT_MS,
+          parentRunId: this.session.id,
+          nodeKind: 'fanout',
+        },
+      );
       const after = this._stats(sessionName);
       // `ok` used to be an unconditional true in this block, i.e. "the call did
       // not throw" — so an engine that ran, failed, and reported the failure
@@ -265,6 +280,7 @@ export class Fanout {
         durationMs: Date.now() - start,
       };
     } finally {
+      leave?.();
       await this.manager.stopSession(sessionName).catch(() => {
         // Best-effort cleanup; a dead session is fine to ignore.
       });

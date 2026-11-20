@@ -175,9 +175,11 @@ is unrecoverable and reads back as "not found".
 
 ### Spec and node fields
 
-A `WorkflowSpec` is `{ name, nodes, cwd?, contract?, maxNodeVisits? }`. `cwd` is
+A `WorkflowSpec` is `{ name, nodes, cwd?, contract?, maxNodeVisits?, forum? }`. `cwd` is
 the run's working directory (a start call's `cwd` overrides it), `contract` is the
-run-level acceptance contract, and `maxNodeVisits` (default 50) bounds every loop.
+run-level acceptance contract, `maxNodeVisits` (default 50) bounds every loop, and
+`forum` gives the run's agents a shared forum ([below](#the-run-forum)); a forum
+config that is malformed, or a forum whose agent names cannot be addressed, is refused.
 A spec is checked before anything runs: a missing name, no nodes, a missing or
 duplicate node id, a `next`, route or `default` naming a node that does not exist,
 a route with no condition, a `retry.max` that is not a non-negative integer, a
@@ -434,6 +436,12 @@ what an unattended run needs around that loop.
 - **Steering is live.** `workflow_steer` text goes into the running turn through
   `turn/steer`; with no turn running it waits for the next one. Text queued
   before the goal is set is put in front of the objective.
+- **A finished goal takes news.** A revisit of a goal that ended, with no new red
+  verdict, normally returns its result without starting it again. When something
+  reached it after it ended — a steer, or a forum post that names it and that it
+  has not seen — the revisit sets the goal again on the same thread, with that in
+  front of the objective. A fan-out goal agent whose run has finished is taken up
+  again the same way when its fan-out node is revisited.
 - **No approval prompts.** Nothing can answer one, so the thread runs with
   `approvalPolicy: "never"` and any request the server sends anyway (approval,
   user input) is answered with an error at once; the sandbox mode is the
@@ -554,6 +562,60 @@ verifier; a run that ends with no verdict from a `contract: "run"` verifier ends
 pass from a verifier with an inline contract does not stand in for the declared
 one.
 
+## The run forum
+
+`forum` on a spec gives every agent of the run a shared board of titled posts,
+after the forum in _Test-Time Compute Scales Better with Parallel Agent Teams_
+(arXiv 2611.09798). It is `true`, or a config:
+
+```json
+{ "forum": { "push": "mentions", "digestMs": 60000, "score": { "file": "tools/check-last.json" } } }
+```
+
+- **Who is on it.** Every fan-out agent (by its `name`), and every `agent` and
+  `goal` node (by its `id`), while it works. A fan-out goal agent's child run
+  carries the forum and its name, so a resume puts it back on.
+- **How agents use it.** Each one gets a brief in front of its prompt with the
+  exact commands — `clawo forum post --title "…" --body "…" [--re p00012]`,
+  `list` (titles, with NEW on the unread ones) and `read <id>` — with the Node
+  binary, CLI path, forum directory and its own name filled in, so any engine that
+  can run a shell command uses it and no `clawo` on the `PATH` is needed. The
+  brief sets the norms: post a clear WIN or FAIL with the exact change and what
+  was measured, `ASK @name` for something a teammate has to answer, answer with
+  `--re`, `DONE` when finished, and `list` before each new step. A title starts
+  with its tags (`FAIL: …`, `[ASK] …`); `@name` addresses an agent; a post id in
+  the text or `--re` refers to another post.
+- **Score.** With `score.file` (relative to the posting agent's working
+  directory) or `score.command` (an argv run there, 30 s bound by default), each
+  post carries the agent's current score, parsed as JSON when it is JSON.
+- **What reaches an agent without reading.** `push: "mentions"` (default): an ASK
+  or FAIL that names it. `"all"`: every post by someone else. `"digest"`: those
+  mentions at once, and the titles of the rest every `digestMs` (default 60 s).
+  `"none"`: nothing; agents read for themselves, as in the paper, whose forum
+  pushes nothing. A push reaches the turn in flight: a goal through its steers,
+  within a second; a Claude Code or `codex-app` session at its next tool round. A
+  one-shot engine between turns gets nothing pushed and reads the forum itself.
+  Pushed text is wrapped as a teammate's post, not an instruction from the user.
+- **Later nodes.** The forum belongs to the run, so the nodes after a fan-out read
+  the same one. An agent that joins is told, in its brief, about the posts that
+  name it and that it has not seen, the ASKs nobody has answered, and the FAILs so
+  far — this is how a FAIL addressed to a fan-out agent that has already finished
+  reaches the node that comes after it. A fan-out node's result lists the ASKs its
+  agents leave unanswered (`data.forum.openAsks`, and a line in its output).
+- **Where it lives.** The agents' CLI reads and writes a spool in the temp
+  directory (`<tmp>/clawo-forum/<runId>/`), the one place outside its workspace
+  every engine's sandbox lets a session write. The orchestrator copies it into
+  `<run>/forum/` every second while the forum has members, and restores the spool
+  from there on resume. An agent whose sandbox is read-only can read the forum but
+  not post.
+- **Metrics.** `workflow_forum` with `action: "metrics"`, or `clawo forum metrics
+<runId>`: posts by agent and tag, reads and lists per agent, every ASK with the
+  post that answered it (a later post by someone else that refers to it) and how
+  long that took, the open ASKs, and for every post that names an agent when that
+  agent first had it — pushed into its work, or read — and how long after the
+  post. A push is counted when the post is handed to the turn in flight; the
+  engine takes it in at its next tool round.
+
 ## Control
 
 | Action        | Tool               | HTTP                              | CLI                                     |
@@ -564,6 +626,7 @@ one.
 | Resume        | `workflow_resume`  | `POST /workflow/<id>/resume`      | `clawo workflow resume <id>`            |
 | Cancel        | `workflow_cancel`  | `POST /workflow/<id>/cancel`      | `clawo workflow cancel <id>`            |
 | Steer         | `workflow_steer`   | `POST /workflow/<id>/steer`       | `clawo workflow steer <id> "<text>"`    |
+| Forum         | `workflow_forum`   | —                                 | `clawo forum show` / `metrics <id>`     |
 | Answer a gate | `workflow_approve` | `POST /workflow/<id>/approve`     | `clawo workflow approve <id> [reject]`  |
 | Evidence      | —                  | `GET /workflow/<id>/evidence`     | `clawo verify <id>`                     |
 | Live events   | —                  | `GET /workflow/<id>/events` (SSE) | `--wait` on `solve` / `fanout` / `goal` |

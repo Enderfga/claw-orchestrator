@@ -25,6 +25,8 @@ export interface SessionManagerLike {
   startSession(config: Partial<SessionConfig> & { name?: string }): Promise<SessionInfo>;
   sendMessage(name: string, message: string, options?: Partial<SendOptions>): Promise<SendResult>;
   stopSession(name: string, opts?: { keepPersisted?: boolean }): Promise<void>;
+  /** Hand text to the session's turn in flight; false when it cannot be taken mid-turn. */
+  deliverMidTurn?(name: string, text: string): Promise<boolean>;
   /** Optional so lightweight fakes stay valid; success falls back to throw/no-throw without it. */
   getStatus?(name: string): SessionInfo & { stats: SessionStats };
   /** The live `codex-app` session behind `name`, for the `goal` node. */

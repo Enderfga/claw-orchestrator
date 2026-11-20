@@ -824,6 +824,14 @@ export interface ISession {
     message: string | unknown[],
     options?: SessionSendOptions,
   ): Promise<TurnResult | { requestId: number; sent: boolean }>;
+  /**
+   * Hand `text` to the turn in flight, where the engine takes it in at its next
+   * tool round. False when no turn is in flight or the engine has no way in
+   * mid-turn (the one-shot engines); the caller then queues it for the next
+   * turn. Claude Code (stream-json input) and the `codex-app` engine
+   * (`turn/steer`) implement it.
+   */
+  deliverMidTurn?(text: string): Promise<boolean>;
 
   // ── Observability ───────────────────────────────────────────────────────
   getStats(): SessionStats & { sessionId?: string; uptime: number };

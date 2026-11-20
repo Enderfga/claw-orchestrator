@@ -9,8 +9,16 @@
 
 import * as path from 'node:path';
 import type { NodeContext, NodeResult, RunKernel } from '../engine.js';
-import type { FanoutAgentSpec, FanoutNode, GoalNode, NodeSpec, RunRecord } from '../types.js';
+import {
+  isTerminalRunState,
+  type FanoutAgentSpec,
+  type FanoutNode,
+  type GoalNode,
+  type NodeSpec,
+  type RunRecord,
+} from '../types.js';
 import type { FanoutAgentResult, FanoutSession } from '../../fanout.js';
+import { forumBrief, forumHub, forumTeamOf, openAsks, resolveForum, unreadFor } from '../forum.js';
 import type { GoalNodeData } from './goal.js';
 import { loadRun } from '../store.js';
 import { sanitizeCwd } from '../../validation.js';
@@ -79,9 +87,20 @@ async function runFanout(node: NodeSpec, ctx: NodeContext, kernel: RunKernel | u
     results.map((r) => `## ${r.agent}${r.ok ? '' : ' (failed)'}\n\n${r.output || r.error || ''}`).join('\n\n');
   const costUsd = (turns?.costUsd ?? 0) + goals.reduce((sum, r) => sum + (r.costUsd ?? 0), 0);
 
+  // The ASKs this node's agents leave unanswered on the forum, named in its
+  // result so a later node, and whoever reads the run, sees them.
+  const forum = resolveForum(ctx.record);
+  const names = new Set(spec.agents.map((a) => a.name));
+  const unanswered = forum
+    ? openAsks(forum.runId).filter((p) => names.has(p.from) || p.to.some((n) => names.has(n)))
+    : [];
+  const forumNote = unanswered.length
+    ? `\n\nOpen ASKs on the forum: ${unanswered.map((p) => `${p.id} ${p.from}: ${p.title}`).join('; ')}`
+    : '';
+
   return {
     ok: turns?.status !== 'error' && failures.length < results.length,
-    output: body,
+    output: body + forumNote,
     error: failures.length > 0 ? `${failures.length}/${results.length} agent(s) failed` : undefined,
     // What the agents and the synthesis spent, so the run's cost includes it.
     costUsd,
@@ -92,6 +111,9 @@ async function runFanout(node: NodeSpec, ctx: NodeContext, kernel: RunKernel | u
       synthesis: turns?.synthesis,
       synthesisError: turns?.synthesisError,
       ...(goalAgents.length > 0 ? { goalRuns } : {}),
+      ...(forum
+        ? { forum: { openAsks: unanswered.map((p) => ({ id: p.id, from: p.from, to: p.to, title: p.title })) } }
+        : {}),
     },
   };
 }
@@ -117,8 +139,14 @@ async function runGoalAgent(
     cwd = a.cwd ? sanitizeCwd(path.resolve(projectDir, a.cwd))! : projectDir;
     let record: RunRecord;
     const existing = goalRuns[a.name];
-    if (existing && loadRun(existing)) {
-      record = await kernel.resume(existing, { secrets: ctx.secrets });
+    const forum = resolveForum(ctx.record);
+    const prev = existing ? loadRun(existing) : undefined;
+    if (existing && prev) {
+      // A finished goal run is taken up again, on its thread, when the forum has
+      // posts that name its agent and that it has not seen; otherwise its result
+      // stands, as a resume of a finished run returns it.
+      const news = !!forum && isTerminalRunState(prev.state) && unreadFor(forum.runId, a.name).length > 0;
+      record = await kernel.resume(existing, { secrets: ctx.secrets, ...(news ? { restart: true } : {}) });
     } else {
       const goal: GoalNode = {
         id: 'goal',
@@ -136,7 +164,7 @@ async function runGoalAgent(
       };
       record = await kernel.start(
         { name: `${ctx.record.spec.name}/${spec.id}/${a.name}`, cwd, nodes: [goal] },
-        { cwd, secrets: ctx.secrets },
+        { cwd, secrets: ctx.secrets, ...(forum ? { forum: { runId: forum.runId, agent: a.name } } : {}) },
       );
       goalRuns[a.name] = record.runId;
       // Checkpointed at once: a parent that dies from here on must find this run.
@@ -186,6 +214,7 @@ async function runTurnAgents(
   // `permissionMode: 'plan'` stopped reaching the session — a read-only review
   // that ran under `bypassPermissions`.
   const customEngines = (ctx.secrets.agentCustomEngines ?? {}) as Record<string, unknown>;
+  const forum = resolveForum(ctx.record);
   const { Fanout } = await import('../../fanout.js');
   const fanout = new Fanout(
     {
@@ -221,6 +250,19 @@ async function runTurnAgents(
       // A cancelled run, or an attempt the kernel timed out, must stop taking
       // queued agents off the queue rather than keep starting paid turns.
       signal: ctx.signal,
+      // On a run with a forum, each agent is on it for its turn and reads its
+      // brief first; a post pushed to it reaches the turn in flight where the
+      // engine allows it.
+      ...(forum
+        ? {
+            agentPreface: (agent: string) => forumBrief(forum.runId, agent, forumTeamOf(forum.runId), forum.config),
+            onAgentSession: (agent: string, sessionName: string) =>
+              forumHub(forum.runId, forum.config).join(
+                agent,
+                (text) => ctx.manager!.deliverMidTurn?.(sessionName, text) ?? false,
+              ),
+          }
+        : {}),
     },
     ctx.manager!,
     ctx.logger,

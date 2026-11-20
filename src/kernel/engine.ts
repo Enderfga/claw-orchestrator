@@ -49,6 +49,7 @@ import { EventEmitter } from 'node:events';
 import crypto from 'node:crypto';
 import { createConsoleLogger, type Logger } from '../logger.js';
 import { contractProblems, normalizeContract, type AcceptanceContract } from '../verify/contract.js';
+import { forumTeam, isForumName, normalizeForumConfig, type ForumBinding } from './forum.js';
 import { captureBaseline, treeFingerprint } from '../verify/baseline.js';
 import { needsTestSnapshot, snapshotTests, type TestSnapshot } from '../verify/protected-tests.js';
 import type { SessionManagerLike } from './agent-step.js';
@@ -348,6 +349,8 @@ export interface StartOptions {
    * agents' edits as the starting point.
    */
   baseTests?: TestSnapshot;
+  /** Put this run's agent on another run's forum (a fan-out goal agent's child run). */
+  forum?: ForumBinding;
 }
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -592,6 +595,21 @@ export class RunKernel extends EventEmitter {
   async start(rawSpec: WorkflowSpec, opts: StartOptions = {}): Promise<RunRecord> {
     const spec = prepareSpec(normalizeSpecContracts(rawSpec, opts.contract));
     validateSpec(spec);
+    if (spec.forum !== undefined) {
+      const forum = normalizeForumConfig(spec.forum, `Workflow '${spec.name}': forum`);
+      if (forum) {
+        const bad = forumTeam(spec).filter((n) => !isForumName(n));
+        if (bad.length) {
+          throw new Error(
+            `Workflow '${spec.name}': forum names must be letters, digits, '.', '_' or '-' (at most 64): ${bad.join(', ')}`,
+          );
+        }
+      }
+      spec.forum = forum;
+    }
+    if (opts.forum && !(isValidRunId(opts.forum.runId) && isForumName(opts.forum.agent))) {
+      throw new Error('StartOptions.forum names an invalid run or agent');
+    }
     const runId = opts.runId || `wf-${Date.now().toString(36)}-${crypto.randomBytes(3).toString('hex')}`;
     // Validated here as well as in the store: failing before any directory is
     // created keeps a rejected id from leaving a half-made run behind.
@@ -617,6 +635,7 @@ export class RunKernel extends EventEmitter {
       updatedAt: now,
       nodes,
       costUsd: 0,
+      ...(opts.forum ? { forum: { runId: opts.forum.runId, agent: opts.forum.agent } } : {}),
     };
 
     if (opts.secrets) this._secrets.set(runId, opts.secrets);

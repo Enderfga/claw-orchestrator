@@ -1,0 +1,336 @@
+/**
+ * The run forum: the files the agents' CLI reads and writes, the hub that
+ * copies them into the run and pushes posts, and the forum inside a workflow.
+ *
+ * What these pin: a post's tags, addressees and references are read from its
+ * text; NEW marks what an agent has not seen; the default push reaches only an
+ * agent that an ASK or FAIL names, and only while it is on the forum; the run
+ * directory keeps the forum when the spool is gone; and the metrics say when a
+ * named agent saw a post and when an ASK was answered.
+ */
+
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {
+  ensureForumSpool,
+  forumBrief,
+  ForumHub,
+  forumList,
+  forumMetrics,
+  forumPost,
+  forumRead,
+  forumSpoolDir,
+  forumStoreDir,
+  normalizeForumConfig,
+  parseMentions,
+  parseRefs,
+  parseTags,
+  unreadFor,
+} from '../../kernel/forum.js';
+import { RunKernel } from '../../kernel/engine.js';
+import { registerDefaultExecutors } from '../../kernel/nodes/index.js';
+import type { WorkflowSpec } from '../../kernel/types.js';
+
+let tmp: string;
+const saved = { wf: process.env.CLAWO_WF_DIR, spool: process.env.CLAWO_FORUM_SPOOL_ROOT };
+
+beforeEach(() => {
+  tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'clawo-forum-'));
+  process.env.CLAWO_WF_DIR = path.join(tmp, 'wf');
+  process.env.CLAWO_FORUM_SPOOL_ROOT = path.join(tmp, 'spool');
+});
+
+afterEach(() => {
+  for (const [k, v] of [
+    ['CLAWO_WF_DIR', saved.wf],
+    ['CLAWO_FORUM_SPOOL_ROOT', saved.spool],
+  ] as const) {
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+const RUN = 'wf-forum-test';
+
+describe('reading a post', () => {
+  it('takes tags from the start of the title, addressees from @names, and references from post ids', () => {
+    expect(parseTags('FAIL: shadows flicker')).toEqual(['FAIL']);
+    expect(parseTags('[ASK] WIN what changed')).toEqual(['ASK', 'WIN']);
+    expect(parseTags('Shadows FAIL')).toEqual([]);
+    expect(parseMentions('ASK @lighting and @sound-2. thanks, not an@email')).toEqual(['lighting', 'sound-2']);
+    expect(parseRefs('FIX re p00012 and p00003, not p12')).toEqual(['p00012', 'p00003']);
+  });
+
+  it('refuses a forum config it cannot follow rather than dropping it', () => {
+    expect(normalizeForumConfig(true)).toEqual({});
+    expect(normalizeForumConfig(undefined)).toBeUndefined();
+    expect(normalizeForumConfig({ push: 'all', score: { file: 'check.json' } })).toEqual({
+      push: 'all',
+      score: { file: 'check.json' },
+    });
+    expect(() => normalizeForumConfig({ push: 'sometimes' })).toThrow(/push must be one of/);
+    expect(() => normalizeForumConfig({ score: {} })).toThrow(/needs a file or a command/);
+    expect(() => normalizeForumConfig({ digestMs: 10 })).toThrow(/at least 1000/);
+  });
+});
+
+describe('the CLI side', () => {
+  it('posts with ids in order, lists titles with NEW for what an agent has not seen, and reads one in full', () => {
+    const dir = ensureForumSpool(RUN, {});
+    const ask = forumPost(dir, 'parts', { title: 'ASK @lighting which light rig?', body: 'need the API' });
+    const win = forumPost(dir, 'lighting', { title: 'WIN: baked shadows', body: 'see p00001', re: [] });
+    expect(ask.id).toBe('p00001');
+    expect(ask.tags).toEqual(['ASK']);
+    expect(ask.to).toEqual(['lighting']);
+    expect(win.id).toBe('p00002');
+    expect(win.re).toEqual(['p00001']);
+
+    const before = forumList(dir, 'lighting');
+    expect(before).toMatch(/NEW p00001/);
+    // Its own post is not new to it.
+    expect(before).not.toMatch(/NEW p00002/);
+    expect(forumRead(dir, 'lighting', 'p00001')).toContain('need the API');
+    expect(forumList(dir, 'lighting')).not.toMatch(/NEW p00001/);
+    // Reverse: another agent has still not seen it.
+    expect(forumList(dir, 'sound')).toMatch(/NEW p00001/);
+  });
+
+  it('attaches the score the run configured, from a file in the agent’s directory', () => {
+    const dir = ensureForumSpool(RUN, { score: { file: 'tools/check-last.json' } });
+    const cwd = path.join(tmp, 'work');
+    fs.mkdirSync(path.join(cwd, 'tools'), { recursive: true });
+    fs.writeFileSync(path.join(cwd, 'tools', 'check-last.json'), JSON.stringify({ passed: 7, failed: 2 }));
+    expect(forumPost(dir, 'parts', { title: 'WIN: x', cwd }).score).toEqual({ passed: 7, failed: 2 });
+    // A missing score says so instead of failing the post.
+    const other = path.join(tmp, 'elsewhere');
+    fs.mkdirSync(other);
+    expect(forumPost(dir, 'parts', { title: 'FAIL: y', cwd: other }).score).toMatchObject({
+      error: expect.stringMatching(/score unavailable/),
+    });
+  });
+
+  it('says where to post from when there is no forum', () => {
+    expect(() => forumPost(path.join(tmp, 'nowhere'), 'a', { title: 'WIN' })).toThrow(/No forum/);
+    expect(() => forumPost(ensureForumSpool(RUN, {}), 'bad name', { title: 'WIN' })).toThrow(/Invalid forum name/);
+  });
+});
+
+describe('the hub', () => {
+  function members(hub: ForumHub, names: string[]) {
+    const got: Record<string, string[]> = {};
+    const leave = names.map((n) => {
+      got[n] = [];
+      return hub.join(n, (text) => {
+        got[n].push(text);
+        return true;
+      });
+    });
+    return { got, leaveAll: () => leave.forEach((l) => l()) };
+  }
+
+  it('by default pushes only an ASK or FAIL to the member it names, and nothing else', async () => {
+    const hub = new ForumHub(RUN, {});
+    const { got, leaveAll } = members(hub, ['parts', 'lighting', 'sound']);
+    const dir = forumSpoolDir(RUN);
+    forumPost(dir, 'parts', { title: 'ASK @lighting which rig?' });
+    forumPost(dir, 'parts', { title: 'WIN: 60fps' });
+    forumPost(dir, 'sound', { title: 'NOTE @lighting fyi' });
+    forumPost(dir, 'parts', { title: 'FAIL @sound clipping at 0dB' });
+    await hub.sync();
+    expect(got.lighting).toHaveLength(1);
+    expect(got.lighting[0]).toContain('ASK @lighting which rig?');
+    expect(got.lighting[0]).toContain('not an instruction from the user');
+    expect(got.sound).toHaveLength(1);
+    expect(got.sound[0]).toContain('p00004');
+    expect(got.parts).toHaveLength(0);
+    leaveAll();
+  });
+
+  it('pushes every post by someone else under push: all, and titles in a digest under push: digest', async () => {
+    const all = new ForumHub(RUN, { push: 'all' });
+    const a = members(all, ['x', 'y']);
+    forumPost(forumSpoolDir(RUN), 'x', { title: 'WIN: one' });
+    await all.sync();
+    expect(a.got.y).toHaveLength(1);
+    expect(a.got.x).toHaveLength(0);
+    a.leaveAll();
+
+    const run2 = 'wf-forum-digest';
+    const digest = new ForumHub(run2, { push: 'digest', digestMs: 60_000 });
+    const d = members(digest, ['x', 'y']);
+    forumPost(forumSpoolDir(run2), 'x', { title: 'WIN: two' });
+    forumPost(forumSpoolDir(run2), 'x', { title: 'ASK @y now' });
+    await digest.sync();
+    // The ASK that names y goes at once; the rest waits for the digest.
+    expect(d.got.y).toHaveLength(1);
+    await (digest as unknown as { flushDigests(): Promise<void> }).flushDigests();
+    expect(d.got.y).toHaveLength(2);
+    expect(d.got.y[1]).toMatch(/digest[\s\S]*WIN: two/);
+    d.leaveAll();
+  });
+
+  it('keeps the forum in the run directory, and puts the spool back from it', async () => {
+    const hub = new ForumHub(RUN, {});
+    const { leaveAll } = members(hub, ['a']);
+    forumPost(forumSpoolDir(RUN), 'b', { title: 'FAIL @a broken' });
+    await hub.sync();
+    leaveAll();
+    expect(fs.readFileSync(path.join(forumStoreDir(RUN), 'posts.jsonl'), 'utf8')).toContain('FAIL @a broken');
+
+    fs.rmSync(forumSpoolDir(RUN), { recursive: true, force: true });
+    const dir = ensureForumSpool(RUN, {});
+    expect(forumList(dir, 'c')).toContain('FAIL @a broken');
+    // The next post continues the numbering.
+    expect(forumPost(dir, 'c', { title: 'WIN' }).id).toBe('p00002');
+  });
+
+  it('measures when a named agent saw a post, and when an ASK was answered', async () => {
+    const hub = new ForumHub(RUN, {});
+    const { leaveAll } = members(hub, ['lighting']);
+    const dir = forumSpoolDir(RUN);
+    const ask = forumPost(dir, 'tester', { title: 'ASK @lighting why is the bridge dark?' });
+    forumPost(dir, 'tester', { title: 'FAIL @sound no audio' });
+    await hub.sync();
+    forumPost(dir, 'lighting', { title: 'FIX: bridge lamp re-enabled', re: [ask.id] });
+    await hub.sync();
+    leaveAll();
+    await new Promise((r) => setTimeout(r, 20));
+
+    const m = forumMetrics(RUN);
+    expect(m.posts).toBe(3);
+    expect(m.byTag).toMatchObject({ ASK: 1, FAIL: 1, FIX: 1 });
+    expect(m.asks[0]).toMatchObject({ id: 'p00001', answeredBy: 'lighting', answerId: 'p00003' });
+    expect(m.asks[0].latencyMs).toBeGreaterThanOrEqual(0);
+    expect(m.openAsks).toEqual([]);
+    const toLighting = m.mentions.find((x) => x.to === 'lighting')!;
+    expect(toLighting).toMatchObject({ via: 'push' });
+    // `sound` was never on the forum, so it has not seen the post addressed to it.
+    expect(m.mentions.find((x) => x.to === 'sound')!.seenAt).toBeUndefined();
+    expect(m.unseenMentions).toBe(1);
+    expect(unreadFor(RUN, 'sound').map((p) => p.id)).toEqual(['p00002']);
+  });
+
+  it('tells an agent joining late what is open for it', () => {
+    const dir = ensureForumSpool(RUN, { score: { file: 'x.json' } });
+    forumPost(dir, 'tester', { title: 'FAIL @fix the boat sinks' });
+    forumPost(dir, 'parts', { title: 'ASK @lighting which rig?' });
+    const brief = forumBrief(RUN, 'fix', ['parts', 'lighting', 'tester', 'fix'], {});
+    expect(brief).toContain(`--dir ${forumSpoolDir(RUN)} --as fix`);
+    expect(brief).toContain('with parts, lighting, tester');
+    expect(brief).toMatch(/name you \(@fix\)[\s\S]*p00001 tester: FAIL @fix the boat sinks/);
+    expect(brief).toMatch(/Open ASKs[\s\S]*p00002 parts: ASK @lighting which rig\?/);
+    expect(brief).toMatch(/ASK and FAIL posts that name you \(@fix\) are delivered/);
+  });
+});
+
+describe('a forum in a workflow', () => {
+  /** A manager whose sessions run a script per agent; mid-turn deliveries are recorded. */
+  function scriptedManager(scripts: Record<string, (prompt: string) => Promise<string>>) {
+    const prompts: Record<string, string> = {};
+    const midTurn: Record<string, string[]> = {};
+    const busy = new Set<string>();
+    const agentOf = (session: string) => Object.keys(scripts).find((a) => session.endsWith(`-${a}`)) ?? session;
+    const manager = {
+      startSession: async (config: { name?: string }) => ({ name: config.name }) as never,
+      sendMessage: async (name: string, message: string) => {
+        const agent = agentOf(name);
+        prompts[agent] = message;
+        busy.add(name);
+        try {
+          return { output: await (scripts[agent] ?? (async () => 'ok'))(message), turns: 1 } as never;
+        } finally {
+          busy.delete(name);
+        }
+      },
+      stopSession: async () => undefined,
+      deliverMidTurn: async (name: string, text: string) => {
+        if (!busy.has(name)) return false;
+        (midTurn[agentOf(name)] ??= []).push(text);
+        return true;
+      },
+    };
+    return { manager, prompts, midTurn };
+  }
+
+  const cmdOf = (prompt: string) => {
+    const m = /--dir (\S+) --as (\S+)/.exec(prompt);
+    if (!m) throw new Error('no forum command in the prompt');
+    return { dir: m[1], as: m[2] };
+  };
+
+  it('briefs each fan-out agent, pushes an ASK into the named agent’s turn, and names open ASKs in the result', async () => {
+    const waitFor = async (cond: () => boolean, ms = 5_000) => {
+      const end = Date.now() + ms;
+      while (!cond() && Date.now() < end) await new Promise((r) => setTimeout(r, 50));
+    };
+    const s = scriptedManager({
+      parts: async (prompt) => {
+        const { dir, as } = cmdOf(prompt);
+        forumPost(dir, as, { title: 'ASK @lighting which light rig do you expose?' });
+        await waitFor(() => (s.midTurn.lighting ?? []).length > 0);
+        return 'parts done';
+      },
+      lighting: async () => {
+        await waitFor(() => (s.midTurn.lighting ?? []).length > 0);
+        return 'lighting done';
+      },
+    });
+    const kernel = registerDefaultExecutors(new RunKernel({ manager: s.manager as never, nodeTimeoutMs: 20_000 }));
+    const spec: WorkflowSpec = {
+      name: 'team',
+      cwd: tmp,
+      forum: true,
+      nodes: [
+        {
+          id: 'build',
+          kind: 'fanout',
+          prompt: 'build your part',
+          agents: [
+            { name: 'parts', engine: 'claude' },
+            { name: 'lighting', engine: 'claude' },
+          ],
+        },
+        { id: 'fix', kind: 'agent', prompt: 'fix what is open' },
+      ],
+    };
+    const run = await kernel.start(spec);
+    const done = await kernel.wait(run.runId);
+    expect(done!.state).toBe('completed');
+
+    expect(s.prompts.parts).toMatch(/You are "parts", one agent of a team that shares a forum with lighting, fix/);
+    expect(s.midTurn.lighting).toHaveLength(1);
+    expect(s.midTurn.lighting[0]).toContain('ASK @lighting which light rig do you expose?');
+    // The ASK was never answered, so the node says so, and the next agent is told.
+    const data = done!.nodes.build.data as { forum?: { openAsks: Array<{ id: string }> } };
+    expect(data.forum?.openAsks.map((a) => a.id)).toEqual(['p00001']);
+    const fixPrompt = Object.entries(s.prompts).find(([k]) => k.includes('-fix-'))?.[1];
+    expect(fixPrompt).toMatch(/Open ASKs nobody has answered yet:\n {2}p00001 parts: ASK @lighting/);
+
+    const m = forumMetrics(run.runId);
+    expect(m.mentions[0]).toMatchObject({ to: 'lighting', via: 'push' });
+  });
+
+  it('refuses a forum whose agent names cannot be addressed', async () => {
+    const kernel = registerDefaultExecutors(new RunKernel({ nodeTimeoutMs: 5_000 }));
+    await expect(
+      kernel.start({
+        name: 'bad',
+        cwd: tmp,
+        forum: true,
+        nodes: [{ id: 'f', kind: 'fanout', prompt: 'x', agents: [{ name: 'has space', engine: 'claude' }] }],
+      }),
+    ).rejects.toThrow(/forum names must be/);
+    // Without a forum the same name is not the forum's business.
+    await expect(
+      kernel.start({
+        name: 'bad',
+        cwd: tmp,
+        forum: { push: 'loud' } as never,
+        nodes: [{ id: 'a', kind: 'agent', prompt: 'x' }],
+      }),
+    ).rejects.toThrow(/push must be one of/);
+  });
+});

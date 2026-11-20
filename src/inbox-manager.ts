@@ -2,7 +2,9 @@
  * Cross-session messaging (inbox) manager.
  *
  * Manages message delivery between sessions. Idle sessions receive messages
- * immediately; busy sessions queue for later delivery via deliverInbox().
+ * immediately. A busy session whose engine takes input mid-turn (Claude Code,
+ * `codex-app`) receives it in the turn in flight, at its next tool round; other
+ * busy sessions queue it for later delivery via deliverInbox().
  */
 
 import type { InboxMessage, ISession } from './types.js';
@@ -24,6 +26,11 @@ export interface SessionLookup {
    * written to the session directly.
    */
   deliver?(name: string, text: string): Promise<void>;
+  /**
+   * Hand `text` to the named session's turn in flight. Resolves false when the
+   * session has no turn in flight or no way in mid-turn; the message is then queued.
+   */
+  deliverMidTurn?(name: string, text: string): Promise<boolean>;
 }
 
 export class InboxManager {
@@ -174,6 +181,18 @@ export class InboxManager {
         return 'delivered';
       } catch {
         // Fall through to queue
+      }
+    }
+
+    // Busy: into the turn in flight, where the engine allows it.
+    if (managed.session.isBusy && managed.session.isReady) {
+      const text = this.wrapCrossSessionMessage(msg);
+      const midTurn = lookup.deliverMidTurn
+        ? lookup.deliverMidTurn(sessionName, text)
+        : (managed.session.deliverMidTurn?.(text) ?? Promise.resolve(false));
+      if (await midTurn.catch(() => false)) {
+        msg.read = true;
+        return 'delivered';
       }
     }
 

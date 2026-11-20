@@ -20,7 +20,8 @@ Session A (planner)          SessionManager           Session B (coder)
 
 - **Idle sessions** (ready and not busy) receive messages immediately as a new user turn. The call does not wait for the recipient's reply
 - **A delivered message is an ordinary turn**: it goes through the same send path as `session_send`, so the recipient's spend cap applies and the turn gets its own run-ledger row and a place in the conversation a handoff carries
-- **Busy sessions** have messages queued in an inbox (max 200 messages); so does an idle session whose turn could not start — for example one that has reached its spend cap
+- **Busy sessions whose engine takes input mid-turn** — Claude Code (stream-json input) and `codex-app` (`turn/steer`) — receive the message in the turn in flight. The engine takes it in at its next tool round, so it waits for the tool call that is running, not for the turn to end. Measured on Claude Code 2.1.327: a message delivered while a 35-second command ran reached the model when that command finished, before the next one started. It joins the session's handoff record as a user turn
+- **Other busy sessions** (the one-shot engines between turns) have messages queued in an inbox (max 200 messages); so does an idle session whose turn could not start — for example one that has reached its spend cap
 - **Queued messages wait for a caller**: nothing delivers them on its own. Call `sessionDeliverInbox()` once the session is idle
 - Messages are wrapped in `<cross-session-message>` XML tags
 - Supports broadcast to all sessions via `to: "*"`; a broadcast skips the sender

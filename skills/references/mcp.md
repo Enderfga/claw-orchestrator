@@ -1,6 +1,6 @@
 # MCP integration
 
-Claw Orchestrator ships a Model Context Protocol (MCP) server (`clawo-mcp`) so any MCP-compatible host can drive its 79 tools.
+Claw Orchestrator ships a Model Context Protocol (MCP) server (`clawo-mcp`) so any MCP-compatible host can drive its 81 tools.
 
 This document covers:
 
@@ -42,7 +42,7 @@ Tools fall into a few groups:
 | Codex app-server        | `codex_interrupt`, `codex_steer`, `codex_fork`, `codex_rollback`, `codex_models`, `codex_thread_list`                                                                 |
 | Claude specifics        | `claude_goal_set`, `claude_goal_status`, `claude_goal_clear`, `claude_agents_list`, `plugin_details`                                                                  |
 | Fan-out                 | `fanout_start`, `fanout_status`, `fanout_abort`                                                                                                                       |
-| Workflow & verification | `workflow_start`, `workflow_status`, `workflow_list`, `workflow_resume`, `workflow_cancel`, `workflow_steer`, `workflow_approve`, `verify_run`                        |
+| Workflow & verification | `workflow_start`, `workflow_status`, `workflow_list`, `workflow_resume`, `workflow_cancel`, `workflow_steer`, `workflow_forum`, `workflow_approve`, `verify_run`                        |
 | Ultraapp                | `ultraapp_*` (14 tools) — see [`ultraapp.md`](./ultraapp.md)                                                                                                          |
 | Agent teams             | `team_list`, `team_send`                                                                                                                                              |
 | Maintenance             | `project_purge`                                                                                                                                                       |
@@ -256,7 +256,7 @@ The engines themselves (`claude`, `codex`, `agy`, `grok`, `opencode`, and any AC
 
 ## Tool filtering
 
-80 tools is a lot for a small context window. Reduce noise either at the host level (most hosts have an `include` / `exclude` filter — see Hermes example above) or at the server level via `CLAWO_MCP_TOOLS`:
+81 tools is a lot for a small context window. Reduce noise either at the host level (most hosts have an `include` / `exclude` filter — see Hermes example above) or at the server level via `CLAWO_MCP_TOOLS`:
 
 ```bash
 CLAWO_MCP_TOOLS="session_start,session_send,session_stop,council_start,council_status" clawo-mcp
@@ -287,7 +287,7 @@ For "let the model commission an ultrareview before merging":
 | `readOnlyHint` + `idempotentHint` | `session_list`, `sessions_overview`, `coding_session_status`, `session_grep`, `session_inbox`, `coding_agents_list`, `team_list`, `council_status`, `council_review`, `ultraplan_status`, `ultrareview_status`, `autoloop_status`, `autoloop_list`, `codex_goal_get`, `claude_goal_status`, `claude_agents_list`, `plugin_details`, `codex_models`, `codex_thread_list`, `fanout_status`, `workflow_status`, `workflow_list`, `ultraapp_list`, `ultraapp_get`, `ultraapp_status`                                                                                        |
 | `destructiveHint`                 | `session_stop`, `council_abort`, `council_accept`, `council_reject`, `autoloop_stop`, `project_purge`, `codex_interrupt`, `codex_rollback`, `fanout_abort`, `workflow_cancel`, `ultraapp_build_cancel`, `ultraapp_promote_version`, `ultraapp_stop_container`, `ultraapp_delete`                                                                                                                                                                                                                                                                                        |
 | `openWorldHint`                   | `session_start`, `session_send`, `session_handoff`, `team_send`, `session_send_to`, `session_deliver_inbox`, `council_start`, `council_inject`, `ultraplan_start`, `ultrareview_start`, `autoloop_start`, `autoloop_chat`, `autoloop_resume`, `codex_resume`, `codex_review`, `codex_goal_set`, `codex_goal_resume`, `session_compact`, `claude_goal_set`, `codex_steer`, `fanout_start`, `workflow_start`, `workflow_resume`, `workflow_approve`, `verify_run`, `ultraapp_new`, `ultraapp_answer`, `ultraapp_add_file`, `ultraapp_spec_edit`, `ultraapp_build_start`, `ultraapp_feedback` |
-| none                              | `autoloop_reset_agent`, `autoloop_rebind_role`, `codex_goal_pause`, `codex_goal_clear`, `session_update_tools`, `session_switch_model`, `claude_goal_clear`, `codex_fork`, `workflow_steer`, `ultraapp_start_container`                                                                                                                                                                                                                                                                                                                                                                         |
+| none                              | `autoloop_reset_agent`, `autoloop_rebind_role`, `codex_goal_pause`, `codex_goal_clear`, `session_update_tools`, `session_switch_model`, `claude_goal_clear`, `codex_fork`, `workflow_steer`, `workflow_forum`, `ultraapp_start_container`                                                                                                                                                                                                                                                                                                                                                                         |
 
 Every registered tool has an entry. A hint that is not set takes the MCP default — not read-only, destructive, open-world — so the tools in the last row are advertised at the defaults, and so is each unset hint in the other rows.
 

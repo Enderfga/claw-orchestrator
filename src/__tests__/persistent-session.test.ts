@@ -1042,6 +1042,28 @@ describe('PersistentClaudeSession', () => {
       expect(result).toHaveProperty('requestId');
       expect(result).toHaveProperty('sent', true);
     });
+
+    // A message written while a turn runs is folded into it at the next tool
+    // round (measured on 2.1.327); it must not restart the turn's accounting.
+    it('delivers mid-turn only while one of its messages is unanswered, without resetting the turn', async () => {
+      const writes = () => mockProc.stdin.write.mock.calls.length;
+      const before = writes();
+      expect(await session.deliverMidTurn('note')).toBe(false);
+      expect(writes()).toBe(before);
+
+      await session.send('do the work');
+      const internals = session as unknown as { _turnApplied: { in: number } };
+      internals._turnApplied.in = 5;
+      expect(await session.deliverMidTurn('FORUM: a teammate posted')).toBe(true);
+      const payload = JSON.parse((mockProc.stdin.write.mock.calls.at(-1)![0] as string).trim());
+      expect(payload.type).toBe('user');
+      expect(payload.uuid).toEqual(expect.any(String));
+      expect(payload.message.content[0].text).toBe('FORUM: a teammate posted');
+      expect(internals._turnApplied.in).toBe(5);
+      // Reverse: a send starts a new turn's accounting.
+      await session.send('next');
+      expect(internals._turnApplied.in).toBe(0);
+    });
   });
 
   describe('stderr sanitization', () => {

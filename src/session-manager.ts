@@ -160,6 +160,7 @@ import {
 } from './kernel/templates/index.js';
 import type { KernelEvent, RunRecord, RunState, WorkflowSpec } from './kernel/types.js';
 import { contractProblems, normalizeContract } from './verify/contract.js';
+import { ensureForumSpool, forumMetrics, forumPost, forumSnapshot, resolveForum } from './kernel/forum.js';
 import { runContract } from './verify/runner.js';
 import {
   evidenceDir,
@@ -1957,6 +1958,52 @@ export class SessionManager {
     const record = this.kernel.get(runId);
     if (!record) throw new Error(`Workflow run '${runId}' not found`);
     return record;
+  }
+
+  /**
+   * The run forum from outside the team (`kernel/forum.ts`): list its posts, read
+   * one, post to it, or measure it. A run that is a fan-out goal agent's child
+   * reaches its parent's forum. Reading here is not an agent's read and is not
+   * recorded as one. A post is taken in by the forum's hub while the run is live
+   * in this process, and pushed to its members by the same rules as theirs.
+   */
+  workflowForum(args: {
+    runId: string;
+    action: 'list' | 'read' | 'post' | 'metrics';
+    postId?: string;
+    title?: string;
+    body?: string;
+    as?: string;
+  }): unknown {
+    const record = this.kernel.get(args.runId);
+    if (!record) throw new Error(`Workflow run '${args.runId}' not found`);
+    const forum = resolveForum(record);
+    if (!forum) throw new Error(`Workflow run '${args.runId}' has no forum (set \`forum\` on its spec)`);
+    const runId = forum.runId;
+    if (args.action === 'metrics') return forumMetrics(runId);
+    const { posts } = forumSnapshot(runId);
+    if (args.action === 'list') {
+      return posts.map((p) => ({
+        id: p.id,
+        ts: p.ts,
+        from: p.from,
+        tags: p.tags,
+        to: p.to,
+        title: p.title,
+        score: p.score,
+      }));
+    }
+    if (args.action === 'read') {
+      const post = posts.find((p) => p.id === args.postId);
+      if (!post) throw new Error(`No post ${String(args.postId)} on the forum of run '${runId}'`);
+      return post;
+    }
+    if (args.action === 'post') {
+      if (!args.title) throw new Error('A post needs a title');
+      const dir = ensureForumSpool(runId, forum.config);
+      return forumPost(dir, args.as ?? 'orchestrator', { title: args.title, body: args.body, cwd: record.cwd });
+    }
+    throw new Error(`Unknown forum action '${String(args.action)}'`);
   }
 
   workflowList(query: { workflow?: string; state?: RunState; limit?: number } = {}): RunSummary[] {
@@ -3837,7 +3884,25 @@ export class SessionManager {
       exists: (name) => this.sessions.has(name),
       allNames: () => this.sessions.keys(),
       deliver: (name, text) => this._deliverInboxTurn(name, text),
+      deliverMidTurn: (name, text) => this.deliverMidTurn(name, text),
     };
+  }
+
+  /**
+   * Hand `text` to the named session's turn in flight (`ISession.deliverMidTurn`).
+   * False when there is no such session, no turn in flight, or the engine has no
+   * way in mid-turn. What is delivered joins the session's handoff record as a
+   * user turn, since the engine now holds it as one.
+   */
+  async deliverMidTurn(name: string, text: string): Promise<boolean> {
+    const managed = this.sessions.get(name);
+    if (!managed?.session.deliverMidTurn) return false;
+    const ok = await managed.session.deliverMidTurn(text).catch(() => false);
+    if (ok) {
+      managed.transcript ??= newTranscript();
+      recordExchange(managed.transcript, 'user', text);
+    }
+    return ok;
   }
 
   /**

@@ -142,6 +142,7 @@
       "workflow_resume",
       "workflow_cancel",
       "workflow_steer",
+      "workflow_forum",
       "workflow_approve",
       "verify_run",
       "council_start",
