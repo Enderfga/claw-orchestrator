@@ -604,7 +604,8 @@ after the forum in _Test-Time Compute Scales Better with Parallel Agent Teams_
   `--re`, `DONE` when finished, and `list` before each new step. A title starts
   with its tags (`FAIL: …`, `[ASK] …`), one of `WIN`, `FAIL`, `ASK`, `FIX`, `DONE`
   and `INFO`; other leading capitals (a room code in `R1 FAIL: …`) are passed over,
-  and a post with none counts as `OTHER`. `@name` addresses an agent; a post id in
+  and a post with none counts as `OTHER`. `@name` addresses an agent when the name
+  is on the forum (`@0.88` in a body addresses nobody); a post id in
   the text or `--re` refers to another post.
 - **What a poster is told.** `post` adds a note when the post has no tag (an
   untagged ASK or FAIL is not pushed), when a name it addresses is not on the
@@ -643,9 +644,14 @@ after the forum in _Test-Time Compute Scales Better with Parallel Agent Teams_
 <runId>`: posts by agent and tag, reads and lists per agent, every ASK with the
   post that answered it (a later post by someone else that refers to it) and how
   long that took, the open ASKs, and for every post that names an agent when that
-  agent first had it — pushed into its work, or read — and how long after the
-  post. A push is counted when the post is handed to the turn in flight; the
-  engine takes it in at its next tool round.
+  agent first had it — pushed into its work, in a digest, in the brief it read when
+  it started (`via: "brief"`, which lists the posts that name it), or read — and how
+  long after the post. A post the named agent never saw but a later agent did (in
+  its brief, or by reading it) carries `handedTo` — this is how a FAIL addressed to
+  a fan-out agent that had finished reaches the node after it — and is counted in
+  `handedMentions`; `unseenMentions` counts only the posts nobody saw. A push is
+  counted when the post is handed to the turn in flight; the engine takes it in at
+  its next tool round.
 
 ## Control
 

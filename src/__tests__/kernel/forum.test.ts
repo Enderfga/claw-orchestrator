@@ -312,7 +312,9 @@ describe('a forum in a workflow', () => {
     expect(fixPrompt).toMatch(/Open ASKs nobody has answered yet:\n {2}p00001 parts: ASK @lighting/);
 
     const m = forumMetrics(run.runId);
-    expect(m.mentions[0]).toMatchObject({ to: 'lighting', via: 'push' });
+    // The agents start together, so lighting can have the ASK in its brief before the push reaches its turn.
+    expect(m.mentions[0].to).toBe('lighting');
+    expect(['push', 'brief']).toContain(m.mentions[0].via);
   });
 
   it('refuses a forum whose agent names cannot be addressed', async () => {
@@ -443,5 +445,76 @@ describe('after the first full run', () => {
       ['fix', tmp],
       ['ship', tmp],
     ]);
+  });
+});
+
+describe('after the runs on 7.28.0', () => {
+  it('addresses only members of the forum, so a number after @ is not a recipient', () => {
+    const dir = ensureForumSpool(RUN, {});
+    // A spool written for a run whose team is known.
+    fs.writeFileSync(
+      path.join(dir, 'config.json'),
+      JSON.stringify({ runId: RUN, team: [{ name: 'feel', node: 'build', mayReturn: false }] }),
+    );
+    const post = forumPost(dir, 'look', { title: 'INFO @feel contrast', body: 'aim for @0.88, ask @ghost' });
+    expect(post.to).toEqual(['feel']);
+    const notes = forumPostNotes(dir, post).join('\n');
+    expect(notes).toMatch(/@ghost is not on this forum/);
+    expect(notes).not.toMatch(/0\.88/);
+  });
+
+  it('counts a mention as delivered when it reached the agent in its brief, or a later node instead', async () => {
+    const posts: Record<string, () => void> = {};
+    const manager = {
+      startSession: async (config: { name?: string }) => ({ name: config.name }) as never,
+      sendMessage: async (name: string, message: string) => {
+        const m = /--dir (\S+) --as (\S+)/.exec(message)!;
+        const who = m[2];
+        if (who === 'direction') forumPost(m[1], who, { title: 'INFO @feel build the jump', body: 'gravity @0.88' });
+        if (who === 'tester') forumPost(m[1], who, { title: 'FAIL @feel jump is too short' });
+        posts[who] = () => undefined;
+        return { output: 'ok', turns: 1 } as never;
+      },
+      stopSession: async () => undefined,
+    };
+    const kernel = registerDefaultExecutors(new RunKernel({ manager: manager as never, nodeTimeoutMs: 20_000 }));
+    const run = await kernel.start({
+      name: 'team',
+      cwd: tmp,
+      forum: true,
+      nodes: [
+        { id: 'direction', kind: 'agent', prompt: 'd' },
+        { id: 'build', kind: 'fanout', prompt: 'b', agents: [{ name: 'feel', engine: 'claude' }] },
+        { id: 'test', kind: 'fanout', prompt: 't', agents: [{ name: 'tester', engine: 'claude' }] },
+        { id: 'fix', kind: 'agent', prompt: 'f' },
+      ],
+    });
+    expect((await kernel.wait(run.runId))!.state).toBe('completed');
+    await new Promise((r) => setTimeout(r, 50));
+
+    const m = forumMetrics(run.runId);
+    // The number was never a recipient, not even in metrics.
+    expect(m.mentions.map((x) => x.to)).toEqual(['feel', 'feel']);
+    // The INFO reached feel in its brief when it started.
+    expect(m.mentions[0]).toMatchObject({ id: 'p00001', to: 'feel', via: 'brief' });
+    // The FAIL came after feel had finished; it reached the fix node in its brief.
+    expect(m.mentions[1].seenAt).toBeUndefined();
+    expect(m.mentions[1].handedTo).toMatchObject({ who: 'fix', via: 'brief' });
+    expect(m.unseenMentions).toBe(0);
+    expect(m.handedMentions).toBe(1);
+
+    // A post written before only members were addressees still names the number; the metrics leave it out.
+    const old = {
+      id: 'p00003',
+      ts: new Date().toISOString(),
+      from: 'look',
+      title: 'INFO',
+      body: '@0.88',
+      tags: ['INFO'],
+      to: ['0.88'],
+      re: [],
+    };
+    fs.appendFileSync(path.join(forumSpoolDir(run.runId), 'posts.jsonl'), JSON.stringify(old) + '\n');
+    expect(forumMetrics(run.runId).mentions.map((x) => x.to)).toEqual(['feel', 'feel']);
   });
 });

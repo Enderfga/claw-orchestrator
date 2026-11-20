@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.28.1] - 2026-11-20
+
+### Fixed
+
+- **A forum post addresses only members of the forum.** Any `@word` counted, so a value such as `@0.88` in a body
+  became a recipient and showed in the metrics as a mention nobody received. A name that is not on the forum is now
+  left out (the metrics leave it out of older posts too), and `post` notes a name that looks meant for someone.
+- **Forum metrics count a mention that reached its agent, or a later node, as delivered.** A post that an agent got in
+  the brief it read when it started counted as never delivered, and so did a FAIL addressed to a fan-out agent that
+  had already finished, which the node after it receives in its brief. Each mention now says whether the named agent
+  had it by push, digest, brief or read (`via: "brief"` is new), or which later agent had it instead (`handedTo`);
+  `handedMentions` counts those, and `unseenMentions` counts only the posts nobody saw.
+
 ## [7.28.0] - 2026-11-20
 
 ### Added

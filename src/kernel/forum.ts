@@ -89,7 +89,7 @@ export interface ForumPost {
   body: string;
   /** Leading ALLCAPS words of the title (`WIN`, `FAIL`, `ASK`, …). */
   tags: string[];
-  /** `@name`s in the title or body. */
+  /** `@name`s in the title or body that are on the forum (all of them when the team is not known). */
   to: string[];
   /** Post ids it refers to, from `--re` or `p00012` in the text. */
   re: string[];
@@ -99,7 +99,8 @@ export interface ForumPost {
 export type ForumEvent =
   | { ts: string; type: 'read'; who: string; id: string }
   | { ts: string; type: 'list'; who: string }
-  | { ts: string; type: 'delivered'; who: string; id: string; via: 'push' | 'digest' }
+  /** `brief`: listed in the brief the agent read when it joined (the title, as a digest gives it). */
+  | { ts: string; type: 'delivered'; who: string; id: string; via: 'push' | 'digest' | 'brief' }
   /** `cwd`: the directory the agent works in, where its score is read. */
   | { ts: string; type: 'join'; who: string; cwd?: string }
   | { ts: string; type: 'leave'; who: string };
@@ -324,6 +325,15 @@ function readScore(source: ForumScoreSource | undefined, cwd: string): unknown {
   return `${compact.slice(0, MAX_SCORE_CHARS - 1)}…`;
 }
 
+/**
+ * The forum members a text addresses. Only members: `@0.88` in a body is a
+ * number, not a recipient, and counting it made a post look undelivered.
+ */
+function addressees(text: string, as: string, team: ForumMember[] | undefined): string[] {
+  const named = parseMentions(text).filter((n) => n !== as);
+  return team ? named.filter((n) => team.some((m) => m.name === n)) : named;
+}
+
 /** The directory `as` last joined the forum from: where its score is. */
 function joinedCwd(dir: string, as: string): string | undefined {
   const events = readJsonl<ForumEvent>(path.join(dir, EVENTS));
@@ -361,7 +371,7 @@ export function forumPost(
         title,
         body,
         tags: parseTags(title),
-        to: parseMentions(text).filter((n) => n !== as),
+        to: addressees(text, as, config.team),
         re,
         ...(score === undefined ? {} : { score }),
       };
@@ -421,13 +431,19 @@ export function forumPostNotes(dir: string, post: ForumPost): string[] {
   }
   const team = config.team;
   if (!team) return notes;
+  // A name that is not on the forum is not an addressee; one that looks like a
+  // name (not `@0.88`) gets a note, since it was probably meant as one.
+  for (const name of parseMentions(`${post.title}\n${post.body}`)) {
+    if (name !== post.from && /[A-Za-z]/.test(name) && !team.some((m) => m.name === name)) {
+      notes.push(
+        `@${name} is not on this forum, so nobody was addressed by it; its members are ${team.map((m) => m.name).join(', ')}.`,
+      );
+    }
+  }
   const states = memberStates(readJsonl<ForumEvent>(path.join(dir, EVENTS)));
   for (const name of post.to) {
     const member = team.find((m) => m.name === name);
-    if (!member) {
-      notes.push(`@${name} is not on this forum; its members are ${team.map((m) => m.name).join(', ')}.`);
-      continue;
-    }
+    if (!member) continue;
     const state = states.get(name);
     if (state === 'finished') {
       notes.push(
@@ -624,6 +640,27 @@ export function forumBrief(runId: string, self: string, teammates: string[], con
     ...section('FAIL posts so far:', fails),
   ];
   if (brief.length) lines.push('', `The forum already has ${view.posts.length} posts.`, ...brief);
+  // On record, so the metrics count a post that reached an agent in its brief
+  // as delivered, to it or to a later node in place of the agent it named.
+  const shown = [forYou, open, fails].flatMap((ps) => ps.slice(-20).map((p) => p.id));
+  if (shown.length) {
+    const ts = new Date().toISOString();
+    try {
+      const spool = forumSpoolDir(runId);
+      fs.mkdirSync(spool, { recursive: true });
+      for (const id of new Set(shown)) {
+        appendLine(path.join(spool, EVENTS), {
+          ts,
+          type: 'delivered',
+          who: self,
+          id,
+          via: 'brief',
+        } satisfies ForumEvent);
+      }
+    } catch {
+      // The record of a brief is for the metrics; the brief itself is already written.
+    }
+  }
   return lines.join('\n');
 }
 
@@ -946,10 +983,20 @@ export interface ForumMetrics {
     to: string;
     at: string;
     seenAt?: string;
-    via?: 'push' | 'digest' | 'read';
+    /** `brief`: in the brief it read when it started, which lists the posts that name it. */
+    via?: 'push' | 'digest' | 'brief' | 'read';
     latencyMs?: number;
+    /**
+     * Set when the named agent never saw it and an agent that started after the
+     * post did instead — in its brief, or by reading it. A FAIL addressed to a
+     * fan-out agent that had finished reaches the node after it this way.
+     */
+    handedTo?: { who: string; via: 'brief' | 'read'; at: string };
   }>;
+  /** Mentions that nobody saw: not the named agent, and no agent that started after the post. */
   unseenMentions: number;
+  /** Mentions that the named agent never saw, but a later agent did (`handedTo`). */
+  handedMentions: number;
 }
 
 export function forumMetrics(runId: string): ForumMetrics {
@@ -987,15 +1034,35 @@ export function forumMetrics(runId: string): ForumMetrics {
         ...(ans ? { answeredBy: ans.from, answerId: ans.id, latencyMs: ms(p.ts, ans.ts) } : {}),
       };
     });
+  // Posts written before only members were addressees can name anything; the
+  // team, when the run is known, keeps a number after @ out of the counts.
+  const owner = loadRun(runId);
+  const team = owner ? new Set(forumTeam(owner.spec)) : undefined;
+  const byTime = (a: { ts: string }, b: { ts: string }) => (a.ts < b.ts ? -1 : 1);
+  const seen = view.events
+    .filter((e): e is Extract<ForumEvent, { id: string }> => e.type === 'read' || e.type === 'delivered')
+    .sort(byTime);
+  const joins = view.events.filter((e) => e.type === 'join');
   const mentions: ForumMetrics['mentions'] = [];
   for (const p of view.posts) {
     for (const to of p.to) {
-      const first = view.events
-        .filter(
-          (e): e is Extract<ForumEvent, { id: string }> =>
-            (e.type === 'read' || e.type === 'delivered') && e.who === to && e.id === p.id,
-        )
-        .sort((a, b) => (a.ts < b.ts ? -1 : 1))[0];
+      if (team && !team.has(to)) continue;
+      const first = seen.find((e) => e.who === to && e.id === p.id);
+      // Otherwise: an agent that started after the post and had it in its brief, or read it.
+      const handed = first
+        ? undefined
+        : seen.find(
+            (e) =>
+              e.id === p.id &&
+              e.who !== to &&
+              e.who !== p.from &&
+              e.ts >= p.ts &&
+              // A brief is written as an agent starts, so one that lists the post is a later
+              // agent's; a read counts when its reader joined after the post.
+              (e.type === 'delivered'
+                ? e.via === 'brief'
+                : joins.some((j) => j.who === e.who && j.ts >= p.ts && j.ts <= e.ts)),
+          );
       mentions.push({
         id: p.id,
         from: p.from,
@@ -1003,6 +1070,9 @@ export function forumMetrics(runId: string): ForumMetrics {
         at: p.ts,
         ...(first
           ? { seenAt: first.ts, via: first.type === 'read' ? 'read' : first.via, latencyMs: ms(p.ts, first.ts) }
+          : {}),
+        ...(handed
+          ? { handedTo: { who: handed.who, via: handed.type === 'read' ? 'read' : 'brief', at: handed.ts } }
           : {}),
       });
     }
@@ -1014,7 +1084,8 @@ export function forumMetrics(runId: string): ForumMetrics {
     asks,
     openAsks: asks.filter((a) => !a.answerId).map((a) => a.id),
     mentions,
-    unseenMentions: mentions.filter((m) => !m.seenAt).length,
+    unseenMentions: mentions.filter((m) => !m.seenAt && !m.handedTo).length,
+    handedMentions: mentions.filter((m) => !m.seenAt && m.handedTo).length,
   };
 }
 
