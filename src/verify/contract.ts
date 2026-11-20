@@ -14,6 +14,8 @@
  * steps. Nothing in the kernel reads a contract out of a node's result.
  */
 
+import { createHash } from 'node:crypto';
+
 /** Argv form only — there is no shell string anywhere, so there is nothing to inject into. */
 export interface CommandCheck {
   type: 'command';
@@ -260,6 +262,92 @@ export function normalizeContract(raw: unknown): AcceptanceContract | undefined 
     fixOnFailureRounds: num(r.fixOnFailureRounds),
     ...(r.protectTests === false ? { protectTests: false } : {}),
   };
+}
+
+// ─── Which rules ────────────────────────────────────────────────────────────
+
+/**
+ * JSON with object keys sorted at every level and no whitespace, so the same
+ * value always serialises the same way. `undefined` members are left out, as
+ * `JSON.stringify` does; arrays keep their order, because the order of checks
+ * is the order they run in.
+ */
+export function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null';
+  if (Array.isArray(value)) return `[${value.map((v) => (v === undefined ? 'null' : canonicalJson(v))).join(',')}]`;
+  const obj = value as Record<string, unknown>;
+  const keys = Object.keys(obj)
+    .filter((k) => obj[k] !== undefined)
+    .sort();
+  return `{${keys.map((k) => `${JSON.stringify(k)}:${canonicalJson(obj[k])}`).join(',')}}`;
+}
+
+/** Versions the fingerprint itself: a change to what it covers must not match an older fingerprint. */
+const FINGERPRINT_SCHEME = 'clawo-contract/1';
+
+/**
+ * What a contract asks of the work: each check's spec and whether it is
+ * required, in order, and whether tests are protected. Left out: the contract's
+ * `id` and each check's `id`, which are names (a maintainer can keep a name
+ * while changing what it checks, or rename without changing it), and
+ * `fixOnFailureRounds`, which is how hard the run tries to pass, not what
+ * passing means. Defaults are not filled in, so a contract that spells one out
+ * fingerprints differently from one that leaves it implicit: two fingerprints
+ * that match are the same rules; two that differ may still be equivalent.
+ */
+function rulesOf(contract: AcceptanceContract): unknown {
+  return {
+    scheme: FINGERPRINT_SCHEME,
+    checks: contract.checks.map(checkRules),
+    protectTests: contract.protectTests !== false,
+  };
+}
+
+function checkRules(check: ContractCheck): unknown {
+  return { spec: check.spec, required: check.required !== false };
+}
+
+const sha256 = (text: string): string => `sha256:${createHash('sha256').update(text).digest('hex')}`;
+
+/**
+ * A digest of a contract's rules (see `rulesOf`), for the run record, the verdict
+ * and every evidence bundle. It covers the contract as declared: the command
+ * lines, paths and arguments of its checks, not the content of the programs or
+ * files those checks run. A judge script that changes while the command that
+ * runs it stays the same keeps the fingerprint; name its version in the command,
+ * or check its digest in a check of its own.
+ */
+export function contractFingerprint(contract: AcceptanceContract): string {
+  return sha256(canonicalJson(rulesOf(contract)));
+}
+
+/**
+ * How the rules of `next` relate to those of `prev`: `same`; `adds-checks` (every
+ * check of `prev` is in `next`, unchanged, and `next` has more), so passing `next`
+ * implies passing `prev` but not the reverse; `removes-checks`, the converse; or
+ * `changed`. A check whose spec or `required` changed is a different check, and
+ * a change to `protectTests` is a change.
+ */
+export function compareContracts(
+  prev: AcceptanceContract,
+  next: AcceptanceContract,
+): 'same' | 'adds-checks' | 'removes-checks' | 'changed' {
+  if (contractFingerprint(prev) === contractFingerprint(next)) return 'same';
+  if ((prev.protectTests !== false) !== (next.protectTests !== false)) return 'changed';
+  const count = (c: AcceptanceContract) => {
+    const m = new Map<string, number>();
+    for (const check of c.checks) {
+      const k = canonicalJson(checkRules(check));
+      m.set(k, (m.get(k) ?? 0) + 1);
+    }
+    return m;
+  };
+  const a = count(prev);
+  const b = count(next);
+  const within = (x: Map<string, number>, y: Map<string, number>) => [...x].every(([k, n]) => (y.get(k) ?? 0) >= n);
+  if (within(a, b)) return 'adds-checks';
+  if (within(b, a)) return 'removes-checks';
+  return 'changed';
 }
 
 /** True when every required check passed. Non-required failures are recorded, not fatal. */

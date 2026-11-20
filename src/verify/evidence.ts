@@ -21,6 +21,12 @@ export interface EvidenceBundle {
   /** Node that produced it, or `'run'` for a standalone `verify_run`. */
   node: string;
   contractId?: string;
+  /**
+   * Fingerprint of the rules these checks ran under (`contractFingerprint`), so
+   * two bundles can be told apart when a contract kept its `id` and changed its
+   * checks. Absent on bundles from before fingerprints: unknown, not inferred.
+   */
+  contractHash?: string;
   createdAt: string;
   cwd: string;
   baseSha?: string;
@@ -98,6 +104,7 @@ export interface WriteEvidenceArgs {
   cwd: string;
   baseSha?: string;
   contractId?: string;
+  contractHash?: string;
   results: CheckResult[];
   rounds: number;
   logger?: Logger;
@@ -125,6 +132,7 @@ export async function writeEvidence(args: WriteEvidenceArgs): Promise<EvidenceBu
     runId: args.runId,
     node: args.node,
     contractId: args.contractId,
+    ...(args.contractHash ? { contractHash: args.contractHash } : {}),
     createdAt: new Date().toISOString(),
     cwd: args.cwd,
     baseSha: args.baseSha,

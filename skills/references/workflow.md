@@ -71,7 +71,10 @@ called, files it wrote — before doing it again. A `goal` node that picks its
 thread back up has that conversation already and gets no note.
 
 Resume is explicit — `workflow_resume` or `clawo workflow resume` — not automatic.
-Resuming a run that already ended returns it unchanged. Custom-engine configs are
+Resuming a run that already ended returns it unchanged. A resume re-checks with the
+contract the run started with; rules a caller declares at the resume are recorded as
+drift when they differ, never applied, and every resume is listed on the run
+(`resumes`) — see [verification.md](./verification.md#which-rules-a-verdict-was-reached-under). Custom-engine configs are
 never written to disk (they can carry credentials), so a run whose agents used one
 is resumed through `workflow_resume` with `agentCustomEngineRefs:
 { "<agent>": "<REF>" }`, each config read as JSON from `CLAWO_CUSTOM_ENGINE_<REF>`

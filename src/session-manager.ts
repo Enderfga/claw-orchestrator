@@ -159,7 +159,7 @@ import {
   splitAgentSecrets,
 } from './kernel/templates/index.js';
 import type { KernelEvent, RunRecord, RunState, WorkflowSpec } from './kernel/types.js';
-import { contractProblems, normalizeContract } from './verify/contract.js';
+import { contractFingerprint, contractProblems, normalizeContract } from './verify/contract.js';
 import { ensureForumSpool, forumMetrics, forumPost, forumSnapshot, resolveForum } from './kernel/forum.js';
 import { runContract } from './verify/runner.js';
 import {
@@ -2022,8 +2022,20 @@ export class SessionManager {
    * A run that used one cannot be resumed in a fresh process without them,
    * because they were never written down.
    */
-  async workflowResume(runId: string, opts: { secrets?: Record<string, unknown> } = {}): Promise<RunRecord> {
-    return this.kernel.resume(runId, { secrets: opts.secrets });
+  /**
+   * Resume a run. `contract` / `nodeContracts` declare the rules as the caller
+   * holds them now: they are never applied (the run is verified with the rules
+   * it started with), and rules that differ are recorded on the resume as drift.
+   */
+  async workflowResume(
+    runId: string,
+    opts: { secrets?: Record<string, unknown>; contract?: unknown; nodeContracts?: Record<string, unknown> } = {},
+  ): Promise<RunRecord> {
+    return this.kernel.resume(runId, {
+      secrets: opts.secrets,
+      ...(opts.contract !== undefined ? { contract: opts.contract } : {}),
+      ...(opts.nodeContracts ? { nodeContracts: opts.nodeContracts } : {}),
+    });
   }
 
   workflowSteer(runId: string, text: string): { steered: boolean } {
@@ -2084,6 +2096,7 @@ export class SessionManager {
       cwd: args.cwd,
       baseSha: args.baseSha,
       contractId: contract.id,
+      contractHash: contractFingerprint(contract),
       results,
       rounds,
       logger: this.logger,

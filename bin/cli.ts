@@ -629,6 +629,10 @@ program
   .option('--state <state>', 'Filter by run state (list)')
   .option('--workflow <name>', 'Filter by workflow name (list)')
   .option('--limit <n>', 'Max rows (list)', '25')
+  .option(
+    '--contract <file>',
+    'resume: the run contract as you hold it now; a difference is recorded as drift, never applied',
+  )
   .option('--json', 'Raw JSON output')
   .action(async (action: string, runId: string | undefined, text: string | undefined, opts) => {
     if (action === 'list') {
@@ -663,6 +667,20 @@ program
       const run = r.run as Record<string, unknown>;
       console.log(`${String(run.runId)}  ${String(run.workflow)}  ${String(run.state)} / ${String(run.outcome)}`);
       if (run.error) console.log(`error: ${String(run.error)}`);
+      // Execution, resumes and verification, reported apart.
+      const { runReport } = await import('../src/kernel/projections.js');
+      const report = runReport(run as never);
+      const v = report.verification;
+      console.log(
+        `execution ${report.execution}  ·  resumed ${report.resume.count}x  ·  verification ${v.outcome}` +
+          (v.contractHash ? ` under ${v.contractHash}` : '') +
+          (v.runContractHash && v.runContractHash !== v.contractHash ? `  (run contract ${v.runContractHash})` : ''),
+      );
+      if (v.contractDrift) {
+        console.log(
+          `rules drift at a resume: declared ${v.contractDrift.declared} (${v.contractDrift.relation}); verified under ${v.contractDrift.checkpoint}`,
+        );
+      }
       for (const node of Object.values(run.nodes as Record<string, Record<string, unknown>>)) {
         console.log(`  ${String(node.id).padEnd(18)} ${String(node.kind).padEnd(11)} ${String(node.state)}`);
         // A goal runs for hours; its checkpoint is the only progress there is.
@@ -680,7 +698,13 @@ program
     }
 
     if (action === 'cancel' || action === 'resume') {
-      const r = await api(`/workflow/${encodeURIComponent(runId)}/${action}`, 'POST', {});
+      // A declared contract is never applied: the run verifies with the one it
+      // started with, and a difference is recorded on the resume as drift.
+      const body =
+        action === 'resume' && opts.contract
+          ? { contract: JSON.parse(fs.readFileSync(path.resolve(opts.contract), 'utf8')) }
+          : {};
+      const r = await api(`/workflow/${encodeURIComponent(runId)}/${action}`, 'POST', body);
       if (!r.ok) return fail(r);
       console.log(JSON.stringify(r, null, 2));
       return;

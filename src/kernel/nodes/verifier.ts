@@ -16,6 +16,7 @@ import { runDir } from '../store.js';
 import type { NodeSpec, VerifierNode } from '../types.js';
 import { evidenceDir, makeEvidenceId, writeEvidence } from '../../verify/evidence.js';
 import { runContract, type FixerSpawner } from '../../verify/runner.js';
+import { contractFingerprint } from '../../verify/contract.js';
 
 function makeFixer(ctx: NodeContext, nodeId: string): FixerSpawner | undefined {
   if (!ctx.manager) return undefined;
@@ -58,6 +59,8 @@ export async function executeVerifierNode(node: NodeSpec, ctx: NodeContext): Pro
 
   // Both counters: `attempts` restarts at 1 on every fresh visit, so on its own
   // it names the same bundle on every pass through a repair loop.
+  // The rules these checks run under, named on the bundle and the verdict.
+  const contractHash = contractFingerprint(contract);
   const nodeRecord = ctx.record.nodes[spec.id];
   const evidenceId = makeEvidenceId(spec.id, nodeRecord?.visits ?? 1, nodeRecord?.attempts ?? 1);
   const dir = runDir(ctx.runId);
@@ -87,6 +90,7 @@ export async function executeVerifierNode(node: NodeSpec, ctx: NodeContext): Pro
     cwd,
     baseSha: ctx.record.baseSha,
     contractId: contract.id,
+    contractHash,
     results,
     rounds,
     logger: ctx.logger,
@@ -96,6 +100,7 @@ export async function executeVerifierNode(node: NodeSpec, ctx: NodeContext): Pro
   return {
     ok: passed,
     passed,
+    contractHash,
     evidenceId: bundle.evidenceId,
     treeFingerprint: bundle.treeFingerprint,
     // The digest above was taken here, which is `spec.cwd` when the node

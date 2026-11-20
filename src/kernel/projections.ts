@@ -14,7 +14,14 @@
 
 import type { AgentResponse, CouncilSession, EngineType, UltraplanResult, UltrareviewResult } from '../types.js';
 import type { FanoutAgentResult, FanoutSession } from '../fanout.js';
-import type { NodeRecord, RunRecord, RunState } from './types.js';
+import {
+  isTerminalRunState,
+  type ContractDrift,
+  type NodeRecord,
+  type RunRecord,
+  type RunResume,
+  type RunState,
+} from './types.js';
 
 /** Node id used by every single-node legacy workflow, so projections know where to look. */
 export const LEGACY_NODE = 'main';
@@ -48,6 +55,67 @@ export interface CouncilNodeData {
   agents: CouncilSession['config']['agents'];
   maxRounds: number;
   projectDir: string;
+}
+
+/**
+ * A run's three answers, kept apart: did its nodes run to the end
+ * (`execution`), how often and from where was it resumed (`resume`), and did the
+ * work pass which rules (`verification`). A resume that went fine and a
+ * verdict that passed are different facts; so are verdicts under different
+ * rules, which are never folded into one.
+ *
+ * Fingerprints a record does not have are `unknown`, never computed after the
+ * fact: a record from before fingerprints cannot show which rules its evidence
+ * ran under, and saying so is the only honest report.
+ */
+export interface RunReport {
+  execution: 'completed' | 'failed' | 'cancelled' | 'running' | 'unknown';
+  resume: { count: number; last?: RunResume };
+  verification: {
+    outcome: RunRecord['outcome'];
+    outcomeReason?: string;
+    evidenceId?: string;
+    node?: string;
+    /** The rules the current verdict was reached under. */
+    contractHash?: string;
+    /** The run-level contract the run started with; absent when it has none. */
+    runContractHash?: string;
+    nodeContractHashes?: Record<string, string>;
+    /** The latest resume whose declared rules differed from the run's; the verdict is under the run's. */
+    contractDrift?: ContractDrift;
+  };
+}
+
+export function runReport(record: RunRecord): RunReport {
+  const resumes = record.resumes ?? [];
+  const drift = [...resumes].reverse().find((r) => r.contractDrift)?.contractDrift;
+  const verifierNodes = (record.spec?.nodes ?? []).filter(
+    (n) => n.kind === 'verifier' && n.contract && n.contract !== 'run',
+  );
+  return {
+    execution: record.execution ?? (isTerminalRunState(record.state) ? 'unknown' : 'running'),
+    resume: { count: resumes.length, ...(resumes.length ? { last: resumes[resumes.length - 1] } : {}) },
+    verification: {
+      outcome: record.outcome,
+      ...(record.outcomeReason ? { outcomeReason: record.outcomeReason } : {}),
+      ...(record.verdict
+        ? {
+            evidenceId: record.verdict.evidenceId,
+            node: record.verdict.node,
+            contractHash: record.verdict.contractHash ?? 'unknown',
+          }
+        : {}),
+      ...(record.spec?.contract ? { runContractHash: record.contractHashes?.run ?? 'unknown' } : {}),
+      ...(verifierNodes.length
+        ? {
+            nodeContractHashes: Object.fromEntries(
+              verifierNodes.map((n) => [n.id, record.contractHashes?.nodes?.[n.id] ?? 'unknown']),
+            ),
+          }
+        : {}),
+      ...(drift ? { contractDrift: drift } : {}),
+    },
+  };
 }
 
 export function toCouncilSession(record: RunRecord): CouncilSession {

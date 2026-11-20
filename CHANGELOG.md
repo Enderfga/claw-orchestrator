@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A verdict names the rules it was reached under, and a resume keeps them.** A contract's `id` is a name a
+  maintainer can keep while changing what the contract checks, so the rules are now named by a fingerprint of their
+  content: `sha256` over a canonical serialisation of each check's spec and whether it is required, in order, and
+  whether tests are protected. Ids, the repair budget, key order and whitespace do not change it. It is recorded on
+  the run record when the run starts (`contractHashes`, for the run's contract and each verifier node's), on the
+  verdict, and in every evidence bundle, `verify_run`'s included. A resume always re-checks with the contracts the
+  run started with. `workflow_resume` (and `clawo workflow resume <id> --contract <file>`) can declare the contract,
+  and per-node contracts (`nodeContracts`), as the caller holds them now; when the rules differ, the resume records
+  `contractDrift` (both fingerprints, and whether checks were added, removed or changed) and does not apply them.
+  `workflow_status` and `clawo workflow show` report a run's execution, its resumes and its verification apart, so a
+  run that resumed cleanly and failed its checks reads `execution: completed` with `outcome: refuted`. Records and
+  bundles from earlier versions report the fingerprint as `unknown`. The fingerprint covers the contract as
+  declared, not the content of the programs its checks run.
 - **`autoloop_status` lists the messages a paused run is holding.** While a run is paused, messages for its agents
   are parked and delivered on resume, but nothing showed what was waiting, so an operator deciding whether to
   resume or stop could not see what resuming would deliver. The status now carries `parked`: one entry per held

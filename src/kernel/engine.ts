@@ -48,7 +48,13 @@
 import { EventEmitter } from 'node:events';
 import crypto from 'node:crypto';
 import { createConsoleLogger, type Logger } from '../logger.js';
-import { contractProblems, normalizeContract, type AcceptanceContract } from '../verify/contract.js';
+import {
+  compareContracts,
+  contractFingerprint,
+  contractProblems,
+  normalizeContract,
+  type AcceptanceContract,
+} from '../verify/contract.js';
 import { forumTeam, isForumName, normalizeForumConfig, type ForumBinding } from './forum.js';
 import { captureBaseline, treeFingerprint } from '../verify/baseline.js';
 import { needsTestSnapshot, snapshotTests, type TestSnapshot } from '../verify/protected-tests.js';
@@ -83,6 +89,8 @@ import {
   type NodeSpec,
   type RunOutcome,
   type RunRecord,
+  type RunResume,
+  type ContractDrift,
   type WorkflowSpec,
 } from './types.js';
 
@@ -110,6 +118,8 @@ export interface NodeResult {
   evidenceId?: string;
   /** Verifier nodes only: whether the contract passed. */
   passed?: boolean;
+  /** Verifier nodes only: fingerprint of the rules the checks ran under. */
+  contractHash?: string;
   /** Verifier nodes only: the tree digest at the moment the checks finished. */
   treeFingerprint?: string;
   /**
@@ -394,6 +404,44 @@ function normalizeSpecContracts(spec: WorkflowSpec, override: unknown): Workflow
 }
 
 /**
+ * Fingerprints of the contracts a normalised spec carries: the run-level one and
+ * each verifier node's inline one. Undefined when it carries none.
+ */
+function specContractHashes(spec: WorkflowSpec): RunRecord['contractHashes'] {
+  const nodes: Record<string, string> = {};
+  for (const n of spec.nodes) {
+    if (n.kind === 'verifier' && n.contract && n.contract !== 'run') nodes[n.id] = contractFingerprint(n.contract);
+  }
+  const run = spec.contract ? contractFingerprint(spec.contract) : undefined;
+  if (!run && Object.keys(nodes).length === 0) return undefined;
+  return { ...(run ? { run } : {}), ...(Object.keys(nodes).length ? { nodes } : {}) };
+}
+
+/**
+ * Compare the rules a caller declares at a resume with the ones the run started
+ * with. The run's own are compared by content, so a run from before fingerprints
+ * is compared too, and reported with `checkpoint: 'unknown'` rather than a
+ * fingerprint computed after the fact. Undefined drift: the same rules.
+ */
+function declaredDrift(
+  declaredRaw: unknown,
+  stored: AcceptanceContract | undefined,
+  storedHash: string | undefined,
+  what: string,
+): { declared: string; drift?: ContractDrift } {
+  const declared = normalizeContract(declaredRaw);
+  if (!declared) {
+    const problems = contractProblems(declaredRaw).filter((p) => !p.endsWith('(optional, dropped)'));
+    throw new Error(`${what} was refused: ${problems.join('; ') || 'no recognised checks'}`);
+  }
+  const hash = contractFingerprint(declared);
+  const checkpoint = storedHash ?? 'unknown';
+  if (!stored) return { declared: hash, drift: { checkpoint, declared: hash, relation: 'added' } };
+  const relation = compareContracts(stored, declared);
+  return relation === 'same' ? { declared: hash } : { declared: hash, drift: { checkpoint, declared: hash, relation } };
+}
+
+/**
  * Reject a spec that cannot execute correctly, before anything runs.
  *
  * These are all mistakes that used to surface much later and much worse: a
@@ -637,6 +685,9 @@ export class RunKernel extends EventEmitter {
       costUsd: 0,
       ...(opts.forum ? { forum: { runId: opts.forum.runId, agent: opts.forum.agent } } : {}),
     };
+    // The rules this run is verified under, named once, here.
+    const contractHashes = specContractHashes(spec);
+    if (contractHashes) record.contractHashes = contractHashes;
 
     if (opts.secrets) this._secrets.set(runId, opts.secrets);
     if (opts.tag) this._tags.set(runId, opts.tag);
@@ -674,7 +725,20 @@ export class RunKernel extends EventEmitter {
    */
   async resume(
     runId: string,
-    opts: { restart?: boolean; secrets?: Record<string, unknown>; tag?: string } = {},
+    opts: {
+      restart?: boolean;
+      secrets?: Record<string, unknown>;
+      tag?: string;
+      /**
+       * The run contract as the caller holds it now. Never applied: the run is
+       * verified with the contract it started with. A declaration whose rules
+       * differ is recorded on this resume as drift, so the verdict says which
+       * rules it was reached under and the difference is on record.
+       */
+      contract?: unknown;
+      /** The same, for verifier nodes with an inline contract, by node id. */
+      nodeContracts?: Record<string, unknown>;
+    } = {},
   ): Promise<RunRecord> {
     if (opts.secrets) this._secrets.set(runId, opts.secrets);
     if (opts.tag) this._tags.set(runId, opts.tag);
@@ -696,6 +760,39 @@ export class RunKernel extends EventEmitter {
     if (isTerminalRunState(record.state) && !opts.restart) return record;
     // Claim it: two processes resuming the same run would each execute its
     // nodes, with every side effect happening twice.
+    // A declared contract is checked before the run is claimed: one that cannot
+    // be parsed is refused, as it would be at a start.
+    const resumeEntry: RunResume = {
+      at: new Date().toISOString(),
+      ...(opts.restart && isTerminalRunState(record.state) ? { restart: true } : {}),
+      interruptedNodes: Object.values(record.nodes)
+        .filter((n) => n.state === 'running')
+        .map((n) => n.id),
+    };
+    if (opts.contract !== undefined) {
+      const d = declaredDrift(
+        opts.contract,
+        record.spec.contract,
+        record.contractHashes?.run,
+        'The declared acceptance contract',
+      );
+      resumeEntry.declaredContract = d.declared;
+      if (d.drift) resumeEntry.contractDrift = d.drift;
+    }
+    for (const [nodeId, raw] of Object.entries(opts.nodeContracts ?? {})) {
+      const node = record.spec.nodes.find((n) => n.id === nodeId);
+      if (!node || node.kind !== 'verifier' || !node.contract || node.contract === 'run') {
+        throw new Error(`Run '${runId}' has no verifier node '${nodeId}' with a contract of its own`);
+      }
+      const d = declaredDrift(
+        raw,
+        node.contract,
+        record.contractHashes?.nodes?.[nodeId],
+        `The contract declared for '${nodeId}'`,
+      );
+      if (d.drift) (resumeEntry.nodeContractDrift ??= {})[nodeId] = d.drift;
+    }
+
     const guard = acquireLease(runId, this.ownerId);
     const { txn, signal } = this._open(guard, record);
     const pendingSteers = this._unconsumedSteers(runId);
@@ -703,6 +800,8 @@ export class RunKernel extends EventEmitter {
     const wasTerminal = isTerminalRunState(record.state);
     if (
       !txn.apply((draft) => {
+        draft.resumes = [...(draft.resumes ?? []), resumeEntry];
+        if (opts.restart && wasTerminal) draft.execution = undefined;
         for (const n of Object.values(draft.nodes)) {
           if (n.state === 'running' || (opts.restart && wasTerminal)) {
             // A node found running started and did not finish: whatever it did
@@ -967,7 +1066,17 @@ export class RunKernel extends EventEmitter {
     handle.done.catch(() => undefined);
   }
 
-  private _setRunState(handle: RunHandle, state: RunRecord['state'], error?: string): boolean {
+  /**
+   * `execution` says whether the nodes ran to the end, apart from the verdict: a
+   * terminal state names it unless the caller does (`_finish` passes `completed`
+   * for a run that finished its nodes and then failed its contract).
+   */
+  private _setRunState(
+    handle: RunHandle,
+    state: RunRecord['state'],
+    error?: string,
+    execution?: NonNullable<RunRecord['execution']>,
+  ): boolean {
     const txn = handle.txn;
     const ts = new Date().toISOString();
     const terminal = isTerminalRunState(state);
@@ -978,7 +1087,11 @@ export class RunKernel extends EventEmitter {
         draft.updatedAt = ts;
         if (error) draft.error = error;
         // Terminal states carry `endedAt`; this is the one place that stamps it.
-        if (terminal) draft.endedAt = ts;
+        if (terminal) {
+          draft.endedAt = ts;
+          draft.execution =
+            execution ?? (state === 'completed' ? 'completed' : state === 'cancelled' ? 'cancelled' : 'failed');
+        }
       },
       [{ ts, type: 'run_state', state, outcome, error }],
     );
@@ -1219,7 +1332,14 @@ export class RunKernel extends EventEmitter {
       if (!result.ok) {
         this._setNodeState(handle, nodeId, 'failed', { error: result.error });
         if ((spec.onFailure ?? 'fail') === 'fail') {
-          await this._finish(handle, `node '${nodeId}' failed: ${result.error ?? 'unknown'}`);
+          // A verifier whose checks ran and refuted the work stopped the run on a
+          // verdict, not on a fault: execution completed, verification failed.
+          const verdictStop = spec.kind === 'verifier' && !!result.evidenceId && result.passed === false;
+          await this._finish(
+            handle,
+            `node '${nodeId}' failed: ${result.error ?? 'unknown'}`,
+            verdictStop ? 'completed' : undefined,
+          );
           return txn.record;
         }
         // `continue` — record it and move on.
@@ -1443,6 +1563,7 @@ export class RunKernel extends EventEmitter {
             treeFingerprint: result.treeFingerprint,
             fingerprintCwd: result.fingerprintCwd,
             sideEffectSeq: draft.sideEffectSeq ?? 0,
+            ...(result.contractHash ? { contractHash: result.contractHash } : {}),
           };
         }
         draft.updatedAt = ts;
@@ -1457,7 +1578,11 @@ export class RunKernel extends EventEmitter {
    * a run with no contract completes as `unverified`, which says we did not check
    * rather than claiming success.
    */
-  private async _finish(handle: RunHandle, error?: string): Promise<void> {
+  private async _finish(
+    handle: RunHandle,
+    error?: string,
+    execution?: NonNullable<RunRecord['execution']>,
+  ): Promise<void> {
     const txn = handle.txn;
     let outcome: RunOutcome = txn.record.outcome;
     let downgrade: string | undefined;
@@ -1495,13 +1620,18 @@ export class RunKernel extends EventEmitter {
       if (txn.finished) return;
     }
 
-    if (error || outcome === 'refuted') {
-      this._setRunState(handle, 'failed', error ?? 'acceptance contract was not satisfied');
+    if (error) {
+      this._setRunState(handle, 'failed', error, execution);
+      return;
+    }
+    // From here every node ran: whatever the verdict, execution completed.
+    if (outcome === 'refuted') {
+      this._setRunState(handle, 'failed', 'acceptance contract was not satisfied', 'completed');
       return;
     }
     const unchecked = this._runContractUnchecked(txn.record);
     if (unchecked) {
-      this._setRunState(handle, 'failed', unchecked);
+      this._setRunState(handle, 'failed', unchecked, 'completed');
       return;
     }
     this._setRunState(handle, 'completed');

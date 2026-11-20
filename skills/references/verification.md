@@ -116,7 +116,7 @@ attempt share its bundle, which records how many were used:
 ```
 ~/.claw-orchestrator/wf/<runId>/evidence/<evidenceId>/
   bundle.json        verdict, per-check results, fix rounds, changed files,
-                     base/head SHA, tree digest
+                     base/head SHA, tree digest, contract id and fingerprint
   checks/<id>.log    output tail for each failed check
   diff.patch         the patch the run produced, new files included
   shot-<label>.png   screenshots, when a screenshot check ran
@@ -227,6 +227,60 @@ the stored evidence: the bundle is written to
 `~/.claw-orchestrator/wf/<label>/evidence/verify-01/`, and `clawo verify <label>`
 reads it back. A later call with the same label writes over it. It writes no ledger
 row and starts no workflow run.
+
+## Which rules a verdict was reached under
+
+A contract's `id` is a name; a maintainer can keep it while changing what the
+contract checks. So the rules themselves are named by a fingerprint,
+`sha256:<hex>` over a canonical serialisation (keys sorted at every level, no
+whitespace) of what the contract asks of the work: each check's spec and whether
+it is required, in order, and whether tests are protected. The contract's `id`,
+each check's `id` and `fixOnFailureRounds` (how hard the run tries, not what
+passing means) are left out. `required`, `protectTests` and a file check's
+`exists` are normalised before hashing, so spelling out their defaults changes
+nothing; other defaults inside a check — a timeout, a working directory — are
+not filled in, so a contract that spells one out fingerprints differently from
+one that leaves it implicit. Two matching fingerprints are always the same
+rules; two different ones may still be equivalent.
+
+The fingerprint covers the contract as declared — command lines, paths,
+arguments — not the content of the programs and files the checks run. A judge
+script that changes while the command that runs it stays the same keeps the
+fingerprint. To pin the judge too, name its version in the command, or check its
+digest in a check of its own.
+
+Where it is recorded:
+
+- `contractHashes` on the run record, at start: the run-level contract's
+  (`run`) and each verifier node's inline one (`nodes`, by id). They never change.
+- `contractHash` on the verdict (`verdict.contractHash`) and on every evidence
+  bundle, including a standalone `verify_run`, so bundles under one label or one
+  contract `id` can be told apart.
+
+**A resume re-checks with the rules the run started with.** The contract is part
+of the run's checkpoint, and a resume never swaps it. `workflow_resume` (and
+`clawo workflow resume <id> --contract <file>`) can declare the contract as the
+caller holds it now; when its rules differ, the resume records `contractDrift`
+— the run's fingerprint, the declared one, and how they relate (`adds-checks`,
+`removes-checks`, `changed`, or `added` when the run had no contract) — and the
+run still verifies under its own. A verdict under the declared rules is a
+separate check (`verify_run`), kept as its own bundle with its own fingerprint;
+the two are never merged into one conclusion. Only when the newer rules add
+checks to the older ones (`adds-checks`) does a pass under the newer imply a pass
+under the older; nothing else carries a verdict from one version to another.
+
+**Execution, resumes and verification are reported apart.** `workflow_status`
+returns `execution` (`completed`: every node ran, or the run stopped on a
+verdict; `failed`: a node error, a gate rejected, a loop bound; `cancelled`),
+`resume` (how many, and the last one with the nodes it found interrupted and any
+drift) and `verification` (the outcome, the evidence and node behind it, the
+fingerprint it was reached under, the run's contract fingerprint, and the latest
+drift). `clawo workflow show` prints the same. A run that resumed cleanly and
+failed its checks reads `execution: completed` with `outcome: refuted`.
+
+A record or bundle from before fingerprints reports `unknown` for them. They are
+not computed after the fact: evidence cannot show which rules it ran under if it
+was not written down when it ran.
 
 ## Three outcomes, not two
 

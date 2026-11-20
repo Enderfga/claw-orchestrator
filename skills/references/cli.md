@@ -304,7 +304,7 @@ goes into the running turn.
 ```bash
 clawo workflow list [--state <s>] [--workflow <name>] [--limit N] [--json]
 clawo workflow show <runId> [--json]
-clawo workflow resume <runId>          # re-attach to a run whose process died
+clawo workflow resume <runId> [--contract <file>]   # re-attach to a run whose process died
 clawo workflow cancel <runId>
 clawo workflow steer <runId> "<text>"  # a correction for the next agent node, or into a running goal
 clawo workflow approve <runId> [reject]
@@ -316,6 +316,13 @@ is not a failure.
 
 `approve` answers the gate a run is parked on: it approves unless the last
 argument is `reject`, `false` or `no`.
+
+`resume --contract <file>` declares the run contract as you hold it now. It is
+never applied — the run is verified with the contract it started with — and if
+its rules differ, the resume records the drift (see
+[verification.md](./verification.md#which-rules-a-verdict-was-reached-under)).
+`show` prints execution, resumes and verification on separate lines, with the
+fingerprint of the rules behind the verdict.
 
 Runs survive restarts, so `list` sees runs started by other processes and by
 earlier sessions.

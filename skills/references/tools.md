@@ -953,7 +953,10 @@ Codex `/goal` on one `codex-app` thread, then the contract, then repairs on the 
 
 `{ runId, events? }` → run state, per-node status, `outcome`, `outcomeReason`,
 `verdict`, `evidenceId`, `costUsd`, `consensusVotes`, and the last N events when
-`events` is given.
+`events` is given; plus three answers kept apart: `execution` (did the nodes run to
+the end), `resume` (`count` and the `last` resume) and `verification` (outcome,
+evidence, and the fingerprints of the rules behind the verdict and of the run's
+contract, with any `contractDrift`; `unknown` on a record from before fingerprints).
 
 `outcome` is `verified` (a contract passed), `refuted` (it failed), or
 `unverified` (**nothing checked the work**, which is not the same as a failure):
@@ -967,10 +970,13 @@ changed after it or an abandoned attempt was still running, in which case
 - `workflow_list({ workflow?, state?, limit? })` — newest first (`limit` default 25), survives
   restarts. `state` is one of `pending`, `running`, `awaiting_human`, `verifying`, `completed`,
   `failed`, `cancelled`.
-- `workflow_resume({ runId, agentCustomEngineRefs? })` — nodes already succeeded are not re-run;
-  the node that was in flight is retried, because a half-finished node left no result to trust.
-  A run whose agents used a custom engine needs `agentCustomEngineRefs`
+- `workflow_resume({ runId, agentCustomEngineRefs?, contract?, nodeContracts? })` — nodes already
+  succeeded are not re-run; the node that was in flight is retried, because a half-finished node left
+  no result to trust. A run whose agents used a custom engine needs `agentCustomEngineRefs`
   (`{ "<agent>": "<REF>" }`, resolved from `CLAWO_CUSTOM_ENGINE_<REF>` on the orchestrator's host).
+  `contract` (and `nodeContracts`, by verifier node id) declare the rules as you hold them now: never
+  applied, and when they differ from the run's the result carries `contractDrift` (see
+  [verification.md](./verification.md#which-rules-a-verdict-was-reached-under)).
 - `workflow_cancel({ runId })` → `{ cancelled }`.
 - `workflow_steer({ runId, text })` → `{ steered }` — the text is **prepended** to the next agent
   node's prompt. Steers not yet consumed are delivered after a restart too.

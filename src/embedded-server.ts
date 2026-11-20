@@ -1144,8 +1144,19 @@ export class EmbeddedServer {
               json(200, { ok: true, ...this.manager.workflowCancel(runId) });
               return;
             case 'resume': {
-              const record = await this.manager.workflowResume(runId);
-              json(200, { ok: true, runId: record.runId, state: record.state });
+              const record = await this.manager.workflowResume(runId, {
+                ...(body.contract !== undefined ? { contract: body.contract } : {}),
+                ...(body.nodeContracts && typeof body.nodeContracts === 'object'
+                  ? { nodeContracts: body.nodeContracts as Record<string, unknown> }
+                  : {}),
+              });
+              const last = record.resumes?.at(-1);
+              json(200, {
+                ok: true,
+                runId: record.runId,
+                state: record.state,
+                ...(last?.contractDrift ? { contractDrift: last.contractDrift } : {}),
+              });
               return;
             }
             case 'steer':

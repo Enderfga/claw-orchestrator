@@ -162,6 +162,28 @@ describe('verifyRun', () => {
     expect(fs.existsSync(path.join(tmp, 'wf', rec.runId, 'evidence'))).toBe(false);
   });
 
+  it('names the rules each standalone check ran under, so two versions under one label stay apart', async () => {
+    fs.writeFileSync(path.join(tmp, 'present.txt'), 'x');
+    const v1 = await manager.verifyRun({
+      cwd: tmp,
+      label: 'rules',
+      contract: { checks: [{ type: 'file', path: 'present.txt' }] },
+    });
+    const v2 = await manager.verifyRun({
+      cwd: tmp,
+      label: 'rules',
+      contract: {
+        checks: [
+          { type: 'file', path: 'present.txt' },
+          { type: 'command', cmd: 'true' },
+        ],
+      },
+    });
+    expect(v1.contractHash).toMatch(/^sha256:/);
+    expect(v2.contractHash).toMatch(/^sha256:/);
+    expect(v2.contractHash).not.toBe(v1.contractHash);
+  });
+
   // A second check under the same label used to overwrite the first bundle (both were verify-01).
   it('keeps every check under a reused label, the newest with the highest number', async () => {
     fs.writeFileSync(path.join(tmp, 'present.txt'), 'x');

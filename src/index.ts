@@ -34,6 +34,7 @@ import {
 } from './kernel/templates/index.js';
 import { isValidRunId, readEvents as readKernelEvents } from './kernel/store.js';
 import { resolveSecretRefs } from './kernel/secrets.js';
+import { runReport } from './kernel/projections.js';
 import type { RunState, WorkflowSpec } from './kernel/types.js';
 import { AUTOLOOP_TIMEOUT_SCHEMA, validateAutoloopTimeoutConfig } from './autoloop/types.js';
 
@@ -1592,6 +1593,8 @@ const plugin = {
           error: record.error,
           nodes: record.nodes,
           consensusVotes: record.consensusVotes,
+          // The same run, answered three ways that are kept apart.
+          ...runReport(record),
           events: limit ? readKernelEvents(record.runId, limit) : undefined,
         };
       },
@@ -1635,6 +1638,15 @@ const plugin = {
               'Per-agent custom-engine credentials, by name: { "<agent>": "<REF>" }. The orchestrator resolves each REF from CLAWO_CUSTOM_ENGINE_<REF> on its own host — the credentials themselves are never persisted with the run and never travel here. Required to resume a run whose agents used a custom engine.',
             additionalProperties: { type: 'string' },
           },
+          contract: {
+            type: 'object',
+            description:
+              'The run contract as you hold it now. Never applied: the run is verified with the contract it started with. If its rules differ, the difference is recorded on this resume as drift (with how the two versions relate) and returned.',
+          },
+          nodeContracts: {
+            type: 'object',
+            description: 'The same for verifier nodes with an inline contract, by node id.',
+          },
         },
         required: ['runId'],
       },
@@ -1642,8 +1654,18 @@ const plugin = {
         const refs = args.agentCustomEngineRefs as Record<string, string> | undefined;
         const record = await getManager().workflowResume(args.runId as string, {
           secrets: refs ? { agentCustomEngines: resolveSecretRefs(refs) } : undefined,
+          ...(args.contract !== undefined ? { contract: args.contract } : {}),
+          ...(args.nodeContracts ? { nodeContracts: args.nodeContracts as Record<string, unknown> } : {}),
         });
-        return { ok: true, runId: record.runId, state: record.state, currentNode: record.currentNode };
+        const last = record.resumes?.at(-1);
+        return {
+          ok: true,
+          runId: record.runId,
+          state: record.state,
+          currentNode: record.currentNode,
+          ...(last?.contractDrift ? { contractDrift: last.contractDrift } : {}),
+          ...(last?.nodeContractDrift ? { nodeContractDrift: last.nodeContractDrift } : {}),
+        };
       },
     });
 

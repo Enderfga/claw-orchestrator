@@ -392,6 +392,33 @@ export interface ConsensusVote {
   source: 'strict' | 'variant' | 'none';
 }
 
+/** One resume of a run: what it found interrupted, and the rules a caller declared for it. */
+export interface RunResume {
+  at: string;
+  /** `restart`: a finished run started again from the top. */
+  restart?: boolean;
+  /** Nodes that were running when the previous process stopped; they run again from the beginning. */
+  interruptedNodes: string[];
+  /** Fingerprint of the run contract the caller declared at this resume, when it declared one. */
+  declaredContract?: string;
+  /**
+   * Set when the declared rules differ from the ones the run started with. The run
+   * still verifies with its own (`checkpoint`); a verdict under the declared rules
+   * is a separate check (`verify_run`), never merged into this run's.
+   */
+  contractDrift?: ContractDrift;
+  /** The same, per verifier node with an inline contract that the caller declared. */
+  nodeContractDrift?: Record<string, ContractDrift>;
+}
+
+export interface ContractDrift {
+  /** The fingerprint recorded when the run started, or `unknown` for a run from before fingerprints. */
+  checkpoint: string;
+  declared: string;
+  /** How the declared rules relate to the run's (`compareContracts`), `added` when the run had none. */
+  relation: 'adds-checks' | 'removes-checks' | 'changed' | 'added';
+}
+
 export interface RunRecord {
   runId: string;
   /**
@@ -443,7 +470,29 @@ export interface RunRecord {
     /** Where that digest was taken — a verifier may declare its own cwd. */
     fingerprintCwd?: string;
     sideEffectSeq: number;
+    /**
+     * Fingerprint of the rules this verdict was reached under (`contractFingerprint`).
+     * Absent on verdicts from before fingerprints, which are reported as unknown.
+     */
+    contractHash?: string;
   };
+  /**
+   * Fingerprints of the contracts the run was started with: the run-level one
+   * and each verifier node's inline one, by node id. Written at start and never
+   * changed: a resume re-checks with these rules, whatever is declared then.
+   * Absent on runs from before fingerprints.
+   */
+  contractHashes?: { run?: string; nodes?: Record<string, string> };
+  /**
+   * Whether the run's nodes ran to the end, kept apart from whether the work
+   * passed its contract (`outcome`). `completed` with `outcome: 'refuted'` is a
+   * run that finished and failed its checks; `failed` is one that did not get
+   * through its nodes (a node error, a gate rejected, a loop bound). Set when the
+   * run ends; absent on runs from before this field.
+   */
+  execution?: 'completed' | 'failed' | 'cancelled';
+  /** Every resume of this run, oldest first. */
+  resumes?: RunResume[];
   /**
    * Count of node results absorbed from kinds that can touch the workspace —
    * every kind but `verifier`, `router` and `human_gate` (`SIDE_EFFECT_KINDS` in
