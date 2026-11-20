@@ -2732,9 +2732,10 @@ export class SessionManager {
     }
     // Council, fan-out, ultraplan and ultrareview no longer have timers or maps
     // to tear down here: the kernel owns their lifecycle, and `shutdown` on it
-    // cancels every live run. Four separate 30-minute TTL closures used to sit
+    // stops every live run and leaves it suspended, to be resumed — a process
+    // stopping is not a cancel. Four separate 30-minute TTL closures used to sit
     // in this method, each capturing `this`.
-    // Autoloops included: cancelling their run stops the loop, which shuts down
+    // Autoloops included: stopping their run stops the loop, which shuts down
     // its three persistent agents. One teardown path for every mode.
     if (this._kernel) await this._kernel.shutdown();
     // Stop all sessions

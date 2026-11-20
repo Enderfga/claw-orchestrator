@@ -134,6 +134,8 @@ export interface FanoutSession {
   /** Every agent turn and the synthesis pass, summed — the fan-out's share of its run's cost. */
   costUsd?: number;
   error?: string;
+  /** Set while the process running it has stopped and the run waits for `workflow_resume`; `status` still reads `running`. */
+  suspended?: { at: string; reason: string };
 }
 
 export const DEFAULT_AGENT_TIMEOUT_MS = 600_000;

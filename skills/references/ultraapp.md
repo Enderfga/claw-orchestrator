@@ -321,8 +321,9 @@ and restored on startup. Builds run one at a time, first in, first out. Only one
 process owns the queue: restoring it takes a lease, and a process that cannot
 take the lease starts with an empty queue.
 
-A build that was in flight when the process died goes back to the **front** of
-the queue. When it runs again, its workflow run resumes from the last stage it
+A build that was in flight when the process died, or when it stopped cleanly
+(SIGTERM, SIGINT: the build's run is suspended, not cancelled), goes back to the
+**front** of the queue. When it runs again, its workflow run resumes from the last stage it
 finished (see [The build is a workflow run](#the-build-is-a-workflow-run)), so a
 finished council is not paid for twice. A build started again after it completed,
 failed or was cancelled is a fresh run under the same id.

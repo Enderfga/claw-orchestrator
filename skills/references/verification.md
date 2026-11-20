@@ -271,7 +271,8 @@ under the older; nothing else carries a verdict from one version to another.
 
 **Execution, resumes and verification are reported apart.** `workflow_status`
 returns `execution` (`completed`: every node ran, or the run stopped on a
-verdict; `failed`: a node error, a gate rejected, a loop bound; `cancelled`),
+verdict; `failed`: a node error, a gate rejected, a loop bound; `cancelled`;
+`running`; `suspended`: its process stopped and it waits for a resume),
 `resume` (how many, and the last one with the nodes it found interrupted and any
 drift) and `verification` (the outcome, the evidence and node behind it, the
 fingerprint it was reached under, the run's contract fingerprint, and the latest

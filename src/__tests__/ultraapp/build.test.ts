@@ -147,6 +147,25 @@ describe('durable queue', () => {
     expect(seen).toEqual(['run-a', 'run-b']);
   });
 
+  it('keeps a build whose run was suspended by a shutdown as the one in flight, and starts nothing else', async () => {
+    // The process is stopping: the build's run is left for the next process to
+    // resume, so the queue must neither forget it nor start the next build here.
+    const seen: string[] = [];
+    const q = new UltraappBuildQueue({
+      statePath,
+      worker: async (runId) => {
+        seen.push(runId);
+        return 'suspended';
+      },
+    });
+    await q.enqueue('run-a');
+    await q.enqueue('run-b');
+    await vi.waitFor(() => expect(seen).toEqual(['run-a']));
+    await new Promise((r) => setTimeout(r, 30));
+    expect(seen).toEqual(['run-a']);
+    expect(JSON.parse(fs.readFileSync(statePath, 'utf8'))).toMatchObject({ current: 'run-a', pending: ['run-b'] });
+  });
+
   it('refuses to take builds a live OTHER process already owns', async () => {
     // Two owners restoring the same file would each run every build — every side
     // effect twice.

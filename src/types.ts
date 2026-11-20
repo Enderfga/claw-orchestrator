@@ -890,6 +890,8 @@ export interface UltraplanResult {
   startTime: string;
   endTime?: string;
   error?: string;
+  /** Set while the process running it has stopped and the run waits for `workflow_resume`; `status` still reads `running`. */
+  suspended?: { at: string; reason: string };
 }
 
 export interface UltrareviewResult {
@@ -901,6 +903,8 @@ export interface UltrareviewResult {
   startTime: string;
   endTime?: string;
   error?: string;
+  /** Set while the process running it has stopped and the run waits for `workflow_resume`; `status` still reads `running`. */
+  suspended?: { at: string; reason: string };
 }
 
 // ─── Council Types ──────────────────────────────────────────────────────────
@@ -989,6 +993,8 @@ export interface CouncilSession {
   error?: string;
   /** Every agent turn summed, as each send measured it — the council's share of its run's cost. */
   costUsd?: number;
+  /** Set while the process running it has stopped and the run waits for `workflow_resume`; `status` still reads `running`. */
+  suspended?: { at: string; reason: string };
 }
 
 // ─── Council Post-Processing Types ─────────────────────────────────────────

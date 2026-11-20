@@ -28,6 +28,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   message, in delivery order, with its `msg_id`, `type`, `from`, `to`, `iter` and `ts` and never its text. It is
   present only while something is parked. (#191, thanks @ajmtrz)
 
+### Fixed
+
+- **Stopping `clawo serve` cleanly no longer cancels its workflow runs.** On SIGTERM or SIGINT (a host reboot, a
+  service restart, an upgrade, Ctrl-C) every live run was cancelled, which is terminal, so the resume meant to bring
+  it back returned it unchanged; only a crash left a run resumable. A shutdown now marks each live run `suspended`,
+  freezes its checkpoint without recording the failures its stopped nodes return, and hands its claim back, so the
+  run stays where a crash would leave it and the next resume runs its interrupted node again. `workflow_status`
+  reports such a run as `execution: suspended`, and `fanout_status`, `council_status`, `ultraplan_status` and
+  `ultrareview_status` carry `suspended` while their status still reads `running`. An UltraApp build in flight goes
+  back to the front of its queue and resumes from its last finished stage. Only `workflow_cancel` cancels a run.
+
 ## [7.26.0] - 2026-11-20
 
 ### Added

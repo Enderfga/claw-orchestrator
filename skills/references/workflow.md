@@ -50,6 +50,15 @@ half-finished node left no result to trust. A node that had finished just before
 the process died continues at its successor; a router is evaluated again, since
 its choice is not recorded. A run parked at a `human_gate` parks there again.
 
+A process that stops cleanly leaves its runs the same way. On SIGTERM or SIGINT —
+a host reboot, a service restart, an upgrade, Ctrl-C — `clawo serve` marks each
+live run `suspended` (`{ at, reason }` on the record; `execution: suspended` in
+`workflow_status`), freezes its checkpoint, stops its executors without
+recording their failures, and hands the claim back. The run stays non-terminal
+with its running node to be run again, exactly as after a crash, and the next
+resume clears the mark and copies it onto the resume entry. A shutdown is not a
+cancel: only `workflow_cancel` ends a run as `cancelled`.
+
 Steers survive a restart. They are logged when they arrive and recorded as
 consumed when the node that took them finishes, so on resume every steer no
 finished node consumed is queued again — including one a node was holding when

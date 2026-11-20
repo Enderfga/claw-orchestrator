@@ -361,7 +361,7 @@ export class UltraappManager {
    * mean a router self-loop fighting the visit bound, or one fake node with a
    * state machine hidden inside it. That would be unification as theatre.
    */
-  private async runBuild(runId: string, emit: (e: BuildEvent) => void): Promise<void> {
+  private async runBuild(runId: string, emit: (e: BuildEvent) => void): Promise<void | 'suspended'> {
     await this.opts.store.setMode(runId, 'building');
     await this.startNarrator(runId);
 
@@ -417,6 +417,9 @@ export class UltraappManager {
       // itself, so one that started just before the terminal transition can
       // finish just after it — and write the state it saw over the newer one.
       off();
+      // The process is stopping and the run was suspended, not ended: nothing
+      // failed, and the next process resumes it from the queue.
+      if (record?.suspended && !['completed', 'failed', 'cancelled'].includes(record.state)) return 'suspended';
       await this.settleBuild(runId, record, emit);
     } catch (err) {
       const reason = (err as Error).message;

@@ -78,6 +78,45 @@ async function buildOnce(): Promise<{ id: string; synthCalls: () => number }> {
   return { id, synthCalls: () => calls };
 }
 
+describe('a build when the process stops', () => {
+  it("is left building, its run suspended and still the queue's build in flight, for the next process to resume", async () => {
+    const councilMod = await import('../../ultraapp/council-adapter.js');
+    let started!: () => void;
+    const inCouncil = new Promise<void>((r) => (started = r));
+    let finish!: () => void;
+    vi.spyOn(councilMod, 'runCouncilSynth').mockImplementation(async ({ runDir }) => {
+      started();
+      await new Promise<void>((r) => (finish = r));
+      const codebase = path.join(runDir, 'versions', 'v1', 'codebase');
+      fs.mkdirSync(codebase, { recursive: true });
+      return { ok: true, worktreePath: codebase, rounds: 1 };
+    });
+    mgr = new UltraappManager({
+      store,
+      sessionManager: fakeSessionManager() as never,
+      kernel,
+      buildContract: PASSING_BUILD,
+    });
+    const id = await mgr.createRun();
+    await mgr.startBuild(id);
+    await inCouncil;
+
+    const stopping = kernel.shutdown();
+    finish();
+    await stopping;
+    // The build's worker has returned: the queue settles only after it does.
+    await (mgr as unknown as { buildQueue: { idle(): Promise<void> } }).buildQueue.idle();
+    await mgr.waitForIdle();
+
+    const record = loadRun(ultraappKernelRunId(id))!;
+    expect(record.state).toBe('running');
+    expect(record.suspended).toBeDefined();
+    expect((await store.readState(id)).mode).toBe('building');
+    const queue = JSON.parse(fs.readFileSync(path.join(store.rootDir(), 'build-queue.json'), 'utf8'));
+    expect(queue.current).toBe(id);
+  }, 30_000);
+});
+
 describe('the ultraapp build pipeline is a kernel run', () => {
   it('is listed, checkpointed per stage, and carries the build evidence', async () => {
     const { id } = await buildOnce();

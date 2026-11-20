@@ -69,7 +69,8 @@ export interface CouncilNodeData {
  * ran under, and saying so is the only honest report.
  */
 export interface RunReport {
-  execution: 'completed' | 'failed' | 'cancelled' | 'running' | 'unknown';
+  /** `suspended`: its process stopped while it was live, and it waits for a resume. */
+  execution: 'completed' | 'failed' | 'cancelled' | 'running' | 'suspended' | 'unknown';
   resume: { count: number; last?: RunResume };
   verification: {
     outcome: RunRecord['outcome'];
@@ -93,7 +94,8 @@ export function runReport(record: RunRecord): RunReport {
     (n) => n.kind === 'verifier' && n.contract && n.contract !== 'run',
   );
   return {
-    execution: record.execution ?? (isTerminalRunState(record.state) ? 'unknown' : 'running'),
+    execution:
+      record.execution ?? (isTerminalRunState(record.state) ? 'unknown' : record.suspended ? 'suspended' : 'running'),
     resume: { count: resumes.length, ...(resumes.length ? { last: resumes[resumes.length - 1] } : {}) },
     verification: {
       outcome: record.outcome,
@@ -116,6 +118,11 @@ export function runReport(record: RunRecord): RunReport {
       ...(drift ? { contractDrift: drift } : {}),
     },
   };
+}
+
+/** A run whose process stopped reads as running; this says it is waiting for a resume. */
+function suspension(record: RunRecord): { suspended?: { at: string; reason: string } } {
+  return record.suspended && !isDone(record.state) ? { suspended: record.suspended } : {};
 }
 
 export function toCouncilSession(record: RunRecord): CouncilSession {
@@ -144,6 +151,7 @@ export function toCouncilSession(record: RunRecord): CouncilSession {
     finalSummary: data?.finalSummary,
     compactContext: data?.compactContext,
     ...(error ? { error } : {}),
+    ...suspension(record),
   };
 }
 
@@ -179,6 +187,7 @@ export function toFanoutSession(record: RunRecord): FanoutSession {
     synthesis: data?.synthesis,
     synthesisError: data?.synthesisError,
     error: record.error,
+    ...suspension(record),
   };
 }
 
@@ -204,6 +213,7 @@ export function toUltraplanResult(record: RunRecord, plan: string | undefined): 
     endTime: record.endedAt,
     plan: status === 'completed' ? text : undefined,
     error: status === 'error' ? (record.error ?? text ?? 'Empty response from engine') : undefined,
+    ...suspension(record),
   };
 }
 
@@ -229,6 +239,7 @@ export function toUltrareviewResult(record: RunRecord, findings: string | undefi
     endTime: record.endedAt,
     findings: status === 'completed' ? findings : undefined,
     error: status === 'error' ? record.error : undefined,
+    ...suspension(record),
   };
 }
 

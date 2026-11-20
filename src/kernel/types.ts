@@ -399,6 +399,8 @@ export interface RunResume {
   restart?: boolean;
   /** Nodes that were running when the previous process stopped; they run again from the beginning. */
   interruptedNodes: string[];
+  /** The suspension this resume ended, when the previous process stopped cleanly (`RunRecord.suspended`). */
+  suspended?: RunSuspension;
   /** Fingerprint of the run contract the caller declared at this resume, when it declared one. */
   declaredContract?: string;
   /**
@@ -409,6 +411,12 @@ export interface RunResume {
   contractDrift?: ContractDrift;
   /** The same, per verifier node with an inline contract that the caller declared. */
   nodeContractDrift?: Record<string, ContractDrift>;
+}
+
+/** A run whose process stopped while it was live, and that is waiting to be resumed. */
+export interface RunSuspension {
+  at: string;
+  reason: string;
 }
 
 export interface ContractDrift {
@@ -493,6 +501,14 @@ export interface RunRecord {
   execution?: 'completed' | 'failed' | 'cancelled';
   /** Every resume of this run, oldest first. */
   resumes?: RunResume[];
+  /**
+   * Set when the process running this run stopped (a shutdown: SIGTERM, SIGINT,
+   * a service restart) while the run was live. The run is left where a crash
+   * would leave it — not terminal, its running node to be run again — rather
+   * than cancelled, because a process stopping is not a decision about the run.
+   * Cleared by the resume that picks it up.
+   */
+  suspended?: RunSuspension;
   /**
    * Count of node results absorbed from kinds that can touch the workspace —
    * every kind but `verifier`, `router` and `human_gate` (`SIDE_EFFECT_KINDS` in

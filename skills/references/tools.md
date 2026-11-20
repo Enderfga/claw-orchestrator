@@ -412,6 +412,10 @@ Poll a fan-out by `id`. Returns `{ ok, id, status, results: [{ agent, engine, mo
 `status` is `running`, `done`, `error` or `aborted`. `synthesisError` is set when synthesis was requested
 and failed; without it, a missing `synthesis` means none was requested or fewer than two agents succeeded.
 
+These four statuses (`fanout_status`, `council_status`, `ultraplan_status`, `ultrareview_status`) carry
+`suspended: { at, reason }` while the `clawo serve` process running the mode has stopped and its run waits for
+`workflow_resume <id>`; `status` still reads `running` then.
+
 ### `fanout_abort`
 
 Abort a running fan-out by `id`. Agents already running finish, agents still waiting for a session
@@ -474,7 +478,7 @@ Start a multi-agent council. Runs in background, returns session ID immediately.
 
 ### `council_status`
 
-Get status of a running or recently completed council.
+Get status of a running or recently completed council. `suspended` as for `fanout_status`.
 
 | Parameter | Type   | Required |
 | --------- | ------ | -------- |
@@ -582,7 +586,7 @@ Start a dedicated Opus planning session (up to 30 min). Runs in background.
 
 ### `ultraplan_status`
 
-Get status and plan text when completed.
+Get status and plan text when completed. `suspended` as for `fanout_status`.
 
 | Parameter | Type   | Required |
 | --------- | ------ | -------- |
@@ -607,7 +611,7 @@ Start 1–20 reviewer agents that review the code in parallel, each from a diffe
 
 ### `ultrareview_status`
 
-Get status and findings when completed.
+Get status and findings when completed. `suspended` as for `fanout_status`.
 
 | Parameter | Type   | Required |
 | --------- | ------ | -------- |
@@ -954,7 +958,7 @@ Codex `/goal` on one `codex-app` thread, then the contract, then repairs on the 
 `{ runId, events? }` → run state, per-node status, `outcome`, `outcomeReason`,
 `verdict`, `evidenceId`, `costUsd`, `consensusVotes`, and the last N events when
 `events` is given; plus three answers kept apart: `execution` (did the nodes run to
-the end), `resume` (`count` and the `last` resume) and `verification` (outcome,
+the end; `suspended` while a run whose process stopped waits for a resume), `resume` (`count` and the `last` resume) and `verification` (outcome,
 evidence, and the fingerprints of the rules behind the verdict and of the run's
 contract, with any `contractDrift`; `unknown` on a record from before fingerprints).
 

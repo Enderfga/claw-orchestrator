@@ -223,6 +223,12 @@ class RunTxn {
    * back, which leaves it resumable.
    */
   stalled = false;
+  /**
+   * The process is stopping, and this run is left where it is for the next one
+   * to resume. Every write after this is dropped: the abort that stops the
+   * executors would otherwise record a cancel nobody asked for.
+   */
+  suspended = false;
 
   constructor(
     readonly guard: RunGuard,
@@ -240,9 +246,14 @@ class RunTxn {
     return this._record;
   }
 
-  /** True once this owner has stopped writing, for either reason. */
+  /** True once this owner has stopped writing, for any reason. */
   get finished(): boolean {
-    return this.lost || this.stalled;
+    return this.lost || this.stalled || this.suspended;
+  }
+
+  /** Stop writing, deliberately: the last committed checkpoint is the one the next process resumes. */
+  suspend(): void {
+    this.suspended = true;
   }
 
   /**
@@ -768,6 +779,7 @@ export class RunKernel extends EventEmitter {
       interruptedNodes: Object.values(record.nodes)
         .filter((n) => n.state === 'running')
         .map((n) => n.id),
+      ...(record.suspended ? { suspended: record.suspended } : {}),
     };
     if (opts.contract !== undefined) {
       const d = declaredDrift(
@@ -801,6 +813,7 @@ export class RunKernel extends EventEmitter {
     if (
       !txn.apply((draft) => {
         draft.resumes = [...(draft.resumes ?? []), resumeEntry];
+        draft.suspended = undefined;
         if (opts.restart && wasTerminal) draft.execution = undefined;
         for (const n of Object.values(draft.nodes)) {
           if (n.state === 'running' || (opts.restart && wasTerminal)) {
@@ -1023,9 +1036,36 @@ export class RunKernel extends EventEmitter {
     return handle ? handle.done : Promise.resolve(loadRun(runId));
   }
 
+  /**
+   * Stop every live run without ending it.
+   *
+   * A process that stops — SIGTERM, SIGINT, a service restart, an upgrade — is
+   * not a caller that cancels. Each live run is marked `suspended`, its
+   * checkpoint is frozen, and only then are its executors stopped, so the
+   * failures they return on the way out are never recorded: the run stays
+   * where a crash would leave it, non-terminal with its running node to be run
+   * again, and its claim is handed back for the next process to take at once.
+   * Cancelling here used to make every graceful stop terminal, and a later
+   * resume returned the run unchanged.
+   */
   async shutdown(): Promise<void> {
-    for (const [runId] of this.live) this.cancel(runId);
-    await Promise.allSettled([...this.live.values()].map((h) => h.done));
+    const handles = [...this.live.values()];
+    const ts = new Date().toISOString();
+    const reason = 'the process running it stopped';
+    // Every run is frozen before any is stopped: stopping a parent reaches its
+    // subflows, which must not record a cancel either.
+    for (const handle of handles) {
+      handle.txn.apply(
+        (draft) => {
+          draft.suspended = { at: ts, reason };
+          draft.updatedAt = ts;
+        },
+        [{ ts, type: 'log', level: 'info', message: `suspended: ${reason}; resume the run to continue it` }],
+      );
+      handle.txn.suspend();
+    }
+    for (const handle of handles) this.cancel(handle.txn.guard.runId);
+    await Promise.allSettled(handles.map((h) => h.done));
     this.live.clear();
   }
 
@@ -1055,8 +1095,9 @@ export class RunKernel extends EventEmitter {
       if (handle.heartbeat) clearInterval(handle.heartbeat);
       // A run that stopped because it could not write still holds its claim.
       // `_scheduleRelease` was already started by the stop callback; this covers
-      // the case where the run ended for another reason while stalled.
-      if (txn.stalled) this._scheduleRelease(txn.guard);
+      // the case where the run ended for another reason while stalled. A
+      // suspended run hands its claim back here, once its executors are done.
+      if (txn.stalled || txn.suspended) this._scheduleRelease(txn.guard);
       // Identity-checked: a run id can be reused, and deleting by key alone
       // meant a finishing run evicted the handle of the run that had just
       // replaced it.

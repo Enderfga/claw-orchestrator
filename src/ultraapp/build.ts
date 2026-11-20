@@ -24,7 +24,12 @@ import path from 'node:path';
 import { withFileLock } from '../kernel/file-lock.js';
 import type { BuildEvent } from './build-events.js';
 
-export type Worker = (runId: string, emit: (e: BuildEvent) => void) => Promise<void>;
+/**
+ * `suspended`: the process is stopping and the build's run was left for the next
+ * process to resume. The queue keeps it as the build in flight and starts nothing
+ * else in this process.
+ */
+export type Worker = (runId: string, emit: (e: BuildEvent) => void) => Promise<void | 'suspended'>;
 
 export interface UltraappBuildQueueOptions {
   worker: Worker;
@@ -109,6 +114,8 @@ export class UltraappBuildQueue {
   private readonly dispatchRetries = new Map<string, number>();
   private idlePromise: Promise<void> = Promise.resolve();
   private idleResolve: (() => void) | null = null;
+  /** Set when a build was suspended by a shutdown: this process dispatches nothing more. */
+  private halted = false;
 
   constructor(opts: UltraappBuildQueueOptions) {
     this.worker = opts.worker;
@@ -377,7 +384,7 @@ export class UltraappBuildQueue {
   }
 
   private async tryDispatch(): Promise<void> {
-    if (this.notOwner) return;
+    if (this.notOwner || this.halted) return;
     if (this.currentRunId !== null) return;
     if (this.concurrency !== 1) throw new Error('concurrency > 1 not implemented in v0.2');
     const next = this.pending.shift();
@@ -405,8 +412,9 @@ export class UltraappBuildQueue {
       return;
     }
     this.dispatchRetries.delete(next.runId);
+    let suspended = false;
     try {
-      await this.worker(next.runId, (e) => this.emit(e));
+      suspended = (await this.worker(next.runId, (e) => this.emit(e))) === 'suspended';
     } catch (e) {
       this.emit({
         type: 'build-failed',
@@ -415,9 +423,17 @@ export class UltraappBuildQueue {
         reason: (e as Error).message,
       });
     } finally {
-      this.currentRunId = null;
-      this.persist();
-      void this.tryDispatch();
+      if (suspended) {
+        // Written with the build still in flight, so the next process restores
+        // it first and resumes its run.
+        this.halted = true;
+        this.persist();
+        this.markIdle();
+      } else {
+        this.currentRunId = null;
+        this.persist();
+        void this.tryDispatch();
+      }
     }
   }
 
