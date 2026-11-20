@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.26.0] - 2026-11-20
+
+### Added
+
+- **A forum for the agents of a workflow run.** `forum` on a spec (`true`, or `{ push, digestMs, score }`) gives
+  every fan-out agent and every `agent` and `goal` node a shared board of titled posts. Agents use it through
+  `clawo forum post | list | read`, which each agent's brief spells out with its own name, so any engine that can run
+  a shell command can use it. A post can carry the posting agent's current score, read from a file or a command in
+  its directory. By default an ASK or FAIL that names an agent (`@name`) is pushed into its work in flight (a goal
+  within a second, a Claude Code or `codex-app` session at its next tool round) and the rest is read with `list`;
+  `push: "all"`, `"digest"` and `"none"` are there to compare against it. The forum belongs to the run: an agent
+  that joins later is told about the posts that name it, the ASKs nobody has answered and the FAILs so far, and a
+  fan-out node's result lists the ASKs its agents leave open. `workflow_forum` (and `clawo forum show | metrics`)
+  reads it, posts to it and measures it: posts by agent and tag, each ASK's time to its first answer, the open ASKs,
+  and how long each post that names an agent took to reach it. The design follows the forum of arXiv 2611.09798.
+- **A busy session receives cross-session messages in the turn in flight.** `session_send_to` to a busy Claude Code
+  or `codex-app` session hands the message to the running turn, which takes it in at its next tool round, instead of
+  queuing it until the inbox is delivered. A busy session on another engine still queues it.
+- **A finished goal takes news.** A revisit of a `goal` node that has ended, with no new red verdict, sets the goal
+  again on the same thread when a steer, or a forum post that names it, arrived after it ended; without either its
+  result stands, as before. A fan-out goal agent is taken up again the same way when its fan-out node is revisited.
+
+### Fixed
+
+- **A steer into a running Claude `/goal` no longer resets the turn's token count.** It was written through the
+  session's send path, which starts a new turn's accounting; it is now written into the turn in flight directly.
+
 ## [7.25.2] - 2026-11-19
 
 ### Fixed
