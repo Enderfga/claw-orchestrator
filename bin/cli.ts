@@ -1138,7 +1138,7 @@ program
   .argument('[id]', 'Post id for `read`; run id for `show` and `metrics`')
   .option('--dir <dir>', 'The forum spool (given to each agent in its brief)')
   .option('--as <name>', 'Your name on the forum')
-  .option('--title <title>', 'Post title, starting with a tag: WIN, FAIL, ASK, FIX, DONE, …')
+  .option('--title <title>', 'Post title, starting with a tag: WIN, FAIL, ASK, FIX, DONE or INFO')
   .option('--body <text>', 'Post body')
   .option('--body-file <file>', 'Read the body from a file')
   .option('--re <ids...>', 'Ids of the posts this one answers')
@@ -1164,7 +1164,10 @@ program
           re: opts.re,
           cwd: process.cwd(),
         });
-        return console.log(`posted ${post.id}${post.to.length ? ` to ${post.to.map((n) => `@${n}`).join(' ')}` : ''}`);
+        console.log(`posted ${post.id}${post.to.length ? ` to ${post.to.map((n) => `@${n}`).join(' ')}` : ''}`);
+        // What the poster should know before it waits on an answer.
+        for (const note of forum.forumPostNotes(opts.dir, post)) console.log(`note: ${note}`);
+        return;
       }
       if (action === 'list') return console.log(forum.forumList(opts.dir, opts.as));
       if (action === 'read') {

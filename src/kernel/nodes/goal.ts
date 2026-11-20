@@ -403,11 +403,15 @@ export async function executeGoalNode(node: NodeSpec, ctx: NodeContext): Promise
   // joins the steers, which reach the turn in flight within a tick.
   const forumIntro = forum ? forumBrief(forum.runId, self, forumTeamOf(forum.runId), forum.config) : undefined;
   const leaveForum = forum
-    ? forumHub(forum.runId, forum.config).join(self, (text) => {
-        steers.push(text);
-        wake?.();
-        return true;
-      })
+    ? forumHub(forum.runId, forum.config).join(
+        self,
+        (text) => {
+          steers.push(text);
+          wake?.();
+          return true;
+        },
+        { cwd: spec.cwd || ctx.cwd },
+      )
     : undefined;
   try {
     const opening = await open(startThread);

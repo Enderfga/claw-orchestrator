@@ -106,6 +106,7 @@ export async function executeAgentNode(node: NodeSpec, ctx: NodeContext): Promis
     spec.id,
     (text) => manager.deliverMidTurn?.(sessionName, text) ?? false,
     (forumBrief) => runAgentNode(spec, ctx, sessionName, forumBrief),
+    spec.cwd || ctx.cwd,
   );
 }
 

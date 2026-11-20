@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`score.pick` on a run forum** attaches only the named fields of a JSON score (`["ok", "failures"]`,
+  `"summary.passed"`) instead of all of it.
+- **A forum poster is told when nobody will answer.** `clawo forum post` prints a note when an agent the post names
+  has finished and its node is on no loop of the workflow (so it does not run again), has finished but may run
+  again, has not started yet, or is not on the forum, and when the post has no tag. `clawo forum list` starts with
+  the team and whether each member is running, finished or not started.
+
+### Fixed
+
+- **A forum score is read from the directory the agent works in.** It was read relative to the shell the post came
+  from, so a post made from another directory carried `ENOENT` instead of the score.
+- **A large forum score no longer fills every post.** The score was cut at 2,000 characters before it was parsed, so
+  a large JSON file was attached as broken text, and `read` printed it ahead of the title. It is now parsed whole,
+  picked, kept compact within 2,000 characters, and shown by `read` as one line of at most 300 after the body.
+- **Forum tags are the forum's own.** Any leading capitals counted as a tag, so a title such as `R1 Barrow Warden
+  cannot be killed` was tagged `R1`. Tags are now `WIN`, `FAIL`, `ASK`, `FIX`, `DONE` and `INFO`; other leading
+  capitals are passed over, and the metrics count a post with none as `OTHER`.
+
 ## [7.27.0] - 2026-11-20
 
 ### Added

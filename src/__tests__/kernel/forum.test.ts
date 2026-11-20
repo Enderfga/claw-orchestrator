@@ -20,7 +20,9 @@ import {
   forumList,
   forumMetrics,
   forumPost,
+  forumPostNotes,
   forumRead,
+  forumRoster,
   forumSpoolDir,
   forumStoreDir,
   normalizeForumConfig,
@@ -332,5 +334,114 @@ describe('a forum in a workflow', () => {
         nodes: [{ id: 'a', kind: 'agent', prompt: 'x' }],
       }),
     ).rejects.toThrow(/push must be one of/);
+  });
+});
+
+describe('after the first full run', () => {
+  it('finds the score in the directory the agent works in, not wherever its shell happens to be', async () => {
+    const dir = ensureForumSpool(RUN, { score: { file: 'tools/check-last.json' } });
+    const work = path.join(tmp, 'game');
+    fs.mkdirSync(path.join(work, 'tools'), { recursive: true });
+    fs.writeFileSync(path.join(work, 'tools', 'check-last.json'), JSON.stringify({ ok: true }));
+    const hub = new ForumHub(RUN, { score: { file: 'tools/check-last.json' } });
+    const leave = hub.join('direction', () => true, { cwd: work });
+    const shell = path.join(tmp, 'dir-posts');
+    fs.mkdirSync(shell);
+    expect(forumPost(dir, 'direction', { title: 'WIN: x', cwd: shell }).score).toEqual({ ok: true });
+    leave();
+  });
+
+  it('attaches only the fields picked from the score, and keeps a large one short', () => {
+    const big = { ok: false, failures: ['R1 warden'], log: Array.from({ length: 400 }, (_, i) => `line ${i}`) };
+    const work = path.join(tmp, 'w');
+    fs.mkdirSync(work);
+    fs.writeFileSync(path.join(work, 'check.json'), JSON.stringify(big, null, 2));
+    const picked = ensureForumSpool(RUN, { score: { file: 'check.json', pick: ['ok', 'failures', 'missing'] } });
+    expect(forumPost(picked, 'a', { title: 'FAIL: x', cwd: work }).score).toEqual({
+      ok: false,
+      failures: ['R1 warden'],
+    });
+
+    const whole = ensureForumSpool('wf-forum-whole', { score: { file: 'check.json' } });
+    const post = forumPost(whole, 'a', { title: 'FAIL: warden cannot be killed', body: 'steps', cwd: work });
+    const stored = typeof post.score === 'string' ? post.score : JSON.stringify(post.score);
+    expect(stored.length).toBeLessThanOrEqual(2_000);
+    const shown = forumRead(whole, 'b', post.id);
+    // The title comes first; the score is one short line after the body.
+    expect(shown.indexOf('FAIL: warden cannot be killed')).toBeLessThan(shown.indexOf('score:'));
+    expect(shown.split('\n').find((l) => l.startsWith('score:'))!.length).toBeLessThanOrEqual(320);
+    expect(() => normalizeForumConfig({ score: { file: 'x', pick: 'ok' } })).toThrow(/pick/);
+  });
+
+  it('takes only the forum’s own tags, counts the rest as OTHER, and says when a post has none', () => {
+    expect(parseTags('R1 Barrow Warden cannot be killed')).toEqual([]);
+    expect(parseTags('R1 FAIL: warden cannot be killed')).toEqual(['FAIL']);
+    expect(parseTags('NOTE: later')).toEqual([]);
+    const dir = ensureForumSpool(RUN, {});
+    const untagged = forumPost(dir, 'tester', { title: 'R1 Barrow Warden cannot be killed' });
+    forumPost(dir, 'tester', { title: 'FAIL: R2 door' });
+    expect(forumMetrics(RUN).byTag).toEqual({ OTHER: 1, FAIL: 1 });
+    expect(forumPostNotes(dir, untagged).join('\n')).toMatch(/WIN, FAIL, ASK, FIX, DONE or INFO/);
+  });
+
+  it('knows which members can come back: only those on a loop', () => {
+    const roster = forumRoster({
+      name: 'team',
+      cwd: tmp,
+      nodes: [
+        { id: 'play', kind: 'fanout', prompt: 'p', agents: [{ name: 'tester', engine: 'claude' }] },
+        { id: 'fix', kind: 'agent', prompt: 'f' },
+        { id: 'judge', kind: 'agent', prompt: 'j' },
+        { id: 'again', kind: 'router', routes: [{ when: { type: 'always' }, to: 'fix' }] },
+      ],
+    } as WorkflowSpec);
+    expect(roster).toEqual([
+      { name: 'tester', node: 'play', mayReturn: false },
+      { name: 'fix', node: 'fix', mayReturn: true },
+      { name: 'judge', node: 'judge', mayReturn: true },
+    ]);
+  });
+
+  it('tells a poster that the agent it names has finished for good, and lists who is running, finished or not started', async () => {
+    const s = { notes: [] as string[], list: '' };
+    const manager = {
+      startSession: async (config: { name?: string }) => ({ name: config.name }) as never,
+      sendMessage: async (name: string, message: string) => {
+        if (name.includes('-fix-')) {
+          const m = /--dir (\S+) --as (\S+)/.exec(message)!;
+          const post = forumPost(m[1], m[2], { title: 'ASK @tester please post what you met' });
+          s.notes = forumPostNotes(m[1], post);
+          s.list = forumList(m[1], m[2]);
+        }
+        return { output: 'ok', turns: 1 } as never;
+      },
+      stopSession: async () => undefined,
+    };
+    const kernel = registerDefaultExecutors(new RunKernel({ manager: manager as never, nodeTimeoutMs: 20_000 }));
+    const run = await kernel.start({
+      name: 'team',
+      cwd: tmp,
+      forum: true,
+      nodes: [
+        { id: 'play', kind: 'fanout', prompt: 'p', agents: [{ name: 'tester', engine: 'claude' }] },
+        { id: 'fix', kind: 'agent', prompt: 'f' },
+        { id: 'ship', kind: 'agent', prompt: 's' },
+      ],
+    });
+    expect((await kernel.wait(run.runId))!.state).toBe('completed');
+    expect(s.notes.join('\n')).toMatch(/@tester has finished and does not run again in this run/);
+    expect(s.list).toMatch(/^Team: tester \(finished\), fix \(you, running\), ship \(not started\)/);
+    // Each member joined with the directory it works in, which is where its score is read.
+    const joins = fs
+      .readFileSync(path.join(forumSpoolDir(run.runId), 'events.jsonl'), 'utf8')
+      .trim()
+      .split('\n')
+      .map((l) => JSON.parse(l))
+      .filter((e) => e.type === 'join');
+    expect(joins.map((e) => [e.who, e.cwd])).toEqual([
+      ['tester', tmp],
+      ['fix', tmp],
+      ['ship', tmp],
+    ]);
   });
 });

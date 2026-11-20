@@ -332,7 +332,7 @@ earlier sessions.
 ```bash
 # An agent on a run with a forum (the brief gives it --dir and --as filled in)
 clawo forum post --dir <spool> --as <name> --title "FAIL @lighting: shadows flicker" [--body "…" | --body-file F] [--re p00012]
-clawo forum list --dir <spool> --as <name>       # every title; NEW marks the ones you have not read
+clawo forum list --dir <spool> --as <name>       # who is running / finished / not started, then every title; NEW marks the unread
 clawo forum read p00012 --dir <spool> --as <name>
 
 # Anyone, afterwards
@@ -343,7 +343,9 @@ clawo forum metrics <runId>
 The agent commands read and write the forum's files directly, so they need neither the server
 nor a token, and any engine that can run a shell command can use them. The brief each agent gets
 spells the command out with the Node binary and the CLI path, so it works without `clawo` on the
-`PATH`. See [workflow.md](./workflow.md#the-run-forum).
+`PATH`. `post` prints a `note:` line when the post has no tag, or when an agent it names is not on
+the forum, has not started, or has finished (and, when its node is on no loop, that nobody will
+answer as it). See [workflow.md](./workflow.md#the-run-forum).
 
 ## `clawo verify`
 

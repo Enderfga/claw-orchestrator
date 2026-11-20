@@ -256,11 +256,15 @@ async function runTurnAgents(
       ...(forum
         ? {
             agentPreface: (agent: string) => forumBrief(forum.runId, agent, forumTeamOf(forum.runId), forum.config),
-            onAgentSession: (agent: string, sessionName: string) =>
-              forumHub(forum.runId, forum.config).join(
+            onAgentSession: (agent: string, sessionName: string) => {
+              // The directory the Fanout engine runs this agent in, where its score is read.
+              const own = agents.find((a) => a.name === agent)?.cwd;
+              return forumHub(forum.runId, forum.config).join(
                 agent,
                 (text) => ctx.manager!.deliverMidTurn?.(sessionName, text) ?? false,
-              ),
+                { cwd: own ? (sanitizeCwd(path.resolve(projectDir, own)) ?? projectDir) : projectDir },
+              );
+            },
           }
         : {}),
     },

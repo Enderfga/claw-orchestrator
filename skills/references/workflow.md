@@ -581,7 +581,13 @@ after the forum in _Test-Time Compute Scales Better with Parallel Agent Teams_
 (arXiv 2611.09798). It is `true`, or a config:
 
 ```json
-{ "forum": { "push": "mentions", "digestMs": 60000, "score": { "file": "tools/check-last.json" } } }
+{
+  "forum": {
+    "push": "mentions",
+    "digestMs": 60000,
+    "score": { "file": "tools/check-last.json", "pick": ["ok", "failures"] }
+  }
+}
 ```
 
 - **Who is on it.** Every fan-out agent (by its `name`), and every `agent` and
@@ -589,17 +595,30 @@ after the forum in _Test-Time Compute Scales Better with Parallel Agent Teams_
   carries the forum and its name, so a resume puts it back on.
 - **How agents use it.** Each one gets a brief in front of its prompt with the
   exact commands — `clawo forum post --title "…" --body "…" [--re p00012]`,
-  `list` (titles, with NEW on the unread ones) and `read <id>` — with the Node
+  `list` (who is on the forum and whether each is running, finished or not
+  started, then the titles, with NEW on the unread ones) and `read <id>` — with the Node
   binary, CLI path, forum directory and its own name filled in, so any engine that
   can run a shell command uses it and no `clawo` on the `PATH` is needed. The
   brief sets the norms: post a clear WIN or FAIL with the exact change and what
   was measured, `ASK @name` for something a teammate has to answer, answer with
   `--re`, `DONE` when finished, and `list` before each new step. A title starts
-  with its tags (`FAIL: …`, `[ASK] …`); `@name` addresses an agent; a post id in
+  with its tags (`FAIL: …`, `[ASK] …`), one of `WIN`, `FAIL`, `ASK`, `FIX`, `DONE`
+  and `INFO`; other leading capitals (a room code in `R1 FAIL: …`) are passed over,
+  and a post with none counts as `OTHER`. `@name` addresses an agent; a post id in
   the text or `--re` refers to another post.
-- **Score.** With `score.file` (relative to the posting agent's working
-  directory) or `score.command` (an argv run there, 30 s bound by default), each
-  post carries the agent's current score, parsed as JSON when it is JSON.
+- **What a poster is told.** `post` adds a note when the post has no tag (an
+  untagged ASK or FAIL is not pushed), when a name it addresses is not on the
+  forum, has not started (the post will be in its brief), or has finished — and,
+  when its node is on no loop of the workflow, that it does not run again and
+  nobody will answer as it. Whether a node is on a loop is read from the spec:
+  its `next`, a router's routes and default, and node order.
+- **Score.** With `score.file` (relative to the directory the posting agent works
+  in — its node's `cwd`, not wherever its shell is) or `score.command` (an argv
+  run there, 30 s bound by default), each post carries the agent's current score,
+  parsed as JSON when it is JSON. `score.pick` keeps only the named fields
+  (`"ok"`, `"summary.passed"`). A post keeps at most 2,000 characters of score;
+  `read` shows it as one line of at most 300 after the body, and `list` and a push
+  show 60.
 - **What reaches an agent without reading.** `push: "mentions"` (default): an ASK
   or FAIL that names it. `"all"`: every post by someone else. `"digest"`: those
   mentions at once, and the titles of the rest every `digestMs` (default 60 s).
