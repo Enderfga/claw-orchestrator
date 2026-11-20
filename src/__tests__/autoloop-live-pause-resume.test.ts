@@ -489,6 +489,40 @@ describe('Autoloop live pause resume regressions', () => {
     }
   });
 
+  it('(g2) autoloopStatus lists parked messages by identity only, and clears them on resume', async () => {
+    const runId = 'regress-parked-status';
+    const { planner } = await startPaused(runId);
+    expect(mgr.autoloopStatus(runId)?.parked).toBeUndefined();
+    await mgr.autoloopChat(runId, 'SECRET-PARKED-TEXT-1');
+    await mgr.autoloopChat(runId, 'SECRET-PARKED-TEXT-2');
+
+    const parked = mgr.autoloopStatus(runId)?.parked;
+    expect(parked).toHaveLength(2);
+    for (const entry of parked ?? []) {
+      expect(Object.keys(entry).sort()).toEqual(['from', 'iter', 'msg_id', 'to', 'ts', 'type']);
+      expect(entry).toMatchObject({ type: 'chat', from: 'user', to: 'planner' });
+    }
+    expect(new Set(parked?.map((entry) => entry.msg_id)).size).toBe(2);
+    expect(JSON.stringify(mgr.autoloopStatus(runId))).not.toContain('SECRET-PARKED-TEXT');
+
+    await mgr.autoloopResume(runId);
+    await vi.waitFor(() => {
+      expect(textsIncluding(planner, 'SECRET-PARKED-TEXT-2')).toHaveLength(1);
+    });
+    expect(mgr.autoloopStatus(runId)?.parked).toBeUndefined();
+  });
+
+  it('(g3) parked messages are dropped from autoloopStatus when the run stops', async () => {
+    const runId = 'regress-parked-status-stop';
+    await startPaused(runId);
+    await mgr.autoloopChat(runId, 'P1');
+    expect(mgr.autoloopStatus(runId)?.parked).toHaveLength(1);
+
+    await mgr.autoloopStop(runId, 'operator-stop');
+
+    expect(mgr.autoloopStatus(runId)?.parked).toBeUndefined();
+  });
+
   it('(h) pending-dispatch no-option resume is a no-op and leaves the lease suspension untouched', async () => {
     const runId = 'regress-pending-noop';
     const activityLeaseMs = 60_000;

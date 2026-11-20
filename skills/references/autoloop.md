@@ -191,6 +191,12 @@ nothing. A no-option resume of an `awaiting_resume` send-timeout pause is still
 a no-op: the pending dispatch, its reason, and the lease suspension stay as
 they are until an explicit timeout increase names that dispatch.
 
+While messages are parked, `autoloop_status` lists them under `parked`, in the
+order they will be delivered: `msg_id`, `type`, `from`, `to`, `iter` and `ts`,
+never the message text. The list comes from the process running the loop and is
+not checkpointed, so a run read from its record has none. Resuming delivers them
+and stopping the run discards them; in both cases `parked` is gone.
+
 ## Quick start
 
 Over HTTP, against `clawo serve` (default `127.0.0.1:18796`):

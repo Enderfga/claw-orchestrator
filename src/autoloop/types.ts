@@ -20,6 +20,16 @@ export interface AutoloopRoleBinding {
 /** The rebound roles of a run. */
 export type AutoloopRoleBindings = Partial<Record<AutoloopRoleName, AutoloopRoleBinding>>;
 
+/** Identity of one parked message, as `autoloopStatus` reports it. */
+export interface AutoloopParkedMessage {
+  msg_id: string;
+  type: string;
+  from: string;
+  to: string;
+  iter: number;
+  ts: string;
+}
+
 export interface AutoloopState {
   run_id: string;
   status: AutoloopStatus;
@@ -42,6 +52,12 @@ export interface AutoloopState {
    * Present only once that has happened; never carries message text.
    */
   unconfirmed_chat?: { count: number; last_at: string; history_pending: boolean };
+  /**
+   * Agent-bound messages held while the run is paused, in delivery order.
+   * Reported by `autoloopStatus` from the process running the loop and present
+   * only when non-empty; never checkpointed and never carries message text.
+   */
+  parked?: AutoloopParkedMessage[];
   /**
    * Phase-error circuit breaker — incremented on every `phase_error` message,
    * cleared on each successful (non-error) `iter_done`. When it reaches

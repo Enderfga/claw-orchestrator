@@ -4715,8 +4715,13 @@ export class SessionManager {
   }
 
   autoloopStatus(runId: string): AutoloopState | undefined {
-    const live = this.kernel.handle<AutoloopHandle>(runId, LEGACY_NODE)?.runner.state;
-    if (live) return live;
+    const runner = this.kernel.handle<AutoloopHandle & { runner: AutoloopRunner }>(runId, LEGACY_NODE)?.runner;
+    if (runner) {
+      // The parked messages live only in this process's runner, so they are
+      // added here rather than checkpointed with the state.
+      const parked = runner.parkedMessages();
+      return parked.length > 0 ? { ...runner.state, parked } : runner.state;
+    }
     // Not running here. The record still holds the last state the loop
     // published, so a historical run opens with its real iteration count and
     // workspace instead of the all-zero stub the registry fallback produced.

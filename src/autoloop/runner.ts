@@ -23,6 +23,7 @@ import {
   MAX_METRIC_HISTORY,
   resolveAutoloopTimeoutConfig,
   type AutoloopConfig,
+  type AutoloopParkedMessage,
   type AutoloopState,
   type ResolvedAutoloopTimeoutConfig,
 } from './types.js';
@@ -809,6 +810,11 @@ export class AutoloopRunner extends EventEmitter {
     this.state.pending_dispatch = { ...pending };
     this.emit('state', this.state);
     this.emit('send_timeout', this.state.pending_dispatch);
+  }
+
+  /** Identities of the parked messages, in delivery order. Never their text. */
+  parkedMessages(): AutoloopParkedMessage[] {
+    return this.pausedBuffer.map(({ msg_id, type, from, to, iter, ts }) => ({ msg_id, type, from, to, iter, ts }));
   }
 
   /** Restore parked agent-bound messages at the queue head in arrival order. */
