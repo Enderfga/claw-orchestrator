@@ -333,10 +333,12 @@ describe('PersistentAgySession', () => {
       expect(spawnArgs[idx + 1]).toBe('high');
     });
 
-    // gemini-4-hydrogen is the one model with a tier above high (agy 1.5.9).
+    // gemini-4-hydrogen (agy 1.5.9) and gemini-4-neon (agy 1.5.12) have a tier above high.
     it.each([
       ['gemini-4-hydrogen', 'xhigh', 'xhigh'],
       ['gemini-4-hydrogen', 'max', 'xhigh'],
+      ['gemini-4-neon', 'xhigh', 'xhigh'],
+      ['gemini-4-neon', 'max', 'xhigh'],
       ['gemini-4-argon', 'xhigh', 'high'],
     ] as const)('gives %s %s effort as agy %s', async (model, effort, expected) => {
       const session = new PersistentAgySession({

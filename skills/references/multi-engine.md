@@ -230,7 +230,7 @@ in print mode, with the message as the `-p` argument. Tested with `agy` **1.5.10
   of the first message of each new conversation.
 - **Reasoning effort**: session `effort` and per-turn `session_send` overrides map
   to `--effort`. agy accepts `low`, `medium` and `high`, and `xhigh` on
-  `gemini-4-hydrogen` only; anything above a model's top tier (`xhigh`, `max`,
+  `gemini-4-hydrogen` and `gemini-4-neon`; anything above a model's top tier (`xhigh`, `max`,
   `ultra`) clamps to that tier. agy requires an effort with unsuffixed base
   slugs such as `gemini-3.8-flash`, so `auto` resolves those to `high`; a model
   already ending in `-low`, `-medium`, `-high` or `-xhigh` keeps that qualified effort.
@@ -273,7 +273,8 @@ in print mode, with the message as the `-p` argument. Tested with `agy` **1.5.10
   errors, non-success statuses, and empty responses. `agy-flash` and the engine
   default resolve to `gemini-3.8-flash`; `agy-pro` resolves to `gemini-4-argon`,
   the Pro-class Gemini 4 model every agy sign-in offers. `gemini-4-hydrogen` and,
-  with a `GEMINI_API_KEY`, `gemini-4-carbon` are registered too. The registry also
+  with a `GEMINI_API_KEY` (or, for Neon, Application Default Credentials),
+  `gemini-4-carbon` and `gemini-4-neon` are registered too. The registry also
   describes the 3.5/3.6/3.7 Flash and 3.1 Pro API models for pricing and routing,
   but agy's own `agy models` output decides which slugs are executable (agy 1.5.8
   dropped `gemini-3.1-pro`). agy also proxies Claude and GPT-OSS models, which

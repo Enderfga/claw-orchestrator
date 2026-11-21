@@ -67,6 +67,8 @@ interface Engine {
   wrapper: string;
   /** argv that prints the headless subcommand's help. */
   helpArgv: string[];
+  /** argv that prints the top-level help, whose subcommands are reviewed too. Default `['--help']`. */
+  commandsArgv?: string[];
   /** Read-only upstream lookup, or null when the vendor offers none. */
   upstream: (() => Promise<string | null>) | null;
   /** The wrapper class, under dist/src, that the live turn goes through. */
@@ -256,10 +258,13 @@ async function grokLatest(): Promise<string | null> {
   return typeof v === 'string' && /^\d+\.\d+\.\d+/.test(v) ? v : null;
 }
 
-/** Every `--flag` the CLI's help advertises. */
+/**
+ * Every `--flag` the CLI's help advertises. camelCase counts: lowercase-only
+ * matching cut `--allowedTools` to `--allowed` on both sides of the comparison.
+ */
 function flagsFromHelp(help: string): Set<string> {
   const out = new Set<string>();
-  for (const m of help.matchAll(/(?:^|\s)(--[a-z][a-z0-9-]*)/gm)) out.add(m[1]);
+  for (const m of help.matchAll(/(?:^|[\s,[(])(--[a-zA-Z][a-zA-Z0-9-]*)/gm)) out.add(m[1]);
   return out;
 }
 
@@ -267,8 +272,57 @@ function flagsFromHelp(help: string): Set<string> {
 function flagsFromWrapper(file: string): Set<string> {
   const src = fs.readFileSync(path.join(ROOT, file), 'utf8');
   const out = new Set<string>();
-  for (const m of src.matchAll(/'(--[a-z][a-z0-9-]*)'/g)) out.add(m[1]);
+  for (const m of src.matchAll(/'(--[a-zA-Z][a-zA-Z0-9-]*)'/g)) out.add(m[1]);
   return out;
+}
+
+/**
+ * The subcommands a CLI's top-level help lists, under whichever heading it
+ * uses (`Commands:`, `Available subcommands:`, `SUBCOMMANDS`). Only lines at
+ * the first entry's indentation are entries; deeper ones continue a
+ * description. `opencode run [message..]` names the binary first.
+ */
+function commandsFromHelp(help: string, bin: string): Set<string> {
+  const out = new Set<string>();
+  const lines = help.split('\n');
+  const binName = path.basename(bin);
+  for (let i = 0; i < lines.length; i++) {
+    if (!/^\s*(commands|subcommands|available (sub)?commands)\s*:?\s*$/i.test(lines[i])) continue;
+    let indent = -1;
+    for (let j = i + 1; j < lines.length; j++) {
+      const line = lines[j];
+      if (!line.trim()) {
+        if (indent >= 0) break;
+        continue;
+      }
+      const lead = line.length - line.trimStart().length;
+      if (lead === 0) break;
+      if (indent < 0) indent = lead;
+      if (lead !== indent) continue;
+      const words = line.trim().split(/\s+/);
+      let name = words[0] === binName ? words[1] : words[0];
+      if (!name || name.startsWith('[') || name.startsWith('<')) continue;
+      name = name.split('|')[0].replace(/,$/, '');
+      if (name && name !== 'help') out.add(name);
+    }
+  }
+  return out;
+}
+
+/**
+ * The flags and subcommands already looked at, per engine, each with the
+ * decision and its reason (scripts/sweep-reviewed.json). What the CLI offers
+ * and the wrapper does not use is listed until it has a decision here, so
+ * what a week adds is a short list rather than the same long one.
+ */
+interface Reviewed {
+  flags?: Record<string, string>;
+  commands?: Record<string, string>;
+}
+function reviewedFor(id: string): Reviewed {
+  const file = path.join(ROOT, 'scripts', 'sweep-reviewed.json');
+  const all = JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, Reviewed>;
+  return all[id] ?? {};
 }
 
 /**
@@ -299,8 +353,12 @@ interface EngineReport {
   upstream: string | null | 'n/a';
   /** Flags the wrapper passes that the binary's --help no longer lists. Candidates, not verdicts. */
   notAdvertised: string[];
-  /** Flags the binary advertises that the wrapper does not reference. */
+  /** Flags the binary advertises that the wrapper does not reference and that have no recorded decision. */
   unreferenced: string[];
+  /** Subcommands the binary lists that have no recorded decision. */
+  unreviewedCommands: string[];
+  /** Decisions recorded for flags or subcommands the binary no longer lists. */
+  staleReviewed: string[];
   live: { ok: boolean; ms: number; note?: string } | 'skipped';
   /** Why the engine was only partly checked. */
   note?: string;
@@ -327,6 +385,8 @@ async function sweepEngine(e: Engine, pinned: string | null, live: boolean): Pro
       upstream,
       notAdvertised: [],
       unreferenced: [],
+      unreviewedCommands: [],
+      staleReviewed: [],
       live: 'skipped',
       note: e.missingBin,
     };
@@ -340,7 +400,19 @@ async function sweepEngine(e: Engine, pinned: string | null, live: boolean): Pro
   const ours = flagsFromWrapper(e.wrapper);
   for (const f of e.otherLineFlags ?? []) ours.delete(f);
   const notAdvertised = [...ours].filter((f) => !cliFlags.has(f)).sort();
-  const unreferenced = [...cliFlags].filter((f) => !ours.has(f) && !['--help', '--version'].includes(f)).sort();
+  const reviewed = reviewedFor(e.id);
+  const unreferenced = [...cliFlags]
+    .filter((f) => !ours.has(f) && !['--help', '--version'].includes(f) && !(f in (reviewed.flags ?? {})))
+    .sort();
+  const top = await run(e.bin, e.commandsArgv ?? ['--help']);
+  const cliCommands = commandsFromHelp(top.out + top.err, e.bin);
+  const unreviewedCommands = [...cliCommands].filter((c) => !(c in (reviewed.commands ?? {}))).sort();
+  const staleReviewed = [
+    ...Object.keys(reviewed.flags ?? {}).filter((f) => !cliFlags.has(f)),
+    ...Object.keys(reviewed.commands ?? {})
+      .filter((c) => cliCommands.size > 0 && !cliCommands.has(c))
+      .map((c) => `command ${c}`),
+  ].sort();
 
   let liveResult: EngineReport['live'] = 'skipped';
   if (live) {
@@ -382,7 +454,17 @@ async function sweepEngine(e: Engine, pinned: string | null, live: boolean): Pro
     if (e.liveCwd === 'empty') fs.rmSync(cwd, { recursive: true, force: true });
   }
 
-  return { id: e.id, installed, pinned, upstream, notAdvertised, unreferenced, live: liveResult };
+  return {
+    id: e.id,
+    installed,
+    pinned,
+    upstream,
+    notAdvertised,
+    unreferenced,
+    unreviewedCommands,
+    staleReviewed,
+    live: liveResult,
+  };
 }
 
 async function acpSmoke(): Promise<Report['acp']> {
@@ -580,13 +662,16 @@ async function xaiPrices(): Promise<{ prices: PublishedPrice[]; note?: string }>
  * suffixes stripped: agy lists only effort-qualified slugs
  * (`gemini-4-hydrogen-xhigh`), and the registry holds the base model.
  */
-async function agyModelBases(): Promise<Set<string> | null> {
+async function agyModelBases(): Promise<{ bases: Set<string>; xhigh: Set<string> } | null> {
   const r = await run('agy', ['models'], { timeoutMs: 60_000 });
   const bases = new Set<string>();
+  const xhigh = new Set<string>();
   for (const m of r.out.matchAll(/^([a-z0-9][a-z0-9.-]+)\t/gm)) {
-    bases.add(m[1].replace(/-(?:low|medium|high|xhigh|max)$/, ''));
+    const base = m[1].replace(/-(?:low|medium|high|xhigh|max)$/, '');
+    bases.add(base);
+    if (m[1].endsWith('-xhigh')) xhigh.add(base);
   }
-  return bases.size ? bases : null;
+  return bases.size ? { bases, xhigh } : null;
 }
 
 /** What `grok models` lists as selectable for the logged-in account. */
@@ -686,6 +771,9 @@ async function sweepRegistry(codexBin: string, claudeBin: string): Promise<Regis
     ) => { id: string; engine: string; pricing: { input: number; output: number; cached?: number } } | undefined;
     getAliases: () => Record<string, string>;
   };
+  const { AGY_XHIGH_MODELS } = (await import(path.join(ROOT, 'src', 'persistent-agy-session.ts'))) as {
+    AGY_XHIGH_MODELS: RegExp;
+  };
   const registered = (id: string) => {
     const m = lookupModel(id);
     return m && m.id === id ? m.pricing : undefined;
@@ -751,10 +839,25 @@ async function sweepRegistry(codexBin: string, claudeBin: string): Promise<Regis
   // agy 1.5.8 dropped it, and this sweep reported nothing. The Claude and
   // GPT-OSS models agy proxies, and its orchestrator entry, are not Gemini
   // API models and are left out.
-  const agyBases = await agyModelBases();
-  if (!agyBases) {
+  const agyList = await agyModelBases();
+  const agyBases = agyList?.bases;
+  if (!agyList || !agyBases) {
     notes.push('missing-model check NOT run for agy — `agy models` listed no model');
   } else {
+    // The wrapper clamps effort to a model's top tier. A model agy lists with an
+    // `-xhigh` tier that the wrapper does not know caps `xhigh`/`max` at `high`
+    // without a word (gemini-4-neon arrived with one in agy 1.5.12); one the
+    // wrapper sends `xhigh` that agy no longer lists fails the turn.
+    for (const base of [...agyList.xhigh].sort()) {
+      if (base.startsWith('gemini-') && !AGY_XHIGH_MODELS.test(base)) {
+        notes.push(`agy lists ${base}-xhigh, but the agy wrapper caps ${base} at high (AGY_XHIGH_MODELS)`);
+      }
+    }
+    for (const base of [...agyBases].sort()) {
+      if (AGY_XHIGH_MODELS.test(base) && !agyList.xhigh.has(base)) {
+        notes.push(`the agy wrapper sends ${base} xhigh, which \`agy models\` no longer lists`);
+      }
+    }
     for (const base of [...agyBases].sort()) {
       if (base.startsWith('gemini-') && !base.includes('orchestrator') && !registered(base)) {
         unregistered.push(`${base} (agy)`);
@@ -796,6 +899,12 @@ async function main(): Promise<void> {
     // A lookup that exists and returns nothing did not check. Reading "?" as
     // "nothing newer" is how an engine stays behind unnoticed.
     if (e.upstream === null) regressions.push(`${e.id}: upstream version lookup returned nothing`);
+    // A flag or subcommand nobody has decided on is a decision still owed:
+    // headless ones get wired, the rest get a reason in sweep-reviewed.json.
+    // As a note it was read past for months.
+    if (e.unreferenced.length) regressions.push(`${e.id}: unreviewed flag(s): ${e.unreferenced.join(' ')}`);
+    if (e.unreviewedCommands.length)
+      regressions.push(`${e.id}: unreviewed subcommand(s): ${e.unreviewedCommands.join(' ')}`);
   }
   if (!acp.ok) regressions.push(`acp: ${acp.note}`);
   if (!mcp.ok) regressions.push(`mcp: ${mcp.note}`);
@@ -846,7 +955,15 @@ async function main(): Promise<void> {
         console.log(
           `\nnot in ${e.id} --help (verify by invocation before treating as removed): ${e.notAdvertised.join(', ')}`,
         );
-      if (e.unreferenced.length) console.log(`new on ${e.id} (judge AI-facing vs TUI): ${e.unreferenced.join(' ')}`);
+      if (e.unreferenced.length || e.unreviewedCommands.length)
+        console.log(
+          `unreviewed on ${e.id} (wire if headless, else record why in scripts/sweep-reviewed.json): ` +
+            [...e.unreferenced, ...e.unreviewedCommands.map((c) => `cmd:${c}`)].join(' '),
+        );
+      if (e.staleReviewed.length)
+        console.log(
+          `reviewed on ${e.id} but no longer listed (drop from sweep-reviewed.json): ${e.staleReviewed.join(' ')}`,
+        );
     }
     if (regressions.length) console.log(`\n${regressions.length} regression(s):\n  ${regressions.join('\n  ')}`);
     else console.log('\nno regressions');

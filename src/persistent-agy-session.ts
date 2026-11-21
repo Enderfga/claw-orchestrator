@@ -74,6 +74,9 @@ interface AgyStreamEvent {
   };
 }
 
+/** agy models with a reasoning tier above `high`; `agy models` lists them with a `-xhigh` slug. */
+export const AGY_XHIGH_MODELS = /^gemini-4-(?:hydrogen|neon)(?:-|$)/;
+
 const EMPTY_RESPONSE_ERROR =
   'Antigravity returned an empty response; the turn failed but the session remains available for retry';
 const TOOL_DENIAL_EMPTY_RESPONSE_ERROR =
@@ -198,8 +201,9 @@ export class PersistentAgySession extends BaseOneShotSession {
     // default model.
     // agy 1.1.5+ exposes reasoning variants through --effort. Its tiers are
     // narrower than the engine-agnostic EffortLevel union and differ by model:
-    // low|medium|high everywhere, and xhigh only on gemini-4-hydrogen (agy
-    // 1.5.9 refuses `gemini-4-argon --effort xhigh`, naming the tiers it has).
+    // low|medium|high everywhere, and xhigh on gemini-4-hydrogen (agy 1.5.9)
+    // and gemini-4-neon (1.5.12); agy refuses `gemini-4-argon --effort xhigh`,
+    // naming the tiers it has. The sweep compares this list with `agy models`.
     // Preserve the caller's intent by clamping everything above a model's top
     // tier to that tier. A per-turn override wins over the session default,
     // matching session_send's documented contract.
@@ -212,7 +216,7 @@ export class PersistentAgySession extends BaseOneShotSession {
     const configuredModel = this.options.resolvedModel || this.options.model;
     let model = configuredModel ? this.resolveModel(configuredModel.replace(/^agy\//, '')) : undefined;
     const requestedEffort = turnEffort ?? this.options.effort;
-    const topTier = model && /^gemini-4-hydrogen(?:-|$)/.test(model) ? 'xhigh' : 'high';
+    const topTier = model && AGY_XHIGH_MODELS.test(model) ? 'xhigh' : 'high';
     const explicitEffort =
       requestedEffort === 'max' || requestedEffort === 'xhigh' || requestedEffort === 'ultra'
         ? topTier

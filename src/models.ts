@@ -477,6 +477,16 @@ const MODELS: ModelDef[] = [
   // gemini-3.1-pro left agy's list in the same release — agy now refuses it as
   // an unknown model — and stays registered only as a real API model with a
   // real price.
+  // Gemini 4 Neon (agy 1.5.12 with a GEMINI_API_KEY, 1.5.13 also with ADC):
+  // $3/$15, cached $0.15, 1M, no dated change announced. Not offered on a plain
+  // Google sign-in, so `agy-pro` stays on Argon.
+  {
+    id: 'gemini-4-neon',
+    engine: 'agy',
+    provider: 'google',
+    pricing: { input: 3, output: 15, cached: 0.15 },
+    contextWindow: 1_000_000,
+  },
   {
     id: 'gemini-4-carbon',
     engine: 'agy',
