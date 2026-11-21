@@ -57,10 +57,14 @@ const FIRST_TURN_MS = 2_000;
 const OUTLIVES_MS = 4_000;
 
 /** The premise of these tests: the first engine was running, and held on through the SIGTERM. */
-function expectFirstHeldOn(): void {
+async function expectFirstHeldOn(): Promise<void> {
   const [start] = log();
   expect(start, 'the first engine never started').toMatch(/^start /);
-  expect(log(), 'the first engine was not running when the turn timed out').toContain(`term ${start.split(' ')[1]}`);
+  // It logs `start` after installing its handler, so the SIGTERM is caught; the
+  // handler's line lands a moment after the turn has already rejected.
+  const term = `term ${start.split(' ')[1]}`;
+  for (let i = 0; i < 40 && !log().includes(term); i++) await sleep(50);
+  expect(log(), 'the first engine did not catch the SIGTERM').toContain(term);
 }
 
 beforeEach(() => {
@@ -81,7 +85,7 @@ describe.runIf(posix)('one-shot turn timeout waits for the engine process to exi
     await session.start();
 
     await expect(session.send('first', { waitForComplete: true, timeout: FIRST_TURN_MS })).rejects.toThrow(/Timeout/);
-    expectFirstHeldOn();
+    await expectFirstHeldOn();
     expect(session.isBusy).toBe(true);
 
     // Generous: under a full parallel run the fake engine's start has been seen to
@@ -102,7 +106,7 @@ describe.runIf(posix)('one-shot turn timeout waits for the engine process to exi
     await session.start();
 
     await expect(session.send('first', { waitForComplete: true, timeout: FIRST_TURN_MS })).rejects.toThrow(/Timeout/);
-    expectFirstHeldOn();
+    await expectFirstHeldOn();
     const second = session.send('second', { waitForComplete: true, timeout: 20_000 }).catch(() => undefined);
     // Wait until the second engine has started and the first has exited.
     const starts = (): string[] => log().filter((l) => l.startsWith('start '));
@@ -124,7 +128,7 @@ describe.runIf(posix)('one-shot turn timeout waits for the engine process to exi
     await session.start();
 
     await expect(session.send('first', { waitForComplete: true, timeout: FIRST_TURN_MS })).rejects.toThrow(/Timeout/);
-    expectFirstHeldOn();
+    await expectFirstHeldOn();
     const waiting = session.send('second', { waitForComplete: true, timeout: 5_000 });
     session.stop();
 
@@ -142,7 +146,7 @@ describe.runIf(posix)('one-shot turn timeout waits for the engine process to exi
     await session.start();
 
     await expect(session.send('first', { waitForComplete: true, timeout: FIRST_TURN_MS })).rejects.toThrow(/Timeout/);
-    expectFirstHeldOn();
+    await expectFirstHeldOn();
     expect(session.isBusy).toBe(true);
 
     // Generous: under a full parallel run the second spawn has been seen to take
