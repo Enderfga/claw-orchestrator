@@ -286,8 +286,10 @@ export function solveWorkflow(args: SolveArgs): WorkflowSpec {
 }
 
 export interface GoalArgs extends CommonArgs {
-  /** Who runs the goal: a Codex `codex-app` thread (default) or a Claude Code session. */
+  /** Who runs the goal (see `GoalNode.engine`); omitted, the configured default engine. */
   engine?: GoalNode['engine'];
+  /** The ACP agent preset, for `engine: 'acp'`. */
+  acpAgent?: string;
   /** Model for the goal's thread; omitted means the engine's own default. */
   model?: string;
   effort?: string;
@@ -306,8 +308,9 @@ export interface GoalArgs extends CommonArgs {
 /**
  * A `/goal` judged by checks it did not write: goal → verify → repair.
  *
- * The goal runs on one thread — a Codex `codex-app` thread, or a Claude Code
- * session — until the agent calls it complete. That is the agent's opinion;
+ * The goal runs on one thread — a Codex `codex-app` thread, a Claude Code
+ * session, or a conversation clawo drives turn by turn — until the agent calls
+ * it complete. That is the agent's opinion;
  * the verifier's contract is the verdict. On red, the router sends control
  * back to the same thread with the failing checks while repair budget remains.
  */
@@ -318,6 +321,7 @@ export function goalWorkflow(args: GoalArgs): WorkflowSpec {
     kind: 'goal',
     objective: args.task,
     ...(args.engine ? { engine: args.engine } : {}),
+    ...(args.acpAgent ? { acpAgent: args.acpAgent } : {}),
     cwd: args.cwd,
     model: args.model,
     effort: args.effort,

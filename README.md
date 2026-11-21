@@ -60,8 +60,9 @@ https://github.com/user-attachments/assets/5bf9bea8-e5ac-4632-a292-a80a45831dff
   workspace ([guide](./skills/references/multi-engine.md)).
 - 💾 **Survives a crash**: every state transition is checkpointed; resume, retry, timeout, cancel and steer come from
   the kernel ([guide](./skills/references/workflow.md)).
-- 🎯 **Long goals**: `clawo goal` runs a Claude Code or Codex `/goal` unattended on one thread, resumes it after usage limits within a
-  bound, optionally inside your own sandbox ([guide](./skills/references/workflow.md#goal)).
+- 🎯 **Long goals**: `clawo goal` keeps one agent working toward an objective unattended, on any engine (Claude Code's
+  and Codex's own `/goal`, a loop clawo runs on the others), resumes it after usage limits within a bound, optionally
+  inside your own sandbox ([guide](./skills/references/workflow.md#goal)).
 - 💰 **Known cost**: one per-turn ledger across engines (`clawo runs`) and a `maxBudgetUsd` cap the runtime enforces on
   every engine ([guide](./skills/references/observability.md)).
 - 🔌 **Fits your tools**: a CLI, an MCP server, an ACP agent for editors, an OpenAI-compatible endpoint, a TypeScript

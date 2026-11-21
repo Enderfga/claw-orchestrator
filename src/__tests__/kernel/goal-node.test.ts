@@ -947,11 +947,12 @@ describe('goal node on claude', () => {
       return s;
     });
     const kernel = kernelWith(m);
-    for (const engine of ['agy', 'grok', 'opencode', 'acp']) {
+    for (const engine of ['custom', 'gemini', 'cursor', 'nope']) {
       await expect(kernel.start(oneGoal({ engine }))).rejects.toThrow(
-        new RegExp(`a goal runs on engine 'claude' or 'codex', not '${engine}'`),
+        new RegExp(`a goal runs on engine .*not '${engine}'`),
       );
     }
+    await expect(kernel.start(oneGoal({ engine: 'acp' }))).rejects.toThrow(/names its agent preset \(acpAgent\)/);
     expect(m.starts).toEqual([]);
     const done = await kernel.wait((await kernel.start(oneGoal({ engine: 'codex-app' }))).runId);
     expect(m.starts[0]).toMatchObject({ engine: 'codex-app' });
@@ -1035,7 +1036,7 @@ describe('fan-out agents that run goals', () => {
     expect(objectives.sort()).toEqual(['build it in alpha', 'build it in beta']);
   });
 
-  it('refuses at start a goal agent without claude or codex, and synthesis beside goal agents', async () => {
+  it('refuses at start a goal agent on an engine no goal runs on, and synthesis beside goal agents', async () => {
     const kernel = kernelWith(mixedManager());
     const one = (agent: Record<string, unknown>, extra: Record<string, unknown> = {}): WorkflowSpec => ({
       name: 'bad',
@@ -1046,8 +1047,11 @@ describe('fan-out agents that run goals', () => {
     const unnamed = await kernel.start(one({ name: 'a', objective: 'do it' }));
     expect((unnamed.spec.nodes[0] as { agents: Array<{ engine?: string }> }).agents[0].engine).toBe('claude');
     await kernel.wait(unnamed.runId);
-    await expect(kernel.start(one({ name: 'a', engine: 'opencode', objective: 'do it' }))).rejects.toThrow(
-      /needs engine/,
+    await expect(kernel.start(one({ name: 'a', engine: 'custom', objective: 'do it' }))).rejects.toThrow(
+      /agent 'a' runs a goal, and a goal runs on engine .*not 'custom'/,
+    );
+    await expect(kernel.start(one({ name: 'a', engine: 'acp', objective: 'do it' }))).rejects.toThrow(
+      /names its agent preset/,
     );
     await expect(
       kernel.start(one({ name: 'a', engine: 'codex', objective: 'do it' }, { synthesize: true })),

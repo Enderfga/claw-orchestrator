@@ -22,6 +22,7 @@ import { forumBrief, forumHub, forumTeamOf, openAsks, resolveForum, unreadFor } 
 import type { GoalNodeData } from './goal.js';
 import { loadRun } from '../store.js';
 import { sanitizeCwd } from '../../validation.js';
+import type { EngineType } from '../../types.js';
 
 /** The fan-out executor without goal agents; one with them needs the kernel (`makeFanoutExecutor`). */
 export async function executeFanoutNode(node: NodeSpec, ctx: NodeContext): Promise<NodeResult> {
@@ -132,7 +133,8 @@ async function runGoalAgent(
   goalRuns: Record<string, string>,
   track: (runId: string) => void,
 ): Promise<FanoutAgentResult> {
-  const engine = a.engine === 'claude' ? 'claude' : 'codex-app';
+  // The session engine the goal runs on: a Codex goal is a `codex-app` thread.
+  const engine: EngineType = !a.engine || a.engine === 'codex' ? 'codex-app' : a.engine;
   const started = Date.now();
   let cwd = projectDir;
   try {
@@ -152,7 +154,9 @@ async function runGoalAgent(
         id: 'goal',
         kind: 'goal',
         objective: a.objective!,
-        engine: a.engine === 'claude' ? 'claude' : 'codex',
+        // Stamped and checked at start (`validateSpec`): one of the goal engines.
+        engine: a.engine as GoalNode['engine'],
+        ...(a.acpAgent ? { acpAgent: a.acpAgent } : {}),
         cwd,
         ...(a.model ? { model: a.model } : {}),
         ...(a.effort ? { effort: a.effort } : {}),

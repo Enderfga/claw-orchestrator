@@ -116,8 +116,8 @@ export interface FanoutAgentSpec extends AgentBinding {
    */
   cwd?: string;
   /**
-   * Fan-out only: run this agent as a goal instead of one turn — a `/goal` on its
-   * engine (`codex` or `claude`, required) with this objective, under the same
+   * Fan-out only: run this agent as a goal instead of one turn — a goal on its
+   * engine (any goal engine, see `GoalNode.engine`) with this objective, under the same
    * rules as a `goal` node: the goal ends when its judge or the agent says it is
    * met, out of budget, or blocked, and stalls and capacity errors are resumed.
    * It runs as a child run with one goal node, so a resumed parent picks it up
@@ -243,11 +243,22 @@ export interface AutoloopNode extends NodeBase {
  * checks. Like `autoloop`, it has no default node timeout; `timeoutMs` is the
  * wall-clock budget.
  */
+/** The engines a goal runs on. */
+export const GOAL_ENGINES = ['claude', 'codex', 'codex-app', 'agy', 'grok', 'opencode', 'acp'] as const;
+export type GoalEngine = (typeof GOAL_ENGINES)[number];
+
 export interface GoalNode extends NodeBase {
   kind: 'goal';
   objective: string;
-  /** Who runs the goal. Default `codex`. */
-  engine?: 'codex' | 'claude';
+  /**
+   * Who runs the goal: Codex (`codex`, a `codex-app` thread) or Claude Code run
+   * the goal loop themselves; on `agy`, `grok`, `opencode` and `acp` clawo runs
+   * it turn by turn (`TurnGoalSession`). Omitted, the configured default engine,
+   * fixed when the run starts.
+   */
+  engine?: GoalEngine;
+  /** The ACP agent preset, for `engine: 'acp'`. */
+  acpAgent?: string;
   cwd?: string;
   model?: string;
   effort?: string;
@@ -272,8 +283,9 @@ export interface GoalNode extends NodeBase {
   /** An active goal with no turn and no notification for this long is resumed. Default 5 min. */
   stallMs?: number;
   /**
-   * Tools the session may not use (`--disallowed-tools`). `claude` only: Codex's
-   * app-server has no per-thread tool list, so it is refused there.
+   * Tools the session may not use (`--disallowed-tools`). `claude` and `grok`
+   * only: Codex's app-server has no per-thread tool list, so it is refused there,
+   * as on the other engines.
    */
   disallowedTools?: string[];
 }

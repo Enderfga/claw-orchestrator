@@ -17,6 +17,7 @@ import {
   sessionBody,
 } from './session-flags.js';
 import { Command } from 'commander';
+import type { GoalArgs } from '../src/kernel/templates/index.js';
 import { createRequire } from 'node:module';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -1067,19 +1068,19 @@ addAgentFlags(
   if (node?.output) console.log(`\n${node.output}`);
 });
 
-program
-  .command('goal')
+addEngineFlags(program.command('goal'), 'Run the goal on')
   .description(
-    'Run a /goal on one thread (Codex or Claude Code), then have the runtime check it: goal → verify → repair',
+    'Run a goal on one thread (any engine but custom), then have the runtime check it: goal → verify → repair',
   )
   .argument('[objective]', 'What the agent should achieve (or use --objective-file)')
   .option('--objective-file <file>', 'Read the objective from a file')
-  .option('-e, --engine <engine>', 'Who runs the goal: codex | claude (default: the configured default engine)')
-  .option('--claude', 'Run the goal on Claude Code (same as -e claude)')
-  .option('--codex', 'Run the goal on Codex (same as -e codex)')
+  .option(
+    '-e, --engine <engine>',
+    'Who runs the goal: claude | codex | agy | grok | opencode | acp (default: the configured default engine)',
+  )
   .option('-m, --model <model>', "Model (default: the engine's own)")
   .option('--effort <level>', 'Reasoning effort')
-  .option('--sandbox <mode>', "Codex's own sandbox: read-only | workspace-write | danger-full-access")
+  .option('--sandbox <mode>', 'Sandbox: read-only | workspace-write | danger-full-access (Claude Code has none)')
   .option(
     '--launcher <arg>',
     'Run the engine under this command, one argv element per flag, e.g. --launcher ./sandbox.sh --launcher task --launcher "0 1"',
@@ -1088,7 +1089,7 @@ program
   )
   .option(
     '--thread <id>',
-    'Start on this existing codex thread or claude session: its goal is replaced, its history kept',
+    "Start on this existing thread (a codex thread, a claude session, another engine's conversation id): its goal is replaced, its history kept",
   )
   .option('--token-budget <n>', 'Tokens the goal may spend before it stops as budgetLimited')
   .option('--goal-timeout <minutes>', 'Wall-clock budget for one goal pass (default: none)')
@@ -1103,16 +1104,19 @@ program
     const { goalWorkflow } = await import('../src/kernel/templates/index.js');
     const { GOAL_OBJECTIVE_MAX_CHARS } = await import('../src/kernel/nodes/goal.js');
     let engine: string | undefined;
+    let acpAgent: string | undefined;
     try {
-      engine = engineFromFlags(opts).engine;
+      ({ engine, acpAgent } = engineFromFlags(opts));
     } catch (err) {
       fail((err as Error).message);
       return;
     }
     // With none given the goal carries no engine, and the server gives it the
     // configured default when the run starts (refused there if no goal runs on it).
-    if (engine !== undefined && engine !== 'codex' && engine !== 'claude') {
-      console.error(`Error: a goal runs on codex or claude, not ${engine}`);
+    if (engine === 'codex-app') engine = 'codex';
+    const goalEngines = ['claude', 'codex', 'agy', 'grok', 'opencode', 'acp'];
+    if (engine !== undefined && !goalEngines.includes(engine)) {
+      console.error(`Error: a goal runs on ${goalEngines.join(', ')}, not ${engine}`);
       process.exitCode = 1;
       return;
     }
@@ -1137,7 +1141,8 @@ program
       task: objective,
       cwd,
       contract: contract as never,
-      engine: engine as 'codex' | 'claude' | undefined,
+      engine: engine as GoalArgs['engine'],
+      ...(acpAgent ? { acpAgent } : {}),
       model: opts.model,
       effort: opts.effort,
       sandboxMode: opts.sandbox,

@@ -1,12 +1,15 @@
 /**
- * `goal` node — a `/goal` run on one thread: a Codex `codex-app` thread, or a
- * Claude Code session (`engine: 'claude'`).
+ * `goal` node — a `/goal` run on one thread: a Codex `codex-app` thread, a
+ * Claude Code session (`engine: 'claude'`), or a conversation on an engine with
+ * no goal loop of its own (`agy`, `grok`, `opencode`, `acp`), where
+ * `TurnGoalSession` runs the loop turn by turn.
  *
  * Codex's app-server runs a goal itself: `thread/goal/set` starts its turn loop,
  * which keeps going until the goal is `complete`, out of budget, blocked, or
  * stopped by a usage limit. Claude Code's `/goal` keeps a session working the
  * same way, through a Stop hook; `ClaudeGoalSession` puts it behind the same
- * surface, so everything below holds for both. What the kernel adds is what a
+ * surface, and `TurnGoalSession` does for the rest, so everything below holds
+ * for every engine. What the kernel adds is what a
  * long unattended run needs around that loop:
  *
  *  - **Reattach, never restart.** The thread id is checkpointed as soon as the
@@ -30,6 +33,7 @@ import { randomUUID } from 'node:crypto';
 import { SESSION_EVENT } from '../../constants.js';
 import type { NodeContext, NodeResult } from '../engine.js';
 import type { GoalNode, NodeSpec } from '../types.js';
+import type { EngineType } from '../../types.js';
 import { goalRepairBrief, interruptedNotice } from './agent.js';
 import { forumBrief, forumHub, forumTeamOf, resolveForum, unreadFor } from '../forum.js';
 
@@ -147,8 +151,12 @@ export async function executeGoalNode(node: NodeSpec, ctx: NodeContext): Promise
   if (!manager?.goalSession && !manager?.codexGoalSession) {
     return { ok: false, error: 'goal node requires a session manager' };
   }
-  const claude = spec.engine === 'claude';
-  const engineName = claude ? 'claude' : 'codex-app';
+  const engineName: EngineType =
+    !spec.engine || spec.engine === 'codex' || spec.engine === 'codex-app' ? 'codex-app' : spec.engine;
+  const claude = engineName === 'claude';
+  const codex = engineName === 'codex-app';
+  /** The loop is `TurnGoalSession`'s: the conversation id appears with the first turn. */
+  const turns = !claude && !codex;
   if (!spec.objective?.trim()) return { ok: false, error: `goal node '${spec.id}' has no objective` };
   if (chars(spec.objective) > GOAL_OBJECTIVE_MAX_CHARS) {
     return {
@@ -177,7 +185,7 @@ export async function executeGoalNode(node: NodeSpec, ctx: NodeContext): Promise
   // usage limit) was not finished; a process that died during the backoff picks
   // it up again, unless a new red verdict sends the node to repair instead.
   const capacityBlock =
-    !claude && prior?.status === 'blocked' && TRANSIENT_ERRORS.has(prior?.lastError?.code ?? '') && !newRed;
+    codex && prior?.status === 'blocked' && TRANSIENT_ERRORS.has(prior?.lastError?.code ?? '') && !newRed;
   const finished = !!priorThread && TERMINAL.has(prior?.status ?? '') && !capacityBlock;
   // A finished goal also goes back to work, on the same thread, for word that
   // reached it after it ended: a steer, or a forum post that names it. Without
@@ -238,7 +246,11 @@ export async function executeGoalNode(node: NodeSpec, ctx: NodeContext): Promise
   };
   const absorb = (goal: GoalSnapshot | null) => {
     if (!goal) return;
-    const changed = goal.status !== data.status;
+    // A new conversation on a turn-driven engine gets its id with its first turn.
+    const thread = session?.codexThreadId;
+    const newThread = !data.threadId && !!thread;
+    if (newThread) data.threadId = thread!;
+    const changed = goal.status !== data.status || newThread;
     data.status = goal.status;
     data.objective = goal.objective;
     data.tokensUsed = goal.tokensUsed;
@@ -352,7 +364,8 @@ export async function executeGoalNode(node: NodeSpec, ctx: NodeContext): Promise
         model: spec.model,
         effort: spec.effort as never,
         ...(claude ? {} : { sandboxMode: spec.sandboxMode }),
-        ...(claude && spec.disallowedTools?.length ? { disallowedTools: spec.disallowedTools } : {}),
+        ...(spec.disallowedTools?.length ? { disallowedTools: spec.disallowedTools } : {}),
+        ...(engineName === 'acp' && spec.acpAgent ? { acpAgent: spec.acpAgent } : {}),
         launcher: spec.launcher,
         permissionMode: 'bypassPermissions',
         // The node checkpoints the thread id itself; a registry entry would only
@@ -380,9 +393,9 @@ export async function executeGoalNode(node: NodeSpec, ctx: NodeContext): Promise
         ? undefined
         : manager.codexGoalSession?.(sessionName);
     if (!live) return `the ${engineName} session has no goal surface`;
-    if (!live.codexThreadId) return `the ${engineName} session has no thread`;
+    if (!live.codexThreadId && !turns) return `the ${engineName} session has no thread`;
     if (threadId && live.codexThreadId !== threadId) {
-      return `could not resume ${claude ? 'claude session' : 'codex thread'} ${threadId} (got ${live.codexThreadId}); refusing to start the goal over`;
+      return `could not resume ${claude ? 'claude session' : codex ? 'codex thread' : `${engineName} conversation`} ${threadId} (got ${live.codexThreadId ?? 'none'}); refusing to start the goal over`;
     }
     session = live;
     closed = false;
@@ -393,7 +406,7 @@ export async function executeGoalNode(node: NodeSpec, ctx: NodeContext): Promise
     live.on('codex:error', onError);
     live.on(SESSION_EVENT.CLOSE, onClose);
     live.on(SESSION_EVENT.RESULT, onResult);
-    data.threadId = live.codexThreadId;
+    data.threadId = live.codexThreadId ?? '';
     publish(true);
     return undefined;
   };
@@ -497,7 +510,13 @@ export async function executeGoalNode(node: NodeSpec, ctx: NodeContext): Promise
       if (closed) {
         // The engine process is gone; the thread is on disk. Reattach after a backoff.
         if (retryAt === null) {
-          const stop = spendRecovery(claude ? 'the claude process exited' : 'the codex app-server exited');
+          const stop = spendRecovery(
+            claude
+              ? 'the claude process exited'
+              : codex
+                ? 'the codex app-server exited'
+                : `the ${engineName} session closed`,
+          );
           if (stop) return stop;
         }
         if (Date.now() >= (retryAt ?? 0)) {
@@ -531,7 +550,7 @@ export async function executeGoalNode(node: NodeSpec, ctx: NodeContext): Promise
       // `blocked`; the cause comes with the turn, not as a goal status. That is
       // the same transient condition `usageLimited` names, so it is resumed the
       // same way, within the same bound, rather than ending the node.
-      const capacityBlocked = !claude && data.status === 'blocked' && capacityError;
+      const capacityBlocked = codex && data.status === 'blocked' && capacityError;
       const end = capacityBlocked ? undefined : ended();
       if (end) return end;
 

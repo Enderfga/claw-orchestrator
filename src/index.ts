@@ -41,7 +41,7 @@ import {
 import { isValidRunId, readEvents as readKernelEvents } from './kernel/store.js';
 import { resolveSecretRefs } from './kernel/secrets.js';
 import { runReport } from './kernel/projections.js';
-import type { RunState, WorkflowSpec } from './kernel/types.js';
+import { GOAL_ENGINES, type RunState, type WorkflowSpec } from './kernel/types.js';
 import { AUTOLOOP_TIMEOUT_SCHEMA, validateAutoloopTimeoutConfig } from './autoloop/types.js';
 
 // ─── Standalone Export ───────────────────────────────────────────────────────
@@ -1174,9 +1174,11 @@ const plugin = {
           },
           engine: {
             type: 'string',
-            enum: ['codex', 'claude'],
-            description: '`goal` only: who runs the goal (default codex).',
+            enum: GOAL_ENGINES.filter((e) => e !== 'codex-app'),
+            description:
+              '`goal` only: who runs the goal. Codex and Claude Code run their own goal loop; on agy, grok, opencode and acp clawo runs it turn by turn. Default: the configured default engine.',
           },
+          acpAgent: { ...ACP_AGENT_ID_SCHEMA, description: '`goal` with engine acp: the ACP agent preset.' },
           model: { type: 'string', description: "`goal` only: model (default: the engine's own)." },
           tokenBudget: { type: 'number', description: '`goal` only: tokens the goal may spend.' },
           launcher: {
@@ -1279,6 +1281,7 @@ const plugin = {
               cwd,
               contract: args.contract as never,
               engine: args.engine as GoalArgs['engine'],
+              acpAgent: args.acpAgent as string | undefined,
               model: args.model as string | undefined,
               tokenBudget: args.tokenBudget as number | undefined,
               launcher: args.launcher as string[] | undefined,

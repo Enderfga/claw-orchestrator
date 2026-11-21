@@ -5,7 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [7.30.1] - 2026-11-21
+## [7.31.0] - 2026-11-21
+
+### Added
+
+- **Goals on every engine.** `clawo goal --agy`, `--grok`, `--opencode` and `--acp <preset>`, goal nodes and fan-out goal
+  agents run on Antigravity, Grok Build, OpenCode and ACP agents as well as on Claude Code and Codex. These engines have
+  no goal loop of their own, so clawo runs it on one conversation: the agent declares the goal done with a last line
+  `GOAL COMPLETE` (or `GOAL BLOCKED: <reason>`), and a turn that ends with neither is followed by one that tells it to
+  continue. Token budgets, usage-limit and stall resumes, repairs on the same conversation after a red verdict and
+  reattaching after a crash work as on the other two; a team of goal agents can mix engines.
 
 ### Fixed
 
@@ -16,8 +25,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A Codex goal sent back to repair marks itself complete once it has fixed the cause.** Its objective said its
   own test run did not count, and gave no way to see the runtime's checks pass, so an agent that had fixed the
   failure marked the goal `blocked`. It now says the checks run again after the agent stops.
-- **A goal node naming an engine other than `claude` or `codex` is refused at start.** It ran on Codex instead:
+- **A goal names an engine a goal runs on, or is refused at start.** A goal node naming another engine ran on Codex:
   the node treated every engine but `claude` as Codex.
+- **A fan-out goal agent's result names the engine it ran on**; it said `codex-app` for every agent but Claude Code.
 
 ## [7.30.0] - 2026-11-21
 

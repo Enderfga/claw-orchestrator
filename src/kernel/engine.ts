@@ -94,6 +94,8 @@ import {
   type RunResume,
   type ContractDrift,
   type WorkflowSpec,
+  GOAL_ENGINES,
+  type GoalEngine,
 } from './types.js';
 
 export const DEFAULT_NODE_TIMEOUT_MS = 30 * 60_000;
@@ -463,8 +465,18 @@ function declaredDrift(
  * run halfway through with `unknown node`; a negative retry or visit bound was
  * accepted and then behaved arbitrarily.
  */
-/** The engines a goal runs on; `codex-app` is the session engine `codex` means for a goal. */
-const GOAL_ENGINES = new Set(['claude', 'codex', 'codex-app']);
+/** Why a goal cannot run on `engine` (with `acpAgent`), if it cannot. */
+function goalEngineProblem(engine: unknown, acpAgent: unknown): string | undefined {
+  if (!GOAL_ENGINES.includes(engine as GoalEngine)) {
+    return `a goal runs on engine ${GOAL_ENGINES.filter((e) => e !== 'codex-app')
+      .map((e) => `'${e}'`)
+      .join(', ')}, not '${String(engine)}'`;
+  }
+  if (engine === 'acp' && (typeof acpAgent !== 'string' || !acpAgent.trim())) {
+    return "a goal on engine 'acp' names its agent preset (acpAgent)";
+  }
+  return undefined;
+}
 
 export function validateSpec(spec: WorkflowSpec): void {
   if (!spec || typeof spec.name !== 'string' || !spec.name.trim()) {
@@ -485,14 +497,11 @@ export function validateSpec(spec: WorkflowSpec): void {
     if (node.timeoutMs !== undefined && (!Number.isFinite(node.timeoutMs) || node.timeoutMs <= 0)) {
       throw new Error(`Node '${node.id}': timeoutMs must be a positive number`);
     }
-    // A goal runs on Claude Code's /goal or a codex-app thread. Refused, not
-    // mapped: the node treats every engine but claude as codex, so a goal that
-    // named another engine would have run on Codex without a word.
-    if (node.kind === 'goal' && node.engine !== undefined && !GOAL_ENGINES.has(node.engine as string)) {
-      throw new Error(
-        `Node '${node.id}': a goal runs on engine 'claude' or 'codex', not '${String(node.engine)}' ` +
-          `(for another engine, an agent node with a verifier and a repair loop, as in the solve workflow)`,
-      );
+    // Refused, not mapped: a goal that named an engine the node does not know
+    // would run somewhere else without a word.
+    if (node.kind === 'goal' && node.engine !== undefined) {
+      const problem = goalEngineProblem(node.engine, node.acpAgent);
+      if (problem) throw new Error(`Node '${node.id}': ${problem}`);
     }
     if (node.kind === 'fanout') {
       const goals = (node.agents ?? []).filter((a) => a.objective !== undefined);
@@ -500,11 +509,8 @@ export function validateSpec(spec: WorkflowSpec): void {
         if (typeof a.objective !== 'string' || !a.objective.trim()) {
           throw new Error(`Node '${node.id}': agent '${a.name}' has an empty objective`);
         }
-        if (a.engine !== 'claude' && a.engine !== 'codex') {
-          throw new Error(
-            `Node '${node.id}': agent '${a.name}' runs a goal, which needs engine 'claude' or 'codex' (got '${a.engine ?? 'none'}')`,
-          );
-        }
+        const problem = goalEngineProblem(a.engine, a.acpAgent);
+        if (problem) throw new Error(`Node '${node.id}': agent '${a.name}' runs a goal, and ${problem}`);
       }
       if (goals.length > 0 && node.synthesize) {
         throw new Error(`Node '${node.id}': synthesize is not supported when agents run goals`);
@@ -518,11 +524,10 @@ export function validateSpec(spec: WorkflowSpec): void {
       // Refused, not dropped: a node that asked to deny tools and silently ran
       // with them would be worse than one that did not start.
       const engine = node.engine ?? (node.kind === 'goal' ? 'codex' : 'claude');
-      const honours = node.kind === 'goal' ? engine === 'claude' : engine === 'claude' || engine === 'grok';
+      const honours = engine === 'claude' || engine === 'grok';
       if (tools.length > 0 && !honours) {
         throw new Error(
-          `Node '${node.id}': disallowedTools is not supported on engine '${engine}' ` +
-            `(${node.kind === 'goal' ? 'goal nodes: claude' : 'agent nodes: claude, grok'})`,
+          `Node '${node.id}': disallowedTools is not supported on engine '${engine}' (engines claude, grok)`,
         );
       }
     }
@@ -557,7 +562,7 @@ export function validateSpec(spec: WorkflowSpec): void {
 export interface EngineDefaults {
   session: EngineType;
   /** Called only when some goal needs it, so a default no goal can run is refused only then. */
-  goal: () => 'claude' | 'codex';
+  goal: () => GoalEngine;
 }
 
 /**
@@ -597,10 +602,11 @@ function configuredEngines(): EngineDefaults {
   return {
     session,
     goal: () => {
-      if (session === 'claude') return 'claude';
       if (session === 'codex' || session === 'codex-app') return 'codex';
+      // `acp` needs a preset the default does not carry; custom and the legacy engines run no goal.
+      if (session !== 'acp' && GOAL_ENGINES.includes(session as GoalEngine)) return session as GoalEngine;
       throw new Error(
-        `A goal runs on Claude Code or Codex, and the default engine is ${session}: give the goal an engine (--claude or --codex)`,
+        `A goal cannot run on the default engine ${session}: give the goal an engine (--claude, --codex, --agy, --grok, --opencode or --acp <preset>)`,
       );
     },
   };

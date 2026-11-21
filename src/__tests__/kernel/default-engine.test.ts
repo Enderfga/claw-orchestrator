@@ -95,14 +95,27 @@ describe('engines fixed at start', () => {
     expect(stampEngines(stamped, { session: 'agy', goal: () => 'claude' })).toBe(stamped);
   });
 
-  it('refuses a goal with no engine when the default is an engine no goal runs on', async () => {
+  it('gives a goal with no engine the default when a goal runs on it, and refuses one that cannot', async () => {
+    const goal = (): WorkflowSpec => ({
+      name: 'g',
+      cwd: tmp,
+      nodes: [{ id: 'g', kind: 'goal', objective: 'do it' } as never],
+    });
+    // agy has no goal loop of its own; clawo runs it turn by turn.
     setDefault('agy');
     const k = kernelRecording([]);
-    await expect(
-      k.start({ name: 'g', cwd: tmp, nodes: [{ id: 'g', kind: 'goal', objective: 'do it' } as never] }),
-    ).rejects.toThrow(/A goal runs on Claude Code or Codex, and the default engine is agy/);
-    // An agent node is fine on agy.
+    const onAgy = await k.start(goal());
+    expect(onAgy.spec.nodes[0]).toMatchObject({ kind: 'goal', engine: 'agy' });
+    await k.wait(onAgy.runId);
+    // An acp default names no agent preset, and a custom engine runs no goal.
+    for (const engine of ['acp', 'custom']) {
+      setDefault(engine);
+      await expect(k.start(goal())).rejects.toThrow(
+        new RegExp(`A goal cannot run on the default engine ${engine}: give the goal an engine`),
+      );
+    }
+    // An agent node is fine on either.
     const run = await k.start(spec());
-    expect(loadRun(run.runId)!.spec.nodes[0]).toMatchObject({ engine: 'agy' });
+    expect(loadRun(run.runId)!.spec.nodes[0]).toMatchObject({ engine: 'custom' });
   });
 });

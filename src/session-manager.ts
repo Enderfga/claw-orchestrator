@@ -211,6 +211,7 @@ import { PersistentCodexSession } from './persistent-codex-session.js';
 import { PersistentCodexAppServerSession, type ThreadGoal } from './persistent-codex-app-session.js';
 import type { GoalSession } from './kernel/nodes/goal.js';
 import { ClaudeGoalSession, type ClaudeGoalOpen } from './claude-goal-session.js';
+import { TURN_GOAL_ENGINES, TurnGoalSession } from './turn-goal-session.js';
 import { PersistentCursorSession } from './persistent-cursor-session.js';
 import { PersistentGrokSession } from './persistent-grok-session.js';
 import { PersistentOpencodeSession } from './persistent-opencode-session.js';
@@ -1095,7 +1096,7 @@ function readClosedLedgerRestore(ledgerDir: string): ClosedLedgerRestore | null 
 export class SessionManager {
   private sessions = new Map<string, ManagedSession>();
   /** Goal adapters over `claude` sessions, by session name; dropped when the session stops. */
-  private _claudeGoals = new Map<string, ClaudeGoalSession>();
+  private _claudeGoals = new Map<string, ClaudeGoalSession | TurnGoalSession>();
   private _pendingSessions = new Map<string, Promise<SessionInfo>>();
   /**
    * Starts that passed the capacity check and are not in `sessions` yet. The
@@ -2820,13 +2821,19 @@ export class SessionManager {
 
   /**
    * The goal surface of the session behind `name`: a `codex-app` session as it
-   * is, a `claude` session through `ClaudeGoalSession` (one per session, made on
-   * first use with what the node knows of the thread). Other engines have none.
+   * is, a `claude` session through `ClaudeGoalSession`, and a session on an
+   * engine with no goal loop of its own (`agy`, `grok`, `opencode`, `acp`)
+   * through `TurnGoalSession`, which runs the loop itself. One adapter per
+   * session, made on first use with what the node knows of the thread.
    */
   goalSession(name: string, open?: ClaudeGoalOpen): GoalSession | undefined {
-    const session = this.sessions.get(name)?.session;
+    const managed = this.sessions.get(name);
+    const session = managed?.session;
+    if (!managed || !session) return undefined;
     if (session instanceof PersistentCodexAppServerSession) return session;
-    if (!(session instanceof PersistentClaudeSession)) return undefined;
+    const engine = managed.config.engine ?? 'claude';
+    const claude = session instanceof PersistentClaudeSession;
+    if (!claude && !TURN_GOAL_ENGINES.has(engine)) return undefined;
     let adapter = this._claudeGoals.get(name);
     // A session replaced under the same name (model switch, tool update) gets a new adapter.
     if (adapter && adapter.host !== session) {
@@ -2834,7 +2841,13 @@ export class SessionManager {
       adapter = undefined;
     }
     if (!adapter) {
-      adapter = new ClaudeGoalSession(session, open);
+      adapter = claude
+        ? new ClaudeGoalSession(session, open)
+        : new TurnGoalSession(
+            session,
+            () => this._storedResumeId(engine, this._sessionResumeId(engine, session)),
+            open,
+          );
       this._claudeGoals.set(name, adapter);
     }
     return adapter;
