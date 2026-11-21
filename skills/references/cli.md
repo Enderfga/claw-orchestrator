@@ -78,44 +78,34 @@ Run as an Agent Client Protocol agent over stdio (same as the `clawo-acp` binary
 ### session-start
 
 ```bash
-clawo session-start [name] [options]
+clawo session-start [name] [--claude | --codex | --codex-app | --agy | --grok | --opencode | --acp <preset> | --custom <preset> | -e <engine>] [options]
 ```
 
 `name` defaults to `session-<timestamp>`. Starting a name that is already live returns that session unchanged; a name in the resume registry resumes its conversation (see [sessions.md](./sessions.md#session-persistence)).
 
-| Flag                            | Description                                                                                                 |
-| ------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `-d, --cwd <dir>`               | Working directory                                                                                           |
-| `-e, --engine <engine>`         | Engine: `claude` (default), `codex`, `codex-app`, `agy`, `grok`, `opencode`, `acp`, or `custom`             |
-| `-m, --model <model>`           | Model name or alias                                                                                         |
-| `--permission-mode <mode>`      | `acceptEdits` (default), `plan`, `auto`, `bypassPermissions`, `manual`, `dontAsk`                           |
-| `--effort <level>`              | `low`, `medium`, `high`, `xhigh`, `max`, `ultra`, `auto` (default); each engine clamps it to its own ladder |
-| `--allowed-tools <tools>`       | Comma-separated tools to auto-approve                                                                       |
-| `--disallowed-tools <tools>`    | Comma-separated tools to deny                                                                               |
-| `--max-turns <n>`               | Max agent loop turns                                                                                        |
-| `--max-budget <usd>`            | Spend cap in USD, checked before every send on every engine                                                 |
-| `--system-prompt <text>`        | Replace system prompt                                                                                       |
-| `--append-system-prompt <text>` | Append to system prompt                                                                                     |
-| `--agents <json>`               | Custom sub-agents JSON                                                                                      |
-| `--agent <name>`                | Default agent                                                                                               |
-| `--bare`                        | Claude Code minimal mode: skips hooks, LSP, auto-memory and CLAUDE.md discovery                             |
-| `-w, --worktree [name]`         | Git worktree                                                                                                |
-| `--fallback-model <model>`      | Fallback model                                                                                              |
-| `--json-schema <schema>`        | JSON Schema for structured output                                                                           |
-| `--mcp-config <paths>`          | MCP config files (comma-separated)                                                                          |
-| `--settings <pathOrJson>`       | Settings.json path or inline JSON                                                                           |
-| `--skip-persistence`            | Keep the session out of the resume registry; Claude Code and Codex also skip writing their own transcript   |
-| `--betas <headers>`             | Beta headers (comma-separated)                                                                              |
-| `--enable-agent-teams`          | Enable agent teams                                                                                          |
-| `--enable-auto-mode`            | Enable auto permission mode                                                                                 |
-| `--resume-session-id <id>`      | Resume an earlier conversation by the engine's own id (Claude session id, Codex thread id, …)               |
-| `--base-url <url>`              | Custom API endpoint (for proxy)                                                                             |
-| `--claude-account <name>`       | Claude engine: run under this account from `claude-accounts.json`, or `auto` (see multi-engine.md)          |
-| `--add-dir <dirs>`              | Comma-separated additional working directories                                                              |
-| `--custom-engine <preset>`      | With `-e custom`: the id of a bundled engine preset (see [`clawo engines`](#clawo-engines))                 |
-| `--acp-agent <preset>`          | With `-e acp`: the id of a bundled ACP agent preset, e.g. `kimi-code`, `dsh`                                |
+**One set of flags for every engine.** The engine is picked with a shorthand or `-e`; with neither, the
+configured default engine runs (Claude Code out of the box — see [`clawo config`](#clawo-config)). Every
+`session_start` parameter is a flag, named after it in kebab-case (`strictMcpConfig` → `--strict-mcp-config`,
+`sandboxMode` → `--sandbox-mode`), and each engine's wrapper maps it to that engine's own flag;
+[tools.md](./tools.md#session_start) says what each does and on which engines, and
+`clawo session-start --help` lists them all. The flags are built from the tool's schema, so the CLI and the
+MCP tool take the same options. Two different engine picks are an error.
 
-Most of these flags map to Claude Code options; [multi-engine.md](./multi-engine.md) lists which ones each other engine honours. The remaining `session_start` options (`sandboxMode`, `autoCompactPercent`, `ultracode`, hook events, permission-prompt tool, debug output, `fromPr`, MCP channels, prompt-cache settings and others) are tool parameters only and have no CLI flag. See [Tools Reference](./tools.md#session_start).
+| Form           | Example                                                                           |
+| -------------- | --------------------------------------------------------------------------------- |
+| Switch         | `--strict-mcp-config`, `--trust-project`, `--skip-persistence`                    |
+| Value          | `-m opus`, `--effort high`, `--sandbox read-only`                                 |
+| Number         | `--max-turns 12`, `--max-budget 2.5`, `--auto-compact-window 200000`              |
+| Comma list     | `--add-dir /a,/b`, `--allowed-tools Read,Grep`, `--setting-sources project,local` |
+| Repeatable     | `--launcher bwrap --launcher --bind`, `--codex-config model_verbosity=low`        |
+| JSON           | `--agents '{"r":{…}}'`, `--codex-features '{"enable":["goals"]}'`                 |
+| Optional value | `-w` or `-w my-tree` (worktree)                                                   |
+
+`-d/--cwd`, `-m/--model` and `-w/--worktree` keep their short forms; `--max-budget` (`maxBudgetUsd`),
+`--skip-persistence` (`noSessionPersistence`) and `--sandbox` (`sandboxMode`) keep their earlier names. An ACP
+agent or custom engine is named by its bundled preset (`--acp kimi-code`, `--custom zcode`, or
+`-e acp --acp-agent kimi-code`); inline configs are not accepted over HTTP. The reply names the engine the
+session runs on.
 
 ### session-send
 
@@ -124,16 +114,17 @@ clawo session-send <name> <message> [options]
 clawo session-send <name> --message-file <file> [options]
 ```
 
-| Flag                    | Description                                                                                                                                  |
-| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--message-file <file>` | Read the message from a file (long text, or text starting with `-`)                                                                          |
-| `--effort <level>`      | Override effort for this message                                                                                                             |
-| `--plan`                | Ask for a plan only: Claude Code and persistent custom engines get a plan-only instruction in front of the message; other engines ignore it  |
-| `-s, --stream`          | Accepted, but has no effect: the server returns the reply when the turn ends, with no streamed chunks                                        |
-| `-t, --timeout <ms>`    | Turn timeout (default 300000)                                                                                                                |
-| `--json`                | Print the whole result as one line, including `ok`, `output`, `sessionId`, `error`, and `permissionDenials` / `images` when the turn had any |
+| Flag                    | Description                                                                                                                                          |
+| ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--message-file <file>` | Read the message from a file (long text, or text starting with `-`)                                                                                  |
+| `--effort <level>`      | Override effort for this message                                                                                                                     |
+| `--plan`                | Ask for a plan only: Claude Code and persistent custom engines get a plan-only instruction in front of the message; other engines ignore it          |
+| `--image <path>`        | Attach an image (PNG, JPEG, GIF, WebP), repeatable; Claude Code, Codex, `codex-app`, Grok and OpenCode take images, other engines refuse the message |
+| `-s, --stream`          | Accepted, but has no effect: the server returns the reply when the turn ends, with no streamed chunks                                                |
+| `-t, --timeout <ms>`    | Turn timeout (default 300000)                                                                                                                        |
+| `--json`                | Print the whole result as one line, including `ok`, `output`, `sessionId`, `error`, and `permissionDenials` / `images` when the turn had any         |
 
-`--plan` does not change the permission mode. For a session that cannot write, start it with `--permission-mode plan` (Claude Code, Grok) or the `sandboxMode: 'read-only'` tool parameter.
+`--plan` does not change the permission mode. For a session that cannot write, start it with `--sandbox read-only`.
 
 ### session-stop
 
@@ -221,23 +212,25 @@ Start the built-in `solve` workflow — triage → implement → verify → repa
 green — and let the runtime decide whether it worked.
 
 ```bash
-clawo solve "<task>" [--engine <engine[:model]>] [--check "<command>"]... [--contract <file>]
-            [--scouts <list>] [--reviewers <list>] [--max-repairs N] [--human-gate]
-            [--cwd <dir>] [--wait] [--json]
+clawo solve "<task>" [--claude | --codex | … | --acp <preset> | -e <engine[:model]>] [--check "<command>"]...
+            [--contract <file>] [-m <model>] [--effort <level>] [--permission-mode <mode>] [--sandbox <mode>]
+            [--append-system-prompt <text>] [--scouts <list>] [--reviewers <list>] [--max-repairs N]
+            [--human-gate] [--cwd <dir>] [--wait] [--json]
 ```
 
-| Option          | Default           | Notes                                                                                                                                        |
-| --------------- | ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| `-e, --engine`  | `claude`          | The implementer, `engine` or `engine:model` (`codex:gpt-6.1-sol`), or `acp:<preset>` for an ACP agent (`acp:kimi-code`)                      |
-| `-c, --check`   | —                 | A command check, repeatable. Split on whitespace and run as argv, never through a shell; anything that needs quoting belongs in `--contract` |
-| `--contract`    | —                 | A contract JSON file ([verification.md](./verification.md)); `--check` entries are appended to it                                            |
-| `--scouts`      | the implementer   | Comma-separated triage agents, `engine[:model]` each (`acp:<preset>` for an ACP agent)                                                       |
-| `--reviewers`   | —                 | Comma-separated reviewers of the finished change                                                                                             |
-| `--max-repairs` | `3`               | Attempts the router allows while the checks are red; `0` keeps only the first attempt                                                        |
-| `--human-gate`  | off               | Park before anything is written until `clawo workflow approve`                                                                               |
-| `--cwd`         | current directory | Project directory                                                                                                                            |
-| `-w, --wait`    | off               | Follow the run, printing each node transition, then the verdict                                                                              |
-| `--json`        | off               | Print `{ runId, state }`, or with `--wait` the final run record                                                                              |
+| Option                                                                       | Default            | Notes                                                                                                                                                                             |
+| ---------------------------------------------------------------------------- | ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `-e, --engine`                                                               | the default engine | The implementer, `engine` or `engine:model` (`codex:gpt-6.1-sol`), or `acp:<preset>` for an ACP agent (`acp:kimi-code`); or a shorthand, `--codex`, `--agy`, `--acp kimi-code`, … |
+| `-m`, `--effort`, `--permission-mode`, `--sandbox`, `--append-system-prompt` | —                  | The session flags of the same names, for the implementer (and the scouts when they default to it)                                                                                 |
+| `-c, --check`                                                                | —                  | A command check, repeatable. Split on whitespace and run as argv, never through a shell; anything that needs quoting belongs in `--contract`                                      |
+| `--contract`                                                                 | —                  | A contract JSON file ([verification.md](./verification.md)); `--check` entries are appended to it                                                                                 |
+| `--scouts`                                                                   | the implementer    | Comma-separated triage agents, `engine[:model]` each (`acp:<preset>` for an ACP agent)                                                                                            |
+| `--reviewers`                                                                | —                  | Comma-separated reviewers of the finished change                                                                                                                                  |
+| `--max-repairs`                                                              | `3`                | Attempts the router allows while the checks are red; `0` keeps only the first attempt                                                                                             |
+| `--human-gate`                                                               | off                | Park before anything is written until `clawo workflow approve`                                                                                                                    |
+| `--cwd`                                                                      | current directory  | Project directory                                                                                                                                                                 |
+| `-w, --wait`                                                                 | off                | Follow the run, printing each node transition, then the verdict                                                                                                                   |
+| `--json`                                                                     | off                | Print `{ runId, state }`, or with `--wait` the final run record                                                                                                                   |
 
 With `--wait` the exit code is the verdict: `0` when the run completed (verified,
 or unverified because no check was given), `1` when it was refuted, failed or
@@ -248,52 +241,56 @@ cancelled. Unknown engine names are refused before anything starts.
 Ask several engines the same thing in parallel, optionally merging the answers.
 
 ```bash
-clawo fanout "<task>" [--engines <list>] [--synthesize] [--check "<command>"]...
+clawo fanout "<task>" [--engines <list>] [--claude] [--codex] … [--acp <preset>]... [--synthesize]
+             [--effort <level>] [--permission-mode <mode>] [--sandbox <mode>] [--check "<command>"]...
              [--contract <file>] [--cwd <dir>] [--wait] [--json]
 ```
 
-| Option             | Default           | Notes                                                                                                          |
-| ------------------ | ----------------- | -------------------------------------------------------------------------------------------------------------- |
-| `-e, --engines`    | `claude,codex`    | Comma-separated agents, `engine[:model]` each, or `acp:<preset>` for an ACP agent; an engine may repeat        |
-| `-s, --synthesize` | off               | Merge the answers in a final pass. It runs only when at least two agents answered                              |
-| `-c, --check`      | —                 | A command check, repeatable, run after the fan-out, as for `solve`                                             |
-| `--contract`       | —                 | A contract JSON file; `--check` entries are appended to it                                                     |
-| `--cwd`            | current directory | Project directory                                                                                              |
-| `-w, --wait`       | off               | Follow the run to the end, then print every answer under a `## <agent>` heading — or the synthesis, if one ran |
-| `--json`           | off               | Print `{ runId, state }`, or with `--wait` the final run record                                                |
+| Option                                       | Default                        | Notes                                                                                                                                                                            |
+| -------------------------------------------- | ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `-e, --engines`                              | the default engine and `codex` | Comma-separated agents, `engine[:model]` each, or `acp:<preset>` for an ACP agent; an engine may repeat. Each shorthand (`--codex`, `--agy`, `--acp <preset>`, …) adds one agent |
+| `--effort`, `--permission-mode`, `--sandbox` | —                              | The session flags of the same names, for every agent                                                                                                                             |
+| `-s, --synthesize`                           | off                            | Merge the answers in a final pass. It runs only when at least two agents answered                                                                                                |
+| `-c, --check`                                | —                              | A command check, repeatable, run after the fan-out, as for `solve`                                                                                                               |
+| `--contract`                                 | —                              | A contract JSON file; `--check` entries are appended to it                                                                                                                       |
+| `--cwd`                                      | current directory              | Project directory                                                                                                                                                                |
+| `-w, --wait`                                 | off                            | Follow the run to the end, then print every answer under a `## <agent>` heading — or the synthesis, if one ran                                                                   |
+| `--json`                                     | off                            | Print `{ runId, state }`, or with `--wait` the final run record                                                                                                                  |
 
 ## `clawo goal`
 
-Run a `/goal` on one thread — a Codex `codex-app` thread, or a Claude Code
-session with `--engine claude` — then have the runtime check the result: goal →
-verify → repair on the same thread. See [workflow.md](./workflow.md#goal).
+Run a `/goal` on one thread — a Claude Code session (`--claude`) or a Codex
+`codex-app` thread (`--codex`) — then have the runtime check the result: goal →
+verify → repair on the same thread. With neither, the configured default engine
+runs it (Claude Code out of the box); a default that runs no goal is refused at
+start. See [workflow.md](./workflow.md#goal).
 
 ```bash
 clawo goal "<objective>" | --objective-file <file>
            [--check "<command>"]... [--contract <file>] [--check-timeout <minutes>]
-           [--engine codex|claude] [--launcher <arg>]... [--model <model>] [--effort <level>] [--sandbox <mode>] [--thread <id>]
+           [--claude | --codex | --engine codex|claude] [--launcher <arg>]... [--model <model>] [--effort <level>] [--sandbox <mode>] [--thread <id>]
            [--token-budget N] [--goal-timeout <minutes>] [--max-repairs N]
            [--cwd <dir>] [--wait] [--json]
 ```
 
-| Option             | Default           | Notes                                                                                                                    |
-| ------------------ | ----------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| `--objective-file` | —                 | Read the objective from a file instead of the argument. A goal accepts at most 4,000 characters                          |
-| `-e, --engine`     | `codex`           | Who runs the goal: `codex` (a `codex-app` thread) or `claude` (a Claude Code session)                                    |
-| `-c, --check`      | —                 | A command check, repeatable, run after the goal. Split on whitespace; quote-needing commands go in `--contract`          |
-| `--contract`       | —                 | A contract JSON file; `--check` entries are appended to it                                                               |
-| `--check-timeout`  | 10                | Minutes for each `--check` (at least 1). The verifier's node timeout is sized from the checks                            |
-| `--launcher`       | —                 | Run the engine under this command, one argv element per flag: `--launcher ./sandbox.sh --launcher task --launcher "0 1"` |
-| `-m, --model`      | the engine's own  | Model                                                                                                                    |
-| `--effort`         | the engine's own  | Reasoning effort                                                                                                         |
-| `--sandbox`        | `workspace-write` | Codex's own sandbox mode (claude has none). With an outer sandbox as the boundary, `danger-full-access`                  |
-| `--thread`         | —                 | Start on this existing codex thread or claude session: its goal is replaced, its history kept                            |
-| `--token-budget`   | —                 | The goal stops as `budgetLimited` past this                                                                              |
-| `--goal-timeout`   | none              | Wall-clock minutes for one goal pass                                                                                     |
-| `--max-repairs`    | `1`               | Times a red verdict sends the goal back to the same thread                                                               |
-| `--cwd`            | current directory | Project directory                                                                                                        |
-| `-w, --wait`       | off               | Follow the run; exit `0` only if it completes                                                                            |
-| `--json`           | off               | Print `{ runId, state }`, or with `--wait` the final run record                                                          |
+| Option             | Default            | Notes                                                                                                                    |
+| ------------------ | ------------------ | ------------------------------------------------------------------------------------------------------------------------ |
+| `--objective-file` | —                  | Read the objective from a file instead of the argument. A goal accepts at most 4,000 characters                          |
+| `-e, --engine`     | the default engine | Who runs the goal: `claude` (a Claude Code session, `--claude`) or `codex` (a `codex-app` thread, `--codex`)             |
+| `-c, --check`      | —                  | A command check, repeatable, run after the goal. Split on whitespace; quote-needing commands go in `--contract`          |
+| `--contract`       | —                  | A contract JSON file; `--check` entries are appended to it                                                               |
+| `--check-timeout`  | 10                 | Minutes for each `--check` (at least 1). The verifier's node timeout is sized from the checks                            |
+| `--launcher`       | —                  | Run the engine under this command, one argv element per flag: `--launcher ./sandbox.sh --launcher task --launcher "0 1"` |
+| `-m, --model`      | the engine's own   | Model                                                                                                                    |
+| `--effort`         | the engine's own   | Reasoning effort                                                                                                         |
+| `--sandbox`        | `workspace-write`  | Codex's own sandbox mode (claude has none). With an outer sandbox as the boundary, `danger-full-access`                  |
+| `--thread`         | —                  | Start on this existing codex thread or claude session: its goal is replaced, its history kept                            |
+| `--token-budget`   | —                  | The goal stops as `budgetLimited` past this                                                                              |
+| `--goal-timeout`   | none               | Wall-clock minutes for one goal pass                                                                                     |
+| `--max-repairs`    | `1`                | Times a red verdict sends the goal back to the same thread                                                               |
+| `--cwd`            | current directory  | Project directory                                                                                                        |
+| `-w, --wait`       | off                | Follow the run; exit `0` only if it completes                                                                            |
+| `--json`           | off                | Print `{ runId, state }`, or with `--wait` the final run record                                                          |
 
 `clawo workflow show <runId>` prints the goal's status, tokens, time, resume
 attempts and thread id while it runs; `clawo workflow steer <runId> "<text>"`
@@ -358,6 +355,32 @@ per-check pass/fail with the failing command and the lines of its output that sa
 why (an assertion message, an error line — the last few lines when nothing stands
 out), the base and head commits, and the files the run changed (created files
 included).
+
+## `clawo config`
+
+The defaults a session takes when its caller leaves a field out — from this CLI, the MCP tools, HTTP, or a
+workflow node.
+
+```bash
+clawo config                                   # the file, and every default in it
+clawo config set defaults.engine codex         # the default engine (Claude Code out of the box)
+clawo config set defaults.effort high          # any session field, for every engine
+clawo config set engines.codex.model gpt-6.2-sol
+clawo config set engines.claude.strictMcpConfig true
+clawo config get engines.codex.model
+clawo config unset defaults.engine
+```
+
+A key is `defaults.<field>` or `engines.<engine>.<field>`, with the field named as a `session_start` parameter
+(`clawo session-start --help` lists them). A value is read as its field's type: `true`/`false`, a number, a
+comma list, or JSON. Unknown fields, engines and values are refused. The file is
+`~/.claw-orchestrator/config.json` (`CLAWO_CONFIG` to move it), read on every session start by the server on
+this host, so a change applies to the next session without a restart.
+
+A session's fields come from, in order: what the caller set; for a name restarted from the resume registry, what
+it ran with; `engines.<its engine>`; `defaults`; the server's built-in defaults. A general `defaults.model` goes
+only to an engine that runs that model. A workflow fixes each node's engine when the run starts, so a run keeps
+its engines when the default changes (see [workflow.md](./workflow.md)).
 
 ## `clawo engines`
 

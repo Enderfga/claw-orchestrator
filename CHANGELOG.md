@@ -9,11 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **One set of CLI flags for every engine.** Every `session_start` parameter is a `clawo session-start` flag, named
+  after it (`--strict-mcp-config`, `--sandbox-mode`/`--sandbox`, `--codex-config key=value`, `--trust-project`, …)
+  and built from the tool's own schema, so the CLI and the MCP tool take the same options and each engine's wrapper
+  maps them to its own. The engine is picked with a shorthand — `--claude`, `--codex`, `--codex-app`, `--agy`,
+  `--grok`, `--opencode`, `--acp <preset>`, `--custom <preset>` — or `-e`, on `session-start`, `solve`, `goal` and
+  `fanout` alike; two different picks are an error. `solve` and `fanout` also take `--effort`, `--permission-mode`
+  and `--sandbox` (and `solve` `-m` and `--append-system-prompt`) for their agents, and `session-send` takes
+  `--image <path>`.
+- **Defaults, set once for every entry point.** `~/.claw-orchestrator/config.json` (`CLAWO_CONFIG`) holds the
+  default engine (`defaults.engine`, Claude Code until set) and any other session field for every engine
+  (`defaults.<field>`) or for one (`engines.<engine>.<field>`). The server reads it on every session start, so the
+  CLI, the MCP tools, HTTP callers and workflow nodes take the same defaults, and a change applies without a
+  restart. `clawo config` shows, gets, sets and unsets them, checking each key and value against the session
+  fields. `session_start` returns the `engine` a session runs on, and `clawo engines` prints the default.
+- **A workflow's engines are fixed when it starts.** A node or agent that names no engine is given the default in
+  the run's spec at start, so a resume after the default changed keeps the engine its sessions and threads belong
+  to; runs recorded before this resume with what an unnamed engine meant then.
 - **Forum posts reach agents on every engine.** A push into the turn in flight needs an engine that takes input
   mid-turn (Claude Code, `codex-app`, a goal), so an ASK or FAIL addressed to a Codex, Antigravity, Grok, OpenCode,
   ACP or custom agent was not delivered until it read the forum. Such a post now appears, in full and once, at the
   top of the agent's next `clawo forum` command, and the hub does not push it again; the metrics record it as
   `via: "cli"`.
+
+### Changed
+
+- **`clawo goal` and goal nodes run on the configured default engine when they name none** — Claude Code out of the
+  box — instead of Codex. Pass `--codex` (or `"engine": "codex"`) to run a goal on Codex; a default no goal runs on
+  (such as `agy`) is refused at start. A goal run recorded earlier still resumes on Codex.
+- **Every other place that fell back to Claude Code now falls back to the configured default**: `solve`'s
+  implementer and scouts, `fanout`'s first agent (`<default>,codex` without `--engines`), fan-out synthesis, council
+  seats, and a fan-out goal agent with no engine, which was refused before.
+- **`clawo session-start` no longer sends `acceptEdits` as the permission mode itself**; the server's default
+  applies, which is the same value unless `defaults.permissionMode` is set.
 
 ## [7.29.0] - 2026-11-21
 

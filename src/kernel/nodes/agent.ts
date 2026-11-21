@@ -146,6 +146,7 @@ async function runAgentNode(
       ...(spec.acpAgent === undefined ? {} : { acpAgent: spec.acpAgent }),
       ...(spec.appendSystemPrompt ? { appendSystemPrompt: spec.appendSystemPrompt } : {}),
       ...(spec.disallowedTools?.length ? { disallowedTools: spec.disallowedTools } : {}),
+      ...(spec.sandboxMode ? { sandboxMode: spec.sandboxMode } : {}),
       permissionMode: (spec.permissionMode as never) ?? 'bypassPermissions',
     },
   });

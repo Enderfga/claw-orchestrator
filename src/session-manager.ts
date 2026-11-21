@@ -183,6 +183,7 @@ import { checkBudget, isBudgetExceeded } from './budget.js';
 import { withFileLock } from './kernel/file-lock.js';
 import { InboxManager, type SessionLookup } from './inbox-manager.js';
 import { compileSafeRegex, sanitizeCwd, validateImagePaths, validateName } from './validation.js';
+import { defaultEngine, sessionDefaults } from './clawo-config.js';
 
 /** Engines whose wrapper passes `SendOptions.images` to the model. */
 const IMAGE_ENGINES = new Set<string>(['claude', 'codex', 'codex-app', 'grok', 'opencode']);
@@ -1280,7 +1281,10 @@ export class SessionManager {
     const skipPersist = !!(config.skipPersistence || config.noSessionPersistence);
     const persisted = skipPersist ? undefined : this.persistedSessions.get(name);
     // Unified: only use resumeSessionId (claudeResumeId is an internal alias, not exposed)
-    const engine: EngineType = config.engine || persisted?.engine || 'claude';
+    // The defaults file (src/clawo-config.ts) decides what a caller leaves out:
+    // the engine, then that engine's other fields.
+    const engine: EngineType = config.engine || persisted?.engine || defaultEngine();
+    const { fields: configured, generalModel } = sessionDefaults(engine);
     // A resume id belongs to the engine that issued it. A start under the same
     // name on another engine (an Autoloop role rebound to a new engine) begins a
     // new conversation instead of handing that engine a foreign id.
@@ -1299,15 +1303,23 @@ export class SessionManager {
     // omit a key (MCP session_start, HTTP /session/start, auto-resume by name)
     // leave it absent, so the persisted/default fallback below still applies.
     const fullConfig: SessionConfig = {
+      // Configured defaults first: anything below, and anything the caller set,
+      // goes over them.
+      ...configured,
       name,
       cwd: config.cwd || persisted?.cwd || process.cwd(),
-      permissionMode: config.permissionMode || this.pluginConfig.defaultPermissionMode,
-      effort: config.effort || this.pluginConfig.defaultEffort,
-      model: config.model || persisted?.model || defaultModelFor(engine, this.pluginConfig.defaultModel),
-      sandboxMode: config.sandboxMode ?? persisted?.sandboxMode,
-      autoCompactPercent: config.autoCompactPercent ?? persisted?.autoCompactPercent,
-      chrome: config.chrome ?? persisted?.chrome,
-      claudeAccount: config.claudeAccount ?? persisted?.claudeAccount,
+      permissionMode: config.permissionMode || configured.permissionMode || this.pluginConfig.defaultPermissionMode,
+      effort: config.effort || configured.effort || this.pluginConfig.defaultEffort,
+      model:
+        config.model ||
+        persisted?.model ||
+        configured.model ||
+        defaultModelFor(engine, generalModel) ||
+        defaultModelFor(engine, this.pluginConfig.defaultModel),
+      sandboxMode: config.sandboxMode ?? persisted?.sandboxMode ?? configured.sandboxMode,
+      autoCompactPercent: config.autoCompactPercent ?? persisted?.autoCompactPercent ?? configured.autoCompactPercent,
+      chrome: config.chrome ?? persisted?.chrome ?? configured.chrome,
+      claudeAccount: config.claudeAccount ?? persisted?.claudeAccount ?? configured.claudeAccount,
       ...config,
       ...(resumeId ? { resumeSessionId: resumeId } : {}),
     };
@@ -3865,6 +3877,7 @@ export class SessionManager {
     const costUsd = this._spentUsd(managed);
     const info: SessionInfo = {
       name,
+      engine: (managed.config.engine || 'claude') as EngineType,
       claudeSessionId: resumeSessionId,
       created: managed.created,
       cwd: managed.cwd,

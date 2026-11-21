@@ -10,8 +10,10 @@ npm install -g @enderfga/claw-orchestrator
 # Start the embedded server (keeps running; use a second terminal for the commands below)
 clawo serve
 
-# Drive sessions from the command line
-clawo session-start myproject -d ~/project
+# Drive sessions from the command line — the same flags on every engine
+clawo session-start myproject -d ~/project            # the default engine (Claude Code out of the box)
+clawo session-start review -d ~/project --codex       # or --agy, --grok, --opencode, --acp kimi-code, …
+clawo config set defaults.engine codex                # change the default
 clawo session-send myproject "fix the auth bug"
 clawo session-status myproject
 clawo session-stop myproject
@@ -19,13 +21,14 @@ clawo session-stop myproject
 
 `clawo serve` listens on `127.0.0.1:18796` (`-p/--port`, `-H/--host`; `OPENCLAW_SERVER_HOST`
 also sets the bind address) and prints the dashboard URL, `http://127.0.0.1:18796/dashboard`.
-Apart from `clawo engines` and `clawo acp`, which run locally, the other `clawo` commands are
+Apart from `clawo engines`, `clawo config` and `clawo acp`, which run locally, the other `clawo` commands are
 HTTP clients of that server: they read its address from `CLAWO_API_URL` (default
 `http://127.0.0.1:18796`) and its token as described under
 [Embedded Server Authentication](#embedded-server-authentication), and a request that fails or
-cannot reach the server exits with status 1. `session-start -e <engine>` picks the engine
-(default `claude`; `codex`, `codex-app`, `agy`, `grok`, `opencode`, `acp` with
-`--acp-agent <id>`, `custom` with `--custom-engine <id>`);
+cannot reach the server exits with status 1. `session-start` takes every session option as a flag
+on every engine, and picks the engine with a shorthand (`--claude`, `--codex`, `--codex-app`,
+`--agy`, `--grok`, `--opencode`, `--acp <id>`, `--custom <id>`) or `-e <engine>`; with neither it
+runs the default from `clawo config` (`claude` until set);
 `session-send --message-file <file>` sends a long message, and `--json` on `session-send` and
 `session-status` prints the full result. See [cli.md](./cli.md) for every command.
 

@@ -638,7 +638,7 @@ describe('PersistentGrokSession — stop reasons', () => {
     await s.start();
     const p = s.send('hi', { waitForComplete: true });
     setTimeout(() => reply(OK_RESULT), 5);
-    const r = (await p) as { event: { stop_reason: string } };
+    const r = (await p) as unknown as { event: { stop_reason: string } };
     expect(r.event.stop_reason).toBe('end_turn');
     expect(s.getStats().turnsSucceeded).toBe(1);
   });
@@ -652,7 +652,7 @@ describe('PersistentGrokSession — stop reasons', () => {
       await s.start();
       const p = s.send('hi', { waitForComplete: true });
       setTimeout(() => reply({ ...OK_RESULT, stopReason }), 5);
-      const r = (await p) as { text: string; event: { stop_reason: string } };
+      const r = (await p) as unknown as { text: string; event: { stop_reason: string } };
       expect(r.text).toBe('PING');
       expect(r.event.stop_reason).toBe('error');
       const st = s.getStats();

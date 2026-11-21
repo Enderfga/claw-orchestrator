@@ -77,6 +77,8 @@ export interface AgentNode extends NodeBase, AgentBinding {
    */
   sessionName?: string;
   permissionMode?: string;
+  /** Engine-agnostic sandbox, as on a session; `read-only` holds on every engine that supports it. */
+  sandboxMode?: 'read-only' | 'workspace-write' | 'danger-full-access';
   /** Standing instructions for the session, appended to its system prompt. */
   appendSystemPrompt?: string;
   /** Tools the session may not use (`--disallowed-tools`). Engines `claude` and `grok`; refused on the others. */

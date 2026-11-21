@@ -8,6 +8,14 @@
  * For standalone use (no OpenClaw), run: clawo serve
  */
 
+import {
+  addAgentFlags,
+  addEngineFlags,
+  addSessionFlags,
+  agentFields,
+  engineFromFlags,
+  sessionBody,
+} from './session-flags.js';
 import { Command } from 'commander';
 import { createRequire } from 'node:module';
 import * as fs from 'node:fs';
@@ -183,128 +191,31 @@ program
   });
 
 // Session commands
-program
-  .command('session-start [name]')
-  .description(
-    'Start a persistent coding session (Claude Code, Codex, Antigravity, Grok Build, OpenCode, an ACP agent, or a custom engine preset)',
-  )
-  .option('-d, --cwd <dir>', 'Working directory')
-  .option('-e, --engine <engine>', 'Engine: claude (default), codex, codex-app, agy, grok, opencode, acp, or custom')
-  .option('-m, --model <model>', 'Model to use')
-  .option('--permission-mode <mode>', 'Permission mode', 'acceptEdits')
-  .option('--effort <level>', 'Effort level')
-  .option('--allowed-tools <tools>', 'Comma-separated tools to auto-approve')
-  .option('--disallowed-tools <tools>', 'Comma-separated tools to deny')
-  .option('--max-turns <n>', 'Max agent loop turns')
-  .option('--max-budget <usd>', 'Max API spend')
-  .option('--system-prompt <prompt>', 'Replace system prompt')
-  .option('--append-system-prompt <prompt>', 'Append to system prompt')
-  .option('--agents <json>', 'Custom sub-agents JSON')
-  .option('--agent <name>', 'Default agent')
-  .option('--bare', 'Minimal mode')
-  .option('-w, --worktree [name]', 'Git worktree')
-  .option('--fallback-model <model>', 'Fallback model')
-  .option('--json-schema <schema>', 'JSON Schema for structured output')
-  .option('--mcp-config <paths>', 'MCP config files')
-  .option('--settings <pathOrJson>', 'Settings.json')
-  .option('--skip-persistence', 'Disable session persistence')
-  .option('--betas <headers>', 'Custom beta headers')
-  .option('--enable-agent-teams', 'Enable agent teams')
-  .option('--enable-auto-mode', 'Enable auto permission mode')
-  .option('--resume-session-id <id>', 'Resume existing session by ID')
-  .option('--base-url <url>', 'Custom API endpoint (for proxy)')
-  .option(
-    '--claude-account <name>',
-    "Claude engine: run under this account from the server's claude-accounts.json, or 'auto'",
-  )
-  .option('--add-dir <dirs>', 'Comma-separated additional working directories')
-  .option(
-    '--custom-engine <preset>',
-    'With -e custom: the id of a bundled engine preset (see `clawo engines`). Inline configs are not accepted here — that is what presets are for',
-  )
-  .option('--acp-agent <preset>', 'With -e acp: the id of a bundled ACP agent preset (see `clawo engines`)')
-  .action(async (name, opts) => {
-    const body: Record<string, unknown> = { name: name || `session-${Date.now()}` };
-    if (opts.cwd) body.cwd = opts.cwd;
-    if (opts.engine) body.engine = opts.engine;
-    // Only a preset id. An inline config names a binary and its arguments, and
-    // this command reaches the session through the same HTTP surface that
-    // refuses those — see `clawo engines` for what is available.
-    if (opts.customEngine) body.customEngine = opts.customEngine;
-    if (opts.acpAgent) body.acpAgent = opts.acpAgent;
-    if (opts.model) body.model = opts.model;
-    if (opts.permissionMode) body.permissionMode = opts.permissionMode;
-    if (opts.effort) body.effort = opts.effort;
-    if (opts.allowedTools)
-      body.allowedTools = opts.allowedTools
-        .split(',')
-        .map((s: string) => s.trim())
-        .filter(Boolean);
-    if (opts.disallowedTools)
-      body.disallowedTools = opts.disallowedTools
-        .split(',')
-        .map((s: string) => s.trim())
-        .filter(Boolean);
-    if (opts.resumeSessionId) body.resumeSessionId = opts.resumeSessionId;
-    if (opts.baseUrl) body.baseUrl = opts.baseUrl;
-    if (opts.claudeAccount) body.claudeAccount = opts.claudeAccount;
-    if (opts.addDir)
-      body.addDir = opts.addDir
-        .split(',')
-        .map((s: string) => s.trim())
-        .filter(Boolean);
-    if (opts.enableAutoMode) body.enableAutoMode = true;
-    if (opts.maxTurns) {
-      const v = parseInt(opts.maxTurns);
-      if (isNaN(v) || v <= 0) {
-        console.error('--max-turns must be a positive integer');
-        process.exit(1);
-      }
-      body.maxTurns = v;
-    }
-    if (opts.maxBudget) {
-      const v = parseFloat(opts.maxBudget);
-      if (isNaN(v) || v <= 0) {
-        console.error('--max-budget must be a positive number');
-        process.exit(1);
-      }
-      body.maxBudgetUsd = v;
-    }
-    if (opts.systemPrompt) body.systemPrompt = opts.systemPrompt;
-    if (opts.appendSystemPrompt) body.appendSystemPrompt = opts.appendSystemPrompt;
-    if (opts.agents) {
-      try {
-        body.agents = JSON.parse(opts.agents);
-      } catch (e) {
-        console.error(`Invalid JSON in --agents: ${(e as Error).message}`);
-        process.exit(1);
-      }
-    }
-    if (opts.agent) body.agent = opts.agent;
-    if (opts.bare) body.bare = true;
-    if (opts.worktree !== undefined) body.worktree = typeof opts.worktree === 'string' ? opts.worktree : true;
-    if (opts.fallbackModel) body.fallbackModel = opts.fallbackModel;
-    if (opts.jsonSchema) body.jsonSchema = opts.jsonSchema;
-    if (opts.mcpConfig)
-      body.mcpConfig = opts.mcpConfig
-        .split(',')
-        .map((s: string) => s.trim())
-        .filter(Boolean);
-    if (opts.settings) body.settings = opts.settings;
-    if (opts.skipPersistence) body.noSessionPersistence = true;
-    if (opts.betas)
-      body.betas = opts.betas
-        .split(',')
-        .map((s: string) => s.trim())
-        .filter(Boolean);
-    if (opts.enableAgentTeams) body.enableAgentTeams = true;
-
-    const result = await api('/session/start', 'POST', body);
-    if (result.ok) {
-      console.log(`Session '${body.name}' started!`);
-      if (result.claudeSessionId) console.log(`Engine session ID: ${result.claudeSessionId}`);
-    } else fail(result.error);
-  });
+// Every session_start field is a flag here (bin/session-flags.ts), the same for
+// every engine; each engine's wrapper maps it to that engine's own flag.
+addSessionFlags(
+  addEngineFlags(
+    program
+      .command('session-start [name]')
+      .description(
+        'Start a persistent coding session on any engine: -e <engine> or --claude / --codex / --codex-app / --agy / --grok / --opencode / --acp <preset> / --custom <preset>. Without one, the configured default engine (`clawo config`; Claude Code out of the box)',
+      )
+      .option('-e, --engine <engine>', 'Engine: claude, codex, codex-app, agy, grok, opencode, acp, or custom'),
+  ),
+).action(async (name, opts) => {
+  let body: Record<string, unknown>;
+  try {
+    body = { name: name || `session-${Date.now()}`, ...engineFromFlags(opts), ...sessionBody(opts) };
+  } catch (err) {
+    fail((err as Error).message);
+    return;
+  }
+  const result = await api('/session/start', 'POST', body);
+  if (result.ok) {
+    console.log(`Session '${body.name}' started on ${String(result.engine ?? body.engine ?? 'the default engine')}.`);
+    if (result.claudeSessionId) console.log(`Engine session ID: ${result.claudeSessionId}`);
+  } else fail(result.error);
+});
 
 program
   .command('session-send <name> [message]')
@@ -312,6 +223,12 @@ program
   .option('--message-file <file>', 'Read the message from a file (for long or dash-leading text)')
   .option('--effort <level>', 'Effort level')
   .option('--plan', 'Plan mode')
+  .option(
+    '--image <path>',
+    'Attach an image (PNG, JPEG, GIF, WebP) to the message; repeatable. Claude Code, Codex, codex-app, Grok and OpenCode take images',
+    collect,
+    [],
+  )
   .option('-t, --timeout <ms>', 'Timeout', '300000')
   // Kept so scripts that pass it still parse: /session/send answers when the
   // turn ends and has no streamed form.
@@ -328,6 +245,7 @@ program
       message,
       effort: opts.effort,
       plan: opts.plan,
+      ...(opts.image.length ? { images: (opts.image as string[]).map((p) => path.resolve(p)) } : {}),
       timeout: parseInt(opts.timeout),
     });
     if (opts.json) {
@@ -399,6 +317,10 @@ program
       console.log(JSON.stringify(presets, null, 2));
       return;
     }
+    const { defaultEngine } = await import('../src/clawo-config.js');
+    console.log(
+      `Default engine: ${defaultEngine()} (\`clawo config set defaults.engine <engine>\`; pick one per command with --claude, --codex, …)\n`,
+    );
     if (!presets.length) {
       console.log('No engine presets are bundled with this build.');
       return;
@@ -418,6 +340,50 @@ program
           : `    use:   clawo session-start my-session -e custom --custom-engine ${p.id}`,
       );
       console.log('');
+    }
+  });
+
+program
+  .command('config')
+  .description(
+    'Show or change the defaults every session takes when its caller leaves a field out: the default engine, and any session field for every engine or for one (`defaults.engine`, `defaults.effort`, `engines.codex.model`, …)',
+  )
+  .argument('[action]', 'get | set | unset (none: show everything)')
+  .argument('[key]', 'defaults.<field> or engines.<engine>.<field>')
+  .argument('[value]', 'For set: the value, read as the field’s type (true/false, a number, a,b list, JSON)')
+  .option('--json', 'Raw JSON output')
+  .action(async (action: string | undefined, key: string | undefined, value: string | undefined, opts) => {
+    // The file on this host, which a `clawo serve` here reads on every session start.
+    const cfg = await import('../src/clawo-config.js');
+    try {
+      if (!action) {
+        const { config, warnings } = cfg.loadConfig();
+        const shown = {
+          defaults: { engine: cfg.defaultEngine(), ...(config.defaults ?? {}) },
+          engines: config.engines ?? {},
+        };
+        if (opts.json) return console.log(JSON.stringify({ path: cfg.configPath(), ...shown, warnings }, null, 2));
+        console.log(
+          `${cfg.configPath()}${fs.existsSync(cfg.configPath()) ? '' : ' (not written yet: factory defaults)'}`,
+        );
+        console.log(JSON.stringify(shown, null, 2));
+        for (const w of warnings) console.log(`warning: ${w}`);
+        return;
+      }
+      if (!key) return usage(`\`config ${action}\` needs a key, e.g. defaults.engine`);
+      if (action === 'get') {
+        const v = cfg.getConfigValue(key);
+        return console.log(v === undefined ? '(not set)' : typeof v === 'string' ? v : JSON.stringify(v));
+      }
+      if (action === 'set') {
+        if (value === undefined) return usage('`config set` needs a value');
+        const v = cfg.setConfigValue(key, value);
+        return console.log(`${key} = ${typeof v === 'string' ? v : JSON.stringify(v)}`);
+      }
+      if (action === 'unset') return console.log(cfg.unsetConfigValue(key) ? `${key} unset` : `${key} was not set`);
+      return usage(`unknown config action '${action}' (get | set | unset)`);
+    } catch (err) {
+      return fail((err as Error).message);
     }
   });
 
@@ -781,7 +747,10 @@ function parseAgentList(list: string, seen = new Map<string, number>()): AgentBi
 async function enginesKnown(agents: AgentBindingArg[]): Promise<boolean> {
   const { ENGINE_TYPES } = await import('../src/types.js');
   const known = ENGINE_TYPES as readonly string[];
-  const bad = agents.filter((a) => !a.engine || !known.includes(a.engine)).map((a) => a.engine || '(empty)');
+  // An agent with no engine runs on the server's configured default.
+  const bad = agents
+    .filter((a) => a.engine !== undefined && !known.includes(a.engine))
+    .map((a) => a.engine || '(empty)');
   if (bad.length) {
     console.error(`Error: unknown engine ${bad.join(', ')}. Known: ${known.join(', ')}`);
     process.exitCode = 1;
@@ -975,80 +944,128 @@ async function waitQuietly(runId: string): Promise<number> {
   }
 }
 
-program
-  .command('solve')
-  .description('Fix something and have the runtime check it: triage → implement → verify → repair until green')
-  .argument('<task>', 'What to do')
-  .option(
-    '-e, --engine <engine[:model]>',
-    'Implementer engine, optionally with a model; acp:<preset> for an ACP agent',
-    'claude',
-  )
-  .option('--scouts <list>', 'Comma-separated triage agents, engine[:model] each (default: the implementer)')
-  .option('--reviewers <list>', 'Comma-separated reviewers, engine[:model] each')
-  .option(
-    '-c, --check <command>',
-    'Acceptance check the runtime runs itself, e.g. "npm test" (repeatable)',
-    collect,
-    [],
-  )
-  .option('--contract <file>', 'Acceptance contract JSON file (merged with --check)')
-  .option('--max-repairs <n>', 'Repair attempts while the checks are red', '3')
-  .option('--human-gate', 'Wait for `clawo workflow approve` before writing anything')
-  .option('--cwd <dir>', 'Project directory', process.cwd())
-  .option('-w, --wait', 'Follow the run until it ends; exit 1 unless it completes')
-  .option('--json', 'Machine-readable output')
-  .action(async (task: string, opts) => {
-    const { solveWorkflow } = await import('../src/kernel/templates/index.js');
-    const [implementer] = parseAgentList(opts.engine);
-    const scouts = opts.scouts ? parseAgentList(opts.scouts) : [{ ...implementer }];
-    const reviewers = opts.reviewers ? parseAgentList(opts.reviewers) : undefined;
-    if (!(await enginesKnown([implementer, ...scouts, ...(reviewers ?? [])]))) return;
-    const cwd = path.resolve(opts.cwd);
-    const spec = solveWorkflow({
-      task,
-      cwd,
-      scouts: scouts as never,
-      implementer: { engine: implementer.engine as never, model: implementer.model, acpAgent: implementer.acpAgent },
-      reviewers: reviewers as never,
-      humanGate: opts.humanGate,
-      maxRepairs: Math.max(0, parseInt(opts.maxRepairs, 10) || 0),
-    });
-    await startWorkflow(spec, cwd, buildContract(opts.check, opts.contract), opts);
+addAgentFlags(
+  program
+    .command('solve')
+    .description('Fix something and have the runtime check it: triage → implement → verify → repair until green')
+    .argument('<task>', 'What to do')
+    .option(
+      '-e, --engine <engine[:model]>',
+      'Implementer engine, optionally with a model; acp:<preset> for an ACP agent (default: the configured default engine)',
+    )
+    .option('--claude', 'Implement with Claude Code')
+    .option('--codex', 'Implement with Codex')
+    .option('--codex-app', 'Implement with codex-app')
+    .option('--agy', 'Implement with Antigravity')
+    .option('--grok', 'Implement with Grok')
+    .option('--opencode', 'Implement with OpenCode')
+    .option('--acp <preset>', 'Implement with an ACP agent preset')
+    .option('--scouts <list>', 'Comma-separated triage agents, engine[:model] each (default: the implementer)')
+    .option('--reviewers <list>', 'Comma-separated reviewers, engine[:model] each')
+    .option(
+      '-c, --check <command>',
+      'Acceptance check the runtime runs itself, e.g. "npm test" (repeatable)',
+      collect,
+      [],
+    )
+    .option('--contract <file>', 'Acceptance contract JSON file (merged with --check)')
+    .option('--max-repairs <n>', 'Repair attempts while the checks are red', '3')
+    .option('--human-gate', 'Wait for `clawo workflow approve` before writing anything')
+    .option('--cwd <dir>', 'Project directory', process.cwd())
+    .option('-w, --wait', 'Follow the run until it ends; exit 1 unless it completes')
+    .option('--json', 'Machine-readable output'),
+).action(async (task: string, opts) => {
+  const { solveWorkflow } = await import('../src/kernel/templates/index.js');
+  // -e engine[:model], or a shorthand; with neither the implementer carries no
+  // engine and the server gives it the configured default when the run starts.
+  const fromE = opts.engine ? parseAgentList(opts.engine)[0] : undefined;
+  let picked: ReturnType<typeof engineFromFlags>;
+  try {
+    picked = engineFromFlags({ ...opts, engine: fromE?.engine });
+  } catch (err) {
+    fail((err as Error).message);
+    return;
+  }
+  const fields = agentFields(opts);
+  const implementer: AgentBindingArg & typeof fields = {
+    name: fromE?.name ?? picked.acpAgent ?? picked.engine ?? 'implementer',
+    ...(picked.engine ? { engine: picked.engine } : {}),
+    ...(fromE?.model ? { model: fromE.model } : {}),
+    ...((picked.acpAgent ?? fromE?.acpAgent) ? { acpAgent: picked.acpAgent ?? fromE?.acpAgent } : {}),
+    ...fields,
+  };
+  // Scouts default to the implementer, less what an agent of a fan-out has no field for.
+  const { appendSystemPrompt: _ignored, ...scoutFields } = implementer;
+  void _ignored;
+  const scouts = opts.scouts ? parseAgentList(opts.scouts) : [scoutFields];
+  const reviewers = opts.reviewers ? parseAgentList(opts.reviewers) : undefined;
+  if (!(await enginesKnown([implementer, ...scouts, ...(reviewers ?? [])]))) return;
+  const cwd = path.resolve(opts.cwd);
+  const spec = solveWorkflow({
+    task,
+    cwd,
+    scouts: scouts as never,
+    implementer: implementer as never,
+    reviewers: reviewers as never,
+    humanGate: opts.humanGate,
+    maxRepairs: Math.max(0, parseInt(opts.maxRepairs, 10) || 0),
   });
+  await startWorkflow(spec, cwd, buildContract(opts.check, opts.contract), opts);
+});
 
-program
-  .command('fanout')
-  .description('Ask several engines the same thing in parallel, optionally with a synthesis pass')
-  .argument('<task>', 'The prompt every agent gets')
-  .option(
-    '-e, --engines <list>',
-    'Comma-separated agents, engine[:model] each; acp:<preset> for an ACP agent',
-    'claude,codex',
-  )
-  .option('-s, --synthesize', 'Merge the answers in a final pass (needs two or more agents)')
-  .option('-c, --check <command>', 'Acceptance check the runtime runs afterwards (repeatable)', collect, [])
-  .option('--contract <file>', 'Acceptance contract JSON file (merged with --check)')
-  .option('--cwd <dir>', 'Project directory', process.cwd())
-  .option('-w, --wait', 'Follow the run until it ends, then print every answer')
-  .option('--json', 'Machine-readable output')
-  .action(async (task: string, opts) => {
-    const { fanoutWorkflow } = await import('../src/kernel/templates/index.js');
-    const agents = parseAgentList(opts.engines);
-    if (!agents.length) {
-      console.error('Error: --engines needs at least one engine');
-      process.exitCode = 1;
-      return;
-    }
-    if (!(await enginesKnown(agents))) return;
-    const cwd = path.resolve(opts.cwd);
-    const spec = fanoutWorkflow({ task, cwd, agents: agents as never, synthesize: !!opts.synthesize });
-    const runId = await startWorkflow(spec, cwd, buildContract(opts.check, opts.contract), opts);
-    if (!runId || !opts.wait || opts.json) return;
-    const s = await api(`/workflow/${encodeURIComponent(runId)}/state`);
-    const node = (s.run as { nodes?: Record<string, { output?: string }> } | undefined)?.nodes?.fanout;
-    if (node?.output) console.log(`\n${node.output}`);
-  });
+addAgentFlags(
+  program
+    .command('fanout')
+    .description('Ask several engines the same thing in parallel, optionally with a synthesis pass')
+    .argument('<task>', 'The prompt every agent gets')
+    .option(
+      '-e, --engines <list>',
+      'Comma-separated agents, engine[:model] each; acp:<preset> for an ACP agent (default: the configured default engine and codex)',
+    )
+    .option('--claude', 'Add a Claude Code agent')
+    .option('--codex', 'Add a Codex agent')
+    .option('--codex-app', 'Add a codex-app agent')
+    .option('--agy', 'Add an Antigravity agent')
+    .option('--grok', 'Add a Grok agent')
+    .option('--opencode', 'Add an OpenCode agent')
+    .option('--acp <preset>', 'Add an ACP agent (repeatable)', collect, [])
+    .option('-s, --synthesize', 'Merge the answers in a final pass (needs two or more agents)')
+    .option('-c, --check <command>', 'Acceptance check the runtime runs afterwards (repeatable)', collect, [])
+    .option('--contract <file>', 'Acceptance contract JSON file (merged with --check)')
+    .option('--cwd <dir>', 'Project directory', process.cwd())
+    .option('-w, --wait', 'Follow the run until it ends, then print every answer')
+    .option('--json', 'Machine-readable output'),
+  { model: false, appendSystemPrompt: false },
+).action(async (task: string, opts) => {
+  const { fanoutWorkflow } = await import('../src/kernel/templates/index.js');
+  // -e and the shorthands add up; with neither, the configured default engine and Codex.
+  const picks = [
+    ...(opts.engines ? [opts.engines as string] : []),
+    ...['claude', 'codex', 'codex-app', 'agy', 'grok', 'opencode'].filter(
+      (e) => opts[e.replace(/-([a-z])/g, (_: string, c: string) => c.toUpperCase())],
+    ),
+    ...(opts.acp as string[]).map((p) => `acp:${p}`),
+  ];
+  if (picks.length === 0) {
+    const { defaultEngine } = await import('../src/clawo-config.js');
+    const first = defaultEngine();
+    picks.push(first, first === 'codex' ? 'claude' : 'codex');
+  }
+  const agents = parseAgentList(picks.join(',')).map((a) => ({ ...a, ...agentFields(opts) }));
+  if (!agents.length) {
+    console.error('Error: --engines needs at least one engine');
+    process.exitCode = 1;
+    return;
+  }
+  if (!(await enginesKnown(agents))) return;
+  const cwd = path.resolve(opts.cwd);
+  const spec = fanoutWorkflow({ task, cwd, agents: agents as never, synthesize: !!opts.synthesize });
+  const runId = await startWorkflow(spec, cwd, buildContract(opts.check, opts.contract), opts);
+  if (!runId || !opts.wait || opts.json) return;
+  const s = await api(`/workflow/${encodeURIComponent(runId)}/state`);
+  const node = (s.run as { nodes?: Record<string, { output?: string }> } | undefined)?.nodes?.fanout;
+  if (node?.output) console.log(`\n${node.output}`);
+});
 
 program
   .command('goal')
@@ -1057,7 +1074,9 @@ program
   )
   .argument('[objective]', 'What the agent should achieve (or use --objective-file)')
   .option('--objective-file <file>', 'Read the objective from a file')
-  .option('-e, --engine <engine>', 'Who runs the goal: codex | claude', 'codex')
+  .option('-e, --engine <engine>', 'Who runs the goal: codex | claude (default: the configured default engine)')
+  .option('--claude', 'Run the goal on Claude Code (same as -e claude)')
+  .option('--codex', 'Run the goal on Codex (same as -e codex)')
   .option('-m, --model <model>', "Model (default: the engine's own)")
   .option('--effort <level>', 'Reasoning effort')
   .option('--sandbox <mode>', "Codex's own sandbox: read-only | workspace-write | danger-full-access")
@@ -1083,8 +1102,17 @@ program
   .action(async (objectiveArg: string | undefined, opts) => {
     const { goalWorkflow } = await import('../src/kernel/templates/index.js');
     const { GOAL_OBJECTIVE_MAX_CHARS } = await import('../src/kernel/nodes/goal.js');
-    if (opts.engine !== 'codex' && opts.engine !== 'claude') {
-      console.error(`Error: --engine must be codex or claude, not ${opts.engine}`);
+    let engine: string | undefined;
+    try {
+      engine = engineFromFlags(opts).engine;
+    } catch (err) {
+      fail((err as Error).message);
+      return;
+    }
+    // With none given the goal carries no engine, and the server gives it the
+    // configured default when the run starts (refused there if no goal runs on it).
+    if (engine !== undefined && engine !== 'codex' && engine !== 'claude') {
+      console.error(`Error: a goal runs on codex or claude, not ${engine}`);
       process.exitCode = 1;
       return;
     }
@@ -1109,7 +1137,7 @@ program
       task: objective,
       cwd,
       contract: contract as never,
-      engine: opts.engine,
+      engine: engine as 'codex' | 'claude' | undefined,
       model: opts.model,
       effort: opts.effort,
       sandboxMode: opts.sandbox,

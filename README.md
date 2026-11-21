@@ -54,12 +54,13 @@ https://github.com/user-attachments/assets/5bf9bea8-e5ac-4632-a292-a80a45831dff
 - ✅ **Verdicts the agent cannot write**: acceptance contracts (commands, HTTP probes, screenshots, diff policy, file
   assertions) run by the runtime. A run ends `verified`, `refuted` or `unverified`, and editing the tests its contract
   runs refutes it ([guide](./skills/references/verification.md)).
-- 🔀 **Many vendors, one API**: Claude Code, Codex, Antigravity, Grok Build, OpenCode, any ACP agent and custom CLIs.
+- 🔀 **Many vendors, one API**: Claude Code, Codex, Antigravity, Grok Build, OpenCode, any ACP agent and custom CLIs,
+  behind one set of CLI flags: pick the engine with `--codex`, `--agy`, … and set the default once with `clawo config`.
   `clawo fanout` asks several at once; `session_handoff` moves a live conversation to another engine in the same
   workspace ([guide](./skills/references/multi-engine.md)).
 - 💾 **Survives a crash**: every state transition is checkpointed; resume, retry, timeout, cancel and steer come from
   the kernel ([guide](./skills/references/workflow.md)).
-- 🎯 **Long goals**: `clawo goal` runs a Codex `/goal` unattended on one thread, resumes it after usage limits within a
+- 🎯 **Long goals**: `clawo goal` runs a Claude Code or Codex `/goal` unattended on one thread, resumes it after usage limits within a
   bound, optionally inside your own sandbox ([guide](./skills/references/workflow.md#goal)).
 - 💰 **Known cost**: one per-turn ledger across engines (`clawo runs`) and a `maxBudgetUsd` cap the runtime enforces on
   every engine ([guide](./skills/references/observability.md)).
@@ -81,7 +82,7 @@ clawo serve &    # local runtime + dashboard on 127.0.0.1:18796
 ```
 
 ```bash
-clawo solve "The test fails. Fix price.js." --engine codex \
+clawo solve "The test fails. Fix price.js." --codex \
   --check "npm test" --check "node ../holdout/price.spec.mjs" --wait
 clawo verify <runId>    # each check, why it failed, the files that changed
 clawo runs --since 1h   # every turn on every engine: model, tokens, cost, verdict
@@ -161,7 +162,7 @@ orchestrator does not edit its own code unattended.
 | Capability                  | What it does                                                                                                                   | Reference                                                                             |
 | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------- |
 | **Persistent sessions**     | Long-lived agents kept alive across requests, with context, tool, model and worktree control.                                  | [`sessions.md`](./skills/references/sessions.md)                                      |
-| **Multi-engine runtime**    | One interface over the engines above, any ACP agent, and custom CLIs.                                                          | [`multi-engine.md`](./skills/references/multi-engine.md)                              |
+| **Multi-engine runtime**    | One interface and one set of CLI flags over the engines above, any ACP agent, and custom CLIs; a configurable default engine.  | [`multi-engine.md`](./skills/references/multi-engine.md)                              |
 | **Session handoff**         | Moves a live conversation to another engine or model in the same workspace; the old session keeps running.                     | [`sessions.md`](./skills/references/sessions.md)                                      |
 | **Claude accounts**         | Several Claude accounts, keys or gateways; a session moves to the next one at its usage limit and keeps its conversation.      | [`multi-engine.md`](./skills/references/multi-engine.md#claude-accounts-and-rotation) |
 | **Verification plane**      | Acceptance contracts the runtime runs itself, with an evidence bundle on disk; a run without a contract ends `unverified`.     | [`verification.md`](./skills/references/verification.md)                              |

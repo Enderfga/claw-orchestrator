@@ -46,6 +46,23 @@ function log(): string[] {
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * The first turn's timeout, and how long its engine outlives a SIGTERM. The
+ * timeout has to land after the fake engine has booted and installed its
+ * SIGTERM handler: under a full parallel run Node took longer than 500 ms to
+ * get there, the SIGTERM killed it before it logged anything, and the second
+ * engine was taken for the first.
+ */
+const FIRST_TURN_MS = 2_000;
+const OUTLIVES_MS = 4_000;
+
+/** The premise of these tests: the first engine was running, and held on through the SIGTERM. */
+function expectFirstHeldOn(): void {
+  const [start] = log();
+  expect(start, 'the first engine never started').toMatch(/^start /);
+  expect(log(), 'the first engine was not running when the turn timed out').toContain(`term ${start.split(' ')[1]}`);
+}
+
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'oneshot-timeout-'));
   bin = join(dir, 'fake-engine.mjs');
@@ -59,11 +76,12 @@ afterEach(() => {
 
 describe.runIf(posix)('one-shot turn timeout waits for the engine process to exit', () => {
   it('keeps the session busy and starts the next turn only after the timed-out process exits', async () => {
-    writeEngine([1_500, 0]);
+    writeEngine([OUTLIVES_MS, 0]);
     const session = new PersistentCodexSession({ name: 'timeout-exit', cwd: dir }, bin);
     await session.start();
 
-    await expect(session.send('first', { waitForComplete: true, timeout: 500 })).rejects.toThrow(/Timeout/);
+    await expect(session.send('first', { waitForComplete: true, timeout: FIRST_TURN_MS })).rejects.toThrow(/Timeout/);
+    expectFirstHeldOn();
     expect(session.isBusy).toBe(true);
 
     // Generous: under a full parallel run the fake engine's start has been seen to
@@ -79,16 +97,17 @@ describe.runIf(posix)('one-shot turn timeout waits for the engine process to exi
   }, 30_000);
 
   it('stop() reaches the turn that runs after a timed-out one', async () => {
-    writeEngine([1_200, 3_000]);
+    writeEngine([OUTLIVES_MS, 3_000]);
     const session = new PersistentCodexSession({ name: 'timeout-stop', cwd: dir }, bin);
     await session.start();
 
-    await expect(session.send('first', { waitForComplete: true, timeout: 500 })).rejects.toThrow(/Timeout/);
-    const second = session.send('second', { waitForComplete: true, timeout: 10_000 }).catch(() => undefined);
+    await expect(session.send('first', { waitForComplete: true, timeout: FIRST_TURN_MS })).rejects.toThrow(/Timeout/);
+    expectFirstHeldOn();
+    const second = session.send('second', { waitForComplete: true, timeout: 20_000 }).catch(() => undefined);
     // Wait until the second engine has started and the first has exited.
     const starts = (): string[] => log().filter((l) => l.startsWith('start '));
     const firstExited = (): boolean => log().includes(`exit ${starts()[0]?.split(' ')[1]}`);
-    for (let i = 0; i < 100 && (starts().length < 2 || !firstExited()); i++) await sleep(50);
+    for (let i = 0; i < 300 && (starts().length < 2 || !firstExited()); i++) await sleep(50);
     const pidB = starts()[1]?.split(' ')[1];
     expect(pidB).toBeDefined();
     expect(firstExited()).toBe(true);
@@ -100,11 +119,12 @@ describe.runIf(posix)('one-shot turn timeout waits for the engine process to exi
   }, 30_000);
 
   it('does not start a turn on a session stopped while the turn waited', async () => {
-    writeEngine([1_500, 0]);
+    writeEngine([OUTLIVES_MS, 0]);
     const session = new PersistentCodexSession({ name: 'timeout-stopped', cwd: dir }, bin);
     await session.start();
 
-    await expect(session.send('first', { waitForComplete: true, timeout: 500 })).rejects.toThrow(/Timeout/);
+    await expect(session.send('first', { waitForComplete: true, timeout: FIRST_TURN_MS })).rejects.toThrow(/Timeout/);
+    expectFirstHeldOn();
     const waiting = session.send('second', { waitForComplete: true, timeout: 5_000 });
     session.stop();
 
@@ -113,7 +133,7 @@ describe.runIf(posix)('one-shot turn timeout waits for the engine process to exi
   });
 
   it('applies to a one-shot custom engine too', async () => {
-    writeEngine([1_500, 0]);
+    writeEngine([OUTLIVES_MS, 0]);
     const session = new PersistentCustomSession({
       name: 'timeout-custom',
       cwd: dir,
@@ -121,7 +141,8 @@ describe.runIf(posix)('one-shot turn timeout waits for the engine process to exi
     });
     await session.start();
 
-    await expect(session.send('first', { waitForComplete: true, timeout: 500 })).rejects.toThrow(/Timeout/);
+    await expect(session.send('first', { waitForComplete: true, timeout: FIRST_TURN_MS })).rejects.toThrow(/Timeout/);
+    expectFirstHeldOn();
     expect(session.isBusy).toBe(true);
 
     // Generous: under a full parallel run the second spawn has been seen to take

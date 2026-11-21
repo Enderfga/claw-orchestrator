@@ -10,6 +10,7 @@
  * edits. For isolated parallel editing use `council` (per-agent worktrees).
  */
 
+import { defaultEngine } from './clawo-config.js';
 import { randomUUID } from 'node:crypto';
 
 import type {
@@ -205,7 +206,7 @@ export class Fanout {
   }
 
   private async _runAgent(spec: FanoutAgentSpec): Promise<FanoutAgentResult> {
-    const engine: EngineType = spec.engine || 'claude';
+    const engine: EngineType = spec.engine || defaultEngine();
     // An agent still queued for a slot when the run was aborted never starts.
     if (this._stopped()) {
       return {
@@ -326,7 +327,7 @@ export class Fanout {
       await this.manager.startSession({
         name: sessionName,
         cwd: this.config.projectDir,
-        engine: this.config.synthesisEngine || 'claude',
+        engine: this.config.synthesisEngine || defaultEngine(),
         model: this.config.synthesisModel,
         ...(this.config.synthesisAcpAgent === undefined ? {} : { acpAgent: this.config.synthesisAcpAgent }),
         permissionMode: this.config.synthesisPermissionMode ?? 'bypassPermissions',

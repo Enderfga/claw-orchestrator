@@ -740,6 +740,7 @@ export class EmbeddedServer {
         const result = await this.manager.sendMessage(body.name as string, body.message as string, {
           effort: body.effort as EffortLevel | undefined,
           plan: body.plan as boolean | undefined,
+          images: body.images as string[] | undefined,
           timeout: body.timeout as number | undefined,
         });
         json(200, { ok: true, ...result });

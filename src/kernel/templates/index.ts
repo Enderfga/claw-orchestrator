@@ -156,7 +156,15 @@ export interface SolveArgs extends CommonArgs {
   /** Agents that explore the problem in parallel before anything is written. */
   scouts: FanoutAgentSpec[];
   /** Engine/model that does the implementation. */
-  implementer?: { engine?: FanoutAgentSpec['engine']; model?: string; acpAgent?: string };
+  implementer?: {
+    engine?: FanoutAgentSpec['engine'];
+    model?: string;
+    acpAgent?: string;
+    effort?: FanoutAgentSpec['effort'];
+    permissionMode?: string;
+    sandboxMode?: FanoutAgentSpec['sandboxMode'];
+    appendSystemPrompt?: string;
+  };
   /** Reviewers that read the finished change. */
   reviewers?: FanoutAgentSpec[];
   /** Ask a human before writing anything. */
@@ -199,6 +207,10 @@ export function solveWorkflow(args: SolveArgs): WorkflowSpec {
     engine: args.implementer?.engine,
     model: args.implementer?.model,
     acpAgent: args.implementer?.acpAgent,
+    ...(args.implementer?.effort ? { effort: args.implementer.effort } : {}),
+    ...(args.implementer?.permissionMode ? { permissionMode: args.implementer.permissionMode } : {}),
+    ...(args.implementer?.sandboxMode ? { sandboxMode: args.implementer.sandboxMode } : {}),
+    ...(args.implementer?.appendSystemPrompt ? { appendSystemPrompt: args.implementer.appendSystemPrompt } : {}),
     cwd: args.cwd,
     // A failed implementation attempt still goes to the verifier, so the
     // evidence bundle records what was actually wrong rather than just "the

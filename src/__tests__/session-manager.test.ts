@@ -1606,6 +1606,41 @@ describe('SessionManager', () => {
       expect(info.name).toBe('tools-merge');
     });
 
+    it('takes what a caller leaves out from the defaults file: engine, then that engine’s fields', async () => {
+      const cfgDir = fs.mkdtempSync(path.join(os.tmpdir(), 'clawo-sm-config-'));
+      process.env.CLAWO_CONFIG = path.join(cfgDir, 'config.json');
+      try {
+        fs.writeFileSync(
+          process.env.CLAWO_CONFIG,
+          JSON.stringify({
+            defaults: { engine: 'codex', effort: 'high', model: 'opus', strictMcpConfig: true },
+            engines: { codex: { model: 'gpt-6.2-sol' }, claude: { effort: 'low' } },
+          }),
+        );
+        await mgr.startSession({ name: 'cfg-default', cwd: '/tmp' });
+        expect(createdConfigs[0]).toMatchObject({ engine: 'codex', model: 'gpt-6.2-sol', effort: 'high' });
+        // An explicit engine wins, takes its own defaults, and the general model fits it.
+        await mgr.startSession({ name: 'cfg-claude', cwd: '/tmp', engine: 'claude' });
+        expect(createdConfigs[1]).toMatchObject({
+          engine: 'claude',
+          effort: 'low',
+          model: 'opus',
+          strictMcpConfig: true,
+        });
+        // What the caller sets wins over every default.
+        await mgr.startSession({ name: 'cfg-explicit', cwd: '/tmp', model: 'gpt-6.2-astra', effort: 'medium' });
+        expect(createdConfigs[2]).toMatchObject({ engine: 'codex', model: 'gpt-6.2-astra', effort: 'medium' });
+        // The general model is not handed to an engine that does not run it.
+        fs.writeFileSync(process.env.CLAWO_CONFIG, JSON.stringify({ defaults: { engine: 'agy', model: 'opus' } }));
+        await mgr.startSession({ name: 'cfg-agy', cwd: '/tmp' });
+        expect(createdConfigs[3].engine).toBe('agy');
+        expect(createdConfigs[3].model).not.toBe('opus');
+      } finally {
+        delete process.env.CLAWO_CONFIG;
+        fs.rmSync(cfgDir, { recursive: true, force: true });
+      }
+    });
+
     it('passes images to an engine that takes them, checked, and refuses them on one that does not', async () => {
       const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'clawo-img-send-')));
       const png = path.join(dir, 'shot.png');

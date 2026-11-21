@@ -12,6 +12,7 @@
  * - Engine-agnostic: agents can use Claude, Codex, or any ISession engine
  */
 
+import { defaultEngine } from './clawo-config.js';
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { withoutServerCredential } from './kernel/secrets.js';
@@ -551,7 +552,7 @@ export class Council extends EventEmitter {
         }
 
         // Start a session for this agent
-        const engine: EngineType = agent.engine || 'claude';
+        const engine: EngineType = agent.engine || defaultEngine();
         await this.manager.startSession({
           name: sessionName,
           cwd: workDir,

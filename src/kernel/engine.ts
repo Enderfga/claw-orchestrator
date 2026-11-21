@@ -47,6 +47,8 @@
 
 import { EventEmitter } from 'node:events';
 import crypto from 'node:crypto';
+import { defaultEngine } from '../clawo-config.js';
+import type { EngineType } from '../types.js';
 import { createConsoleLogger, type Logger } from '../logger.js';
 import {
   compareContracts,
@@ -539,6 +541,59 @@ export function validateSpec(spec: WorkflowSpec): void {
  * Append the implicit terminal verifier when a run-level contract exists and the
  * author did not already place one. This is what makes `completed` mean "checked".
  */
+/** What a node or agent with no engine runs on: one engine for sessions, one for goals. */
+export interface EngineDefaults {
+  session: EngineType;
+  /** Called only when some goal needs it, so a default no goal can run is refused only then. */
+  goal: () => 'claude' | 'codex';
+}
+
+/**
+ * The engine each `agent`, `goal`, fan-out and council agent runs on, written
+ * into the spec where it names none.
+ *
+ * Done when the run starts, from the configured default, so the run keeps that
+ * engine for good: a resume after the default changed must not hand a Codex
+ * thread to Claude Code or a Claude conversation to Codex. A record from before
+ * this was done carries no engine and is given what it meant then (`LEGACY`).
+ */
+export function stampEngines(spec: WorkflowSpec, defaults: EngineDefaults): WorkflowSpec {
+  let changed = false;
+  const nodes = spec.nodes.map((node) => {
+    if ((node.kind === 'agent' || node.kind === 'goal') && !node.engine) {
+      changed = true;
+      return { ...node, engine: node.kind === 'goal' ? defaults.goal() : defaults.session } as typeof node;
+    }
+    if ((node.kind === 'fanout' || node.kind === 'council') && node.agents?.some((a) => !a.engine)) {
+      changed = true;
+      const agents = node.agents.map((a) =>
+        a.engine ? a : { ...a, engine: a.objective !== undefined ? defaults.goal() : defaults.session },
+      );
+      return { ...node, agents } as typeof node;
+    }
+    return node;
+  });
+  return changed ? { ...spec, nodes } : spec;
+}
+
+/** What a node with no engine ran on before engines were written at start. */
+const LEGACY_ENGINES: EngineDefaults = { session: 'claude', goal: () => 'codex' };
+
+/** The configured default engine, and the goal engine it implies. */
+function configuredEngines(): EngineDefaults {
+  const session = defaultEngine();
+  return {
+    session,
+    goal: () => {
+      if (session === 'claude') return 'claude';
+      if (session === 'codex' || session === 'codex-app') return 'codex';
+      throw new Error(
+        `A goal runs on Claude Code or Codex, and the default engine is ${session}: give the goal an engine (--claude or --codex)`,
+      );
+    },
+  };
+}
+
 export function prepareSpec(spec: WorkflowSpec): WorkflowSpec {
   if (!spec.contract) return spec;
   const hasRunVerifier = spec.nodes.some((n) => n.kind === 'verifier' && n.contract === 'run');
@@ -652,7 +707,7 @@ export class RunKernel extends EventEmitter {
   // ─── Lifecycle ────────────────────────────────────────────────────────────
 
   async start(rawSpec: WorkflowSpec, opts: StartOptions = {}): Promise<RunRecord> {
-    const spec = prepareSpec(normalizeSpecContracts(rawSpec, opts.contract));
+    const spec = stampEngines(prepareSpec(normalizeSpecContracts(rawSpec, opts.contract)), configuredEngines());
     validateSpec(spec);
     if (spec.forum !== undefined) {
       const forum = normalizeForumConfig(spec.forum, `Workflow '${spec.name}': forum`);
@@ -760,6 +815,7 @@ export class RunKernel extends EventEmitter {
     }
     const record = loadRun(runId);
     if (!record) throw new Error(`Run '${runId}' not found`);
+    record.spec = stampEngines(record.spec, LEGACY_ENGINES);
     // A finished run stays finished by default: silently re-running a completed
     // workflow because someone polled `resume` would be a nasty surprise.
     // `restart` is for callers whose "resume" genuinely means "bring it back up"

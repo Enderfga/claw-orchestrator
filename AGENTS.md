@@ -13,6 +13,8 @@ or an ACP agent, with first-class OpenClaw plugin support. Key source files:
 | File                                  | Purpose                                                                                                                                                                                                                                      |
 | ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `src/index.ts`                        | Plugin entry — registers all 81 canonical tools; also the SDK's export surface                                                                                                                                                               |
+| `src/session-params.ts`               | The `session_start` parameters — one list, read by the MCP tool, the CLI's session flags and the defaults file                                                                                                                               |
+| `src/clawo-config.ts`                 | The defaults file (`~/.claw-orchestrator/config.json`): the default engine and per-engine session defaults, read on every session start                                                                                                      |
 | `src/session-manager.ts`              | Core orchestrator — session lifecycle, handoff, and the entry point of every mode (council, fan-out, ultraplan/ultrareview, autoloop, UltraApp, workflows, `verify_run`)                                                                     |
 | `src/base-oneshot-session.ts`         | Abstract base class for one-shot (process-per-send) engines                                                                                                                                                                                  |
 | `src/engine-spawn.ts`                 | The one place engine CLIs are spawned (cross-spawn, so Windows `.cmd` shims run without a shell) and their process trees killed                                                                                                              |
@@ -67,6 +69,7 @@ or an ACP agent, with first-class OpenClaw plugin support. Key source files:
 | `src/acp-server.ts`                   | Agent Client Protocol adapter — runs the orchestrator as an ACP _agent_                                                                                                                                                                      |
 | `src/proxy/`                          | Multi-model proxy (Gemini, GPT via Anthropic format translation)                                                                                                                                                                             |
 | `bin/cli.ts`                          | CLI entry point (commander-based)                                                                                                                                                                                                            |
+| `bin/session-flags.ts`                | The session flags of `clawo session-start`, built from `session-params.ts`, and the engine shorthands (`--codex`, `--agy`, …)                                                                                                                |
 | `bin/mcp-server.ts`                   | MCP stdio entry (`clawo-mcp`) — serves the tools `src/index.ts` registers                                                                                                                                                                    |
 | `bin/acp-server.ts`                   | ACP stdio entry (`clawo-acp` / `clawo acp`)                                                                                                                                                                                                  |
 
@@ -115,6 +118,9 @@ npx tsx scripts/sweep.ts --json --out report.json
   three differ), document it in `skills/references/tools.md` and the annotation table in `mcp.md`,
   and update the tool count where it is quoted: `openclaw-tool-result-contract.test.ts`, README.md,
   `skills/SKILL.md`, `skills/references/tools.md`, `mcp.md`, `getting-started.md`, and this file
+- **Adding a session field** — add it to `src/session-params.ts` (and `SessionConfig` in `src/types.ts`); it is
+  then an MCP `session_start` parameter, a `clawo session-start` flag and a `clawo config` key at once
+  (`cli-session-flags.test.ts` holds the three together). Document it in `skills/references/tools.md`
 - **Legacy engines** — `gemini` and `cursor` stay in `ENGINE_TYPES` for existing callers; they are not
   offered in new surfaces (the ACP model selector hides them) and not documented as options
 

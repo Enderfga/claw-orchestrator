@@ -740,6 +740,8 @@ export interface StreamEvent {
 
 export interface SessionInfo {
   name: string;
+  /** The engine the session runs on: the one asked for, or the configured default. */
+  engine?: EngineType;
   claudeSessionId?: string;
   created: string;
   cwd: string;

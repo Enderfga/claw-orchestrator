@@ -126,7 +126,7 @@ function kernelWith(manager: ReturnType<typeof fakeManager>) {
 const oneGoal = (over: Record<string, unknown> = {}): WorkflowSpec => ({
   name: 'goal-test',
   cwd: tmp,
-  nodes: [{ id: 'goal', kind: 'goal', objective: 'make it faster', ...over } as never],
+  nodes: [{ id: 'goal', kind: 'goal', objective: 'make it faster', engine: 'codex', ...over } as never],
 });
 
 describe('goal node', () => {
@@ -412,7 +412,7 @@ describe('goal workflow', () => {
         },
       ],
     };
-    const spec = goalWorkflow({ task: 'create done.txt', cwd, contract, maxRepairs: 1 });
+    const spec = goalWorkflow({ task: 'create done.txt', cwd, contract, maxRepairs: 1, engine: 'codex' });
     const kernel = kernelWith(m);
     const done = await kernel.wait((await kernel.start(spec, { contract } as never)).runId);
 
@@ -602,7 +602,9 @@ describe('goal node after a crash', () => {
       ],
     };
     const kernel = kernelWith(m);
-    const first = await kernel.start(goalWorkflow({ task: 'create done.txt', cwd, contract, maxRepairs: 1 }));
+    const first = await kernel.start(
+      goalWorkflow({ task: 'create done.txt', cwd, contract, maxRepairs: 1, engine: 'codex' }),
+    );
     const finished = (await kernel.wait(first.runId))!;
     expect(finished.outcome).toBe('verified');
     // Put the run back to the moment the repair goal had completed: the first,
@@ -707,7 +709,7 @@ describe('goal objective limit', () => {
         },
       ],
     };
-    const spec = goalWorkflow({ task: 'create done.txt', cwd, contract, maxRepairs: 1 });
+    const spec = goalWorkflow({ task: 'create done.txt', cwd, contract, maxRepairs: 1, engine: 'codex' });
     const kernel = kernelWith(m);
     const done = await kernel.wait((await kernel.start(spec, { contract } as never)).runId);
     expect(done!.outcome).toBe('verified');
@@ -746,7 +748,13 @@ describe('goal objective limit', () => {
       cwd,
       contract,
       nodes: [
-        { id: 'implement', kind: 'goal', objective: 'create done.txt', onFailure: 'continue' } as never,
+        {
+          id: 'implement',
+          kind: 'goal',
+          objective: 'create done.txt',
+          engine: 'codex',
+          onFailure: 'continue',
+        } as never,
         { id: 'verify', kind: 'verifier', contract: 'run', cwd, onFailure: 'continue' } as never,
         {
           id: 'gate',
@@ -754,7 +762,13 @@ describe('goal objective limit', () => {
           routes: [{ when: { type: 'node_failed', node: 'verify' }, to: 'implement-fresh' }],
           default: 'end',
         } as never,
-        { id: 'implement-fresh', kind: 'goal', objective: 'create done.txt', onFailure: 'continue' } as never,
+        {
+          id: 'implement-fresh',
+          kind: 'goal',
+          objective: 'create done.txt',
+          engine: 'codex',
+          onFailure: 'continue',
+        } as never,
         { id: 'verify-2', kind: 'verifier', contract: 'run', cwd, onFailure: 'continue' } as never,
         { id: 'end', kind: 'router', routes: [] } as never,
       ],
@@ -928,11 +942,16 @@ describe('goal node on claude', () => {
     expect(done!.nodes.goal.error).toContain('the claude session has no goal surface');
   });
 
-  it('carries the engine through the goal template, and leaves codex the default', () => {
+  it('carries the engine through the goal template, and leaves an unnamed one to the configured default', async () => {
     const claude = goalWorkflow({ task: 'x', cwd: tmp, engine: 'claude' });
     expect(claude.nodes[0]).toMatchObject({ kind: 'goal', engine: 'claude' });
-    const codex = goalWorkflow({ task: 'x', cwd: tmp });
-    expect('engine' in codex.nodes[0]).toBe(false);
+    const unnamed = goalWorkflow({ task: 'x', cwd: tmp });
+    expect('engine' in unnamed.nodes[0]).toBe(false);
+    // The run fixes it when it starts: Claude Code out of the box.
+    const kernel = kernelWith(fakeManager(() => new FakeGoalSession('t')));
+    const run = await kernel.start(unnamed);
+    expect(run.spec.nodes[0]).toMatchObject({ kind: 'goal', engine: 'claude' });
+    await kernel.wait(run.runId);
   });
 });
 
@@ -999,9 +1018,10 @@ describe('fan-out agents that run goals', () => {
       cwd: tmp,
       nodes: [{ id: 'impl', kind: 'fanout', prompt: 'x', agents: [agent], ...extra } as never],
     });
-    await expect(kernel.start(one({ name: 'a', objective: 'do it' }))).rejects.toThrow(
-      /needs engine 'claude' or 'codex'/,
-    );
+    // A goal agent with no engine takes the configured default (Claude Code out of the box).
+    const unnamed = await kernel.start(one({ name: 'a', objective: 'do it' }));
+    expect((unnamed.spec.nodes[0] as { agents: Array<{ engine?: string }> }).agents[0].engine).toBe('claude');
+    await kernel.wait(unnamed.runId);
     await expect(kernel.start(one({ name: 'a', engine: 'opencode', objective: 'do it' }))).rejects.toThrow(
       /needs engine/,
     );

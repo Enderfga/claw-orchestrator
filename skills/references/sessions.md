@@ -31,7 +31,7 @@ Key options:
 
 | Option               | Description                                                                                                                                                                                                                                                                                                                                                                         |
 | -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `engine`             | `'claude'` (default), `'codex'`, `'codex-app'`, `'agy'`, `'grok'`, `'opencode'`, `'acp'` (with `acpAgent`), or `'custom'` (with `customEngine`) — see [Multi-Engine](./multi-engine.md)                                                                                                                                                                                             |
+| `engine`             | `'claude'`, `'codex'`, `'codex-app'`, `'agy'`, `'grok'`, `'opencode'`, `'acp'` (with `acpAgent`), or `'custom'` (with `customEngine`); omitted, the configured default engine (Claude Code out of the box; see [Defaults](#defaults)) — see [Multi-Engine](./multi-engine.md)                                                                                                       |
 | `model`              | Model alias (`fable`, `opus`, `sonnet`, `haiku`, `agy-pro`, `agy-flash`, `grok`) or full name. A non-Claude model on the `claude` engine goes through the [multi-model proxy](#multi-model-proxy)                                                                                                                                                                                   |
 | `permissionMode`     | `acceptEdits` (default), `bypassPermissions`, `plan`, `auto`, `manual`, `dontAsk` (`default` = legacy alias for `manual`)                                                                                                                                                                                                                                                           |
 | `effort`             | `low`, `medium`, `high`, `xhigh`, `max`, `ultra`, `auto` (default) — each engine clamps to its own ladder (see [Multi-Engine](./multi-engine.md))                                                                                                                                                                                                                                   |
@@ -166,6 +166,27 @@ The same engine carries Codex's `/goal`: set and manage it on a session with the
 `fanout_start` runs one task across N engine/model agents in parallel and collects their answers (optional synthesis) — the best-of-N / diverse-perspective primitive. Unlike Council, no rounds/votes/worktrees; use Council for isolated parallel edits. See [tools.md](./tools.md#fanout_start).
 
 Each agent is a session and counts against `maxConcurrentSessions`. Fan-out and Council run no more agents at once than there are free slots when they start, and the rest wait for an agent to finish. When no slot is free at all, the agents fail on the cap rather than wait for sessions they do not own. On a memory-constrained host, the cap is the knob that bounds how many engine processes run at once. An aborted fan-out starts none of the agents still waiting.
+
+## Defaults
+
+What a caller leaves out of `session_start`, every entry point alike — the CLI, the MCP tools, HTTP, workflow
+nodes — comes from `~/.claw-orchestrator/config.json` (`CLAWO_CONFIG` to move it), which `clawo config`
+reads and writes:
+
+```json
+{
+  "defaults": { "engine": "codex", "effort": "high" },
+  "engines": { "codex": { "model": "gpt-6.2-sol" }, "claude": { "model": "opus", "strictMcpConfig": true } }
+}
+```
+
+`defaults.engine` is the engine a session runs on when it names none: `claude` without a file. Any other
+`session_start` field can be a default for every engine (`defaults`) or for one (`engines.<engine>`). A field
+comes from, in order: the caller; for a name restarted from the resume registry, what it ran with;
+`engines.<its engine>`; `defaults`; the server's built-in defaults (`defaultModel`, `defaultPermissionMode`,
+`defaultEffort`). A general `defaults.model` goes only to an engine that runs it. A key a caller passes as
+`undefined` keeps the engine's own default rather than the file's. The server reads the file on each session
+start, so a change applies without a restart; unknown fields and values are ignored with a warning.
 
 ## Runtime Operations
 
