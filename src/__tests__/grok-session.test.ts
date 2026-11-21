@@ -754,6 +754,15 @@ describe('PersistentGrokSession — directories, trust and debug', () => {
     expect(a2).not.toContain('--add-dir');
   });
 
+  it('sends a message verbatim when slash commands are disabled', async () => {
+    // A leading /name is a slash command unless --verbatim says otherwise.
+    expect(await argsFor({ disableSlashCommands: true })).toContain('--verbatim');
+    mockSpawn.mockClear();
+    mockProc = createMockProcess();
+    mockSpawn.mockReturnValue(mockProc);
+    expect(await argsFor({})).not.toContain('--verbatim');
+  });
+
   it('trusts the project with --trust when asked', async () => {
     expect(await argsFor({ trustProject: true })).toContain('--trust');
     mockSpawn.mockClear();

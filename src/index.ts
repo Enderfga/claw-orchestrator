@@ -440,7 +440,7 @@ const plugin = {
             type: 'string',
             enum: ['on', 'off'],
             description:
-              'Claude engine only (`--system-prompt-snapshot`). `on` (the CLI default) reuses the system prompt recorded on the first request, through resumes, until compaction; `off` renders it each request, so a resume with a new appendSystemPrompt takes effect.',
+              'Claude engine only (`--system-prompt-snapshot`). `on` (the CLI default, except under bare) reuses the system prompt recorded on the first request, through resumes, until compaction; `off` renders it each request, so a resume with a new appendSystemPrompt takes effect.',
           },
           pluginDir: {
             type: ['string', 'array'],
@@ -461,7 +461,7 @@ const plugin = {
           disableSlashCommands: {
             type: 'boolean',
             description:
-              'claude and agy (`--disable-slash-commands`): send messages as text without expanding skills or slash commands. On claude it also removes /compact, so autoCompactPercent cannot compact.',
+              'claude, agy and grok (`--disable-slash-commands`, grok `--verbatim`): send messages as text without expanding skills or slash commands. On claude it also removes /compact, so autoCompactPercent cannot compact.',
           },
           trustProject: {
             type: 'boolean',

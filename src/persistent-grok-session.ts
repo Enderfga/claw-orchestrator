@@ -320,6 +320,8 @@ export class PersistentGrokSession extends BaseOneShotSession {
     // headless grok otherwise skips, and records the grant in
     // ~/.grok/trusted_folders.toml, so it outlives the session.
     if (this.options.trustProject) args.push('--trust');
+    // Without it a message starting with /name is taken as a slash command.
+    if (this.options.disableSlashCommands) args.push('--verbatim');
 
     // grok's `--debug` takes no categories. It writes the log to
     // $GROK_HOME/debug/<session-id>.txt, or to `--debug-file`, not to stderr.

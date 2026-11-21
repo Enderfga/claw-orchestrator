@@ -514,10 +514,12 @@ export interface SessionConfig {
    */
   settingSources?: Array<'user' | 'project' | 'local'>;
   /**
-   * Claude Code: `--system-prompt-snapshot`. With `on` (the CLI's default) a
-   * conversation's system prompt is recorded on its first request and reused,
-   * through resumes, until it is compacted. `off` renders it on every request,
-   * so a resume with a different `appendSystemPrompt` takes effect.
+   * Claude Code: `--system-prompt-snapshot`. With `on` (the CLI's default, except
+   * under `bare`) a conversation's system prompt is recorded on its first
+   * request and reused, through resumes, until it is compacted: measured on
+   * 2.1.330, a conversation begun with one `appendSystemPrompt` and resumed with
+   * another kept the first. `off` renders it on every request, so a resume with
+   * a different `appendSystemPrompt` takes effect.
    */
   systemPromptSnapshot?: 'on' | 'off';
   /** Claude Code: local plugin directories or `.zip` files for this session only (`--plugin-dir`, one per entry). */
@@ -531,8 +533,8 @@ export interface SessionConfig {
   /** Claude Code: standing instructions for the subagents a session starts (`--append-subagent-system-prompt`). */
   appendSubagentSystemPrompt?: string;
   /**
-   * Claude Code and agy: send messages as text, without expanding skills or
-   * slash commands (`--disable-slash-commands`). On Claude Code it also removes
+   * Claude Code, agy and grok: send messages as text, without expanding skills
+   * or slash commands (`--disable-slash-commands`; grok `--verbatim`). On Claude Code it also removes
    * `/compact`, so `autoCompactPercent` cannot compact the session.
    */
   disableSlashCommands?: boolean;
