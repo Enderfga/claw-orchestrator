@@ -292,13 +292,40 @@ in print mode, with the message as the `-p` argument. Tested with `agy` **1.5.10
   `--mode plan` when its preserved conversation is resumed.
 
 - `settings` is passed as `--settings`: settings.json keys as inline JSON or a file path, for this run only. agy refuses a key it does not know.
+- Session options passed on every turn (each turn is a new process):
+  - `jsonSchema` → `--json-schema`. agy enforces it on the turn's final result,
+    returning the JSON as the reply text and the parsed value as `structured_output`
+    on the result event; if the reply text is empty, the structured value is the
+    reply. A value starting with `{` is inline JSON, anything else a file path,
+    passed as an absolute path resolved against the session's `cwd`. agy refuses a
+    schema whose root is not an object with `"type": "object"`, so `start()` refuses
+    it first, along with an unreadable file;
+  - `addDir` → one `--add-dir` per entry. Measured on agy 1.5.13 with one added
+    directory: a shell command the agent ran without naming a directory ran in the
+    added directory, not in `cwd`;
+  - `agent` → `--agent`. An unknown name fails the turn with agy's message listing
+    the agents there are;
+  - `disableSlashCommands` → `--disable-slash-commands`. Without it a message
+    starting with `/` that names a skill or command is read as one: a skill is
+    expanded, a read-only command such as `/help` answers without a model turn,
+    and an interactive-only one such as `/clear` fails the turn. A message starting
+    with an absolute path names neither and reaches the model as written.
+- A message that is a single token starting with `-` (`--version`, `-h`, `-c`) is
+  passed with a trailing newline, because agy reads a `-p` value that is exactly
+  one of its flags as that flag (printing its version or help, or exiting 2).
+- Tool calls are counted in `stats.toolCalls` from the `tool_info` and
+  `subagent_info` steps of the stream, once per step (agy reports a tool step when
+  it starts and again when it is done), including those of a subagent.
 - The engine always passes `--print-timeout`, set just inside the send timeout
   (10% earlier, at most 10s). Since agy 1.2.9 a headless run whose agent started a
   background task (a dev server, a watcher) stays open until that deadline and
   delivers the reply when it exits, ending the task; the earlier deadline lets it
   do so before the send times out. A run that reaches the deadline while the agent
-  is still working fails as a timeout even though agy reports `SUCCESS` with a
-  partial reply. Without the flag a stuck headless agy turn can run indefinitely
+  is still working fails as a timeout, partial reply or not. agy 1.4.11+ reports
+  that as `finished_reason: print_timeout` on the result, which decides; for a
+  result without the field, agy's stderr line and the elapsed time do. Any other
+  `finished_reason` (`interrupted`, `error`) also marks the turn failed. Without
+  the flag a stuck headless agy turn can run indefinitely
 - Do not rely on an unknown `--model` falling back: current agy versions can
   report `status: ERROR` with no usable response. The adapter rejects result
   errors, non-success statuses, and empty responses. `agy-flash` and the engine
