@@ -449,6 +449,313 @@ describe('PersistentAgySession', () => {
     });
   });
 
+  // ─── headless session flags ─────────────────────────────────────────────
+
+  // agy is one process per turn, so every per-session flag is passed on every
+  // turn, the resumed ones included.
+  describe('session flags on every turn', () => {
+    const SCHEMA = '{"type":"object","properties":{"files":{"type":"array","items":{"type":"string"}}}}';
+    const CONV = 'a35ec168-0a1c-4dff-81a0-eed636ca97d9';
+
+    async function twoTurns(config: Record<string, unknown>): Promise<string[][]> {
+      const session = new PersistentAgySession({
+        name: 'test',
+        cwd: '/tmp',
+        permissionMode: 'bypassPermissions',
+        ...config,
+      } as never);
+      await session.start();
+      const first = session.send('first', { waitForComplete: true });
+      setTimeout(() => {
+        feedText(mockProc, JSON.stringify({ event: 'init', conversation_id: CONV }) + '\n');
+        succeedProc(mockProc);
+      }, 10);
+      await first;
+      const proc2 = createMockProcess();
+      mockSpawn.mockReturnValue(proc2);
+      const second = session.send('second', { waitForComplete: true });
+      setTimeout(() => succeedProc(proc2), 10);
+      await second;
+      const calls = mockSpawn.mock.calls.map((c) => c[1] as string[]);
+      expect(calls[1][calls[1].indexOf('--conversation') + 1]).toBe(CONV);
+      return calls;
+    }
+    const valuesOf = (args: string[], flag: string) => args.flatMap((a, i) => (a === flag ? [args[i + 1]] : []));
+
+    it('passes an inline jsonSchema as --json-schema', async () => {
+      for (const args of await twoTurns({ jsonSchema: SCHEMA })) {
+        expect(valuesOf(args, '--json-schema')).toEqual([SCHEMA]);
+      }
+    });
+
+    it('passes a jsonSchema file as its absolute path, resolved against the session directory', async () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-schema-'));
+      try {
+        fs.writeFileSync(path.join(dir, 'schema.json'), SCHEMA);
+        for (const args of await twoTurns({ cwd: dir, jsonSchema: 'schema.json' })) {
+          expect(valuesOf(args, '--json-schema')).toEqual([path.join(dir, 'schema.json')]);
+        }
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    // agy exits 1 at startup on each of these; refusing at start() names the
+    // problem once instead of failing every turn.
+    it.each([
+      ['plain text', 'string'],
+      ['a non-object root type', '{"type":"string"}'],
+      ['a root without a type', '{"properties":{"n":{"type":"integer"}}}'],
+      ['an array', '[{"type":"object"}]'],
+      ['invalid JSON', '{"type":'],
+      ['a missing file', '/no/such/schema.json'],
+    ])('refuses a jsonSchema that is %s at start', async (_kind, jsonSchema) => {
+      const session = new PersistentAgySession({ name: 'test', cwd: '/tmp', jsonSchema } as never);
+      await expect(session.start()).rejects.toThrow(/jsonSchema/);
+      expect(session.isReady).toBe(false);
+      expect(mockSpawn).not.toHaveBeenCalled();
+    });
+
+    it('does not quote a schema file it cannot parse', async () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-schema-'));
+      try {
+        const file = path.join(dir, 'secret.json');
+        fs.writeFileSync(file, 'TOP-SECRET-CONTENT');
+        const session = new PersistentAgySession({ name: 'test', cwd: dir, jsonSchema: file } as never);
+        const err = await session.start().catch((e: Error) => e);
+        expect((err as Error).message).not.toContain('TOP-SECRET');
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('passes each addDir entry as its own --add-dir', async () => {
+      for (const args of await twoTurns({ addDir: ['/srv/a', '/srv/b'] })) {
+        expect(valuesOf(args, '--add-dir')).toEqual(['/srv/a', '/srv/b']);
+      }
+    });
+
+    it('passes agent as --agent', async () => {
+      for (const args of await twoTurns({ agent: 'reviewer' })) {
+        expect(valuesOf(args, '--agent')).toEqual(['reviewer']);
+      }
+    });
+
+    it('passes disableSlashCommands as --disable-slash-commands', async () => {
+      for (const args of await twoTurns({ disableSlashCommands: true })) {
+        expect(args).toContain('--disable-slash-commands');
+      }
+    });
+
+    it('passes none of them by default', async () => {
+      for (const args of await twoTurns({})) {
+        for (const flag of ['--json-schema', '--add-dir', '--agent', '--disable-slash-commands']) {
+          expect(args).not.toContain(flag);
+        }
+      }
+    });
+
+    // Measured on agy 1.5.13: with an unknown --agent, `-p` exits 1 before any
+    // model turn and reports it as a result error.
+    it('surfaces an unknown agent', async () => {
+      const session = new PersistentAgySession({ name: 'test', cwd: '/tmp', agent: 'zz-none' } as never);
+      await session.start();
+      const sendPromise = session.send('hi', { waitForComplete: true });
+      feedText(
+        mockProc,
+        JSON.stringify({
+          event: 'result',
+          result: {
+            conversation_id: '',
+            status: 'ERROR',
+            response: '',
+            error: 'unknown agent "zz-none" (no custom agents are available)',
+            num_turns: 0,
+            finished_reason: 'error',
+          },
+        }) + '\n',
+      );
+      mockProc.stderr.emit('data', Buffer.from('error: unknown agent "zz-none" (no custom agents are available)\n'));
+      setTimeout(() => closeProc(mockProc, 1), 10);
+      await expect(sendPromise).rejects.toThrow('unknown agent "zz-none" (no custom agents are available)');
+    });
+  });
+
+  // ─── the -p value ───────────────────────────────────────────────────────
+
+  // Measured on agy 1.5.13: a `-p` value that is exactly one of agy's flags is
+  // read as that flag. `--version`/`-version` print the version and `--help`/
+  // `-help`/`-h` the help, both exit 0 with no turn; `-v`, `-c`, `--continue`
+  // exit 2. A dash followed by more text (`- item one`, `--help me`) and an
+  // unknown single token (`-x`, `-`) reach the model as written.
+  describe('the message as the -p value', () => {
+    async function promptFor(message: string): Promise<string> {
+      const session = new PersistentAgySession({ name: 'test', cwd: '/tmp', permissionMode: 'bypassPermissions' });
+      await session.start();
+      const sendPromise = session.send(message, { waitForComplete: true });
+      setTimeout(() => succeedProc(mockProc), 10);
+      await sendPromise;
+      const args = mockSpawn.mock.calls.at(-1)![1] as string[];
+      return args[args.indexOf('-p') + 1];
+    }
+
+    it.each(['--version', '-version', '--help', '-h', '-v', '-c', '--continue', '-x', '-'])(
+      'keeps the single token %s from being read as a flag',
+      async (message) => {
+        const prompt = await promptFor(message);
+        expect(prompt).not.toBe(message);
+        expect(prompt.trim()).toBe(message);
+      },
+    );
+
+    it.each(['- item one', '--help me', 'hello', '/Users/someone/notes.txt what is this', '/clear'])(
+      'passes %s unchanged',
+      async (message) => {
+        expect(await promptFor(message)).toBe(message);
+      },
+    );
+  });
+
+  // ─── structured output ──────────────────────────────────────────────────
+
+  describe('structured output (--json-schema)', () => {
+    const resultLine = (result: Record<string, unknown>) =>
+      JSON.stringify({
+        event: 'result',
+        result: { conversation_id: 'a35ec168-0a1c-4dff-81a0-eed636ca97d9', status: 'SUCCESS', ...result },
+      }) + '\n';
+
+    // agy 1.5.13 puts the JSON text in `response` and the parsed value in
+    // `structured_output` (shape measured on a real turn).
+    it('returns the response and exposes structured_output on the result event', async () => {
+      const session = new PersistentAgySession({ name: 'test', cwd: '/tmp', jsonSchema: '{"type":"object"}' } as never);
+      await session.start();
+      const sendPromise = session.send('list', { waitForComplete: true });
+      feedText(mockProc, resultLine({ response: '{"files":["b.txt"]}\n', structured_output: { files: ['b.txt'] } }));
+      setTimeout(() => closeProc(mockProc, 0), 10);
+      const result = await sendPromise;
+      if (!('text' in result)) throw new Error('expected a completed turn');
+      expect(result.text).toBe('{"files":["b.txt"]}');
+      expect(result.event.structured_output).toEqual({ files: ['b.txt'] });
+      expect(session.getStats().turnsSucceeded).toBe(1);
+    });
+
+    it('returns the structured output as the text when the response is empty', async () => {
+      const session = new PersistentAgySession({ name: 'test', cwd: '/tmp', jsonSchema: '{"type":"object"}' } as never);
+      await session.start();
+      const chunks: string[] = [];
+      const sendPromise = session.send('list', {
+        waitForComplete: true,
+        callbacks: { onText: (t: string) => chunks.push(t) },
+      });
+      feedText(mockProc, resultLine({ response: '', structured_output: { files: [] } }));
+      setTimeout(() => closeProc(mockProc, 0), 10);
+      const result = await sendPromise;
+      if (!('text' in result)) throw new Error('expected a completed turn');
+      expect(JSON.parse(result.text)).toEqual({ files: [] });
+      expect(chunks.join('')).toBe(result.text);
+      expect(result.event.stop_reason).toBe('end_turn');
+      expect(session.getStats().turnsSucceeded).toBe(1);
+    });
+  });
+
+  // ─── tool calls ─────────────────────────────────────────────────────────
+
+  describe('tool calls', () => {
+    const CONV = 'a35ec168-0a1c-4dff-81a0-eed636ca97d9';
+    const stepLine = (step: Record<string, unknown>) =>
+      JSON.stringify({ event: 'step_update', step_update: { conversation_id: CONV, ...step } }) + '\n';
+
+    // Shapes from a real agy 1.5.13 turn: a tool step is reported ACTIVE, then
+    // DONE with the same step_index and its output.
+    it('counts each tool step once, whether reported once or twice', async () => {
+      const session = new PersistentAgySession({ name: 'test', cwd: '/tmp', permissionMode: 'bypassPermissions' });
+      await session.start();
+      const sendPromise = session.send('list the files', { waitForComplete: true });
+      setTimeout(() => {
+        feedText(mockProc, JSON.stringify({ event: 'init', conversation_id: CONV }) + '\n');
+        feedText(mockProc, stepLine({ step_index: 0, state: 'DONE', step_type: 'user_input' }));
+        feedText(
+          mockProc,
+          stepLine({
+            step_index: 1,
+            state: 'DONE',
+            step_type: 'agent_response',
+            usage: { input_tokens: 21511, output_tokens: 46 },
+          }),
+        );
+        const tool = { name: 'run_command', parameters: { CommandLine: 'ls -A' } };
+        feedText(
+          mockProc,
+          stepLine({ step_index: 2, state: 'ACTIVE', step_type: 'tool', tool_name: 'run_command', tool_info: tool }),
+        );
+        feedText(
+          mockProc,
+          stepLine({
+            step_index: 2,
+            state: 'DONE',
+            step_type: 'tool',
+            tool_name: 'run_command',
+            tool_info: { ...tool, output: 'Command exited with code 0.\n\nCommand output:\nb.txt\r\n' },
+          }),
+        );
+        feedText(
+          mockProc,
+          stepLine({ step_index: 3, state: 'DONE', step_type: 'tool', tool_name: 'view_file', tool_info: tool }),
+        );
+        // A subagent delegation, and a tool step inside the subagent's own conversation.
+        feedText(
+          mockProc,
+          stepLine({
+            step_index: 4,
+            state: 'ACTIVE',
+            step_type: 'tool',
+            subagent_info: { conversation_id: '99999999-8888-7777-6666-555555555555', log_uri: 'file:///x' },
+          }),
+        );
+        feedText(
+          mockProc,
+          JSON.stringify({
+            event: 'step_update',
+            step_update: {
+              conversation_id: '99999999-8888-7777-6666-555555555555',
+              step_index: 2,
+              state: 'DONE',
+              step_type: 'tool',
+              tool_info: tool,
+            },
+          }) + '\n',
+        );
+        feedText(mockProc, stepLine({ step_index: 5, state: 'DONE', step_type: 'finish' }));
+        feedText(
+          mockProc,
+          JSON.stringify({ event: 'result', result: { conversation_id: CONV, status: 'SUCCESS', response: 'b.txt' } }) +
+            '\n',
+        );
+        closeProc(mockProc, 0);
+      }, 10);
+      await sendPromise;
+      expect(session.getStats().toolCalls).toBe(4);
+    });
+
+    it('adds up across turns', async () => {
+      const session = new PersistentAgySession({ name: 'test', cwd: '/tmp', permissionMode: 'bypassPermissions' });
+      await session.start();
+      for (let turn = 0; turn < 2; turn++) {
+        const proc = createMockProcess();
+        mockSpawn.mockReturnValue(proc);
+        const sendPromise = session.send('again', { waitForComplete: true });
+        setTimeout(() => {
+          // The same step_index in a later turn is a different step.
+          feedText(proc, stepLine({ step_index: 2, state: 'DONE', step_type: 'tool', tool_info: { name: 'x' } }));
+          succeedProc(proc);
+        }, 10);
+        await sendPromise;
+      }
+      expect(session.getStats().toolCalls).toBe(2);
+    });
+  });
+
   // ─── structured turn errors ─────────────────────────────────────────────
 
   describe('turn errors', () => {
@@ -1311,6 +1618,105 @@ describe('PersistentAgySession', () => {
       expect(((await observed) as Error).message).toContain('Timeout waiting for Antigravity response');
       expect(session.getStats().turnsSucceeded).toBe(0);
       expect(session.conversationId).toBe('c1');
+    });
+
+    // agy 1.4.11+ says why a turn ended early in `result.finished_reason`. The
+    // print timeout below is the exact result of a real 1.5.13 run (exit 3).
+    // No stderr line is fed: the field alone must decide.
+    it('fails a turn whose result reports finished_reason print_timeout as a timeout', async () => {
+      const session = new PersistentAgySession({ name: 'test', cwd: '/tmp', permissionMode: 'default' });
+      await session.start();
+
+      const observed = session.send('hello', { waitForComplete: true }).catch((err: Error) => err);
+      feedText(
+        mockProc,
+        JSON.stringify({
+          event: 'result',
+          result: {
+            conversation_id: 'ccb11cf5-60d9-40aa-a69e-d506163e37d5',
+            status: 'ERROR',
+            response: '',
+            error: 'print timeout after 1s with the turn still in progress; the response is partial',
+            num_turns: 1,
+            finished_reason: 'print_timeout',
+          },
+        }) + '\n',
+      );
+      setTimeout(() => closeProc(mockProc, 3), 10);
+
+      expect(((await observed) as Error).message).toContain('Timeout waiting for Antigravity response');
+      expect(session.getStats().turnsSucceeded).toBe(0);
+      expect(session.conversationId).toBe('ccb11cf5-60d9-40aa-a69e-d506163e37d5');
+    });
+
+    it('fails a partial SUCCESS reply that reports finished_reason print_timeout', async () => {
+      const session = new PersistentAgySession({ name: 'test', cwd: '/tmp', permissionMode: 'default' });
+      await session.start();
+
+      const observed = session.send('hello', { waitForComplete: true }).catch((err: Error) => err);
+      feedText(
+        mockProc,
+        JSON.stringify({
+          event: 'result',
+          result: { conversation_id: 'c1', status: 'SUCCESS', response: 'Half', finished_reason: 'print_timeout' },
+        }) + '\n',
+      );
+      setTimeout(() => closeProc(mockProc, 0), 10);
+
+      expect(((await observed) as Error).message).toContain('Timeout waiting for Antigravity response');
+      expect(session.getStats().turnsSucceeded).toBe(0);
+    });
+
+    it('does not count a turn that reports finished_reason interrupted', async () => {
+      const session = new PersistentAgySession({ name: 'test', cwd: '/tmp', permissionMode: 'default' });
+      await session.start();
+
+      const sendPromise = session.send('hello', { waitForComplete: true });
+      feedText(
+        mockProc,
+        JSON.stringify({
+          event: 'result',
+          result: { conversation_id: 'c1', status: 'SUCCESS', response: 'partial', finished_reason: 'interrupted' },
+        }) + '\n',
+      );
+      setTimeout(() => closeProc(mockProc, 0), 10);
+
+      const result = await sendPromise;
+      if (!('text' in result)) throw new Error('expected a completed turn');
+      expect(result.event.stop_reason).toBe('error');
+      expect(session.getStats().turnsSucceeded).toBe(0);
+    });
+
+    // The reported reason outranks the elapsed-time backstop: a turn agy says
+    // ended on an error is that error, however close to the deadline it came.
+    it('surfaces finished_reason error as the error, not a timeout, even past the deadline', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      try {
+        const session = new PersistentAgySession({ name: 'test', cwd: '/tmp', permissionMode: 'default' });
+        await session.start();
+
+        const observed = session.send('hello', { waitForComplete: true, timeout: 60_000 }).catch((err: Error) => err);
+        feedText(
+          mockProc,
+          JSON.stringify({
+            event: 'result',
+            result: {
+              conversation_id: 'c1',
+              status: 'ERROR',
+              response: '',
+              error: 'model failed',
+              finished_reason: 'error',
+            },
+          }) + '\n',
+        );
+        vi.setSystemTime(Date.now() + 55_000); // past agy's 54s, short of our 60s
+        setTimeout(() => closeProc(mockProc, 3), 10);
+
+        expect(((await observed) as Error).message).toBe('model failed');
+        expect(session.getStats().turnsSucceeded).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('counts a turn that ended at the deadline while waiting on a background task', async () => {

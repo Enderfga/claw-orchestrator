@@ -62,8 +62,15 @@ interface AgyStreamEvent {
   /** Progress of one step; an `agent_response` step carries its own request's usage (agy 1.5.3). */
   step_update?: {
     conversation_id?: string;
+    /** Position in its conversation; a tool step is reported ACTIVE, then DONE, at the same index (1.5.13). */
+    step_index?: number;
+    state?: string;
     step_type?: string;
     usage?: AgyUsage;
+    /** Present on every step that calls a tool: `{ name, parameters, output }`. */
+    tool_info?: unknown;
+    /** Present on a step that delegates to a subagent: `{ conversation_id, log_uri, ... }`. */
+    subagent_info?: unknown;
   };
   result?: {
     conversation_id?: string;
@@ -71,6 +78,10 @@ interface AgyStreamEvent {
     response?: string;
     error?: string;
     usage?: AgyUsage;
+    /** Why the turn ended early (agy 1.4.11+): `print_timeout`, `interrupted` or `error`; absent when it finished. */
+    finished_reason?: string;
+    /** The value `--json-schema` asked for; `response` carries it as JSON text too (1.5.13). */
+    structured_output?: unknown;
   };
 }
 
@@ -83,12 +94,57 @@ const TOOL_DENIAL_EMPTY_RESPONSE_ERROR =
   'Antigravity returned an empty response after a tool permission denial; the turn failed but the session remains available for retry';
 const AGY_ECHOABLE_TOOL_NAME_RE = /^[A-Za-z][A-Za-z0-9_.:-]{0,63}$/;
 
-// agy 1.2.9+ ends a headless run whose own deadline passed mid-turn with exit 0
-// and status SUCCESS, carrying whatever partial reply exists, and says so only
-// on stderr. The idle line means the agent had finished and agy was waiting on a
-// background task, so a deadline after it is a clean end.
+// A run cut off by its own deadline. agy 1.4.11+ says so in the result's
+// `finished_reason` (`print_timeout`; on 1.5.13 with status ERROR and exit 3),
+// which decides whenever it is present. Before that, 1.2.9+ ended such a run
+// with exit 0 and status SUCCESS, carrying whatever partial reply existed, and
+// said so only on stderr; that line, and elapsed time, remain the fallback for a
+// result without the field. The idle line means the agent had finished and agy
+// was waiting on a background task, so a deadline after it is a clean end.
 const AGY_DEADLINE_IN_PROGRESS_RE = /print timeout after \S+ with turn in progress/;
 const AGY_IDLE_WAIT_RE = /agent idle; waiting up to/;
+
+/**
+ * A `-p` value agy may read as one of its own flags. Measured on 1.5.13: a value
+ * that is exactly a flag is taken as that flag — `--version` and `--help` print
+ * and exit 0 without a turn, `-v` and `--continue` exit 2 — while a dash followed
+ * by more text (`- item one`, `--help me`) reaches the model as written. agy
+ * compares the whole argument, so a trailing newline is enough to keep it a prompt.
+ */
+const AGY_FLAG_LIKE_PROMPT_RE = /^-\S*$/;
+
+/**
+ * Check a `jsonSchema` the way agy will, so a schema it would refuse fails
+ * `start()` once instead of every turn. agy takes a value starting with `{` as
+ * inline JSON and anything else as a file path, and exits 1 at startup unless
+ * the root is an object with `"type": "object"`. Returns the value to pass:
+ * inline JSON as given, a file as its absolute path, since agy resolves a
+ * relative one against its own working directory.
+ */
+function agyJsonSchemaArg(schema: string, cwd: string): string {
+  const trimmed = schema.trim();
+  const inline = trimmed.startsWith('{');
+  const file = inline ? undefined : path.resolve(cwd, trimmed);
+  let text: string;
+  try {
+    text = inline ? trimmed : fs.readFileSync(file!, 'utf8');
+  } catch {
+    throw new Error(`agy jsonSchema: cannot read the schema file ${file}`);
+  }
+  // The parse error is not repeated: it can quote the start of the file.
+  const refused = new Error(
+    'agy jsonSchema must be a JSON object whose root has "type": "object", inline or in a file',
+  );
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw refused;
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw refused;
+  if ((parsed as { type?: unknown }).type !== 'object') throw refused;
+  return file ?? trimmed;
+}
 
 /**
  * agy's own `--print-timeout` for a send timeout. agy 1.2.9+ holds a headless
@@ -113,6 +169,9 @@ export class PersistentAgySession extends BaseOneShotSession {
    * model sees prior turns. Seeded from `resumeSessionId` when provided.
    */
   private agyConversationId: string | undefined;
+
+  /** The checked `--json-schema` value, set by start(). */
+  private _jsonSchemaArg: string | undefined;
 
   constructor(config: SessionConfig, agyBin?: string) {
     super(config, agyBin || process.env.AGY_BIN || 'agy', {
@@ -144,6 +203,13 @@ export class PersistentAgySession extends BaseOneShotSession {
     return this.agyConversationId;
   }
 
+  override async start(): Promise<this> {
+    if (this.options.jsonSchema !== undefined) {
+      this._jsonSchemaArg = agyJsonSchemaArg(this.options.jsonSchema, path.resolve(this.options.cwd || '.'));
+    }
+    return super.start();
+  }
+
   protected override _continuesConversation(): boolean {
     return !!this.agyConversationId;
   }
@@ -160,8 +226,10 @@ export class PersistentAgySession extends BaseOneShotSession {
   /**
    * Build the agy spawn args for this turn.
    *
-   * First turn:    `agy -p <msg> --log-file <tmp> [--mode M|--sandbox|--dangerously-skip-permissions] [--model M] [--effort E] [--settings S] --print-timeout Ns`
+   * First turn:    `agy -p <msg> --log-file <tmp> [--mode M|--sandbox|--dangerously-skip-permissions] [--model M] [--effort E] [--settings S] [--json-schema J] [--add-dir D]... [--agent A] [--disable-slash-commands] --print-timeout Ns`
    * Resume turns:  same + `--conversation <id>`
+   *
+   * Every session-level flag goes on every turn: each turn is a new process.
    */
   private _buildArgs(message: string, timeoutMs: number, turnEffort?: EffortLevel): string[] {
     // stream-json gives the conversation id up front, progress events while the
@@ -170,7 +238,8 @@ export class PersistentAgySession extends BaseOneShotSession {
     // file, and had to ESTIMATE tokens — so this engine's cost was a guess.
     // --log-file is still passed as the fallback id source for a turn that dies
     // before emitting any event.
-    const args: string[] = ['-p', message, '--output-format', 'stream-json', '--log-file', this._logFile];
+    const prompt = AGY_FLAG_LIKE_PROMPT_RE.test(message) ? `${message}\n` : message;
+    const args: string[] = ['-p', prompt, '--output-format', 'stream-json', '--log-file', this._logFile];
 
     // Permission mode, always named rather than left to agy's own default: agy
     // 1.5.7 moved that default to Auto, where an LLM reviewer lets commands run
@@ -238,6 +307,19 @@ export class PersistentAgySession extends BaseOneShotSession {
     // file path, applied to this run only and never saved.
     const settings = this._settingsArg(agentMode);
     if (settings) args.push('--settings', settings);
+
+    // agy enforces the schema on the turn's final result.
+    if (this._jsonSchemaArg) args.push('--json-schema', this._jsonSchemaArg);
+    for (const dir of this.options.addDir ?? []) args.push('--add-dir', dir);
+    // An unknown name ends the run before any model turn with a result error
+    // listing the agents there are, which the turn surfaces like any other.
+    if (this.options.agent) args.push('--agent', this.options.agent);
+    // Without it a message starting with `/` that names a skill or command is
+    // read as one (agy 1.1.9+): a skill is expanded, a read-only command such as
+    // `/help` answers without a model turn, and an interactive-only one such as
+    // `/clear` fails with a result error. An absolute path names neither and
+    // reaches the model as written (measured on 1.5.13).
+    if (this.options.disableSlashCommands) args.push('--disable-slash-commands');
 
     // 1.2.6 changed the default for a headless run from 5 minutes to unlimited,
     // so passing this is also what keeps a stuck turn from running forever.
@@ -332,6 +414,13 @@ export class PersistentAgySession extends BaseOneShotSession {
       // stderr. Without capturing it the caller only ever saw "Antigravity
       // exited with code 1" — agy's own message names the valid values.
       let turnError: string | undefined;
+      // Why agy ended the turn early, from the result (1.4.11+). `print_timeout`
+      // is kept once seen, like a failure status.
+      let finishedReason: string | undefined;
+      let structuredOutput: unknown;
+      // Tool steps already counted this turn, by conversation and step index:
+      // agy reports a tool step when it starts and again when it is done.
+      const toolSteps = new Set<string>();
 
       const startedAt = Date.now();
       const proc = spawnEngine(this.engineBin, args, {
@@ -398,23 +487,42 @@ export class PersistentAgySession extends BaseOneShotSession {
           const prompt = (step.usage.input_tokens ?? 0) + (step.usage.cache_read_tokens ?? 0);
           if (own && prompt > 0) lastRequestPrompt = prompt;
         }
+        // A tool call, or a delegation to a subagent, including the tool steps
+        // a subagent streams from its own conversation.
+        if (step && (step.tool_info || step.subagent_info)) {
+          const key = step.step_index === undefined ? undefined : `${step.conversation_id ?? ''}#${step.step_index}`;
+          if (key ? !toolSteps.has(key) : step.state !== 'ACTIVE') {
+            if (key) toolSteps.add(key);
+            this._stats.toolCalls++;
+          }
+        }
         if (evt.event === 'result' && evt.result) {
           const r = evt.result;
           if (r.conversation_id && !this.agyConversationId) this.agyConversationId = r.conversation_id;
-          if (typeof r.response === 'string') {
-            resultText = r.response;
+          if (r.structured_output !== undefined && r.structured_output !== null) structuredOutput = r.structured_output;
+          // `response` carries the structured result as JSON text too; should it
+          // come back empty, the structured value is the reply, not a failure.
+          const reply =
+            typeof r.response === 'string' && r.response.trim()
+              ? r.response
+              : structuredOutput !== undefined
+                ? JSON.stringify(structuredOutput)
+                : r.response;
+          if (typeof reply === 'string') {
+            resultText = reply;
             try {
-              options.callbacks?.onText?.(r.response);
+              options.callbacks?.onText?.(reply);
             } catch {
               /* user callback */
             }
-            this.emit(SESSION_EVENT.TEXT, r.response);
+            this.emit(SESSION_EVENT.TEXT, reply);
           }
           if (r.usage) turnUsage = r.usage;
           // Only a non-SUCCESS status is recorded, and it is sticky on purpose: a later
           // SUCCESS in the same turn must not erase a failure agy already reported.
           if (r.status && r.status !== 'SUCCESS') turnStatus = r.status;
           if (typeof r.error === 'string' && r.error.trim()) turnError = sanitizeSecrets(r.error.trim());
+          if (r.finished_reason && finishedReason !== 'print_timeout') finishedReason = r.finished_reason;
         }
       };
       proc.stdout?.on('data', (data: Buffer) => {
@@ -462,11 +570,15 @@ export class PersistentAgySession extends BaseOneShotSession {
         // A non-SUCCESS status with a partial reply still resolves below so callers do
         // not lose useful output, but it deliberately remains a failed ledger turn.
         // Reached agy's deadline while still working: a partial reply is not an
-        // answer. Elapsed time is the backstop should agy reword that line.
+        // answer. agy's `finished_reason` decides when the result carries one; the
+        // stderr line, and elapsed time should agy reword it, decide otherwise.
         const hitDeadline =
-          AGY_DEADLINE_IN_PROGRESS_RE.test(stderr) ||
-          (!AGY_IDLE_WAIT_RE.test(stderr) && Date.now() - startedAt >= agyPrintTimeoutSec(timeout) * 1000);
-        const ok = !hitDeadline && !turnError && !turnStatus && code === 0 && !emptyResponse;
+          finishedReason !== undefined
+            ? finishedReason === 'print_timeout'
+            : AGY_DEADLINE_IN_PROGRESS_RE.test(stderr) ||
+              (!AGY_IDLE_WAIT_RE.test(stderr) && Date.now() - startedAt >= agyPrintTimeoutSec(timeout) * 1000);
+        // Any finished_reason means the turn ended early, whatever the status says.
+        const ok = !hitDeadline && !finishedReason && !turnError && !turnStatus && code === 0 && !emptyResponse;
         this._recordTurnComplete(ok);
 
         // Real usage from the `result` event. estimateTokens() is the fallback
@@ -496,6 +608,7 @@ export class PersistentAgySession extends BaseOneShotSession {
           // agy can exit 0 while reporting a non-SUCCESS status, an error, or no
           // usable response, so all terminal signals participate in the verdict.
           stop_reason: ok ? 'end_turn' : 'error',
+          ...(structuredOutput !== undefined ? { structured_output: structuredOutput } : {}),
           ...(permissionDenials.length > 0
             ? { permission_denials: permissionDenials.map((tool_name) => ({ tool_name })) }
             : {}),
