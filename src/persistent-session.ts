@@ -65,6 +65,67 @@ interface InternalStats {
   pluginErrors?: Array<{ plugin: string; reason: string }>;
 }
 
+// ─── Option checks and content blocks ────────────────────────────────────────
+
+const SETTING_SOURCES = new Set<string>(['user', 'project', 'local']);
+
+/**
+ * The CLI refuses an `--autocompact` window below 100k tokens, and reads 100 to
+ * 1000 as thousands ("200 as shorthand"). The field is a token count, so 200
+ * is refused here rather than quietly meaning 200k.
+ */
+const MIN_AUTOCOMPACT_WINDOW = 100_000;
+
+/**
+ * Refuse, before anything is spawned or written, a session option the CLI
+ * would reject at startup or read differently from what the field says.
+ */
+function checkClaudeOptions(o: SessionConfig): void {
+  if (o.settingSources != null) {
+    const ok = Array.isArray(o.settingSources) && o.settingSources.every((s) => SETTING_SOURCES.has(s));
+    if (!ok) {
+      throw new Error(
+        `settingSources must list only user, project and local (got ${JSON.stringify(o.settingSources)})`,
+      );
+    }
+  }
+  if (o.systemPromptSnapshot != null && o.systemPromptSnapshot !== 'on' && o.systemPromptSnapshot !== 'off') {
+    throw new Error(`systemPromptSnapshot must be 'on' or 'off' (got ${JSON.stringify(o.systemPromptSnapshot)})`);
+  }
+  const w = o.autoCompactWindow;
+  if (w != null && w !== 'auto' && !(Number.isInteger(w) && w >= MIN_AUTOCOMPACT_WINDOW)) {
+    throw new Error(
+      `autoCompactWindow must be 'auto' or a whole token count of at least ${MIN_AUTOCOMPACT_WINDOW} (got ${JSON.stringify(w)})`,
+    );
+  }
+}
+
+const IMAGE_MEDIA_TYPES: Record<string, string> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+};
+
+interface ImageBlock {
+  type: 'image';
+  source: { type: 'base64'; media_type: string; data: string };
+}
+
+/** An image file as a Messages API content block, its media type taken from the extension. */
+function imageBlock(file: string): ImageBlock {
+  const mediaType = IMAGE_MEDIA_TYPES[path.extname(file).toLowerCase()];
+  if (!mediaType) throw new Error(`not an image (png, jpg, jpeg, gif, webp): ${file}`);
+  let data: Buffer;
+  try {
+    data = fs.readFileSync(file);
+  } catch (err) {
+    throw new Error(`cannot read image ${file}: ${(err as Error).message}`);
+  }
+  return { type: 'image', source: { type: 'base64', media_type: mediaType, data: data.toString('base64') } };
+}
+
 // ─── PersistentClaudeSession ─────────────────────────────────────────────────
 
 export class PersistentClaudeSession extends EventEmitter implements ISession {
@@ -269,6 +330,8 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
   // ─── Start ───────────────────────────────────────────────────────────────
 
   async start(): Promise<this> {
+    // Before buildSettingsArgs(), which writes an account's credential file.
+    checkClaudeOptions(this.options);
     const resolvedBin = this.claudeBin;
     const args = [
       '-p',
@@ -332,10 +395,20 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
     // System prompts
     if (this.options.systemPrompt) args.push('--system-prompt', this.options.systemPrompt);
     if (this.options.appendSystemPrompt) args.push('--append-system-prompt', this.options.appendSystemPrompt);
+    // `on` (the CLI's default outside --bare) records the system prompt on the
+    // conversation's first request and resends that record on every resume.
+    // Measured on 2.1.330: a conversation begun with "answer ALPHA" and resumed
+    // with "answer BETA" answered ALPHA by default, BETA with `off` on the resume.
+    if (this.options.systemPromptSnapshot) args.push('--system-prompt-snapshot', this.options.systemPromptSnapshot);
+    // Not listed by `claude --help`; 2.1.330 accepts it.
+    if (this.options.appendSubagentSystemPrompt) {
+      args.push('--append-subagent-system-prompt', this.options.appendSubagentSystemPrompt);
+    }
 
     // Limits
     if (this.options.maxTurns) args.push('--max-turns', String(this.options.maxTurns));
     if (this.options.maxBudgetUsd) args.push('--max-budget-usd', String(this.options.maxBudgetUsd));
+    if (this.options.autoCompactWindow != null) args.push('--autocompact', String(this.options.autoCompactWindow));
 
     // Permissions
     if (this.options.dangerouslySkipPermissions) args.push('--dangerously-skip-permissions');
@@ -363,6 +436,9 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
     // Restricted mode. Structural rather than cooperative: the command-running
     // tools are removed from the session instead of being denied on request.
     if (this.options.restricted) args.push('--restricted');
+    // Messages go in as text: no skill or slash command expands, `/compact`
+    // included (see compact()).
+    if (this.options.disableSlashCommands) args.push('--disable-slash-commands');
 
     // Auto mode
     if (this.options.enableAutoMode || this.options.permissionMode === 'auto') args.push('--enable-auto-mode');
@@ -389,6 +465,12 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
       const configs = Array.isArray(this.options.mcpConfig) ? this.options.mcpConfig : [this.options.mcpConfig];
       for (const c of configs) args.push('--mcp-config', c);
     }
+    // Only the servers of --mcp-config; with none given, no MCP servers at all.
+    if (this.options.strictMcpConfig) args.push('--strict-mcp-config');
+    // An empty list is passed as '' and loads no settings file; leaving the flag
+    // out would load all three. Measured on 2.1.330 through the `initialize`
+    // control request: with '' the user's MCP servers and plugin skills are gone.
+    if (this.options.settingSources != null) args.push('--setting-sources', this.options.settingSources.join(','));
     args.push(...this.buildSettingsArgs());
     if (this.options.noSessionPersistence) args.push('--no-session-persistence');
     if (this.options.betas) {
@@ -400,7 +482,9 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
     if (this.options.includeHookEvents) args.push('--include-hook-events');
     // CLI 2.1.211+: surface subagent output in the parent stream.
     if (this.options.forwardSubagentText) args.push('--forward-subagent-text');
-    if (this.options.chrome) args.push('--chrome');
+    // Chrome acts with the browser's own sign-ins, so it is off unless asked
+    // for, and off is said explicitly: a user setting can enable it by default.
+    args.push(this.options.chrome === true ? '--chrome' : '--no-chrome');
     if (this.options.permissionPromptTool) {
       args.push('--permission-prompt-tool', this.options.permissionPromptTool);
     } else {
@@ -439,6 +523,10 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
     if (this.options.pluginUrl) {
       const urls = Array.isArray(this.options.pluginUrl) ? this.options.pluginUrl : [this.options.pluginUrl];
       for (const u of urls) args.push('--plugin-url', u);
+    }
+    if (this.options.pluginDir) {
+      const dirs = Array.isArray(this.options.pluginDir) ? this.options.pluginDir : [this.options.pluginDir];
+      for (const d of dirs) args.push('--plugin-dir', d);
     }
 
     // Ensure CWD exists (normalize to prevent path traversal)
@@ -829,6 +917,9 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
     options: SessionSendOptions = {},
   ): Promise<TurnResult | { requestId: number; sent: boolean }> {
     if (!this._isReady || !this.proc) throw new Error('Session not ready. Call start() first.');
+    // Read before anything changes, so a file that cannot be read fails the send
+    // without starting a turn.
+    const images = (options.images ?? []).map(imageBlock);
 
     const requestId = ++this.currentRequestId;
 
@@ -862,13 +953,13 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
     // (`user_message_uuids`), which is how a result is matched to its send.
     const uuid = randomUUID();
     this._unanswered.add(uuid);
+    // Images go ahead of the text, as base64 content blocks: stream-json takes
+    // the Messages API's content shape.
+    const blocks = typeof finalMessage === 'string' ? [{ type: 'text', text: finalMessage }] : finalMessage;
     const payload = {
       type: 'user',
       uuid,
-      message: {
-        role: 'user',
-        content: typeof finalMessage === 'string' ? [{ type: 'text', text: finalMessage }] : finalMessage,
-      },
+      message: { role: 'user', content: images.length ? [...images, ...blocks] : blocks },
     };
 
     const stdin = this.proc.stdin;
@@ -1123,6 +1214,13 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
   }
 
   async compact(summary?: string): Promise<TurnResult | { requestId: number; sent: boolean }> {
+    // With slash commands off the CLI takes `/compact` as plain text: a model
+    // turn, and nothing compacted.
+    if (this.options.disableSlashCommands) {
+      throw new Error(
+        'cannot compact: the session was started with disableSlashCommands, so /compact would reach the model as text',
+      );
+    }
     const msg = summary ? `/compact ${summary}` : '/compact';
     return this.send(msg, { waitForComplete: true, timeout: COMPACT_TIMEOUT_MS });
   }
