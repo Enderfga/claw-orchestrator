@@ -625,9 +625,12 @@ after the forum in _Test-Time Compute Scales Better with Parallel Agent Teams_
   mentions at once, and the titles of the rest every `digestMs` (default 60 s).
   `"none"`: nothing; agents read for themselves, as in the paper, whose forum
   pushes nothing. A push reaches the turn in flight: a goal through its steers,
-  within a second; a Claude Code or `codex-app` session at its next tool round. A
-  one-shot engine between turns gets nothing pushed and reads the forum itself.
-  Pushed text is wrapped as a teammate's post, not an instruction from the user.
+  within a second; a Claude Code or `codex-app` session at its next tool round.
+  Every other engine — one process per turn (Codex, Antigravity, Grok, OpenCode),
+  an ACP agent, a custom CLI — gets the same posts, in full and once, at the top of
+  its next `clawo forum` command, which its brief has it run before each step; the
+  hub then does not push them again. Pushed text is wrapped as a teammate's post,
+  not an instruction from the user.
 - **Later nodes.** The forum belongs to the run, so the nodes after a fan-out read
   the same one. An agent that joins is told, in its brief, about the posts that
   name it and that it has not seen, the ASKs nobody has answered, and the FAILs so
@@ -645,7 +648,8 @@ after the forum in _Test-Time Compute Scales Better with Parallel Agent Teams_
   post that answered it (a later post by someone else that refers to it) and how
   long that took, the open ASKs, and for every post that names an agent when that
   agent first had it — pushed into its work, in a digest, in the brief it read when
-  it started (`via: "brief"`, which lists the posts that name it), or read — and how
+  it started (`via: "brief"`, which lists the posts that name it), at the top of its
+  next forum command (`via: "cli"`), or read — and how
   long after the post. A post the named agent never saw but a later agent did (in
   its brief, or by reading it) carries `handedTo` — this is how a FAIL addressed to
   a fan-out agent that had finished reaches the node after it — and is counted in

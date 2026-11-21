@@ -66,7 +66,9 @@ describe.runIf(posix)('one-shot turn timeout waits for the engine process to exi
     await expect(session.send('first', { waitForComplete: true, timeout: 500 })).rejects.toThrow(/Timeout/);
     expect(session.isBusy).toBe(true);
 
-    await session.send('second', { waitForComplete: true, timeout: 5_000 }).catch(() => undefined);
+    // Generous: under a full parallel run the fake engine's start has been seen to
+    // take seconds; this measures order, not speed.
+    await session.send('second', { waitForComplete: true, timeout: 20_000 }).catch(() => undefined);
     const [startA, ...rest] = log();
     const pidA = startA.split(' ')[1];
     expect(rest.indexOf(`exit ${pidA}`)).toBeGreaterThanOrEqual(0);
@@ -74,7 +76,7 @@ describe.runIf(posix)('one-shot turn timeout waits for the engine process to exi
     expect(startB).toBeGreaterThan(rest.indexOf(`exit ${pidA}`));
     expect(session.isBusy).toBe(false);
     session.stop();
-  });
+  }, 30_000);
 
   it('stop() reaches the turn that runs after a timed-out one', async () => {
     writeEngine([1_200, 3_000]);
@@ -95,7 +97,7 @@ describe.runIf(posix)('one-shot turn timeout waits for the engine process to exi
     for (let i = 0; i < 40 && !log().includes(`term ${pidB}`); i++) await sleep(50);
     expect(log()).toContain(`term ${pidB}`);
     await second;
-  });
+  }, 30_000);
 
   it('does not start a turn on a session stopped while the turn waited', async () => {
     writeEngine([1_500, 0]);

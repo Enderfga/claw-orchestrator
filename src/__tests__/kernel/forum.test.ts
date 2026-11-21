@@ -19,6 +19,7 @@ import {
   ForumHub,
   forumList,
   forumMetrics,
+  forumInbox,
   forumPost,
   forumPostNotes,
   forumRead,
@@ -516,5 +517,56 @@ describe('after the runs on 7.28.0', () => {
     };
     fs.appendFileSync(path.join(forumSpoolDir(run.runId), 'posts.jsonl'), JSON.stringify(old) + '\n');
     expect(forumMetrics(run.runId).mentions.map((x) => x.to)).toEqual(['feel', 'feel']);
+  });
+});
+
+describe('delivery to an agent whose engine takes nothing mid-turn', () => {
+  it('shows what would have been pushed at the top of its next forum command, once', () => {
+    const dir = ensureForumSpool(RUN, {});
+    forumPost(dir, 'tester', { title: 'FAIL @feel jump is too short', body: 'measured 1.2 m, needs 2 m' });
+    forumPost(dir, 'tester', { title: 'WIN: door opens' });
+    forumPost(dir, 'tester', { title: 'ASK @other what is next?' });
+    const first = forumInbox(dir, 'feel');
+    expect(first).toContain('FAIL @feel jump is too short');
+    expect(first).toContain('measured 1.2 m');
+    // Only what the push rules would have pushed to feel: not the WIN, not someone else's ASK.
+    expect(first).not.toContain('door opens');
+    expect(first).not.toContain('what is next');
+    // Once.
+    expect(forumInbox(dir, 'feel')).toBe('');
+    // It counts as seen and as delivered.
+    expect(forumList(dir, 'feel')).not.toMatch(/NEW p00001/);
+    const m = forumMetrics(RUN).mentions.find((x) => x.id === 'p00001' && x.to === 'feel')!;
+    expect(m).toMatchObject({ via: 'cli' });
+  });
+
+  it('follows the push mode: all posts under all, nothing under none, and skips what the agent read', () => {
+    const dirAll = ensureForumSpool('wf-forum-inbox-all', { push: 'all' });
+    forumPost(dirAll, 'a', { title: 'WIN: one' });
+    forumPost(dirAll, 'a', { title: 'INFO: two' });
+    forumRead(dirAll, 'b', 'p00002');
+    const shown = forumInbox(dirAll, 'b');
+    expect(shown).toContain('WIN: one');
+    expect(shown).not.toContain('INFO: two');
+
+    const dirNone = ensureForumSpool('wf-forum-inbox-none', { push: 'none' });
+    forumPost(dirNone, 'a', { title: 'FAIL @b broken' });
+    expect(forumInbox(dirNone, 'b')).toBe('');
+  });
+
+  it('does not push again what the agent already had through its forum command', async () => {
+    const hub = new ForumHub(RUN, {});
+    const got: string[] = [];
+    const leave = hub.join('feel', (text) => {
+      got.push(text);
+      return true;
+    });
+    const dir = forumSpoolDir(RUN);
+    forumPost(dir, 'tester', { title: 'FAIL @feel jump is too short' });
+    // The agent's own forum command comes first, before the hub's next sync.
+    expect(forumInbox(dir, 'feel')).toContain('jump is too short');
+    await hub.sync();
+    expect(got).toHaveLength(0);
+    leave();
   });
 });

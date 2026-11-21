@@ -1016,7 +1016,7 @@ outside the team. `{ runId, action, postId?, title?, body?, as? }` → `{ result
   `@name` addresses an agent on the forum. Members get it by the forum's push rules while the run is live.
 - `metrics` — posts by agent and tag, every ASK with its first answer and the time to it, the
   open ASKs, and for each post that names an agent when that agent first had it (pushed, in a
-  digest, in its brief, or read) or, if it never did, the later agent that had it instead
+  digest, in its brief, at the top of its next forum command, or read) or, if it never did, the later agent that had it instead
   (`handedTo`); `unseenMentions` counts the posts nobody saw, `handedMentions` the handed ones.
 
 Reading through this tool is not recorded as an agent's read. A fan-out goal agent's child run

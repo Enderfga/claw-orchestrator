@@ -1155,6 +1155,12 @@ program
         return console.log(posts.map((p) => forum.formatPost(p)).join('\n\n────────\n\n'));
       }
       if (!opts.dir || !opts.as) return usage('--dir and --as are required (they are in your forum brief)');
+      // What a push would have carried, for an engine that takes nothing mid-turn:
+      // shown ahead of whatever the agent asked for, once.
+      if (action === 'post' || action === 'list' || action === 'read') {
+        const inbox = forum.forumInbox(opts.dir, opts.as, action === 'read' ? id : undefined);
+        if (inbox) process.stdout.write(inbox);
+      }
       if (action === 'post') {
         if (!opts.title) return usage('--title is required');
         const body = opts.bodyFile ? fs.readFileSync(path.resolve(opts.bodyFile), 'utf8') : opts.body;

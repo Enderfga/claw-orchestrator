@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Forum posts reach agents on every engine.** A push into the turn in flight needs an engine that takes input
+  mid-turn (Claude Code, `codex-app`, a goal), so an ASK or FAIL addressed to a Codex, Antigravity, Grok, OpenCode,
+  ACP or custom agent was not delivered until it read the forum. Such a post now appears, in full and once, at the
+  top of the agent's next `clawo forum` command, and the hub does not push it again; the metrics record it as
+  `via: "cli"`.
+
 ## [7.29.0] - 2026-11-21
 
 ### Added
