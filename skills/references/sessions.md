@@ -157,7 +157,7 @@ Code session. Read the outcome by sending a follow-up once the workflow has had 
 
 ### Codex app-server turn control (`engine: 'codex-app'`)
 
-Mid-turn and thread control via the Codex app-server v2 RPCs, surfaced as tools: `codex_interrupt` (cancel the in-flight turn), `codex_steer` (add input without restarting), `codex_fork` (branch the thread), `codex_rollback` (drop the last N turns), `codex_models` (list models + supported reasoning efforts), `codex_thread_list` (list the threads the session can see).
+Mid-turn and thread control via the Codex app-server v2 RPCs, surfaced as tools: `codex_interrupt` (cancel the in-flight turn), `codex_steer` (add input without restarting), `codex_fork` (branch the thread), `codex_rollback` (drop the last N turns from the conversation, not from the files), `codex_models` (list models + supported reasoning efforts), `codex_thread_list` (list the threads the session can see).
 
 The same engine carries Codex's `/goal`: set and manage it on a session with the `codex_goal_*` tools, or run it as a checked workflow — goal, then verify, then repair on the same thread — with the `goal` node and `clawo goal` ([workflow.md](./workflow.md#goal)).
 

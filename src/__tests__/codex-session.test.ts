@@ -779,3 +779,243 @@ describe('PersistentCodexSession', () => {
     });
   });
 });
+
+// ─── codex 0.171: last message, images, config overrides, fork ──────────────
+
+/** Path passed with `--output-last-message` in a spawn's argv, if any. */
+function lastMessagePath(args: string[]): string | undefined {
+  const i = args.indexOf('--output-last-message');
+  return i >= 0 ? args[i + 1] : undefined;
+}
+
+describe('PersistentCodexSession — codex 0.171 flags', () => {
+  let mockProc: ReturnType<typeof createMockProcess>;
+
+  beforeEach(() => {
+    process.env.CODEX_HOME = codexHome;
+    mockProc = createMockProcess();
+    mockSpawn.mockReset();
+    mockSpawn.mockReturnValue(mockProc);
+  });
+
+  // Measured on 0.171.0: a turn that runs a command first emits a commentary
+  // agent_message ("Running the command.") and then the answer, both as plain
+  // agent_message items with no phase. `--output-last-message` holds the answer
+  // alone, which is what a `jsonSchema` caller has to be able to parse.
+  it('returns the message codex wrote with --output-last-message, not the commentary before it', async () => {
+    const session = new PersistentCodexSession({ name: 'test', cwd: '/tmp' });
+    await session.start();
+    const texts: string[] = [];
+    const p = session.send('run echo hi', { waitForComplete: true, callbacks: { onText: (t) => texts.push(t) } });
+    setTimeout(() => {
+      const args = mockSpawn.mock.calls[0][1] as string[];
+      writeFileSync(lastMessagePath(args)!, 'hi');
+      mockProc.stdout.push(JSON.stringify({ type: 'thread.started', thread_id: 'thread-last' }) + '\n');
+      mockProc.stdout.push(
+        JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'Running the command.' } }) +
+          '\n',
+      );
+      mockProc.stdout.push(
+        JSON.stringify({ type: 'item.completed', item: { type: 'command_execution', exit_code: 0 } }) + '\n',
+      );
+      mockProc.stdout.push(
+        JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'hi' } }) + '\n',
+      );
+      mockProc.stdout.push(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1 } }) + '\n');
+      mockProc.stdout.push(null);
+      mockProc.emit('close', 0);
+    }, 10);
+    const result = (await p) as { text: string; event: Record<string, unknown> };
+
+    expect(result.text).toBe('hi');
+    expect(result.event.result).toBe('hi');
+    // Streaming still shows the commentary as it happens.
+    expect(texts).toEqual(['Running the command.', 'hi']);
+    // The file is the turn's own and is gone once the turn has been read.
+    const outPath = lastMessagePath(mockSpawn.mock.calls[0][1] as string[])!;
+    expect(existsSync(outPath)).toBe(false);
+    expect((mockSpawn.mock.calls[0][1] as string[]).at(-1)).toBe('-');
+    session.stop();
+  });
+
+  it('falls back to the streamed messages when codex wrote no last message', async () => {
+    const session = new PersistentCodexSession({ name: 'test', cwd: '/tmp' });
+    await session.start();
+    const p = session.send('hi', { waitForComplete: true });
+    setTimeout(() => runTurn(mockProc, 'thread-nofile'), 10);
+    const result = (await p) as { text: string };
+    expect(result.text).toBe('ok');
+    session.stop();
+  });
+
+  it('asks for the last message on resumed turns too, each in a file of its own', async () => {
+    const session = new PersistentCodexSession({ name: 'test', cwd: '/tmp' });
+    await session.start();
+    const p1 = session.send('first', { waitForComplete: true });
+    setTimeout(() => runTurn(mockProc, 'thread-two'), 10);
+    await p1;
+
+    const proc2 = createMockProcess();
+    mockSpawn.mockReturnValue(proc2);
+    const p2 = session.send('second', { waitForComplete: true });
+    setTimeout(() => {
+      writeFileSync(lastMessagePath(mockSpawn.mock.calls[1][1] as string[])!, '{"answer":"42"}');
+      runTurn(proc2, 'thread-two');
+    }, 10);
+    const r2 = (await p2) as { text: string };
+
+    const a1 = mockSpawn.mock.calls[0][1] as string[];
+    const a2 = mockSpawn.mock.calls[1][1] as string[];
+    expect(a2.slice(0, 3)).toEqual(['exec', 'resume', 'thread-two']);
+    expect(lastMessagePath(a1)).toBeDefined();
+    expect(lastMessagePath(a2)).toBeDefined();
+    expect(lastMessagePath(a2)).not.toBe(lastMessagePath(a1));
+    expect(r2.text).toBe('{"answer":"42"}');
+    session.stop();
+  });
+
+  // `-i/--image <FILE>...` takes several values, so `-i a.png -` reads `-` as a
+  // second image and the prompt on stdin is lost (0.171.0 renders "could not
+  // read the local image at `-`"). `--image=<path>` takes exactly one.
+  it('attaches each image as --image=<path> before the trailing -', async () => {
+    const session = new PersistentCodexSession({ name: 'test', cwd: '/tmp' });
+    await session.start();
+    const p1 = session.send('what is this?', { waitForComplete: true, images: ['/tmp/a.png', '/tmp/b b.jpg'] });
+    setTimeout(() => runTurn(mockProc, 'thread-img2'), 10);
+    await p1;
+    const a1 = mockSpawn.mock.calls[0][1] as string[];
+    expect(a1.slice(-3)).toEqual(['--image=/tmp/a.png', '--image=/tmp/b b.jpg', '-']);
+    expect(a1).not.toContain('-i');
+    expect(mockProc.stdin.written).toBe('what is this?');
+
+    // Resume accepts --image as well; a turn without images passes none.
+    const proc2 = createMockProcess();
+    mockSpawn.mockReturnValue(proc2);
+    const p2 = session.send('and this?', { waitForComplete: true, images: ['/tmp/c.png'] });
+    setTimeout(() => runTurn(proc2, 'thread-img2'), 10);
+    await p2;
+    const a2 = mockSpawn.mock.calls[1][1] as string[];
+    expect(a2).toContain('resume');
+    expect(a2.slice(-2)).toEqual(['--image=/tmp/c.png', '-']);
+
+    const proc3 = createMockProcess();
+    mockSpawn.mockReturnValue(proc3);
+    const p3 = session.send('thanks', { waitForComplete: true });
+    setTimeout(() => runTurn(proc3, 'thread-img2'), 10);
+    await p3;
+    expect((mockSpawn.mock.calls[2][1] as string[]).some((a) => a.startsWith('--image'))).toBe(false);
+    session.stop();
+  });
+
+  it('passes codexConfig, codexFeatures and ignoreRules on the first turn and on resume', async () => {
+    const session = new PersistentCodexSession({
+      name: 'test',
+      cwd: '/tmp',
+      codexConfig: { 'sandbox_workspace_write.network_access': true, model_verbosity: 'low' },
+      codexFeatures: { enable: ['web_search'], disable: ['memories'] },
+      ignoreRules: true,
+    });
+    await session.start();
+    const p1 = session.send('first', { waitForComplete: true });
+    setTimeout(() => runTurn(mockProc, 'thread-cfg'), 10);
+    await p1;
+    const proc2 = createMockProcess();
+    mockSpawn.mockReturnValue(proc2);
+    const p2 = session.send('second', { waitForComplete: true });
+    setTimeout(() => runTurn(proc2, 'thread-cfg'), 10);
+    await p2;
+
+    for (const args of [mockSpawn.mock.calls[0][1], mockSpawn.mock.calls[1][1]] as string[][]) {
+      const joined = args.join(' ');
+      expect(joined).toContain('-c sandbox_workspace_write.network_access=true');
+      expect(joined).toContain('-c model_verbosity="low"');
+      expect(joined).toContain('--enable web_search');
+      expect(joined).toContain('--disable memories');
+      expect(args).toContain('--ignore-rules');
+      expect(args.at(-1)).toBe('-');
+    }
+    session.stop();
+  });
+
+  it('refuses at start a codexConfig key the wrapper sets itself', async () => {
+    const session = new PersistentCodexSession({
+      name: 'test',
+      cwd: '/tmp',
+      codexConfig: { sandbox_mode: 'danger-full-access' },
+    });
+    await expect(session.start()).rejects.toThrow(/sandbox_mode/);
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  // `codex exec fork <id>` starts a new thread from a recorded one. Like
+  // `exec resume` it takes no --sandbox, -C, --profile or --add-dir, so the
+  // sandbox is restated as a -c override; the new thread's id arrives in
+  // `thread.started` and later turns resume it, never the source.
+  it('forks the thread named by resumeSessionId when forkSession is set, then resumes the fork', async () => {
+    const src = '01a1fc7f-005f-7cc1-b222-5505a89f2a2c';
+    const session = new PersistentCodexSession({
+      name: 'test',
+      cwd: '/tmp',
+      sandboxMode: 'read-only',
+      resumeSessionId: src,
+      forkSession: true,
+      codexProfile: 'fast',
+      addDir: ['/srv/a'],
+      appendSystemPrompt: 'SEAT RULES',
+    });
+    await session.start();
+    expect(session.threadId).toBeUndefined();
+
+    const p1 = session.send('branch off', { waitForComplete: true });
+    setTimeout(() => runTurn(mockProc, 'forked-thread'), 10);
+    const r1 = (await p1) as { event: Record<string, unknown> };
+    const a1 = mockSpawn.mock.calls[0][1] as string[];
+    expect(a1.slice(0, 3)).toEqual(['exec', 'fork', src]);
+    expect(a1).toContain('sandbox_mode="read-only"');
+    for (const rejected of ['--sandbox', '-C', '--profile', '--add-dir']) expect(a1).not.toContain(rejected);
+    // The forked history already carries the instructions.
+    expect(mockProc.stdin.written).toBe('branch off');
+    expect(session.threadId).toBe('forked-thread');
+    expect(r1.event.session_id).toBe('forked-thread');
+
+    const proc2 = createMockProcess();
+    mockSpawn.mockReturnValue(proc2);
+    const p2 = session.send('continue', { waitForComplete: true });
+    setTimeout(() => runTurn(proc2, 'forked-thread'), 10);
+    await p2;
+    expect((mockSpawn.mock.calls[1][1] as string[]).slice(0, 3)).toEqual(['exec', 'resume', 'forked-thread']);
+    session.stop();
+  });
+
+  // A fork continues the source thread's cumulative usage (measured on 0.171.0:
+  // the source ended at 59,445 input tokens and the fork's first turn reported
+  // 89,436), so the source rollout is the baseline for the fork's first turn.
+  it("measures a fork's first turn against the source thread's usage", async () => {
+    writeRollout('fork-src', [
+      JSON.stringify({ type: 'event_msg', payload: { type: 'task_started', model_context_window: 258_400 } }),
+      JSON.stringify({
+        type: 'event_msg',
+        payload: { type: 'token_count', info: { total_token_usage: { input_tokens: 59_445 } } },
+      }),
+    ]);
+    const session = new PersistentCodexSession({
+      name: 'test',
+      cwd: '/tmp',
+      model: 'gpt-5.5',
+      resumeSessionId: 'fork-src',
+      forkSession: true,
+    });
+    await session.start();
+    const p = session.send('what number?', { waitForComplete: true });
+    setTimeout(() => {
+      mockProc.stdout.push(JSON.stringify({ type: 'thread.started', thread_id: 'fork-new' }) + '\n');
+      mockProc.stdout.push(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 89_436 } }) + '\n');
+      mockProc.stdout.push(null);
+      mockProc.emit('close', 0);
+    }, 10);
+    await p;
+    // 89,436 - 59,445 = 29,991 → 12% of 258,400, not 35% from the whole total.
+    expect(session.getStats().contextPercent).toBe(12);
+    session.stop();
+  });
+});

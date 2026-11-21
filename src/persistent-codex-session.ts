@@ -11,7 +11,9 @@
  *   - Stats, history, and cost are tracked continuously
  *   - The `thread_id` from the first send is captured and reused via
  *     `codex exec resume <id>` for subsequent sends, giving the model real
- *     conversation continuity (Codex 0.119+).
+ *     conversation continuity (Codex 0.119+). With `forkSession`, the first
+ *     send runs `codex exec fork <resumeSessionId>` instead and the session
+ *     continues the new thread.
  */
 
 import { killEngineTree, spawnEngine } from './engine-spawn.js';
@@ -39,6 +41,7 @@ import type {
 import { SESSION_EVENT } from './constants.js';
 import { BaseOneShotSession } from './base-oneshot-session.js';
 import { sanitizeSecrets } from './sanitize.js';
+import { codexConfigArgs, codexFeatureArgs } from './codex-config.js';
 
 // ─── Codex JSON event shapes (subset we consume) ────────────────────────────
 //
@@ -106,6 +109,13 @@ export class PersistentCodexSession extends BaseOneShotSession {
   private codexThreadId?: string;
 
   /**
+   * The recorded thread a `forkSession` session branches from. The first send
+   * runs `codex exec fork <id>`, which starts a new thread holding that one's
+   * history; the new id arrives in `thread.started` and this is cleared.
+   */
+  private _forkSourceId?: string;
+
+  /**
    * Path to a temp file holding the `jsonSchema` config, written lazily on
    * first use. Codex's `--output-schema` takes a file path (unlike Claude's
    * `--json-schema`, which takes the schema inline), so we materialize the
@@ -163,7 +173,8 @@ export class PersistentCodexSession extends BaseOneShotSession {
       engineDisplayName: 'Codex',
     });
     if (config.resumeSessionId && !/^codex-\d+-/.test(config.resumeSessionId)) {
-      this.codexThreadId = config.resumeSessionId;
+      if (config.forkSession) this._forkSourceId = config.resumeSessionId;
+      else this.codexThreadId = config.resumeSessionId;
     }
   }
 
@@ -172,8 +183,16 @@ export class PersistentCodexSession extends BaseOneShotSession {
     return this.codexThreadId;
   }
 
+  /** Refuses a `codexConfig` or `codexFeatures` codex would not take before any turn runs. */
+  override async start(): Promise<this> {
+    codexConfigArgs(this.options.codexConfig);
+    codexFeatureArgs(this.options.codexFeatures);
+    return super.start();
+  }
+
   protected override _continuesConversation(): boolean {
-    return !!this.codexThreadId;
+    // A fork starts from the source thread's history, instructions included.
+    return !!this.codexThreadId || !!this._forkSourceId;
   }
 
   // ── Context accounting ─────────────────────────────────────────────────
@@ -196,13 +215,18 @@ export class PersistentCodexSession extends BaseOneShotSession {
    * per session and is entirely best-effort: an unreadable, absent or
    * `--ephemeral` thread simply leaves both values unset and the registry
    * fallback applies.
+   *
+   * Before a fork's first turn the thread read is the source: the fork carries
+   * on from the source's cumulative usage, so that is the first turn's baseline.
+   * Once the fork's own id is known the read runs again, for its own rollout.
    */
   private _readRollout(): void {
-    if (this._rolloutRead || !this.codexThreadId) return;
+    const threadId = this.codexThreadId ?? this._forkSourceId;
+    if (this._rolloutRead || !threadId) return;
     this._rolloutRead = true;
     try {
       const root = join(process.env.CODEX_HOME || join(homedir(), '.codex'), 'sessions');
-      const match = this._findRolloutFile(root, `-${this.codexThreadId}.jsonl`);
+      const match = this._findRolloutFile(root, `-${threadId}.jsonl`);
       if (!match) return;
       this._rolloutPath = match;
 
@@ -330,24 +354,32 @@ export class PersistentCodexSession extends BaseOneShotSession {
   /**
    * Build the Codex spawn args for this turn.
    *
-   * First turn:    `codex exec [--sandbox W] --skip-git-repo-check --json --model M -C cwd <msg>`
-   * Resume turns:  `codex exec resume <thread_id> [--sandbox W] --skip-git-repo-check --json --model M -C cwd <msg>`
+   * First turn:    `codex exec --sandbox W --skip-git-repo-check --json -C cwd … -`
+   * Fork turn:     `codex exec fork <source_id> --skip-git-repo-check --json -c sandbox_mode="W" … -`
+   * Resume turns:  `codex exec resume <thread_id> --skip-git-repo-check --json -c sandbox_mode="W" … -`
+   *
+   * The prompt is always on stdin (`-`); `lastMessagePath` is where codex
+   * writes the turn's final message.
    */
-  private _buildArgs(): string[] {
+  private _buildArgs(images: readonly string[] | undefined, lastMessagePath: string): string[] {
     const args: string[] = ['exec'];
     const isResume = !!this.codexThreadId;
+    const isFork = !isResume && !!this._forkSourceId;
     const sandbox = this.options.sandboxMode || 'workspace-write';
-    if (isResume) {
+    if (isResume || isFork) {
       // `codex exec resume` rejects --sandbox and -C (still true as of 0.146.0:
       // passing --sandbox errors with "unexpected argument"), so the policy has
       // to be restated as a `-c` config override, which resume does accept.
+      // `codex exec fork` (0.171) takes the same options as resume.
       //
       // Do NOT rely on the resumed thread inheriting the first turn's sandbox.
       // It does not: against 0.146.0, a read-only session whose first turn was
       // spawned with `--sandbox read-only` wrote to disk on the very next turn,
       // reproducibly, when resume was left to inherit. Restating the mode keeps
       // a read-only session read-only for its whole life.
-      args.push('resume', this.codexThreadId!, '--skip-git-repo-check', '--json');
+      if (isResume) args.push('resume', this.codexThreadId!);
+      else args.push('fork', this._forkSourceId!);
+      args.push('--skip-git-repo-check', '--json');
       args.push('-c', `sandbox_mode="${sandbox}"`);
     } else {
       args.push('--sandbox', sandbox, '--skip-git-repo-check', '--json');
@@ -360,11 +392,16 @@ export class PersistentCodexSession extends BaseOneShotSession {
     if (schemaPath) args.push('--output-schema', schemaPath);
     if (this.options.model) args.push('--model', this.options.model);
     args.push(...this._reasoningEffortArgs());
-    // `--profile` is rejected by `codex exec resume` (like --sandbox/-C); the
-    // resumed thread already carries the profile's config, so only pass it on
-    // the first turn. (`-c` and `--model` ARE accepted on resume, verified
-    // against `codex exec resume --help` on 0.137.)
-    if (!isResume && this.options.codexProfile) args.push('--profile', this.options.codexProfile);
+    // The caller's config overrides and feature switches, on every turn: like
+    // the sandbox, nothing says a resumed thread keeps them. Keys the wrapper
+    // sets itself were refused in start().
+    args.push(...codexConfigArgs(this.options.codexConfig));
+    args.push(...codexFeatureArgs(this.options.codexFeatures));
+    // `--profile` is rejected by `codex exec resume` and `fork` (like
+    // --sandbox/-C); the resumed thread already carries the profile's config, so
+    // only pass it on the first turn. (`-c` and `--model` ARE accepted on resume,
+    // verified against `codex exec resume --help` on 0.137.)
+    if (!isResume && !isFork && this.options.codexProfile) args.push('--profile', this.options.codexProfile);
     // `--ephemeral` is codex's counterpart to Claude Code's
     // `--no-session-persistence`, so the engine-agnostic option finally means
     // something here. Accepted by both `exec` and `exec resume`.
@@ -374,11 +411,21 @@ export class PersistentCodexSession extends BaseOneShotSession {
     // model an orchestrated run uses and which one we then price it as. Auth
     // still resolves from CODEX_HOME, so this does not log the session out.
     if (this.options.ignoreUserConfig) args.push('--ignore-user-config');
-    // Extra writable roots. Rejected by `exec resume` (like --sandbox/-C), and
-    // the resumed thread keeps the roots the first turn opened.
-    if (!isResume && this.options.addDir?.length) {
+    // Skips the user's and the project's execpolicy `.rules` files.
+    if (this.options.ignoreRules) args.push('--ignore-rules');
+    // Extra writable roots. Rejected by `exec resume` and `fork` (like
+    // --sandbox/-C), and the resumed thread keeps the roots the first turn opened.
+    if (!isResume && !isFork && this.options.addDir?.length) {
       for (const dir of this.options.addDir) args.push('--add-dir', dir);
     }
+    // The turn's final message alone. Every agent message of the turn, its
+    // commentary included ("Running the command." before the answer, measured
+    // on 0.171.0), arrives as the same `agent_message` item with no phase, so
+    // the stream cannot tell the answer apart; codex writes it to this file.
+    args.push('--output-last-message', lastMessagePath);
+    // `-i/--image <FILE>...` takes any number of values and would read the `-`
+    // below as one more image, losing the prompt; the `=` form takes exactly one.
+    for (const image of images ?? []) args.push(['--image', image].join('='));
     // `-` reads the prompt from stdin. On Windows `codex` is an npm `.cmd` shim
     // that runs through cmd.exe, which would cut a prompt at its first newline
     // and mis-split one with an unbalanced quote; stdin carries it unchanged.
@@ -428,8 +475,27 @@ export class PersistentCodexSession extends BaseOneShotSession {
     // append its own to the same file.
     this._readRollout();
     const imagesBefore = this._generatedImages();
-    const args = this._buildArgs();
+    const lastMessagePath = join(
+      tmpdir(),
+      `claw-codex-last-${this.sessionId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.txt`,
+    );
+    const args = this._buildArgs(options.images, lastMessagePath);
     const timeout = options.timeout || 300_000;
+
+    /** The final message codex wrote, if it wrote one; the file is removed either way. */
+    const takeLastMessage = (): string | undefined => {
+      try {
+        return readFileSync(lastMessagePath, 'utf8') || undefined;
+      } catch {
+        return undefined;
+      } finally {
+        try {
+          unlinkSync(lastMessagePath);
+        } catch {
+          // Never written.
+        }
+      }
+    };
 
     return new Promise<TurnResult>((resolve, reject) => {
       let stdoutBuf = '';
@@ -455,6 +521,7 @@ export class PersistentCodexSession extends BaseOneShotSession {
         if (!settled) {
           settled = true;
           killEngineTree(proc);
+          takeLastMessage();
           reject(new Error('Timeout waiting for Codex response'));
         }
       }, timeout);
@@ -476,6 +543,14 @@ export class PersistentCodexSession extends BaseOneShotSession {
             const t = event as CodexThreadStarted;
             if (t.thread_id && !this.codexThreadId) {
               this.codexThreadId = t.thread_id;
+              if (this._forkSourceId) {
+                // The fork is a thread of its own now: later turns resume it,
+                // and its own rollout replaces the source's for the context
+                // window and the last request.
+                this._forkSourceId = undefined;
+                this._rolloutRead = false;
+                this._rolloutPath = undefined;
+              }
             }
             break;
           }
@@ -559,7 +634,11 @@ export class PersistentCodexSession extends BaseOneShotSession {
         clearTimeout(timer);
         this.currentProc = null;
 
-        if (settled) return;
+        if (settled) {
+          // A timed-out turn's process may still have written the file.
+          takeLastMessage();
+          return;
+        }
         settled = true;
 
         // Drain any final partial line as an event attempt.
@@ -597,12 +676,15 @@ export class PersistentCodexSession extends BaseOneShotSession {
         // The context is the turn's last request, which only the rollout records.
         const lastRequestPrompt = this._lastRequestPrompt();
         if (lastRequestPrompt !== undefined) this._reportTurnInputTokens(lastRequestPrompt);
-        this._addHistory({ text: assistantText, code });
+        // The answer alone when codex wrote it; every message of the turn when it
+        // did not (a failed turn, or an older codex).
+        const text = takeLastMessage() ?? assistantText;
+        this._addHistory({ text, code });
 
         const images = [...this._generatedImages()].filter((p) => !imagesBefore.has(p));
         const event: StreamEvent = {
           type: 'result',
-          result: assistantText,
+          result: text,
           stop_reason: ok ? 'end_turn' : 'error',
           session_id: this.codexThreadId,
           ...(images.length ? { generated_images: images.map((path): GeneratedImage => ({ path })) } : {}),
@@ -618,7 +700,7 @@ export class PersistentCodexSession extends BaseOneShotSession {
         } else if (code !== 0) {
           reject(new Error(stderr || `Codex exited with code ${code}`));
         } else {
-          resolve({ text: assistantText, event });
+          resolve({ text, event });
         }
       });
 
@@ -626,6 +708,7 @@ export class PersistentCodexSession extends BaseOneShotSession {
         clearTimeout(timer);
         if (!settled) {
           settled = true;
+          takeLastMessage();
           reject(err);
         }
       });

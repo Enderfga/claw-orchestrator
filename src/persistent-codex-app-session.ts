@@ -11,7 +11,8 @@
  * we lift it per-session via `--enable goals` rather than touching global
  * config.
  *
- * Protocol notes (verified against codex-cli 0.164.0):
+ * Protocol notes (verified against codex-cli 0.164.0; thread options, turn
+ * inputs, revert and thread listing against 0.171.0):
  *   - Frames are line-delimited JSON-RPC 2.0 messages over stdio.
  *   - Lifecycle: `initialize` → `thread/start` (or `thread/resume`) →
  *     `turn/start` (per send).
@@ -47,6 +48,7 @@ import { getModelPricing, resolveAlias, getContextWindow } from './models.js';
 import { SESSION_EVENT, MAX_HISTORY_ITEMS, DEFAULT_HISTORY_LIMIT } from './constants.js';
 import { sanitizeSecrets } from './sanitize.js';
 import { codexReasoningEffort } from './persistent-codex-session.js';
+import { codexConfigObject, codexFeatureArgs } from './codex-config.js';
 
 // ─── Hand-translated protocol types (subset we use) ────────────────────────
 //
@@ -112,8 +114,50 @@ interface ThreadTokenUsageUpdatedNotification {
 interface ItemCompletedNotification {
   threadId: string;
   turnId: string;
-  item: { type: string; id?: string; text?: string; savedPath?: string | null; revisedPrompt?: string | null };
+  item: {
+    type: string;
+    id?: string;
+    text?: string;
+    /** agentMessage: `commentary`, `partial_answer` or `final_answer`; null when the model does not say. */
+    phase?: string | null;
+    /** commandExecution: the command's exit code. */
+    exitCode?: number | null;
+    savedPath?: string | null;
+    revisedPrompt?: string | null;
+  };
 }
+
+/** The app-server's `SandboxPolicy`, as `thread/start` reports it and `turn/start` takes it. */
+interface SandboxPolicy {
+  type: string;
+  writableRoots?: string[];
+  [key: string]: unknown;
+}
+
+/**
+ * `item/completed` types that are not tool calls: messages, reasoning, the
+ * plan, and markers. Everything else (commandExecution, fileChange,
+ * mcpToolCall, webSearch, imageGeneration, …) is counted, so a tool type a
+ * later codex adds is counted rather than missed.
+ */
+const NON_TOOL_ITEMS = new Set([
+  'userMessage',
+  'hookPrompt',
+  'agentMessage',
+  'plan',
+  'reasoning',
+  'contextCompaction',
+  'enteredReviewMode',
+  'exitedReviewMode',
+  'subAgentActivity',
+]);
+
+/**
+ * Every source a thread can have that a person or a client started. Without
+ * `sourceKinds`, `thread/list` returns interactive threads only, leaving out
+ * the ones `codex exec` started (0.171.0).
+ */
+const LISTED_SOURCE_KINDS = ['cli', 'vscode', 'exec', 'appServer'];
 
 interface AgentMessageDeltaNotification {
   threadId: string;
@@ -155,20 +199,25 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
 
   // Per-session state populated by notifications
   private threadId?: string;
-  /**
-   * Set when `start()` opened a fresh thread and `appendSystemPrompt` is set.
-   * Nothing passes it to `thread/start`, so the instructions ride on the first
-   * turn instead, as for the one-shot engines; a resumed thread already has them.
-   */
-  private _instructionsPending = false;
   private currentTurnId?: string;
   private currentGoal: ThreadGoal | null = null;
   private _lastError: CodexAppError | null = null;
   /** The turn the last `error` notification the server would not retry belonged to. */
   private _lastErrorTurn: string | null = null;
+  /** `jsonSchema`, parsed once in start(), sent as each turn's `outputSchema`. */
+  private _outputSchema?: unknown;
+  /** The sandbox policy the server reported for the thread; `addDir` extends its writable roots. */
+  private _threadSandbox?: SandboxPolicy;
 
-  // Per-turn buffers (reset at each send)
+  // Per-turn buffers (reset when a turn starts)
+  /** Every agent-message delta of the turn, in order — the answer of last resort. */
   private turnAssistantText = '';
+  /** The turn's completed agent messages, each with the phase the server gave it. */
+  private turnMessages: Array<{ text: string; phase: string | null }> = [];
+  /** Agent-message items of the turn whose text already streamed as deltas. */
+  private turnStreamedItems = new Set<string>();
+  /** A delta arrived without an item id, so items cannot be told apart by id. */
+  private turnUntaggedDeltas = false;
   /** Images saved by `imageGeneration` items in the current turn. */
   private turnImages: GeneratedImage[] = [];
   private turnResolve: ((r: TurnResult) => void) | null = null;
@@ -237,12 +286,28 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
   // ── Lifecycle ──────────────────────────────────────────────────────────
 
   async start(): Promise<this> {
+    // What codex would not take is refused before a process exists.
+    if (this.options.ignoreRules) {
+      throw new Error(
+        'ignoreRules is not available on codex-app: `codex app-server` has no --ignore-rules (engine "codex" passes it)',
+      );
+    }
+    const userConfig = codexConfigObject(this.options.codexConfig);
+    const featureArgs = codexFeatureArgs(this.options.codexFeatures);
+    if (this.options.jsonSchema) {
+      try {
+        this._outputSchema = JSON.parse(this.options.jsonSchema);
+      } catch (err) {
+        throw new Error(`jsonSchema is not valid JSON: ${(err as Error).message}`);
+      }
+    }
+
     if (this.options.cwd) {
       this.options.cwd = path.resolve(this.options.cwd);
       if (!fs.existsSync(this.options.cwd)) fs.mkdirSync(this.options.cwd, { recursive: true });
     }
 
-    const args = ['app-server', '--listen', 'stdio://', '--enable', 'goals'];
+    const args = ['app-server', '--listen', 'stdio://', '--enable', 'goals', ...featureArgs];
     this.proc = spawnEngine(this.codexBin, args, {
       launcher: this.options.launcher,
       cwd: this.options.cwd,
@@ -296,7 +361,11 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
     //    `thread/started` notification (which arrives before the response per
     //    observed protocol semantics).
     const effort = codexReasoningEffort(this.options.effort);
-    const startParams = {
+    // On the thread, not only on `turn/start`: the goal loop starts its own
+    // turns, and those read the thread's config. The caller's overrides join
+    // the effort; the keys the wrapper sets were refused above.
+    const config = { ...(effort ? { model_reasoning_effort: effort } : {}), ...userConfig };
+    const threadParams = {
       cwd: this.options.cwd,
       model: this.options.model,
       sandbox: (this.options.sandboxMode || 'workspace-write') as SandboxMode,
@@ -305,31 +374,43 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
       // that wanted approval left the turn waiting forever. The sandbox mode is
       // the boundary instead.
       approvalPolicy: 'never',
-      // On the thread, not only on `turn/start`: the goal loop starts its own
-      // turns, and those read the thread's config.
-      ...(effort ? { config: { model_reasoning_effort: effort } } : {}),
+      ...(Object.keys(config).length ? { config } : {}),
+    };
+    const ephemeral = this.options.noSessionPersistence ? { ephemeral: true } : {};
+    // Native fields, verified on 0.171.0: each reaches the model as a developer
+    // message of its own, `baseInstructions` in place of codex's own prompt. A
+    // resumed or forked thread already carries the ones it was opened with.
+    const developerInstructions = this.options.appendSystemPrompt?.trim();
+    const baseInstructions = this.options.systemPrompt?.trim();
+    const startParams = {
+      ...threadParams,
+      ...ephemeral,
+      ...(developerInstructions ? { developerInstructions } : {}),
+      ...(baseInstructions ? { baseInstructions } : {}),
     };
     // When resuming a known thread, use `thread/resume` (loads prior turns)
-    // instead of `thread/start` (which opens a fresh thread). A stale/unknown
-    // thread id (e.g. a wrong-engine id from auto-resume, or a thread that no
-    // longer exists) degrades gracefully to a fresh thread rather than failing
-    // the whole session.
+    // instead of `thread/start` (which opens a fresh thread); with
+    // `forkSession`, `thread/fork` opens a new thread holding that one's
+    // history. A stale/unknown thread id (e.g. a wrong-engine id from
+    // auto-resume, or a thread that no longer exists) degrades gracefully to a
+    // fresh thread rather than failing the whole session. `excludeTurns`: the
+    // session never reads the turns these return.
     const resumeId = this.options.resumeSessionId;
-    let threadResp: { thread?: { id?: string }; model?: unknown };
-    let resumed = false;
+    type ThreadResponse = { thread?: { id?: string }; model?: unknown; sandbox?: unknown };
+    let threadResp: ThreadResponse;
     if (resumeId) {
+      const method = this.options.forkSession ? 'thread/fork' : 'thread/resume';
+      const params = this.options.forkSession
+        ? { threadId: resumeId, ...threadParams, ...ephemeral, excludeTurns: true }
+        : { threadId: resumeId, ...threadParams, excludeTurns: true };
       try {
-        threadResp = (await this._request('thread/resume', { threadId: resumeId, ...startParams })) as {
-          thread?: { id?: string };
-          model?: unknown;
-        };
-        resumed = true;
+        threadResp = (await this._request(method, params)) as ThreadResponse;
       } catch (err) {
-        this.emit(SESSION_EVENT.LOG, `[codex-app] thread/resume failed (${(err as Error).message}); starting fresh`);
-        threadResp = (await this._request('thread/start', startParams)) as typeof threadResp;
+        this.emit(SESSION_EVENT.LOG, `[codex-app] ${method} failed (${(err as Error).message}); starting fresh`);
+        threadResp = (await this._request('thread/start', startParams)) as ThreadResponse;
       }
     } else {
-      threadResp = (await this._request('thread/start', startParams)) as typeof threadResp;
+      threadResp = (await this._request('thread/start', startParams)) as ThreadResponse;
     }
     if (!this.threadId && threadResp?.thread?.id) {
       this.threadId = threadResp.thread.id;
@@ -338,7 +419,8 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
       throw new Error('codex app-server did not return a thread id from thread/start');
     }
     if (typeof threadResp.model === 'string' && threadResp.model) this._reportedModel = threadResp.model;
-    this._instructionsPending = !resumed && !!this.options.appendSystemPrompt?.trim();
+    const sandbox = threadResp.sandbox as SandboxPolicy | undefined;
+    if (sandbox && typeof sandbox.type === 'string') this._threadSandbox = sandbox;
 
     this.sessionId = `codex-app-${this.threadId.slice(0, 8)}-${Date.now().toString(36)}`;
     this._startTime = new Date().toISOString();
@@ -382,10 +464,7 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
   ): Promise<TurnResult | { requestId: number; sent: boolean }> {
     if (!this._isReady) throw new Error('Session not ready. Call start() first.');
     if (!this.threadId) throw new Error('Session has no thread id (start() did not complete?)');
-    let text = typeof message === 'string' ? message : JSON.stringify(message);
-    const instructions = this._instructionsPending ? this.options.appendSystemPrompt?.trim() : undefined;
-    this._instructionsPending = false;
-    if (instructions) text = `${instructions}\n\n---\n\n${text}`;
+    const text = typeof message === 'string' ? message : JSON.stringify(message);
 
     if (!options.waitForComplete) {
       this._fireAndForgetTurn(text, options).catch((err) => this._emitError(err as Error));
@@ -404,20 +483,71 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
     await this._request('turn/start', this._turnStartParams(text, options));
   }
 
-  /** `turn/start` params. The effort holds for this turn and the ones after it. */
+  /**
+   * `turn/start` params. The effort holds for this turn and the ones after it;
+   * the output schema is for this turn only, so every turn carries it.
+   */
   private _turnStartParams(text: string, options: SessionSendOptions): Record<string, unknown> {
     const effort = codexReasoningEffort(options.effort ?? this.options.effort);
+    const sandboxPolicy = this._addDirSandboxPolicy();
     return {
       threadId: this.threadId,
-      input: [{ type: 'text', text, text_elements: [] }],
+      // Images first, as `codex exec --image` places them, then the text.
+      input: [
+        ...(options.images ?? []).map((imagePath) => ({ type: 'localImage', path: imagePath })),
+        { type: 'text', text, text_elements: [] },
+      ],
       ...(effort ? { effort } : {}),
+      ...(this._outputSchema !== undefined ? { outputSchema: this._outputSchema } : {}),
+      ...(sandboxPolicy ? { sandboxPolicy } : {}),
     };
+  }
+
+  /**
+   * `addDir` as writable roots, for a workspace-write session.
+   *
+   * `codex exec --add-dir` has no app-server counterpart on the thread; a turn's
+   * `sandboxPolicy` replaces the thread's policy for that turn and the ones
+   * after it. It is the policy `thread/start` reported with the directories
+   * added, so the network access and roots the user's config gives stay as
+   * they were. Undefined when there is nothing to add or the mode is not
+   * workspace-write, where extra writable roots mean nothing.
+   */
+  private _addDirSandboxPolicy(): SandboxPolicy | undefined {
+    const dirs = this.options.addDir;
+    if (!dirs?.length || (this.options.sandboxMode || 'workspace-write') !== 'workspace-write') return undefined;
+    const base: SandboxPolicy =
+      this._threadSandbox?.type === 'workspaceWrite' ? this._threadSandbox : { type: 'workspaceWrite' };
+    const roots = Array.isArray(base.writableRoots) ? base.writableRoots : [];
+    const cwd = this.options.cwd ?? process.cwd();
+    return { ...base, writableRoots: [...new Set([...roots, ...dirs.map((d) => path.resolve(cwd, d))])] };
+  }
+
+  /** Clear the per-turn buffers: a turn has started, or is about to. */
+  private _resetTurnBuffers(): void {
+    this.turnAssistantText = '';
+    this.turnMessages = [];
+    this.turnStreamedItems = new Set();
+    this.turnUntaggedDeltas = false;
+    this.turnImages = [];
+  }
+
+  /**
+   * The turn's answer: the agent message the server marked `final_answer`,
+   * else the last agent message, else whatever streamed. A turn's messages
+   * include its commentary ("Running the tests." before a tool call), and a
+   * `jsonSchema` caller has to get the schema-shaped answer alone.
+   */
+  private _turnAnswer(): string {
+    for (let i = this.turnMessages.length - 1; i >= 0; i--) {
+      if (this.turnMessages[i].phase === 'final_answer') return this.turnMessages[i].text;
+    }
+    return this.turnMessages.at(-1)?.text ?? this.turnAssistantText;
   }
 
   private async _runTurn(text: string, options: SessionSendOptions): Promise<TurnResult> {
     const timeout = options.timeout || 600_000;
-    this.turnAssistantText = '';
-    this.turnImages = [];
+    this._resetTurnBuffers();
 
     const turnPromise = new Promise<TurnResult>((resolve, reject) => {
       this.turnResolve = resolve;
@@ -535,32 +665,42 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
       case 'turn/started': {
         const p = params as { threadId: string; turn: { id: string } };
         this.currentTurnId = p.turn?.id;
+        // Also clears what a turn no send() waited on (the goal loop's, a
+        // fire-and-forget one) left behind. Only for this session's thread.
+        if (!p.threadId || p.threadId === this.threadId) this._resetTurnBuffers();
         break;
       }
       case 'item/agentMessage/delta': {
         const p = params as AgentMessageDeltaNotification;
         if (typeof p.delta === 'string' && p.delta.length > 0) {
           this.turnAssistantText += p.delta;
+          if (p.itemId) this.turnStreamedItems.add(p.itemId);
+          else this.turnUntaggedDeltas = true;
           this.emit(SESSION_EVENT.TEXT, p.delta);
         }
         break;
       }
       case 'item/completed': {
         const p = params as ItemCompletedNotification;
+        const type = p.item?.type;
         // Codex's built-in image generation reports where it saved the file.
-        if (p.item?.type === 'imageGeneration' && typeof p.item.savedPath === 'string' && p.item.savedPath) {
+        if (type === 'imageGeneration' && typeof p.item.savedPath === 'string' && p.item.savedPath) {
           this.turnImages.push({
             path: p.item.savedPath,
             ...(typeof p.item.revisedPrompt === 'string' ? { revisedPrompt: p.item.revisedPrompt } : {}),
           });
         }
-        if (p.item?.type === 'agentMessage' && typeof p.item.text === 'string') {
-          // Agent messages may arrive as one final text payload (when no
-          // delta stream was used). Only append if we haven't already
-          // accumulated this turn's text via deltas.
-          if (this.turnAssistantText.length === 0) {
-            this.turnAssistantText = p.item.text;
-            this.emit(SESSION_EVENT.TEXT, p.item.text);
+        if (type === 'agentMessage' && typeof p.item.text === 'string') {
+          this.turnMessages.push({ text: p.item.text, phase: p.item.phase ?? null });
+          // A message that did not stream as deltas is streamed whole, once.
+          const streamed = this.turnUntaggedDeltas
+            ? this.turnAssistantText.length > 0
+            : !!p.item.id && this.turnStreamedItems.has(p.item.id);
+          if (!streamed && p.item.text) this.emit(SESSION_EVENT.TEXT, p.item.text);
+        } else if (type && !NON_TOOL_ITEMS.has(type)) {
+          this._stats.toolCalls++;
+          if (type === 'commandExecution' && typeof p.item.exitCode === 'number' && p.item.exitCode !== 0) {
+            this._stats.toolErrors++;
           }
         }
         break;
@@ -627,7 +767,7 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
         // Clear the active-turn id so a later interrupt()/steer() does not target
         // an already-finished turn (only clear if it is the turn that completed).
         if (p.turn?.id && this.currentTurnId === p.turn.id) this.currentTurnId = undefined;
-        const turnText = this.turnAssistantText;
+        const turnText = this._turnAnswer();
         const event: StreamEvent = {
           type: 'result',
           result: turnText,
@@ -789,7 +929,8 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
   //
   // Method names + param shapes verified against `codex app-server
   // generate-json-schema` (TurnInterruptParams/TurnSteerParams/ThreadForkParams/
-  // ThreadRollbackParams/ModelListResponse/ThreadGoal*Params).
+  // ThreadTurnsListParams/ThreadRevertParams/ThreadListParams/ModelListResponse/
+  // ThreadGoal*Params; 0.171.0 for the turn list, revert and thread list).
 
   /** The id of the most recent turn (set by the `turn/started` notification). */
   get activeTurnId(): string | undefined {
@@ -848,11 +989,40 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
     return { threadId: newId };
   }
 
-  /** Drop the last `numTurns` turns from this thread (`thread/rollback`). */
+  /**
+   * Drop the last `numTurns` turns from this thread's conversation.
+   *
+   * codex 0.171 removed `thread/rollback`; `thread/revert` takes the turn to
+   * revert to before instead. The newest `numTurns` turns are listed
+   * (`thread/turns/list`, newest first, following the cursor) and the thread is
+   * reverted to before the oldest of them. This changes the conversation
+   * history only: files the dropped turns edited stay as they are. An
+   * ephemeral thread (`noSessionPersistence`) cannot list its turns, so it
+   * cannot be rolled back.
+   */
   async rollback(numTurns: number): Promise<void> {
     if (!this.threadId) throw new Error('No thread id');
     if (!Number.isInteger(numTurns) || numTurns < 1) throw new Error('rollback: numTurns must be a positive integer');
-    await this._request('thread/rollback', { threadId: this.threadId, numTurns });
+    if (this.currentTurnId) throw new Error('rollback: a turn is in flight; interrupt it first');
+    const turnIds: string[] = [];
+    let cursor: string | undefined;
+    while (turnIds.length < numTurns) {
+      const page = (await this._request('thread/turns/list', {
+        threadId: this.threadId,
+        limit: numTurns - turnIds.length,
+        sortDirection: 'desc',
+        itemsView: 'notLoaded',
+        ...(cursor ? { cursor } : {}),
+      })) as { data?: Array<{ id?: unknown }>; nextCursor?: string | null };
+      const ids = (page?.data ?? []).map((t) => t.id).filter((id): id is string => typeof id === 'string');
+      turnIds.push(...ids);
+      if (!ids.length || !page?.nextCursor) break;
+      cursor = page.nextCursor;
+    }
+    if (turnIds.length < numTurns) {
+      throw new Error(`rollback: the thread has ${turnIds.length} turn(s), fewer than ${numTurns}`);
+    }
+    await this._request('thread/revert', { threadId: this.threadId, beforeTurnId: turnIds[numTurns - 1] });
   }
 
   /** List available models (`model/list`); returns the `data` array. */
@@ -871,6 +1041,7 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
     if (opts.archived !== undefined) params.archived = opts.archived;
     if (opts.cursor !== undefined) params.cursor = opts.cursor;
     if (opts.limit !== undefined) params.limit = opts.limit;
+    params.sourceKinds = LISTED_SOURCE_KINDS;
     const resp = (await this._request('thread/list', params)) as { data?: unknown[]; nextCursor?: string | null };
     return { data: resp?.data ?? [], nextCursor: resp?.nextCursor ?? null };
   }
