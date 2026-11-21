@@ -294,7 +294,7 @@ Tools targeting OpenAI's `codex` CLI. The `codex_resume` and `codex_review` tool
 
 ### `codex_resume`
 
-Resume a previously recorded Codex thread by UUID/name, or pick the most recent with `last=true`. Spawns `codex exec resume` with `--json` and parses the JSONL output into structured fields. Independent of session manager state.
+Resume a previously recorded Codex thread by UUID/name, or pick the most recent with `last=true`. Spawns `codex exec resume … --json -c sandbox_mode="workspace-write" -` with the message on stdin, and parses the JSONL output into structured fields. Independent of session manager state.
 
 | Parameter    | Type    | Required | Description                                             |
 | ------------ | ------- | -------- | ------------------------------------------------------- |
@@ -305,15 +305,17 @@ Resume a previously recorded Codex thread by UUID/name, or pick the most recent 
 | `model`      | string  |          | Override model.                                         |
 | `timeout`    | number  |          | Timeout in ms (default 300000).                         |
 
-> Note: `codex exec resume` does not accept `--sandbox` or `-C` (sandbox policy and cwd are inherited from the original session). The `cwd` parameter only sets the spawn's working directory so `--last`'s session-picker scopes correctly.
+> Note: `codex exec resume` does not accept `--sandbox` or `-C`, and a resumed thread does not keep the sandbox it was started with, so the thread runs in `workspace-write`, restated as a `-c` override. The `cwd` parameter only sets the spawn's working directory so `--last`'s session-picker scopes correctly. A `session_id` starting with `-` is refused.
 
-Returns `{ ok, text, threadId?, usage?, events }`.
+Returns `{ ok, text, threadId?, usage?, events }`. `text` is the turn's final message (codex's `--output-last-message`), not the commentary before it; `usage` is codex's thread-cumulative count.
 
 ### `codex_review`
 
-Run a non-interactive Codex code review (`codex review`). Pick at most one diff scope
+Run a non-interactive Codex code review (`codex exec review --json`). Pick at most one diff scope
 (`uncommitted`, `base` or `commit`); passing two is an error. `base` and `commit` must be plain git
-refs.
+refs. `prompt` goes to codex on stdin. The review's usage is recorded in the run ledger as session
+`codex_review`: codex reports zero usage for the review turn itself, so it is read from the rollout
+of the review sub-agent codex starts.
 
 | Parameter     | Type    | Description                                    |
 | ------------- | ------- | ---------------------------------------------- |
@@ -326,7 +328,8 @@ refs.
 | `model`       | string  | Override model.                                |
 | `timeout`     | number  | Timeout in ms (default 600000).                |
 
-Returns `{ ok, stdout, stderr }`.
+Returns `{ ok, stdout, stderr, threadId?, usage? }`. `stdout` is the review itself, the turn's final
+message.
 
 ### `codex_goal_set`
 
@@ -366,14 +369,14 @@ For a goal that has to run unattended for hours, judged by checks the agent did 
 
 `codex_interrupt`, `codex_steer`, `codex_fork`, `codex_rollback`, `codex_models` and `codex_thread_list` call Codex app-server v2 methods and require `engine: "codex-app"`. Method names and parameter shapes follow `codex app-server generate-json-schema`.
 
-| Tool                | RPC               | Params                                                          | Returns                                                                                                      |
-| ------------------- | ----------------- | --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
-| `codex_interrupt`   | `turn/interrupt`  | `name`                                                          | `{ ok, interrupted }` — cancels the in-flight turn (no-op if idle)                                           |
-| `codex_steer`       | `turn/steer`      | `name`, `message`                                               | `{ ok, steered, turnId? , text? }` — adds input to the in-flight turn; falls back to a normal turn when idle |
-| `codex_fork`        | `thread/fork`     | `name`                                                          | `{ ok, threadId }` — branches the thread; returns the forked id                                              |
-| `codex_rollback`    | `thread/rollback` | `name`, `numTurns`                                              | `{ ok, numTurns }` — drops the last N turns                                                                  |
-| `codex_models`      | `model/list`      | `name`                                                          | `{ ok, models }` — incl. each model's `supportedReasoningEfforts`                                            |
-| `codex_thread_list` | `thread/list`     | `name`, `searchTerm?`, `cwd?`, `archived?`, `cursor?`, `limit?` | `{ ok, data, nextCursor }` — list threads with filters + pagination                                          |
+| Tool                | RPC                                   | Params                                                          | Returns                                                                                                                                                         |
+| ------------------- | ------------------------------------- | --------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `codex_interrupt`   | `turn/interrupt`                      | `name`                                                          | `{ ok, interrupted }` — cancels the in-flight turn (no-op if idle)                                                                                              |
+| `codex_steer`       | `turn/steer`                          | `name`, `message`                                               | `{ ok, steered, turnId? , text? }` — adds input to the in-flight turn; falls back to a normal turn when idle                                                    |
+| `codex_fork`        | `thread/fork`                         | `name`                                                          | `{ ok, threadId }` — branches the thread; returns the forked id                                                                                                 |
+| `codex_rollback`    | `thread/turns/list` + `thread/revert` | `name`, `numTurns`                                              | `{ ok, numTurns }` — drops the last N turns from the conversation; files they edited stay as they are. Refused mid-turn and on an ephemeral thread              |
+| `codex_models`      | `model/list`                          | `name`                                                          | `{ ok, models }` — incl. each model's `supportedReasoningEfforts`                                                                                               |
+| `codex_thread_list` | `thread/list`                         | `name`, `searchTerm?`, `cwd?`, `archived?`, `cursor?`, `limit?` | `{ ok, data, nextCursor }` — list threads with filters + pagination, including those `codex exec` started (`sourceKinds`: `cli`, `vscode`, `exec`, `appServer`) |
 
 To **resume** a codex-app thread, start a session with `engine: "codex-app"` and
 `resumeSessionId: "<threadId>"` — it loads the existing thread via `thread/resume` instead of

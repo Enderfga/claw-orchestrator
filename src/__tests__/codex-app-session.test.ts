@@ -166,13 +166,69 @@ describe('PersistentCodexAppServerSession v2 RPCs', () => {
     expect(sent?.params).toEqual({ threadId: 't1' });
   });
 
-  it('rollback() sends thread/rollback {threadId,numTurns} and rejects bad counts', async () => {
-    const proc = createMockProc(defaultResponder());
+  // codex 0.171 removed `thread/rollback` ("unknown variant"). Its replacement
+  // reverts to before a named turn, so the wrapper lists the newest N turns and
+  // reverts to before the oldest of them. Measured on 0.171.0: two turns, list
+  // 1 newest, revert before it, and `thread/turns/list` shows the first turn only.
+  it('rollback() lists the newest N turns and reverts to before the oldest of them', async () => {
+    const proc = createMockProc(
+      defaultResponder((m) =>
+        m.method === 'thread/turns/list'
+          ? { data: [{ id: 'turn-c' }, { id: 'turn-b' }, { id: 'turn-a' }].slice(0, Number(m.params?.limit)) }
+          : undefined,
+      ),
+    );
+    const session = await startSession(proc);
+    await session.rollback(2);
+    const list = proc.written.find((m) => m.method === 'thread/turns/list');
+    expect(list?.params).toEqual({ threadId: 't1', limit: 2, sortDirection: 'desc', itemsView: 'notLoaded' });
+    const revert = proc.written.find((m) => m.method === 'thread/revert');
+    expect(revert?.params).toEqual({ threadId: 't1', beforeTurnId: 'turn-b' });
+    expect(proc.written.some((m) => m.method === 'thread/rollback')).toBe(false);
+    await expect(session.rollback(0)).rejects.toThrow(/positive integer/);
+  });
+
+  it('rollback() follows the cursor when a page holds fewer turns than asked for', async () => {
+    const proc = createMockProc(
+      defaultResponder((m) => {
+        if (m.method !== 'thread/turns/list') return undefined;
+        return m.params?.cursor === 'page2'
+          ? { data: [{ id: 'turn-a' }], nextCursor: null }
+          : { data: [{ id: 'turn-c' }, { id: 'turn-b' }], nextCursor: 'page2' };
+      }),
+    );
     const session = await startSession(proc);
     await session.rollback(3);
-    const sent = proc.written.find((m) => m.method === 'thread/rollback');
-    expect(sent?.params).toEqual({ threadId: 't1', numTurns: 3 });
-    await expect(session.rollback(0)).rejects.toThrow(/positive integer/);
+    const lists = proc.written.filter((m) => m.method === 'thread/turns/list');
+    expect(lists.map((m) => m.params?.limit)).toEqual([3, 1]);
+    expect(lists[1].params?.cursor).toBe('page2');
+    expect(proc.written.find((m) => m.method === 'thread/revert')?.params).toEqual({
+      threadId: 't1',
+      beforeTurnId: 'turn-a',
+    });
+  });
+
+  it('rollback() refuses to drop more turns than the thread has, and reverts nothing', async () => {
+    const proc = createMockProc(
+      defaultResponder((m) =>
+        m.method === 'thread/turns/list' ? { data: [{ id: 'only' }], nextCursor: null } : undefined,
+      ),
+    );
+    const session = await startSession(proc);
+    await expect(session.rollback(2)).rejects.toThrow(/1 turn/);
+    expect(proc.written.some((m) => m.method === 'thread/revert')).toBe(false);
+  });
+
+  it('rollback() refuses while a turn is in flight', async () => {
+    const proc = createMockProc(defaultResponder());
+    const session = await startSession(proc);
+    proc.stdout.push(
+      JSON.stringify({ jsonrpc: '2.0', method: 'turn/started', params: { threadId: 't1', turn: { id: 'live' } } }) +
+        '\n',
+    );
+    await new Promise((r) => setTimeout(r, 5));
+    await expect(session.rollback(1)).rejects.toThrow(/in flight/);
+    expect(proc.written.some((m) => m.method === 'thread/turns/list')).toBe(false);
   });
 
   it('listModels() returns the model/list data array', async () => {
@@ -326,7 +382,9 @@ describe('PersistentCodexAppServerSession v2 RPCs', () => {
     expect(proc.written.some((m) => m.method === 'turn/start')).toBe(true);
   });
 
-  it('listThreads() sends thread/list with filters and returns data + nextCursor', async () => {
+  // Without `sourceKinds` the server lists interactive threads only; threads
+  // that `codex exec` (source `exec`) started are left out (0.171.0).
+  it('listThreads() sends thread/list with filters and every source kind, and returns data + nextCursor', async () => {
     const proc = createMockProc(
       defaultResponder((m) =>
         m.method === 'thread/list' ? { data: [{ id: 'a' }, { id: 'b' }], nextCursor: 'cur2' } : undefined,
@@ -336,7 +394,11 @@ describe('PersistentCodexAppServerSession v2 RPCs', () => {
     const r = await session.listThreads({ searchTerm: 'auth', limit: 10 });
     expect(r).toEqual({ data: [{ id: 'a' }, { id: 'b' }], nextCursor: 'cur2' });
     const sent = proc.written.find((m) => m.method === 'thread/list');
-    expect(sent?.params).toEqual({ searchTerm: 'auth', limit: 10 });
+    expect(sent?.params).toEqual({
+      searchTerm: 'auth',
+      limit: 10,
+      sourceKinds: ['cli', 'vscode', 'exec', 'appServer'],
+    });
   });
 
   it('start() uses thread/resume (not thread/start) when resumeSessionId is set', async () => {
@@ -357,7 +419,8 @@ describe('PersistentCodexAppServerSession v2 RPCs', () => {
     expect(proc.written.some((m) => m.method === 'thread/resume')).toBe(true);
     expect(proc.written.some((m) => m.method === 'thread/start')).toBe(false);
     const resume = proc.written.find((m) => m.method === 'thread/resume');
-    expect(resume?.params).toMatchObject({ threadId: 't-prev' });
+    // The session never reads the returned turns, so the server need not load them.
+    expect(resume?.params).toMatchObject({ threadId: 't-prev', excludeTurns: true });
   });
 
   it('falls back to thread/start when thread/resume fails (stale id)', async () => {
@@ -428,18 +491,19 @@ describe('PersistentCodexAppServerSession v2 RPCs', () => {
   });
 });
 
-// Nothing passes `appendSystemPrompt` to `thread/start`, so it used to be
-// dropped — including the charter of a council seat on this engine. It now
-// leads the first turn of a fresh thread, and only that turn.
-describe('PersistentCodexAppServerSession — appendSystemPrompt', () => {
+// `thread/start` takes `developerInstructions` and `baseInstructions`. Measured
+// on 0.171.0, both reach the model as developer messages of their own (the
+// rollout's session_meta records the base instructions as `custom`), so the
+// instructions no longer ride at the top of the first user message.
+describe('PersistentCodexAppServerSession — system prompts', () => {
   beforeEach(() => mockSpawn.mockReset());
 
   const turnTexts = (proc: ReturnType<typeof createMockProc>): string[] =>
     proc.written
       .filter((m) => m.method === 'turn/start')
-      .map((m) => (m.params?.input as Array<{ text: string }>)[0].text);
+      .map((m) => (m.params?.input as Array<{ text: string }>).at(-1)!.text);
 
-  it('leads the first turn of a fresh thread, and only that turn', async () => {
+  it('opens a fresh thread with appendSystemPrompt as developerInstructions and systemPrompt as baseInstructions', async () => {
     const proc = createMockProc(defaultResponder());
     mockSpawn.mockReturnValue(proc);
     const session = new PersistentCodexAppServerSession({
@@ -447,15 +511,20 @@ describe('PersistentCodexAppServerSession — appendSystemPrompt', () => {
       cwd: '/tmp',
       engine: 'codex-app',
       appendSystemPrompt: 'SEAT RULES',
+      systemPrompt: 'BASE PROMPT',
     });
     await session.start();
     await session.send('hi');
     await session.send('again');
     await new Promise((r) => setTimeout(r, 5));
-    expect(turnTexts(proc)).toEqual(['SEAT RULES\n\n---\n\nhi', 'again']);
+    expect(proc.written.find((m) => m.method === 'thread/start')?.params).toMatchObject({
+      developerInstructions: 'SEAT RULES',
+      baseInstructions: 'BASE PROMPT',
+    });
+    expect(turnTexts(proc)).toEqual(['hi', 'again']);
   });
 
-  it('is not repeated on a resumed thread, which already carries it', async () => {
+  it('does not restate them on a resumed thread, which already carries them', async () => {
     const proc = createMockProc(
       defaultResponder((m) => (m.method === 'thread/resume' ? { thread: { id: 't9' } } : undefined)),
     );
@@ -465,12 +534,340 @@ describe('PersistentCodexAppServerSession — appendSystemPrompt', () => {
       cwd: '/tmp',
       engine: 'codex-app',
       appendSystemPrompt: 'SEAT RULES',
+      systemPrompt: 'BASE PROMPT',
       resumeSessionId: 't9',
     });
     await session.start();
     await session.send('continue');
     await new Promise((r) => setTimeout(r, 5));
+    const resume = proc.written.find((m) => m.method === 'thread/resume')?.params;
+    expect(resume).not.toHaveProperty('developerInstructions');
+    expect(resume).not.toHaveProperty('baseInstructions');
     expect(turnTexts(proc)).toEqual(['continue']);
+  });
+
+  it('gives a fresh thread that replaces a stale resume id its instructions', async () => {
+    const proc = createMockProc((msg) => {
+      if (msg.method === 'initialize') return {};
+      if (msg.method === 'thread/resume') return { __rpcError: 'thread not found' };
+      if (msg.method === 'thread/start') return { thread: { id: 'fresh' } };
+      return {};
+    });
+    mockSpawn.mockReturnValue(proc);
+    await new PersistentCodexAppServerSession({
+      name: 't',
+      cwd: '/tmp',
+      engine: 'codex-app',
+      appendSystemPrompt: 'SEAT RULES',
+      resumeSessionId: 'gone',
+    }).start();
+    expect(proc.written.find((m) => m.method === 'thread/start')?.params).toMatchObject({
+      developerInstructions: 'SEAT RULES',
+    });
+  });
+});
+
+// Options the `codex` engine honours and this one used to drop without a word.
+describe('PersistentCodexAppServerSession — session options', () => {
+  beforeEach(() => mockSpawn.mockReset());
+
+  const push = (proc: ReturnType<typeof createMockProc>, method: string, params: unknown) =>
+    proc.stdout.push(JSON.stringify({ jsonrpc: '2.0', method, params }) + '\n');
+
+  it('opens an ephemeral thread for noSessionPersistence', async () => {
+    const proc = createMockProc(defaultResponder());
+    mockSpawn.mockReturnValue(proc);
+    await new PersistentCodexAppServerSession({
+      name: 't',
+      cwd: '/tmp',
+      engine: 'codex-app',
+      noSessionPersistence: true,
+    }).start();
+    expect(proc.written.find((m) => m.method === 'thread/start')?.params).toMatchObject({ ephemeral: true });
+  });
+
+  it('sends jsonSchema as the outputSchema of every turn', async () => {
+    const schema = { type: 'object', properties: { number: { type: 'string' } }, required: ['number'] };
+    const proc = createMockProc(defaultResponder());
+    mockSpawn.mockReturnValue(proc);
+    const session = new PersistentCodexAppServerSession({
+      name: 't',
+      cwd: '/tmp',
+      engine: 'codex-app',
+      jsonSchema: JSON.stringify(schema),
+    });
+    await session.start();
+    await session.send('one');
+    await session.send('two');
+    await new Promise((r) => setTimeout(r, 5));
+    const turns = proc.written.filter((m) => m.method === 'turn/start');
+    expect(turns.map((m) => m.params?.outputSchema)).toEqual([schema, schema]);
+  });
+
+  it('refuses a jsonSchema that is not JSON before starting codex', async () => {
+    const session = new PersistentCodexAppServerSession({
+      name: 't',
+      cwd: '/tmp',
+      engine: 'codex-app',
+      jsonSchema: '{not json',
+    });
+    await expect(session.start()).rejects.toThrow(/jsonSchema/);
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  // `exec --add-dir` adds writable roots; the app-server has no such flag, and
+  // a turn's `sandboxPolicy` replaces the thread's. It is built from the policy
+  // `thread/start` reports, so the user's network access and roots survive.
+  it('adds addDir to the writable roots of the policy the thread reports, on workspace-write only', async () => {
+    const reported = {
+      type: 'workspaceWrite',
+      writableRoots: ['/already'],
+      networkAccess: true,
+      excludeTmpdirEnvVar: false,
+      excludeSlashTmp: false,
+    };
+    const proc = createMockProc((msg) => {
+      if (msg.method === 'initialize') return {};
+      if (msg.method === 'thread/start') return { thread: { id: 't1' }, sandbox: reported };
+      return {};
+    });
+    mockSpawn.mockReturnValue(proc);
+    const session = new PersistentCodexAppServerSession({
+      name: 't',
+      cwd: '/tmp',
+      engine: 'codex-app',
+      addDir: ['/srv/a', '/srv/b'],
+    });
+    await session.start();
+    await session.send('hi');
+    await new Promise((r) => setTimeout(r, 5));
+    expect(proc.written.find((m) => m.method === 'turn/start')?.params?.sandboxPolicy).toEqual({
+      ...reported,
+      writableRoots: ['/already', '/srv/a', '/srv/b'],
+    });
+
+    const ro = createMockProc(defaultResponder());
+    mockSpawn.mockReturnValue(ro);
+    const roSession = new PersistentCodexAppServerSession({
+      name: 'r',
+      cwd: '/tmp',
+      engine: 'codex-app',
+      sandboxMode: 'read-only',
+      addDir: ['/srv/a'],
+    });
+    await roSession.start();
+    await roSession.send('hi');
+    await new Promise((r) => setTimeout(r, 5));
+    expect(ro.written.find((m) => m.method === 'turn/start')?.params).not.toHaveProperty('sandboxPolicy');
+  });
+
+  it('puts the images before the text of the turn, as localImage inputs', async () => {
+    const proc = createMockProc(defaultResponder());
+    mockSpawn.mockReturnValue(proc);
+    const session = new PersistentCodexAppServerSession({ name: 't', cwd: '/tmp', engine: 'codex-app' });
+    await session.start();
+    await session.send('What number is in the image?', { images: ['/tmp/n731.png', '/tmp/b.jpg'] });
+    await session.send('thanks');
+    await new Promise((r) => setTimeout(r, 5));
+    const inputs = proc.written.filter((m) => m.method === 'turn/start').map((m) => m.params?.input);
+    expect(inputs[0]).toEqual([
+      { type: 'localImage', path: '/tmp/n731.png' },
+      { type: 'localImage', path: '/tmp/b.jpg' },
+      { type: 'text', text: 'What number is in the image?', text_elements: [] },
+    ]);
+    expect(inputs[1]).toEqual([{ type: 'text', text: 'thanks', text_elements: [] }]);
+  });
+
+  it('merges codexConfig into the thread config, and passes codexFeatures to the app-server', async () => {
+    const proc = createMockProc(defaultResponder());
+    mockSpawn.mockReturnValue(proc);
+    await new PersistentCodexAppServerSession({
+      name: 't',
+      cwd: '/tmp',
+      engine: 'codex-app',
+      effort: 'high',
+      codexConfig: { 'sandbox_workspace_write.network_access': true, model_verbosity: 'low' },
+      codexFeatures: { enable: ['web_search'], disable: ['memories'] },
+    }).start();
+    expect(proc.written.find((m) => m.method === 'thread/start')?.params?.config).toEqual({
+      model_reasoning_effort: 'high',
+      'sandbox_workspace_write.network_access': true,
+      model_verbosity: 'low',
+    });
+    expect(mockSpawn.mock.calls[0][1]).toEqual([
+      'app-server',
+      '--listen',
+      'stdio://',
+      '--enable',
+      'goals',
+      '--enable',
+      'web_search',
+      '--disable',
+      'memories',
+    ]);
+
+    const resumed = createMockProc(
+      defaultResponder((m) => (m.method === 'thread/resume' ? { thread: { id: 't9' } } : undefined)),
+    );
+    mockSpawn.mockReturnValue(resumed);
+    await new PersistentCodexAppServerSession({
+      name: 'r',
+      cwd: '/tmp',
+      engine: 'codex-app',
+      codexConfig: { model_verbosity: 'low' },
+      resumeSessionId: 't9',
+    }).start();
+    expect(resumed.written.find((m) => m.method === 'thread/resume')?.params?.config).toEqual({
+      model_verbosity: 'low',
+    });
+  });
+
+  it('refuses before starting codex: a reserved codexConfig key, and ignoreRules', async () => {
+    await expect(
+      new PersistentCodexAppServerSession({
+        name: 't',
+        cwd: '/tmp',
+        engine: 'codex-app',
+        codexConfig: { approval_policy: 'on-request' },
+      }).start(),
+    ).rejects.toThrow(/approval_policy/);
+    // `codex app-server` rejects --ignore-rules ("unexpected argument", 0.171.0).
+    await expect(
+      new PersistentCodexAppServerSession({ name: 't', cwd: '/tmp', engine: 'codex-app', ignoreRules: true }).start(),
+    ).rejects.toThrow(/ignoreRules/);
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  it('counts tool items and failed commands, not messages or reasoning', async () => {
+    const proc = createMockProc(defaultResponder());
+    const session = await startSession(proc);
+    const p = session.send('do it', { waitForComplete: true });
+    setTimeout(() => {
+      const item = (item: Record<string, unknown>) =>
+        push(proc, 'item/completed', { threadId: 't1', turnId: 'x', item });
+      item({ type: 'userMessage', id: 'u' });
+      item({ type: 'reasoning', id: 'r' });
+      item({ type: 'plan', id: 'p', text: 'plan' });
+      item({ type: 'commandExecution', id: 'c1', exitCode: 0 });
+      item({ type: 'commandExecution', id: 'c2', exitCode: 2 });
+      item({ type: 'fileChange', id: 'f' });
+      item({ type: 'mcpToolCall', id: 'm' });
+      item({ type: 'agentMessage', id: 'a', text: 'done', phase: 'final_answer' });
+      push(proc, 'turn/completed', { threadId: 't1', turn: { id: 'x', status: 'completed' } });
+    }, 5);
+    await p;
+    expect(session.getStats().toolCalls).toBe(4);
+    expect(session.getStats().toolErrors).toBe(1);
+  });
+
+  // Every agent message of a turn streams as deltas, commentary included. The
+  // result is the one the server marks `final_answer` (0.171.0 sets the phase),
+  // else the last agent message of the turn.
+  it('answers with the final_answer message, not the commentary before it', async () => {
+    const proc = createMockProc(defaultResponder());
+    const session = await startSession(proc);
+    const texts: string[] = [];
+    const p = session.send('run it', { waitForComplete: true, callbacks: { onText: (t) => texts.push(t) } });
+    setTimeout(() => {
+      push(proc, 'item/agentMessage/delta', { threadId: 't1', turnId: 'x', itemId: 'm1', delta: 'Running it.' });
+      push(proc, 'item/completed', {
+        threadId: 't1',
+        turnId: 'x',
+        item: { type: 'agentMessage', id: 'm1', text: 'Running it.', phase: 'commentary' },
+      });
+      push(proc, 'item/agentMessage/delta', { threadId: 't1', turnId: 'x', itemId: 'm2', delta: '{"number":"731"}' });
+      push(proc, 'item/completed', {
+        threadId: 't1',
+        turnId: 'x',
+        item: { type: 'agentMessage', id: 'm2', text: '{"number":"731"}', phase: 'final_answer' },
+      });
+      push(proc, 'item/completed', {
+        threadId: 't1',
+        turnId: 'x',
+        item: { type: 'agentMessage', id: 'm3', text: 'Anything else?', phase: 'commentary' },
+      });
+      push(proc, 'turn/completed', { threadId: 't1', turn: { id: 'x', status: 'completed' } });
+    }, 5);
+    const r = (await p) as { text: string; event: Record<string, unknown> };
+    expect(r.text).toBe('{"number":"731"}');
+    expect(r.event.result).toBe('{"number":"731"}');
+    // Streaming is unchanged: each delta once, and a message that came without deltas once.
+    expect(texts).toEqual(['Running it.', '{"number":"731"}', 'Anything else?']);
+  });
+
+  it('answers with the last agent message when none is marked final_answer', async () => {
+    const proc = createMockProc(defaultResponder());
+    const session = await startSession(proc);
+    const p = session.send('hi', { waitForComplete: true });
+    setTimeout(() => {
+      push(proc, 'item/completed', {
+        threadId: 't1',
+        turnId: 'x',
+        item: { type: 'agentMessage', id: 'a', text: 'first' },
+      });
+      push(proc, 'item/completed', {
+        threadId: 't1',
+        turnId: 'x',
+        item: { type: 'agentMessage', id: 'b', text: 'second' },
+      });
+      push(proc, 'turn/completed', { threadId: 't1', turn: { id: 'x', status: 'completed' } });
+    }, 5);
+    expect(((await p) as { text: string }).text).toBe('second');
+  });
+
+  it('forks the thread named by resumeSessionId when forkSession is set, and continues the fork', async () => {
+    const proc = createMockProc((msg) => {
+      if (msg.method === 'initialize') return {};
+      if (msg.method === 'thread/fork') return { thread: { id: 'forked' }, model: 'gpt-6-astra' };
+      return {};
+    });
+    mockSpawn.mockReturnValue(proc);
+    const session = new PersistentCodexAppServerSession({
+      name: 't',
+      cwd: '/tmp',
+      engine: 'codex-app',
+      resumeSessionId: 'src-thread',
+      forkSession: true,
+      noSessionPersistence: true,
+      appendSystemPrompt: 'SEAT RULES',
+      codexConfig: { model_verbosity: 'low' },
+    });
+    await session.start();
+    expect(session.codexThreadId).toBe('forked');
+    const fork = proc.written.find((m) => m.method === 'thread/fork')?.params;
+    expect(fork).toMatchObject({
+      threadId: 'src-thread',
+      approvalPolicy: 'never',
+      sandbox: 'workspace-write',
+      ephemeral: true,
+      excludeTurns: true,
+      config: { model_verbosity: 'low' },
+    });
+    // The forked history already carries the instructions.
+    expect(fork).not.toHaveProperty('developerInstructions');
+    expect(proc.written.some((m) => m.method === 'thread/resume' || m.method === 'thread/start')).toBe(false);
+    await session.send('go on');
+    await new Promise((r) => setTimeout(r, 5));
+    expect(proc.written.find((m) => m.method === 'turn/start')?.params?.threadId).toBe('forked');
+  });
+
+  it('starts a fresh thread when the fork source is gone', async () => {
+    const proc = createMockProc((msg) => {
+      if (msg.method === 'initialize') return {};
+      if (msg.method === 'thread/fork') return { __rpcError: 'thread not found' };
+      if (msg.method === 'thread/start') return { thread: { id: 'fresh' } };
+      return {};
+    });
+    mockSpawn.mockReturnValue(proc);
+    const session = new PersistentCodexAppServerSession({
+      name: 't',
+      cwd: '/tmp',
+      engine: 'codex-app',
+      resumeSessionId: 'gone',
+      forkSession: true,
+    });
+    await session.start();
+    expect(session.codexThreadId).toBe('fresh');
   });
 });
 

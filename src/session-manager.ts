@@ -11,7 +11,7 @@ import * as os from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { withoutServerCredential } from './kernel/secrets.js';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
-import { execEngine } from './engine-spawn.js';
+import { execEngine, killEngineTree, spawnEngine } from './engine-spawn.js';
 
 import * as http from 'node:http';
 import { createRequire } from 'node:module';
@@ -246,12 +246,19 @@ import {
   overrideModelPricing,
   ENGINE_BINARY_NAMES,
 } from './types.js';
-import { resolveAlias, isClaudeModel, lookupModel, resolveEngineAndModel, claudeGatewayMode } from './models.js';
+import {
+  resolveAlias,
+  isClaudeModel,
+  lookupModel,
+  resolveEngineAndModel,
+  claudeGatewayMode,
+  getModelPricing,
+} from './models.js';
 import { isAgyConversationId } from './agy-conversation.js';
 import { Council } from './council.js';
 import { Fanout, type FanoutConfig, type FanoutSession, type FanoutAgentSpec } from './fanout.js';
 import { AutoloopRunner, type AutoloopInputSnapshot } from './autoloop/runner.js';
-import { boundedErrorReason } from './sanitize.js';
+import { boundedErrorReason, sanitizeSecrets } from './sanitize.js';
 import { ClaudeAgentDispatcher, type ClaudeAgentDispatcherConfig } from './autoloop/dispatcher.js';
 import type { AutoloopRoleBinding, AutoloopRoleBindings, AutoloopState, PushPolicy } from './autoloop/types.js';
 import {
@@ -351,6 +358,14 @@ type CodexAppSession = ISession & {
   setGoal: PersistentCodexAppServerSession['setGoal'];
   getGoal: PersistentCodexAppServerSession['getGoal'];
   clearGoal: PersistentCodexAppServerSession['clearGoal'];
+};
+
+/** `turn.completed.usage` of `codex exec --json`. */
+type CodexUsage = {
+  input_tokens?: number;
+  output_tokens?: number;
+  cached_input_tokens?: number;
+  reasoning_output_tokens?: number;
 };
 
 // ─── Cross-process visibility ───────────────────────────────────────────────
@@ -2845,9 +2860,10 @@ export class SessionManager {
 
   // ─── Codex app-server v2 RPCs (codex-app engine only, Codex 0.137) ────────
   //
-  // turn/interrupt, turn/steer, thread/fork, thread/rollback, model/list — the
-  // high-value app-server surface beyond /goal. Each requires a `codex-app`
-  // session; the discriminator is the presence of the `interrupt` method.
+  // turn/interrupt, turn/steer, thread/fork, thread/turns/list + thread/revert
+  // (rollback), model/list — the high-value app-server surface beyond /goal.
+  // Each requires a `codex-app` session; the discriminator is the presence of
+  // the `interrupt` method.
 
   private _getCodexAppSession(name: string, feature: string): CodexAppSession {
     const managed = this.sessions.get(name);
@@ -2881,8 +2897,9 @@ export class SessionManager {
     return { ok: true, ...r };
   }
 
+  /** Drops the last `numTurns` turns from the conversation; files the turns changed stay changed. */
   async codexRollback(name: string, numTurns: number): Promise<{ ok: true; numTurns: number }> {
-    await this._getCodexAppSession(name, 'thread/rollback').rollback(numTurns);
+    await this._getCodexAppSession(name, 'thread/revert').rollback(numTurns);
     return { ok: true, numTurns };
   }
 
@@ -2990,34 +3007,25 @@ export class SessionManager {
   /**
    * Parse Codex `--json` JSONL output from a stdout buffer.
    *
-   * Codex 0.128 emits one event per line: `thread.started`, `turn.started`,
-   * `item.completed` (with `item.type === 'agent_message'` for assistant text
-   * or tool-use types for shell/MCP calls), `turn.completed` (with usage).
-   *
-   * Returns the concatenated assistant text plus the thread_id (if present)
-   * and the raw event list for callers that want full visibility.
+   * One event per line: `thread.started`, `turn.started`, `item.completed`
+   * (`agent_message` for assistant text, the tool types for shell, file and MCP
+   * calls), `turn.completed` (with usage). `assistantText` is every agent
+   * message concatenated, the turn's commentary included, so the
+   * `--output-last-message` file is the answer whenever codex wrote one.
    */
   private _parseCodexJsonl(stdout: string): {
     assistantText: string;
     threadId?: string;
-    usage?: {
-      input_tokens?: number;
-      output_tokens?: number;
-      cached_input_tokens?: number;
-      reasoning_output_tokens?: number;
-    };
+    usage?: CodexUsage;
+    toolCalls: number;
+    toolErrors: number;
     events: unknown[];
   } {
     let assistantText = '';
     let threadId: string | undefined;
-    let usage:
-      | {
-          input_tokens?: number;
-          output_tokens?: number;
-          cached_input_tokens?: number;
-          reasoning_output_tokens?: number;
-        }
-      | undefined;
+    let usage: CodexUsage | undefined;
+    let toolCalls = 0;
+    let toolErrors = 0;
     const events: unknown[] = [];
     for (const line of stdout.split('\n')) {
       const trimmed = line.trim();
@@ -3034,24 +3042,123 @@ export class SessionManager {
         const t = ev as { thread_id?: string };
         if (t.thread_id) threadId = t.thread_id;
       } else if (e.type === 'item.completed') {
-        const it = ev as { item?: { type?: string; text?: string } };
-        if (it.item?.type === 'agent_message' && typeof it.item.text === 'string') {
-          assistantText += it.item.text;
+        const item = (ev as { item?: { type?: string; text?: string; exit_code?: number } }).item;
+        if (item?.type === 'agent_message' && typeof item.text === 'string') {
+          assistantText += item.text;
+        } else if (item?.type && item.type !== 'reasoning' && item.type !== 'todo_list') {
+          // The same rule as the `codex` engine's: what is not a message,
+          // reasoning or the plan is a tool call.
+          toolCalls++;
+          if (item.type === 'command_execution' && typeof item.exit_code === 'number' && item.exit_code !== 0) {
+            toolErrors++;
+          }
         }
       } else if (e.type === 'turn.completed') {
-        const tc = ev as { usage?: typeof usage };
+        const tc = ev as { usage?: CodexUsage };
         if (tc.usage) usage = tc.usage;
       }
     }
-    return { assistantText, threadId, usage, events };
+    return { assistantText, threadId, usage, toolCalls, toolErrors, events };
   }
 
   /**
-   * Wraps `codex exec resume [SESSION_ID|--last] [PROMPT]` (Codex 0.119+).
+   * Run one `codex exec …` to its end: the prompt, when there is one, on stdin
+   * (`-`), and the turn's final message read back from `--output-last-message`
+   * (codex 0.171 streams the turn's commentary as agent messages too). The
+   * prompt never goes on argv, where cmd.exe would cut it at a newline on
+   * Windows.
+   *
+   * Rejects like `execEngine`: on a spawn failure, a timeout, more output than
+   * `maxBuffer`, or a non-zero exit, the error carrying `stdout`.
+   */
+  private _runCodexOnce(
+    args: string[],
+    prompt: string | undefined,
+    opts: { cwd?: string; timeout: number; maxBuffer: number },
+  ): Promise<{ stdout: string; stderr: string; lastMessage?: string }> {
+    const lastMessagePath = path.join(os.tmpdir(), `clawo-codex-last-${process.pid}-${randomUUID()}.txt`);
+    const argv = [...args, '--output-last-message', lastMessagePath, ...(prompt !== undefined ? ['-'] : [])];
+    const takeLastMessage = (): string | undefined => {
+      try {
+        return fs.readFileSync(lastMessagePath, 'utf8') || undefined;
+      } catch {
+        return undefined;
+      } finally {
+        try {
+          fs.unlinkSync(lastMessagePath);
+        } catch {
+          // Never written.
+        }
+      }
+    };
+    return new Promise((resolve, reject) => {
+      let stdout = '';
+      let stderr = '';
+      let settled = false;
+      let proc: ReturnType<typeof spawnEngine>;
+      try {
+        proc = spawnEngine(this._codexBin(), argv, {
+          cwd: opts.cwd,
+          env: { ...process.env },
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
+      } catch (err) {
+        takeLastMessage();
+        reject(new Error(`codex: ${(err as Error).message}`));
+        return;
+      }
+      const timer = setTimeout(() => {
+        killEngineTree(proc);
+        fail(`codex timed out after ${opts.timeout}ms`);
+      }, opts.timeout);
+      timer.unref?.();
+      const fail = (message: string): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        takeLastMessage();
+        reject(Object.assign(new Error(message), { stdout, stderr }));
+      };
+      const onData = (chunk: Buffer, stream: 'out' | 'err'): void => {
+        if (stream === 'out') stdout += chunk.toString('utf8');
+        else stderr += chunk.toString('utf8');
+        if (stdout.length + stderr.length > opts.maxBuffer) {
+          killEngineTree(proc);
+          fail(`codex output exceeded ${opts.maxBuffer} bytes`);
+        }
+      };
+      proc.stdout?.on('data', (d: Buffer) => onData(d, 'out'));
+      proc.stderr?.on('data', (d: Buffer) => onData(d, 'err'));
+      // A process that dies before reading surfaces through 'close'.
+      proc.stdin?.on('error', () => {});
+      proc.stdin?.end(prompt ?? '');
+      proc.on('error', (err: Error) => fail(`codex: ${err.message}`));
+      proc.on('close', (code: number | null) => {
+        if (settled) {
+          // A process that outlived its timeout may still have written the file.
+          takeLastMessage();
+          return;
+        }
+        if (code !== 0) {
+          fail(`codex exited with code ${code}: ${sanitizeSecrets(stderr.trim()).slice(0, 500)}`);
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        resolve({ stdout, stderr, lastMessage: takeLastMessage() });
+      });
+    });
+  }
+
+  /**
+   * Wraps `codex exec resume [SESSION_ID|--last] -` (Codex 0.119+).
    *
    * Resumes a previously recorded Codex thread by UUID/name or picks the most
-   * recent via `--last`. Always uses `--json` + `--sandbox workspace-write`
-   * so the output can be parsed into structured fields.
+   * recent via `--last`, in `workspace-write`: `exec resume` rejects
+   * `--sandbox`, and a resumed thread does not keep its first turn's mode (the
+   * `codex` engine found that out the hard way), so the mode is restated as
+   * `-c sandbox_mode="workspace-write"`. The prompt goes on stdin and the
+   * answer is the turn's final message.
    *
    * Note: this is a one-shot operation independent of the session manager's
    * tracked sessions. For in-session continuity (each send within one session
@@ -3069,36 +3176,32 @@ export class SessionManager {
     ok: true;
     text: string;
     threadId?: string;
-    usage?: {
-      input_tokens?: number;
-      output_tokens?: number;
-      cached_input_tokens?: number;
-      reasoning_output_tokens?: number;
-    };
+    usage?: CodexUsage;
     events: unknown[];
   }> {
     if (!opts.sessionId && !opts.last) {
       throw new Error('codexResume requires either sessionId or last=true');
     }
-    // `codex exec resume` does not accept --sandbox or -C — sandbox policy
-    // and cwd are inherited from the original session. Forward `cwd` via
-    // the spawn process's working directory so Codex's --last picker scopes
-    // correctly when no SESSION_ID is given.
+    // A positional that starts with `-` is read as an option.
+    if (opts.sessionId?.startsWith('-')) {
+      throw new Error(`codexResume: invalid session id '${opts.sessionId}'`);
+    }
+    // `codex exec resume` does not accept --sandbox or -C. `cwd` is the spawn's
+    // working directory, which is also what scopes `--last` to this directory.
     const args: string[] = ['exec', 'resume'];
     if (opts.last) args.push('--last');
     else if (opts.sessionId) args.push(opts.sessionId);
-    args.push('--skip-git-repo-check', '--json');
+    args.push('--skip-git-repo-check', '--json', '-c', 'sandbox_mode="workspace-write"');
     if (opts.model) args.push('--model', opts.model);
-    args.push(opts.message);
-    const { stdout } = await execEngine(this._codexBin(), args, {
+    const run = await this._runCodexOnce(args, opts.message, {
       cwd: opts.cwd ? path.resolve(opts.cwd) : undefined,
-      maxBuffer: 32 * 1024 * 1024,
       timeout: opts.timeout || 300_000,
+      maxBuffer: 32 * 1024 * 1024,
     });
-    const parsed = this._parseCodexJsonl(stdout);
+    const parsed = this._parseCodexJsonl(run.stdout);
     return {
       ok: true,
-      text: parsed.assistantText,
+      text: run.lastMessage ?? parsed.assistantText,
       threadId: parsed.threadId,
       usage: parsed.usage,
       events: parsed.events,
@@ -3106,10 +3209,13 @@ export class SessionManager {
   }
 
   /**
-   * Wraps `codex review [PROMPT] [--uncommitted | --base BRANCH | --commit SHA]`.
+   * Wraps `codex exec review --json [--uncommitted | --base BRANCH | --commit SHA] [-]`.
    *
-   * Codex 0.128's review subcommand outputs plain text (no `--json` flag),
-   * so the wrapper just captures stdout/stderr verbatim.
+   * `exec review` (rather than the plain-text `codex review`) reports the
+   * thread and the review's final message, and the review's usage is recorded
+   * in the run ledger as session `codex_review`, like any other turn. The custom
+   * instructions, when given, go on stdin. `stdout` in the result is the
+   * review itself.
    */
   async codexReview(opts: {
     prompt?: string;
@@ -3120,14 +3226,14 @@ export class SessionManager {
     title?: string;
     model?: string;
     timeout?: number;
-  }): Promise<{ ok: true; stdout: string; stderr: string }> {
+  }): Promise<{ ok: true; stdout: string; stderr: string; threadId?: string; usage?: CodexUsage }> {
     // Mutex: at most one diff scope flag.
     const scopes = [opts.uncommitted, opts.base, opts.commit].filter((v) => v != null && v !== false);
     if (scopes.length > 1) {
       throw new Error('codexReview: --uncommitted, --base, and --commit are mutually exclusive');
     }
     // Validate git refs: reject leading-dash (argument injection) and shell/path
-    // metacharacters. args go through execFile (no shell) but a '--flag'-shaped
+    // metacharacters. args go through spawn (no shell) but a '--flag'-shaped
     // value could still be misread by codex's parser.
     const GIT_REF = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
     if (opts.base != null && !GIT_REF.test(opts.base)) {
@@ -3136,19 +3242,178 @@ export class SessionManager {
     if (opts.commit != null && !GIT_REF.test(opts.commit)) {
       throw new Error(`codexReview: invalid commit ref '${opts.commit}'`);
     }
-    const args: string[] = ['review'];
+    // No --ephemeral: the review's usage is read from its rollout.
+    const args: string[] = ['exec', 'review', '--json', '--skip-git-repo-check'];
     if (opts.uncommitted) args.push('--uncommitted');
     if (opts.base) args.push('--base', opts.base);
     if (opts.commit) args.push('--commit', opts.commit);
     if (opts.title) args.push('--title', opts.title);
-    if (opts.model) args.push('-c', `model="${opts.model}"`);
-    if (opts.prompt) args.push(opts.prompt);
-    const { stdout, stderr } = await execEngine(this._codexBin(), args, {
-      cwd: opts.cwd ? path.resolve(opts.cwd) : undefined,
-      maxBuffer: 16 * 1024 * 1024,
-      timeout: opts.timeout || 600_000,
-    });
-    return { ok: true, stdout, stderr };
+    if (opts.model) args.push('--model', opts.model);
+    const cwd = opts.cwd ? path.resolve(opts.cwd) : undefined;
+    const startedAt = Date.now();
+    let run: { stdout: string; stderr: string; lastMessage?: string };
+    try {
+      run = await this._runCodexOnce(args, opts.prompt, {
+        cwd,
+        timeout: opts.timeout || 600_000,
+        maxBuffer: 16 * 1024 * 1024,
+      });
+    } catch (err) {
+      const stdout = (err as { stdout?: unknown }).stdout;
+      this._recordCodexReview(
+        cwd ?? process.cwd(),
+        startedAt,
+        opts.model,
+        typeof stdout === 'string' ? stdout : '',
+        boundedErrorReason(err),
+      );
+      throw err;
+    }
+    const { parsed, usage } = this._recordCodexReview(cwd ?? process.cwd(), startedAt, opts.model, run.stdout);
+    return {
+      ok: true,
+      stdout: run.lastMessage ?? parsed.assistantText,
+      stderr: run.stderr,
+      threadId: parsed.threadId,
+      usage,
+    };
+  }
+
+  /**
+   * Write the run-ledger row for one `codex exec review`, and return its usage.
+   *
+   * Measured on 0.171.0: the review runs as a sub-agent thread of its own, and
+   * the exec thread's `turn.completed` reports zero usage. When codex reported
+   * none, the usage is the sub-agent's, from its rollout.
+   */
+  private _recordCodexReview(
+    cwd: string,
+    startedAt: number,
+    model: string | undefined,
+    stdout: string,
+    error?: string,
+  ): { parsed: ReturnType<SessionManager['_parseCodexJsonl']>; usage?: CodexUsage } {
+    const parsed = this._parseCodexJsonl(stdout);
+    let usage = parsed.usage;
+    let billedModel = model;
+    const reported = Object.values(usage ?? {}).some((v) => typeof v === 'number' && v > 0);
+    if (!reported && parsed.threadId) {
+      const sub = this._codexReviewRollout(parsed.threadId, startedAt);
+      if (sub.usage) usage = sub.usage;
+      billedModel ??= sub.model;
+    }
+    const tokensIn = usage?.input_tokens ?? 0;
+    const cachedTokens = usage?.cached_input_tokens ?? 0;
+    const tokensOut = (usage?.output_tokens ?? 0) + (usage?.reasoning_output_tokens ?? 0);
+    const pricing = getModelPricing(billedModel, 'gpt-5.5');
+    // Codex counts its cached reads inside `input_tokens`.
+    const costUsd =
+      (Math.max(0, tokensIn - cachedTokens) * pricing.input +
+        cachedTokens * (pricing.cached ?? 0) +
+        tokensOut * pricing.output) /
+      1_000_000;
+    const row: RunLedgerRow = {
+      ts: new Date().toISOString(),
+      session: 'codex_review',
+      engine: 'codex',
+      cwd,
+      turn: 1,
+      tokensIn,
+      tokensOut,
+      cachedTokens,
+      costUsd: Math.round(costUsd * 10000) / 10000,
+      tokensEstimated: false,
+      durationMs: Date.now() - startedAt,
+      toolCalls: parsed.toolCalls,
+      toolErrors: parsed.toolErrors,
+      ok: !error,
+    };
+    if (billedModel) row.model = billedModel;
+    if (error) row.error = error.slice(0, 500);
+    const repoLang = this._repoLang(cwd);
+    if (repoLang) row.repoLang = repoLang;
+    appendRunRow(row, this.logger);
+    return { parsed, usage };
+  }
+
+  /**
+   * The usage and model of the review sub-agent a `codex exec review` thread
+   * started, from the sub-agent's rollout: the one whose `session_meta` names
+   * the exec thread as `parent_thread_id` with source `{subagent: "review"}`.
+   * Only the two newest day directories, and only files written since the
+   * review began, are read. Empty when there is none (an older codex, or a
+   * rollout that could not be read).
+   */
+  private _codexReviewRollout(parentThreadId: string, since: number): { usage?: CodexUsage; model?: string } {
+    try {
+      const root = path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'sessions');
+      const newestFirst = (dir: string): string[] =>
+        fs
+          .readdirSync(dir, { withFileTypes: true })
+          .filter((e) => e.isDirectory())
+          .map((e) => path.join(dir, e.name))
+          .sort()
+          .reverse();
+      const days: string[] = [];
+      for (const year of newestFirst(root)) {
+        for (const month of newestFirst(year)) {
+          for (const day of newestFirst(month)) {
+            if (days.length < 2) days.push(day);
+          }
+        }
+      }
+      const parentRe = new RegExp(`"parent_thread_id":\\s*"${parentThreadId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"`);
+      for (const dir of days) {
+        const names = fs
+          .readdirSync(dir)
+          .filter((f) => f.startsWith('rollout-') && f.endsWith('.jsonl'))
+          .sort()
+          .reverse();
+        for (const name of names) {
+          const file = path.join(dir, name);
+          if (fs.statSync(file).mtimeMs < since - 60_000) continue;
+          const fd = fs.openSync(file, 'r');
+          const head = Buffer.alloc(8192);
+          const n = fs.readSync(fd, head, 0, head.length, 0);
+          fs.closeSync(fd);
+          const meta = head.subarray(0, n).toString('utf8');
+          if (!parentRe.test(meta) || !/"subagent":\s*"review"/.test(meta)) continue;
+          const text = fs.readFileSync(file, 'utf8');
+          const totals = text.match(/"total_token_usage":\s*\{[^}]*\}/g);
+          const last = totals?.[totals.length - 1];
+          const total = last
+            ? (JSON.parse(`{${last}}`) as { total_token_usage?: Record<string, number> }).total_token_usage
+            : undefined;
+          let model: string | undefined;
+          for (const line of text.split('\n')) {
+            if (!line.includes('"turn_context"')) continue;
+            try {
+              const entry = JSON.parse(line) as { type?: string; payload?: { model?: unknown } };
+              if (entry.type === 'turn_context' && typeof entry.payload?.model === 'string')
+                model = entry.payload.model;
+            } catch {
+              // A torn line.
+            }
+          }
+          return {
+            ...(total
+              ? {
+                  usage: {
+                    input_tokens: total.input_tokens ?? 0,
+                    cached_input_tokens: total.cached_input_tokens ?? 0,
+                    output_tokens: total.output_tokens ?? 0,
+                    reasoning_output_tokens: total.reasoning_output_tokens ?? 0,
+                  },
+                }
+              : {}),
+            ...(model ? { model } : {}),
+          };
+        }
+      }
+    } catch {
+      // Best effort: no usage beats a failed review.
+    }
+    return {};
   }
 
   // ─── Project Purge (CLI 2.1.126) ──────────────────────────────────────
