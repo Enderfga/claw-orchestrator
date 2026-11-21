@@ -8,6 +8,9 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { EventEmitter } from 'node:events';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { SessionConfig, StreamEvent } from '../types.js';
 
 // ─── Mock child_process ────────────────────────────────────────────────────
@@ -260,19 +263,26 @@ describe('PersistentClaudeSession', () => {
       expect(args).toContain('--forward-subagent-text');
     });
 
-    it('passes --chrome only when asked', async () => {
+    // Chrome acts with the browser's own sign-ins, so it is off unless asked
+    // for — and off has to be said: a user setting can turn it on by default.
+    it('passes --chrome only when asked, and --no-chrome otherwise', async () => {
       const { spawnEngine: spawn } = await import('../engine-spawn.js');
-      session = new PersistentClaudeSession(makeConfig({ chrome: true }));
-      let started = session.start();
-      emitInitEvent(mockProc);
-      await started;
-      expect(vi.mocked(spawn).mock.calls.at(-1)![1] as string[]).toContain('--chrome');
+      const argvFor = async (chrome: boolean | undefined) => {
+        session = new PersistentClaudeSession(makeConfig(chrome === undefined ? {} : { chrome }));
+        const started = session.start();
+        emitInitEvent(mockProc);
+        await started;
+        return vi.mocked(spawn).mock.calls.at(-1)![1] as string[];
+      };
 
-      session = new PersistentClaudeSession(makeConfig({}));
-      started = session.start();
-      emitInitEvent(mockProc);
-      await started;
-      expect(vi.mocked(spawn).mock.calls.at(-1)![1] as string[]).not.toContain('--chrome');
+      const on = await argvFor(true);
+      expect(on).toContain('--chrome');
+      expect(on).not.toContain('--no-chrome');
+      for (const chrome of [undefined, false]) {
+        const off = await argvFor(chrome);
+        expect(off).toContain('--no-chrome');
+        expect(off).not.toContain('--chrome');
+      }
     });
 
     it('omits --forward-subagent-text by default', async () => {
@@ -484,6 +494,121 @@ describe('PersistentClaudeSession', () => {
       mockProc.stdout.emit('data', Buffer.from(JSON.stringify(initEvent) + '\n'));
       await startPromise;
       expect(session.stats.pluginErrors).toBeUndefined();
+    });
+  });
+
+  // Flags verified against CLI 2.1.330: each is accepted ahead of a bogus one,
+  // and the `initialize` control request shows its effect (MCP servers, commands
+  // and plugins loaded) without a model turn.
+  describe('start() — settings, MCP, plugins, compaction, slash commands', () => {
+    const argvFor = async (overrides: Partial<SessionConfig>) => {
+      const { spawnEngine: spawn } = await import('../engine-spawn.js');
+      session = new PersistentClaudeSession(makeConfig(overrides));
+      const started = session.start();
+      emitInitEvent(mockProc);
+      await started;
+      return vi.mocked(spawn).mock.calls.at(-1)![1] as string[];
+    };
+    const valuesOf = (argv: string[], flag: string) => argv.flatMap((a, i) => (a === flag ? [argv[i + 1]] : []));
+    const spawnCount = async () => {
+      const { spawnEngine: spawn } = await import('../engine-spawn.js');
+      return vi.mocked(spawn).mock.calls.length;
+    };
+
+    it('passes none of the new flags by default', async () => {
+      const argv = await argvFor({});
+      for (const flag of [
+        '--strict-mcp-config',
+        '--setting-sources',
+        '--system-prompt-snapshot',
+        '--plugin-dir',
+        '--autocompact',
+        '--append-subagent-system-prompt',
+        '--disable-slash-commands',
+      ]) {
+        expect(argv).not.toContain(flag);
+      }
+    });
+
+    it('passes --strict-mcp-config when strictMcpConfig is set', async () => {
+      expect(await argvFor({ strictMcpConfig: true })).toContain('--strict-mcp-config');
+      expect(await argvFor({ strictMcpConfig: false })).not.toContain('--strict-mcp-config');
+    });
+
+    it('passes the setting sources comma-joined, and an empty list as an empty value', async () => {
+      expect(valuesOf(await argvFor({ settingSources: ['project', 'local'] }), '--setting-sources')).toEqual([
+        'project,local',
+      ]);
+      // `--setting-sources ''` loads no settings files (measured: the user's MCP
+      // servers and plugin commands are gone), unlike leaving the flag out.
+      expect(valuesOf(await argvFor({ settingSources: [] }), '--setting-sources')).toEqual(['']);
+    });
+
+    it('refuses an unknown setting source before spawning', async () => {
+      const before = await spawnCount();
+      session = new PersistentClaudeSession(makeConfig({ settingSources: ['user', 'global' as never] }));
+      await expect(session.start()).rejects.toThrow(/settingSources.*global/);
+      expect(await spawnCount()).toBe(before);
+    });
+
+    it('passes --system-prompt-snapshot on or off, and refuses anything else', async () => {
+      expect(valuesOf(await argvFor({ systemPromptSnapshot: 'off' }), '--system-prompt-snapshot')).toEqual(['off']);
+      expect(valuesOf(await argvFor({ systemPromptSnapshot: 'on' }), '--system-prompt-snapshot')).toEqual(['on']);
+      session = new PersistentClaudeSession(makeConfig({ systemPromptSnapshot: 'OFF' as never }));
+      await expect(session.start()).rejects.toThrow(/systemPromptSnapshot/);
+    });
+
+    it('passes one --plugin-dir per entry', async () => {
+      expect(valuesOf(await argvFor({ pluginDir: '/p/one' }), '--plugin-dir')).toEqual(['/p/one']);
+      expect(valuesOf(await argvFor({ pluginDir: ['/p/one', '/p/two.zip'] }), '--plugin-dir')).toEqual([
+        '/p/one',
+        '/p/two.zip',
+      ]);
+    });
+
+    it('passes --autocompact auto or a token count of at least 100000', async () => {
+      expect(valuesOf(await argvFor({ autoCompactWindow: 'auto' }), '--autocompact')).toEqual(['auto']);
+      expect(valuesOf(await argvFor({ autoCompactWindow: 100_000 }), '--autocompact')).toEqual(['100000']);
+      expect(valuesOf(await argvFor({ autoCompactWindow: 400_000 }), '--autocompact')).toEqual(['400000']);
+    });
+
+    // The CLI reads 100–1000 as thousands ("200 as shorthand") and refuses
+    // 1001–99999; the field is a token count, so 200 must not quietly mean 200k.
+    it('refuses an autocompact window that is not auto or a whole token count of at least 100000', async () => {
+      const before = await spawnCount();
+      for (const bad of [99_999, 200, 0, -1, 150_000.5, Number.NaN, '200000', 'AUTO']) {
+        session = new PersistentClaudeSession(makeConfig({ autoCompactWindow: bad as never }));
+        await expect(session.start()).rejects.toThrow(/autoCompactWindow/);
+      }
+      expect(await spawnCount()).toBe(before);
+    });
+
+    it('passes --append-subagent-system-prompt verbatim', async () => {
+      const text = 'Report findings as a bulleted list.';
+      expect(valuesOf(await argvFor({ appendSubagentSystemPrompt: text }), '--append-subagent-system-prompt')).toEqual([
+        text,
+      ]);
+    });
+
+    it('passes --disable-slash-commands when disableSlashCommands is set', async () => {
+      expect(await argvFor({ disableSlashCommands: true })).toContain('--disable-slash-commands');
+    });
+
+    // With slash commands off, `/compact` would reach the model as plain text:
+    // a model turn, and no compaction.
+    it('refuses compact() without writing anything when slash commands are disabled', async () => {
+      await argvFor({ disableSlashCommands: true });
+      const writes = mockProc.stdin.write.mock.calls.length;
+      await expect(session.compact()).rejects.toThrow(/disableSlashCommands/);
+      await expect(session.compact('keep the plan')).rejects.toThrow(/disableSlashCommands/);
+      expect(mockProc.stdin.write.mock.calls.length).toBe(writes);
+    });
+
+    it('still sends /compact when slash commands are enabled', async () => {
+      await argvFor({});
+      void session.compact().catch(() => undefined);
+      const payload = JSON.parse((mockProc.stdin.write.mock.calls.at(-1)![0] as string).trim());
+      expect(payload.message.content).toEqual([{ type: 'text', text: '/compact' }]);
     });
   });
 
@@ -1041,6 +1166,50 @@ describe('PersistentClaudeSession', () => {
       const result = await session.send('hello');
       expect(result).toHaveProperty('requestId');
       expect(result).toHaveProperty('sent', true);
+    });
+
+    // stream-json takes Messages API content blocks: each image goes in as a
+    // base64 `image` block ahead of the text, which keeps its prefixes.
+    it('sends images as base64 image blocks ahead of the text block', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'clawo-img-'));
+      const png = join(dir, 'a.png');
+      const jpg = join(dir, 'b.JPEG');
+      const webp = join(dir, 'c.webp');
+      const gif = join(dir, 'd.gif');
+      writeFileSync(png, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+      writeFileSync(jpg, Buffer.from([0xff, 0xd8, 0xff]));
+      writeFileSync(webp, Buffer.from('RIFF'));
+      writeFileSync(gif, Buffer.from('GIF89a'));
+
+      await session.send('What is shown?', { images: [png, jpg, webp, gif], effort: 'high', plan: true });
+      const payload = JSON.parse((mockProc.stdin.write.mock.calls.at(-1)![0] as string).trim());
+      const content = payload.message.content as Array<Record<string, unknown>>;
+      expect(content.slice(0, 4)).toEqual([
+        { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'iVBORw==' } },
+        { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: '/9j/' } },
+        { type: 'image', source: { type: 'base64', media_type: 'image/webp', data: 'UklGRg==' } },
+        { type: 'image', source: { type: 'base64', media_type: 'image/gif', data: 'R0lGODlh' } },
+      ]);
+      expect(content).toHaveLength(5);
+      expect(content[4].type).toBe('text');
+      expect(content[4].text).toMatch(/^\[Planning Mode\][\s\S]*ultrathink\n\nWhat is shown\?$/);
+    });
+
+    it('keeps a text-only message as a single text block when images is empty', async () => {
+      await session.send('hello', { images: [] });
+      const payload = JSON.parse((mockProc.stdin.write.mock.calls.at(-1)![0] as string).trim());
+      expect(payload.message.content).toEqual([{ type: 'text', text: 'hello' }]);
+    });
+
+    it('refuses an unreadable or non-image file without writing or starting a turn', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'clawo-img-'));
+      const txt = join(dir, 'notes.txt');
+      writeFileSync(txt, 'x');
+      const writes = mockProc.stdin.write.mock.calls.length;
+      await expect(session.send('look', { images: [join(dir, 'missing.png')] })).rejects.toThrow(/missing\.png/);
+      await expect(session.send('look', { images: [txt] })).rejects.toThrow(/notes\.txt/);
+      expect(mockProc.stdin.write.mock.calls.length).toBe(writes);
+      expect(session.isBusy).toBe(false);
     });
 
     // A message written while a turn runs is folded into it at the next tool

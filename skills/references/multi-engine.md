@@ -69,6 +69,37 @@ Default engine. Long-running subprocess with streaming JSON I/O. Tested with Cla
 - `restricted` → `--restricted`: removes the command- and code-running tools and `WebFetch` from
   the session, and ignores user/project/local settings files (including CLAUDE.md). It is separate
   from `sandboxMode: 'read-only'`, which maps to plan mode
+- `settingSources` → `--setting-sources`, comma-joined: the settings files to load (`user`,
+  `project`, `local`). An empty list is passed as `''` and loads none of them, so the user's MCP
+  servers, plugins, model and env are not loaded; `settings` still applies. Another value is
+  refused at start
+- `strictMcpConfig` → `--strict-mcp-config`: only the servers of `mcpConfig`; with no `mcpConfig`,
+  no MCP servers at all
+- `pluginDir` → one `--plugin-dir` per entry: local plugin directories or `.zip` files, loaded for
+  this session only
+- `systemPromptSnapshot` → `--system-prompt-snapshot on|off`. With `on`, the CLI's default
+  except under `bare`, the system prompt is recorded on the conversation's first request and sent
+  as recorded on every later request and resume until the conversation is compacted: a session
+  resumed with a different `appendSystemPrompt` keeps answering to the old one. `off` renders the
+  prompt on every request, so the new one takes effect, including on a conversation that began
+  with a recorded prompt
+- `appendSubagentSystemPrompt` → `--append-subagent-system-prompt` (a flag `claude --help` does
+  not list): standing instructions for the subagents the session starts
+- `autoCompactWindow` → `--autocompact`: the CLI's own auto-compaction window, `auto` or a whole
+  token count of at least 100000. It applies inside a turn, unlike `autoCompactPercent`, which
+  compacts between turns. Anything else is refused at start; the CLI reads 100 to 1000 as
+  thousands, so `200` is refused rather than taken as 200k
+- `disableSlashCommands` → `--disable-slash-commands`: messages go in as text, with no skill or
+  slash command expanded. That includes `/compact`: `compact()` then fails instead of sending it,
+  and `autoCompactPercent` cannot compact the session (each attempt is logged as a failed
+  auto-compact)
+- `chrome: true` → `--chrome`; otherwise `--no-chrome`, so Claude in Chrome stays off even where
+  the user has it on by default
+- `sessionName` → `-n <name>`: the conversation's display name, which `--resume <name>` also
+  accepts
+- `images` on a send go in the stream-json user message as base64 `image` content blocks, media
+  type from the file extension, ahead of the text block, which keeps the `ultrathink` and plan
+  prefixes. A file that cannot be read fails the send before the turn starts
 - Fork subagent (`forkSubagent`), tool search (`enableToolSearch`), OpenTelemetry logging toggles (`otelLogUserPrompts`, `otelLogRawApiBodies`), the `xhigh` effort tier, and `stats.pluginErrors` capture — see [SKILL.md](../SKILL.md#claude-engine-options) and [tools.md](./tools.md)
 
 ```typescript

@@ -227,6 +227,8 @@ has been billed for in total, which only ever grows.
 
 `compactSession()` runs `/compact` (with the optional summary) on `claude` and a
 persistent `custom` engine, and starts the thread's own compaction on `codex-app`.
+A `claude` session started with `disableSlashCommands` refuses it with an error,
+since `/compact` would reach the model as text.
 It is a no-op on the one-shot engines whose CLI has no compaction command (`codex`,
 `agy`, `grok`, `opencode`), which log a warning the first time it is called, and a
 silent no-op on `acp` agents, which manage their own context, and on one-shot
