@@ -307,9 +307,24 @@ await manager.startSession({
 
 ### Grok Build (`engine: 'grok'`)
 
-Wraps xAI's **Grok Build** CLI. Each `send()` spawns `grok -p <msg> --output-format streaming-json`,
-which prints one JSON object per line and exits: the reply as `text` pieces, a `usage` event per
-request, and an `end` event with the rest. Tested with `grok` **1.0.88**.
+Wraps xAI's **Grok Build** CLI. Each `send()` spawns `grok -p --output-format streaming-json` with
+the message on stdin, which prints one JSON object per line and exits: the reply as `text` pieces, a
+`usage` event per request, tool calls, and an `end` event with the rest. Tested with `grok`
+**1.0.88**.
+
+- **The message is never an argument.** `-p` with no value reads the prompt from stdin, so a
+  message that starts with `-` (`- item`, `-5 degrees`, `--- heading`) arrives as written, where
+  grok's option parser would read it as a flag; nor does it show in `ps` or meet the argument size
+  limit. `systemPrompt` and `appendSystemPrompt` go in the `--flag=value` form for the same reason.
+- **Streaming**: `text` pieces reach `onText` and the `text` event as they arrive. A `tool_call` is
+  reported through `onToolUse` and the `tool_use` event, and its final `tool_call_update`
+  (`completed` or `failed`) through `onToolResult` and `tool_result`; the session counts them in
+  `toolCalls` and `toolErrors`.
+- **Only `end_turn` is a completed turn.** grok's stop reasons are open-ended (`max_tokens`,
+  `max_turn_requests`, `refusal`, `cancelled`, `hook_blocked`, `hook_stopped`, and more may come),
+  and its docs say to treat an unknown one as not a success. Any other reason resolves the send with
+  the text it produced and `stop_reason: 'error'`, and does not count toward `turnsSucceeded`; a
+  hook that stopped the turn rejects it with the hook's message.
 
 - **Cost comes from the engine, not from the price table.** The `end` event carries
   `total_cost_usd`, and the wrapper writes it straight into the session's spend, so the run ledger
@@ -330,24 +345,69 @@ request, and an `end` event with the rest. Tested with `grok` **1.0.88**.
   clamp to `xhigh`.
 - Session options that reach grok: `cwd` → `--cwd`, `appendSystemPrompt` → `--rules` (appends,
   unlike `systemPrompt` → `--system-prompt-override`, which replaces), `maxTurns` → `--max-turns`,
-  `allowedTools` → `--tools`, `disallowedTools` → `--disallowed-tools`, `jsonSchema` →
-  `--json-schema` (inline, and it implies the JSON output format already asked for), `agent` →
-  `--agent`, `agents` → `--agents`, `dangerouslySkipPermissions` → `--always-approve`,
+  `jsonSchema` → `--json-schema` (inline, and it implies the JSON output format already asked for),
+  `agent` → `--agent`, `agents` → `--agents`, `dangerouslySkipPermissions` → `--always-approve`,
   `forkSession` → `--fork-session` (on a resumed turn), `customSessionId` → `--session-id` (on a
-  first turn, or a forked one). **grok validates neither tool list**: a name that does not exist is
-  ignored rather than rejected, so a typo in a denylist leaves the tool enabled. Prefer an allowlist.
+  first turn, or a forked one), `trustProject` → `--trust`, `debug` → `--debug`, `debugFile` →
+  `--debug-file`.
+- **Tool control.** `allowedTools` and `disallowedTools` are permission rules, as on Claude Code:
+  - `allowedTools` → one `--allow <rule>` per entry. An allow rule only auto-approves.
+  - `disallowedTools` → one `--deny <rule>` per entry. A deny rule refuses every matching call, in
+    any permission mode, and wins over allow: with `--deny Bash` a shell call came back "Denied by
+    permission policy" and did not run (1.0.92).
+  - grok's rules name `Bash`, `Read`, `Edit`, `Write`, `Grep`, `Glob`, `WebFetch`, `WebSearch` and
+    `MCPTool`, bare or with a pattern (`Bash(npm *)`, `Read(./src/**)`); `mcp__<server>__<tool>`
+    becomes `MCPTool(<server>__<tool>)`. A `disallowedTools` entry naming anything else — a
+    subagent (`Agent`, `Agent(explore)`, `Task`), one of grok's own tool ids (`run_terminal_cmd`), a
+    Claude tool grok lacks — goes to `--disallowed-tools`, which removes the tool; a name grok does
+    not know there only warns. An `allowedTools` entry grok has no rule for is left out and named
+    once in the session log: `--allow NotebookEdit` would stop grok at start.
+  - `tools` → `--tools a,b`, grok's built-in toolset allowlist, which takes grok's tool ids
+    (`read_file`, `grep`, `run_terminal_cmd`), not permission rules: `--tools Bash` or
+    `--disallowed-tools Bash` names no tool and changes nothing. `tools: 'default'` passes nothing.
+
+- **No wait for background work.** After a turn, grok would wait up to 600 s for background shells
+  and subagents it started, and answer each in a further turn — longer than the default 300 s send
+  timeout, so the send would time out without the reply, the cost or the session id. The session
+  passes `--no-wait-for-background`: grok exits when the turn ends and stops the work still running,
+  with the exit code and the `end` event unchanged (a turn that left `sleep 90` running returned in
+  12 s). A model that needs a background result has to wait for it within its turn.
 - **`sandboxMode: 'read-only'` runs inside grok's `--sandbox read-only` profile**, which the OS
   enforces (Seatbelt on macOS, Landlock on Linux) for the whole process tree: the session reads
   anywhere and can write only to `~/.grok/` and the temp directory. Measured on 1.0.50 with
   `bypassPermissions`: a direct write, a shell write, a delegated subagent, a write on a resumed turn
   and a write outside the project all fail with `Operation not permitted`. A tool allowlist was not
-  enough — a delegated subagent does not inherit it. Three cases are refused rather than claimed:
-  - a project under the temp directory, which the profile leaves writable;
+  enough — a delegated subagent does not inherit it. **`sandboxMode: 'workspace-write'` runs inside
+  `--sandbox workspace`**, which also lets the session write its working directory. Cases refused
+  rather than claimed:
+  - for read-only, a project under the temp directory, which the profile leaves writable;
   - a platform other than macOS or Linux;
   - a sandbox grok reports it could not apply. grok itself would carry on unsandboxed; the session
     kills the process on that warning, which grok prints at startup before any model call.
 
-  Child-process network access is not blocked on macOS (grok enforces that part on Linux only).
+  Child-process network access is not blocked on macOS (grok enforces that part on Linux only). A
+  session keeps the profile it was created with; grok refuses a resume under a different one.
+
+- **Images** (`session_send` `images`) go with the message as ACP content blocks in a private
+  `.json` file passed as `--prompt-file`, removed when the turn ends. `--prompt-json` takes the same
+  blocks as an argument, which caps an image at what one argument may hold (128 KiB on Linux); a
+  28 MB prompt file was read whole. Measured on 1.0.92: the model read the number in a PNG sent this
+  way, and did not see one sent as a `resource_link` to the file.
+- **`addDir`** → one `--add-dir` per entry, on the session's first turn only (grok refuses it beside
+  `--resume`; a resumed session keeps its folders). grok refuses a folder it does not trust or that
+  the sandbox profile cannot write (`workspace` writes only the working directory), and grok 1.0.92's
+  headless route refuses every added folder: "additionalDirectories is not supported: a session
+  works only in its cwd". The refusal comes before any model call, as the turn's error.
+- **`trustProject`** → `--trust`: grok loads the folder's AGENTS.md, skills, MCP servers and hooks,
+  which headless grok otherwise skips, and records the grant in `~/.grok/trusted_folders.toml`, so
+  it holds for later runs in that folder too.
+- **`debug`** → `--debug`, which takes no categories: grok writes the log to
+  `$GROK_HOME/debug/<session-id>.txt`, or to `debugFile` (`--debug-file`), not to stderr.
+- **`worktree`** → `--worktree=<name>` (or a bare `--worktree` for `true`) on the first turn: grok
+  creates a git worktree under `~/.grok/worktrees/` and runs the session there. Later turns resume
+  with `--cwd` set to the worktree, which the first `end` event names and `getStats()` reports as
+  `grokWorktreePath`; grok resumes a session in the folder it was created in in any case. The
+  worktree outlives the session: remove it with `grok worktree rm <path>`.
 
 - **On an exhausted free tier grok answers with an error object** (`{"type":"error","message":...}`),
   and the session reports that message as the turn's error.
