@@ -122,13 +122,15 @@ describe.runIf(posix)('one-shot turn timeout waits for the engine process to exi
     await expect(session.send('first', { waitForComplete: true, timeout: 500 })).rejects.toThrow(/Timeout/);
     expect(session.isBusy).toBe(true);
 
-    await session.send('second', { waitForComplete: true, timeout: 5_000 }).catch(() => undefined);
+    // Generous: under a full parallel run the second spawn has been seen to take
+    // longer than 5 s to log its start, and this measures order, not speed.
+    await session.send('second', { waitForComplete: true, timeout: 20_000 }).catch(() => undefined);
     const [startA, ...rest] = log();
     const pidA = startA.split(' ')[1];
     const startB = rest.findIndex((line) => line.startsWith('start '));
     expect(startB).toBeGreaterThan(rest.indexOf(`exit ${pidA}`));
     session.stop();
-  });
+  }, 30_000);
 });
 
 describe.runIf(posix)('EngineProcessSet', () => {

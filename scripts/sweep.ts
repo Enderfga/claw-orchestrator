@@ -130,7 +130,7 @@ const ENGINES: Engine[] = [
     upstream: () => npmLatest('opencode-ai'),
     session: { file: 'persistent-opencode-session.js', cls: 'PersistentOpencodeSession' },
     liveCwd: 'repo',
-    otherLineFlags: ['--standalone'],
+    otherLineFlags: ['--standalone', '--archived'],
   },
   // OpenCode 2 ships as GitHub release binaries and a curl installer, not on
   // npm, where `opencode-ai` stays on the 1.x line. Its first release, 2.2.0,
@@ -146,7 +146,7 @@ const ENGINES: Engine[] = [
     upstream: () => ghLatestStable('anomalyco/opencode', /^v(2\.\d+\.\d+)$/),
     session: { file: 'persistent-opencode-session.js', cls: 'PersistentOpencodeSession' },
     liveCwd: 'repo',
-    otherLineFlags: ['--variant'],
+    otherLineFlags: ['--variant', '--pure'],
   },
 ];
 

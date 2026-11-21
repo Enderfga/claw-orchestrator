@@ -555,7 +555,7 @@ export interface SessionConfig {
   codexConfig?: Record<string, string | number | boolean>;
   /** Codex: features to turn on or off for the session (`--enable` / `--disable`). */
   codexFeatures?: { enable?: string[]; disable?: string[] };
-  /** Codex: do not load the execpolicy `.rules` files (`--ignore-rules`). */
+  /** `codex` only: do not load the execpolicy `.rules` files (`--ignore-rules`); the app-server has no such flag, so `codex-app` refuses it. */
   ignoreRules?: boolean;
   /**
    * Custom engine configuration — required when engine is 'custom'.

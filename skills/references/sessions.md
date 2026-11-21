@@ -39,7 +39,7 @@ Key options:
 | `maxBudgetUsd`       | Spend cap in USD, checked before every send on every engine; once spend reaches it, further sends are refused                                                                                                                                                                                                                                                                       |
 | `bare`               | Claude Code: skip hooks, LSP, auto-memory, CLAUDE.md                                                                                                                                                                                                                                                                                                                                |
 | `worktree`           | Claude Code: run in an isolated git worktree                                                                                                                                                                                                                                                                                                                                        |
-| `appendSystemPrompt` | Append custom instructions to the system prompt. Claude Code and Grok take it natively; Codex, Antigravity and OpenCode have no such flag and receive it at the top of the first message of a conversation, as does `codex-app` on a new thread and an `acp` session on a new session                                                                                               |
+| `appendSystemPrompt` | Append custom instructions to the system prompt. Claude Code and Grok take it natively, and `codex-app` as the thread's developer instructions; Codex, Antigravity and OpenCode have no such flag and receive it at the top of the first message of a conversation, as does an `acp` session on a new session                                                                       |
 
 ### Sending Messages
 
@@ -84,7 +84,7 @@ await manager.startSession({
 });
 ```
 
-`resumeSessionId` is the id the engine itself uses: a Claude Code session id, a Codex or `codex-app` thread id, an Antigravity conversation id, a Grok or OpenCode session id, an ACP agent's session id, or a custom engine's id when its config maps a resume flag. `forkSession` becomes `--fork-session` on Claude Code and Grok; it is a `SessionManager` option and not a `session_start` tool parameter.
+`resumeSessionId` is the id the engine itself uses: a Claude Code session id, a Codex or `codex-app` thread id, an Antigravity conversation id, a Grok or OpenCode session id, an ACP agent's session id, or a custom engine's id when its config maps a resume flag. `forkSession` becomes `--fork-session` on Claude Code and Grok, `codex exec fork` on Codex, `thread/fork` on `codex-app` and `--fork` on OpenCode; it is a `SessionManager` option and not a `session_start` tool parameter.
 
 > `claude continue/respawn/stop/logs` are not headless subcommands — session continuation is via `resumeSessionId`/`forkSession`. Use the `claude_agents_list` tool (`claude agents --json`) to enumerate Claude Code background agent sessions.
 

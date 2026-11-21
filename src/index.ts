@@ -484,7 +484,8 @@ const plugin = {
           },
           ignoreRules: {
             type: 'boolean',
-            description: 'codex and codex-app: do not load execpolicy .rules files (`--ignore-rules`).',
+            description:
+              'codex only: do not load execpolicy .rules files (`--ignore-rules`). codex-app refuses it (the app-server has no such flag).',
           },
           noSessionPersistence: { type: 'boolean', description: 'Do not save session to disk' },
           betas: { type: ['string', 'array'], items: { type: 'string' }, description: 'Custom beta headers' },
@@ -1080,7 +1081,7 @@ const plugin = {
     registerTool({
       name: 'codex_review',
       description:
-        'Run a non-interactive Codex code review (`codex review`). Pick at most one diff scope — uncommitted (working-tree changes), base (vs branch), or commit (vs SHA); passing two is an error. Output is plain text — Codex `review` does not emit JSON.',
+        "Run a non-interactive Codex code review (`codex exec review --json`). Pick at most one diff scope — uncommitted (working-tree changes), base (vs branch), or commit (vs SHA); passing two is an error. Returns the review text (the final message), the thread id and the review's token usage, which also reaches the run ledger.",
       parameters: {
         type: 'object',
         properties: {
@@ -1214,7 +1215,8 @@ const plugin = {
 
     registerTool({
       name: 'codex_rollback',
-      description: 'Drop the last N turns from a codex-app thread (`thread/rollback`).',
+      description:
+        'Drop the last N turns from a codex-app thread (`thread/turns/list` + `thread/revert`). Changes the conversation history only, not files.',
       parameters: {
         type: 'object',
         properties: {

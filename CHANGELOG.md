@@ -5,6 +5,64 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.29.0] - 2026-11-21
+
+### Added
+
+- **Images on `session_send`.** `images` takes absolute paths of PNG, JPEG, GIF or WebP files (at most 20 MB, under the
+  session's directory, an `addDir` entry or the temp directory). Claude Code gets them as content blocks, Codex as
+  `--image=`, `codex-app` as `localImage` input, Grok as content blocks in a private prompt file, OpenCode as `--file`
+  (V1) or `-f` (V2). Any other engine refuses the message instead of sending it without them.
+- **Claude Code session options**: `strictMcpConfig` (`--strict-mcp-config`), `settingSources` (`--setting-sources`),
+  `systemPromptSnapshot` (`--system-prompt-snapshot`; with the CLI's default, a resumed conversation keeps the system
+  prompt it started with, so a new `appendSystemPrompt` does not apply until `off`), `pluginDir` (`--plugin-dir`),
+  `autoCompactWindow` (`--autocompact`), `appendSubagentSystemPrompt` and `disableSlashCommands` (also agy, and Grok
+  as `--verbatim`).
+- **Codex**: `codexConfig` (`-c key=value`, or the thread's `config` on `codex-app`; the keys the wrapper sets are
+  refused), `codexFeatures` (`--enable` / `--disable`) and `ignoreRules` (`--ignore-rules`). `forkSession` forks with
+  `codex exec fork` and, on `codex-app`, `thread/fork`. `codex-app` now honours `noSessionPersistence`
+  (`ephemeral`), `appendSystemPrompt` and `systemPrompt` (developer and base instructions), `jsonSchema`
+  (`outputSchema`) and `addDir` (writable roots under workspace-write).
+- **Antigravity**: `jsonSchema` (`--json-schema`, checked at start), `addDir`, `agent` and `disableSlashCommands`.
+- **Grok**: `trustProject` (`--trust`), `addDir`, `debug` / `debugFile`, `worktree`, and `sandboxMode:
+  'workspace-write'` as `--sandbox workspace`. Text and tool events now stream as they arrive.
+- **OpenCode**: `agent`, `--thinking` (reasoning now reaches the stream), `dangerouslySkipPermissions` as `--auto`,
+  the session name as `--title`, `forkSession` as `--fork`, `noSessionPersistence` as `--archived` (V2) plus deletion
+  of the session on stop, `bare` as `--pure` (V1), `customSessionId` on V2, and V2 retry counts.
+- **Gemini 4 Neon** registered ($3 / $15, cached $0.15, 1M context), with its `xhigh` effort tier.
+- **The weekly sweep records a decision for every flag and subcommand an engine CLI offers.** Each is either used by
+  its wrapper or listed with a reason in `scripts/sweep-reviewed.json`; one with neither fails the sweep, as does an
+  agy model whose `xhigh` tier the wrapper does not know.
+
+### Changed
+
+- **Grok `allowedTools` and `disallowedTools` are permission rules**, passed as `--allow` and `--deny` as on Claude
+  Code. Entries Grok has no rule for (`Agent`, its own tool ids) still go to `--disallowed-tools`; `tools` stays
+  `--tools`.
+- **Claude Code sessions pass `--no-chrome` unless `chrome` is `true`**, so a user setting cannot turn Chrome on for
+  them.
+- **Grok does not wait for background tasks after a turn** (`--no-wait-for-background`).
+- **`codex_review` runs `codex exec review --json`** and returns the review's final message, thread id and token
+  usage, which also reaches the run ledger.
+
+### Fixed
+
+- **Codex turn results carried every message of the turn**, commentary included, so a `jsonSchema` turn returned prose
+  ahead of its JSON. A turn's result is now its final message.
+- **`codex_rollback` failed on Codex 0.171**, which removed `thread/rollback`; it now uses `thread/turns/list` and
+  `thread/revert`.
+- **Grok**: a message starting with `-` failed as an unknown option (the prompt now goes on stdin);
+  `disallowedTools: ['Bash']` did not stop shell commands; a turn that ended in a refusal, at `max_tokens` or cancelled
+  counted as successful; a turn whose background tasks outlasted the send timeout lost its text and cost.
+- **An OpenCode session whose agent did not load ran on the default agent.** OpenCode reports the fallback on stderr,
+  which was not checked; a read-only session could run with the writable default agent. The turn is now stopped.
+- **Antigravity**: a message that is exactly one of agy's flags, such as `--version`, ran as that flag and returned its
+  output as the reply.
+- **`jsonSchema`, `addDir` and `agent` were ignored** by the Antigravity and `codex-app` wrappers, and `agent` by
+  OpenCode; tool calls were counted as 0 on Antigravity, `codex-app` and Grok.
+- **`codex_resume` ran without the workspace-write sandbox its description promised.**
+- **Gemini 4 Neon** at `xhigh` or `max` effort was capped at `high`.
+
 ## [7.28.1] - 2026-11-20
 
 ### Fixed
