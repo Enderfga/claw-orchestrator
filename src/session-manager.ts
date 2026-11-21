@@ -182,7 +182,10 @@ import {
 import { checkBudget, isBudgetExceeded } from './budget.js';
 import { withFileLock } from './kernel/file-lock.js';
 import { InboxManager, type SessionLookup } from './inbox-manager.js';
-import { compileSafeRegex, sanitizeCwd, validateName } from './validation.js';
+import { compileSafeRegex, sanitizeCwd, validateImagePaths, validateName } from './validation.js';
+
+/** Engines whose wrapper passes `SendOptions.images` to the model. */
+const IMAGE_ENGINES = new Set<string>(['claude', 'codex', 'codex-app', 'grok', 'opencode']);
 import { PersistentClaudeSession } from './persistent-session.js';
 import {
   ClaudeAccountPool,
@@ -1452,6 +1455,21 @@ export class SessionManager {
 
       if (options.effort) sendOpts.effort = options.effort;
       if (options.plan) sendOpts.plan = true;
+      if (options.images !== undefined) {
+        // Refused, not dropped: a turn about a screenshot answered without it
+        // reads as an answer.
+        const engine = managed.config.engine ?? 'claude';
+        if (!IMAGE_ENGINES.has(engine)) {
+          throw new Error(
+            `Session '${name}' runs on ${engine}, which cannot take images; claude, codex, codex-app, grok and opencode can`,
+          );
+        }
+        sendOpts.images = validateImagePaths(options.images, [
+          managed.config.cwd,
+          ...(managed.config.addDir ?? []),
+          os.tmpdir(),
+        ]);
+      }
 
       if (options.onEvent || options.onChunk) {
         // A throwing user callback must not corrupt the turn or leave the

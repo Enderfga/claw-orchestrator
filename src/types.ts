@@ -501,6 +501,61 @@ export interface SessionConfig {
    */
   restricted?: boolean;
   /**
+   * Claude Code: use only the MCP servers in `mcpConfig` (`--strict-mcp-config`).
+   * Without it a session also gets every MCP server of the user's and the
+   * project's configuration; with it and no `mcpConfig`, none.
+   */
+  strictMcpConfig?: boolean;
+  /**
+   * Claude Code: which settings files to load (`--setting-sources`). Leaving out
+   * `user` drops the user's model, permission mode, plugins, MCP servers and
+   * env from the session; settings passed with `settings` still apply. Empty
+   * loads none of them.
+   */
+  settingSources?: Array<'user' | 'project' | 'local'>;
+  /**
+   * Claude Code: `--system-prompt-snapshot`. With `on` (the CLI's default) a
+   * conversation's system prompt is recorded on its first request and reused,
+   * through resumes, until it is compacted. `off` renders it on every request,
+   * so a resume with a different `appendSystemPrompt` takes effect.
+   */
+  systemPromptSnapshot?: 'on' | 'off';
+  /** Claude Code: local plugin directories or `.zip` files for this session only (`--plugin-dir`, one per entry). */
+  pluginDir?: string | string[];
+  /**
+   * Claude Code: the CLI's own auto-compaction window (`--autocompact`), `auto` or
+   * a token count of at least 100,000. Unlike `autoCompactPercent`, which
+   * compacts between turns, it also applies within a long turn.
+   */
+  autoCompactWindow?: 'auto' | number;
+  /** Claude Code: standing instructions for the subagents a session starts (`--append-subagent-system-prompt`). */
+  appendSubagentSystemPrompt?: string;
+  /**
+   * Claude Code and agy: send messages as text, without expanding skills or
+   * slash commands (`--disable-slash-commands`). On Claude Code it also removes
+   * `/compact`, so `autoCompactPercent` cannot compact the session.
+   */
+  disableSlashCommands?: boolean;
+  /**
+   * grok: trust the working directory (`--trust`), which loads its AGENTS.md,
+   * skills, MCP servers and hooks; headless grok loads none of them otherwise.
+   * The hooks run commands, so this is the caller's decision.
+   */
+  trustProject?: boolean;
+  /**
+   * Codex (`codex` and `codex-app`): config overrides for the session, each
+   * passed as `-c key=value` (`codex`) or in the thread's `config`
+   * (`codex-app`). Values are TOML: a string is quoted, a number or boolean is
+   * not. Keys the wrapper sets itself are refused: `sandbox_mode`,
+   * `approval_policy`, `approvals_reviewer`, `model_reasoning_effort`. Like
+   * `launcher`, an override such as `notify` or `mcp_servers` can run commands.
+   */
+  codexConfig?: Record<string, string | number | boolean>;
+  /** Codex: features to turn on or off for the session (`--enable` / `--disable`). */
+  codexFeatures?: { enable?: string[]; disable?: string[] };
+  /** Codex: do not load the execpolicy `.rules` files (`--ignore-rules`). */
+  ignoreRules?: boolean;
+  /**
    * Custom engine configuration — required when engine is 'custom'.
    *
    * Either an inline config, or the id of a bundled community preset from
@@ -631,6 +686,13 @@ export interface ActiveSession {
 export interface SendOptions {
   effort?: EffortLevel;
   plan?: boolean;
+  /**
+   * Images to attach to this message: absolute paths of PNG, JPEG, GIF or WebP
+   * files of at most 20 MB, under the session's directory, an `addDir`, or the
+   * temp directory. Taken by claude, codex, codex-app, grok and opencode; any
+   * other engine refuses the turn rather than send it without them.
+   */
+  images?: string[];
   autoResume?: boolean;
   timeout?: number;
   stream?: boolean;
@@ -771,6 +833,12 @@ export interface RuleInfo {
 export interface SessionSendOptions {
   effort?: EffortLevel;
   plan?: boolean;
+  /**
+   * Absolute paths of images to attach to this message, already checked by the
+   * session manager (`validateImagePaths`). An engine that cannot take images
+   * is refused before the turn starts.
+   */
+  images?: string[];
   waitForComplete?: boolean;
   timeout?: number;
   callbacks?: StreamCallbacks;

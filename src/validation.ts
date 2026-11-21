@@ -231,3 +231,51 @@ export function validateName(name: string): string {
   }
   return name;
 }
+
+// ─── validateImagePaths ─────────────────────────────────────────────────────
+
+const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp']);
+const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
+
+/**
+ * Check the images a caller attaches to a message and return their real paths.
+ *
+ * Each must be an absolute path to a PNG, JPEG, GIF or WebP file of at most
+ * 20 MB, lying under one of `roots` (the session's directory, its `addDir`
+ * entries, the temp directory) once symlinks are resolved: the engine reads
+ * the file outside any sandbox the session runs in, so the path is held to
+ * what the session could reach anyway. A comma is refused because Codex splits
+ * `--image` values on it.
+ */
+export function validateImagePaths(images: unknown, roots: string[]): string[] {
+  if (!Array.isArray(images) || images.length === 0) throw new Error('images must be a non-empty array of paths');
+  if (images.length > 20) throw new Error('at most 20 images per message');
+  const realRoots = roots.flatMap((r) => {
+    try {
+      return [fs.realpathSync(r)];
+    } catch {
+      return [];
+    }
+  });
+  return images.map((raw) => {
+    if (typeof raw !== 'string' || !path.isAbsolute(raw))
+      throw new Error(`image path must be absolute: ${String(raw)}`);
+    if (raw.includes(',')) throw new Error(`image path must not contain a comma: ${raw}`);
+    if (!IMAGE_EXTENSIONS.has(path.extname(raw).toLowerCase())) {
+      throw new Error(`not an image (png, jpg, jpeg, gif, webp): ${raw}`);
+    }
+    let real: string;
+    try {
+      real = fs.realpathSync(raw);
+    } catch {
+      throw new Error(`image not found: ${raw}`);
+    }
+    const st = fs.statSync(real);
+    if (!st.isFile()) throw new Error(`image is not a file: ${raw}`);
+    if (st.size > MAX_IMAGE_BYTES) throw new Error(`image larger than 20 MB: ${raw}`);
+    if (!realRoots.some((r) => real === r || real.startsWith(r + path.sep))) {
+      throw new Error(`image outside the session's directory, its addDir entries and the temp directory: ${raw}`);
+    }
+    return real;
+  });
+}

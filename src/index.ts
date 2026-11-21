@@ -420,6 +420,72 @@ const plugin = {
             description:
               'Claude engine only. Restricted mode (`--restricted`): removes the tools that run commands or code (Bash, PowerShell, the REPL) and WebFetch unless `tools` names them, and ignores user, project and local settings files, including CLAUDE.md and hooks. Separate from sandboxMode read-only, which maps to plan mode.',
           },
+          sessionName: {
+            type: 'string',
+            description:
+              "The engine's own name for the conversation: Claude Code `-n` (resumable as `--resume <name>`), OpenCode `--title`. Defaults to the session name on OpenCode.",
+          },
+          strictMcpConfig: {
+            type: 'boolean',
+            description:
+              "Claude engine only (`--strict-mcp-config`): use only the MCP servers in mcpConfig, not the user's and project's; with no mcpConfig, none.",
+          },
+          settingSources: {
+            type: 'array',
+            items: { type: 'string', enum: ['user', 'project', 'local'] },
+            description:
+              "Claude engine only (`--setting-sources`): the settings files to load. Leaving out `user` drops the user's model, permission mode, plugins, MCP servers and env; `settings` still applies. Empty loads none.",
+          },
+          systemPromptSnapshot: {
+            type: 'string',
+            enum: ['on', 'off'],
+            description:
+              'Claude engine only (`--system-prompt-snapshot`). `on` (the CLI default) reuses the system prompt recorded on the first request, through resumes, until compaction; `off` renders it each request, so a resume with a new appendSystemPrompt takes effect.',
+          },
+          pluginDir: {
+            type: ['string', 'array'],
+            items: { type: 'string' },
+            description:
+              'Claude engine only (`--plugin-dir`): local plugin directories or .zip files for this session only.',
+          },
+          autoCompactWindow: {
+            type: ['string', 'number'],
+            description:
+              "Claude engine only (`--autocompact`): the CLI's auto-compaction window, `auto` or a token count of at least 100000. Applies within a turn, unlike autoCompactPercent.",
+          },
+          appendSubagentSystemPrompt: {
+            type: 'string',
+            description:
+              'Claude engine only (`--append-subagent-system-prompt`): standing instructions for the subagents the session starts.',
+          },
+          disableSlashCommands: {
+            type: 'boolean',
+            description:
+              'claude and agy (`--disable-slash-commands`): send messages as text without expanding skills or slash commands. On claude it also removes /compact, so autoCompactPercent cannot compact.',
+          },
+          trustProject: {
+            type: 'boolean',
+            description:
+              "grok engine only (`--trust`): trust the working directory, loading its AGENTS.md, skills, MCP servers and hooks, which headless grok otherwise skips. Hooks run commands; the caller's decision.",
+          },
+          codexConfig: {
+            type: 'object',
+            additionalProperties: { type: ['string', 'number', 'boolean'] },
+            description:
+              'codex and codex-app: config overrides, each as `-c key=value` (TOML values; strings are quoted). sandbox_mode, approval_policy, approvals_reviewer and model_reasoning_effort are refused (the wrapper sets them). Overrides such as notify or mcp_servers can run commands.',
+          },
+          codexFeatures: {
+            type: 'object',
+            properties: {
+              enable: { type: 'array', items: { type: 'string' } },
+              disable: { type: 'array', items: { type: 'string' } },
+            },
+            description: 'codex and codex-app: features to turn on or off (`--enable` / `--disable`).',
+          },
+          ignoreRules: {
+            type: 'boolean',
+            description: 'codex and codex-app: do not load execpolicy .rules files (`--ignore-rules`).',
+          },
           noSessionPersistence: { type: 'boolean', description: 'Do not save session to disk' },
           betas: { type: ['string', 'array'], items: { type: 'string' }, description: 'Custom beta headers' },
           enableAgentTeams: { type: 'boolean', description: 'Enable experimental agent teams' },
@@ -538,6 +604,12 @@ const plugin = {
             description:
               'Ask for a plan only: claude and persistent custom engines prefix the message with a plan-only instruction. The permission mode is unchanged (start with sandboxMode read-only to enforce it); other engines ignore this flag.',
           },
+          images: {
+            type: 'array',
+            items: { type: 'string' },
+            description:
+              'Images to attach to this message: absolute paths of PNG, JPEG, GIF or WebP files of at most 20 MB, under the session directory, an addDir entry, or the temp directory. Taken by claude, codex, codex-app, grok and opencode; another engine refuses the message.',
+          },
           timeout: { type: 'number', description: 'Timeout in ms (default 300000)' },
           stream: {
             type: 'boolean',
@@ -554,6 +626,7 @@ const plugin = {
         const result = await getManager().sendMessage(args.name as string, args.message as string, {
           effort: args.effort as EffortLevel | undefined,
           plan: args.plan as boolean | undefined,
+          images: args.images as string[] | undefined,
           timeout: args.timeout as number | undefined,
           // When stream:true, collect chunks into array for caller.
           // True mid-tool streaming requires SDK-level support (not yet available).

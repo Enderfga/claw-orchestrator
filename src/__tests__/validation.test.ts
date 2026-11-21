@@ -6,7 +6,8 @@ import { describe, it, expect } from 'vitest';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
-import { sanitizeCwd, validateRegex, validateName } from '../validation.js';
+import { sanitizeCwd, validateImagePaths, validateRegex, validateName } from '../validation.js';
+import * as fs from 'node:fs';
 
 // ─── sanitizeCwd ────────────────────────────────────────────────────────────
 
@@ -236,5 +237,33 @@ describe('validateName', () => {
 
   it('rejects empty string', () => {
     expect(() => validateName('')).toThrow('Invalid name');
+  });
+});
+
+describe('validateImagePaths', () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'clawo-img-')));
+  const png = path.join(root, 'shot.png');
+  fs.writeFileSync(png, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+
+  it('returns the real path of an image under a root', () => {
+    expect(validateImagePaths([png], [root])).toEqual([png]);
+  });
+
+  it('refuses what is not an absolute path to an image file under a root', () => {
+    expect(() => validateImagePaths([], [root])).toThrow(/non-empty/);
+    expect(() => validateImagePaths(['shot.png'], [root])).toThrow(/absolute/);
+    expect(() => validateImagePaths([path.join(root, 'a,b.png')], [root])).toThrow(/comma/);
+    const txt = path.join(root, 'notes.txt');
+    fs.writeFileSync(txt, 'x');
+    expect(() => validateImagePaths([txt], [root])).toThrow(/not an image/);
+    expect(() => validateImagePaths([path.join(root, 'missing.png')], [root])).toThrow(/not found/);
+    const other = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'clawo-img-other-')));
+    const outside = path.join(other, 'x.png');
+    fs.writeFileSync(outside, 'x');
+    expect(() => validateImagePaths([outside], [root])).toThrow(/outside/);
+    // A symlink inside a root that points outside it is judged by where it points.
+    const link = path.join(root, 'link.png');
+    fs.symlinkSync(outside, link);
+    expect(() => validateImagePaths([link], [root])).toThrow(/outside/);
   });
 });

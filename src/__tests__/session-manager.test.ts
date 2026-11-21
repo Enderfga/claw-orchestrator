@@ -1606,6 +1606,26 @@ describe('SessionManager', () => {
       expect(info.name).toBe('tools-merge');
     });
 
+    it('passes images to an engine that takes them, checked, and refuses them on one that does not', async () => {
+      const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'clawo-img-send-')));
+      const png = path.join(dir, 'shot.png');
+      fs.writeFileSync(png, 'x');
+      await mgr.startSession({ name: 'img-claude', cwd: dir });
+      lastMock().setBusy(false);
+      await mgr.sendMessage('img-claude', 'what is this?', { images: [png] });
+      expect(lastMock().sendCalls[0].options?.images).toEqual([png]);
+      await expect(mgr.sendMessage('img-claude', 'and this?', { images: ['/etc/passwd.png'] })).rejects.toThrow(
+        /not found|outside/,
+      );
+
+      await mgr.startSession({ name: 'img-agy', cwd: dir, engine: 'agy', model: 'gemini-3.5-flash' });
+      lastMock().setBusy(false);
+      await expect(mgr.sendMessage('img-agy', 'what is this?', { images: [png] })).rejects.toThrow(
+        /agy, which cannot take images/,
+      );
+      expect(lastMock().sendCalls).toHaveLength(0);
+    });
+
     it('uses the agy conversation UUID, not the synthetic session ID, when updating tools', async () => {
       await mgr.startSession({ name: 'agy-tools', cwd: '/tmp', engine: 'agy', model: 'gemini-3.5-flash' });
       lastMock().conversationId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
