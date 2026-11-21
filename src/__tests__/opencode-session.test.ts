@@ -7,18 +7,28 @@
  *   { type, timestamp, sessionID, ...data }
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { EventEmitter } from 'node:events';
 import { Readable } from 'node:stream';
+
+import type { SessionConfig } from '../types.js';
 
 // Mock child_process before importing the session
 const mockSpawn = vi.fn();
 // `opencode --version`, keyed by binary — the session checks it once at start.
 const versions: Record<string, string | Error> = {};
+// Every other execEngine call (`opencode session delete …`), in order.
+const execCalls: Array<{ bin: string; args: string[] }> = [];
+let execFailure: Error | undefined;
 vi.mock('../engine-spawn.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../engine-spawn.js')>()),
   spawnEngine: (...args: unknown[]) => mockSpawn(...args),
-  execEngine: async (bin: string) => {
+  execEngine: async (bin: string, args: string[] = []) => {
+    if (args[0] !== '--version') {
+      execCalls.push({ bin, args });
+      if (execFailure) throw execFailure;
+      return { stdout: '', stderr: '' };
+    }
     const v = versions[bin] ?? '1.19.0';
     if (v instanceof Error) throw v;
     return { stdout: `${v}\n`, stderr: '' };
@@ -1025,5 +1035,526 @@ describe('OpenCode 2', () => {
       (mockSpawn.mock.calls[1][2] as { env: Record<string, string> }).env.OPENCODE_CONFIG_CONTENT,
     );
     expect(v1cfg.agent['clawo-readonly'].permission.bash).toBe('deny');
+  });
+});
+
+// ─── Session options: agent, thinking, auto, title, fork, persistence, images, bare, retries ───
+
+describe('OpenCode session options', () => {
+  const V2 = 'opencode-v2-options';
+  let proc: ReturnType<typeof createMockProcess>;
+
+  /** A session; `permissionMode` filled in, as the session manager always does. */
+  const oc = (
+    config: Omit<SessionConfig, 'permissionMode'> & Partial<Pick<SessionConfig, 'permissionMode'>>,
+    bin?: string,
+  ) => new PersistentOpencodeSession({ permissionMode: 'default', ...config }, bin);
+
+  beforeEach(() => {
+    versions[V2] = 'opencode v2.3.2';
+    proc = createMockProcess();
+    mockSpawn.mockReset();
+    mockSpawn.mockReturnValue(proc);
+    execCalls.length = 0;
+    execFailure = undefined;
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  async function turn(
+    session: InstanceType<typeof PersistentOpencodeSession>,
+    p: ReturnType<typeof createMockProcess>,
+    lines: string[] = [],
+    code = 0,
+    images?: string[],
+  ) {
+    const sent = session.send('hi', { waitForComplete: true, ...(images ? { images } : {}) });
+    setTimeout(() => {
+      feedLines(p, lines);
+      closeProc(p, code);
+    }, 10);
+    return sent;
+  }
+
+  /** A turn on a fresh mock process; returns its argv. */
+  async function nextTurn(session: InstanceType<typeof PersistentOpencodeSession>, lines: string[] = []) {
+    const p = createMockProcess();
+    mockSpawn.mockReturnValue(p);
+    await turn(session, p, lines);
+    return mockSpawn.mock.calls[mockSpawn.mock.calls.length - 1][1] as string[];
+  }
+
+  const argvOf = (i: number) => mockSpawn.mock.calls[i][1] as string[];
+  const started = (sid: string) => JSON.stringify({ type: 'step_start', sessionID: sid });
+
+  describe('agent fallback (OpenCode 1 prints it to stderr, then runs the default agent)', () => {
+    // Measured on 1.19.6: stdout carries only the JSON events; the warning,
+    // with its ANSI colour codes, goes to stderr before the prompt is sent.
+    const FALLBACK = '\u001b[93m\u001b[1m! \u001b[0m agent "clawo-readonly" not found. Falling back to default agent\n';
+
+    it('kills a read-only turn on sight of the fallback on stderr', async () => {
+      const s = oc({ name: 't', cwd: '/tmp', sandboxMode: 'read-only' });
+      await s.start();
+      const sent = s.send('hi', { waitForComplete: true });
+      void sent.catch(() => undefined);
+      await new Promise((r) => setTimeout(r, 10));
+      proc.stderr.emit('data', Buffer.from(FALLBACK));
+      // Refused before the process exits: the default agent must not get to run.
+      await expect(sent).rejects.toThrow(/read-only enforcement failed/i);
+      expect(proc.kill).toHaveBeenCalledWith('SIGTERM');
+      closeProc(proc, 143);
+      const stats = s.getStats();
+      expect(stats.turns).toBe(1);
+      expect(stats.turnsSucceeded).toBe(0);
+    });
+
+    it('also catches the subagent variant, split across stderr chunks', async () => {
+      const s = oc({ name: 't', cwd: '/tmp', sandboxMode: 'read-only' });
+      await s.start();
+      const sent = s.send('hi', { waitForComplete: true });
+      void sent.catch(() => undefined);
+      await new Promise((r) => setTimeout(r, 10));
+      proc.stderr.emit('data', Buffer.from('! agent "clawo-readonly" is a subagent, not a primary agent. Falling '));
+      proc.stderr.emit('data', Buffer.from('back to default agent\n'));
+      await expect(sent).rejects.toThrow(/read-only enforcement failed/i);
+      expect(proc.kill).toHaveBeenCalled();
+      closeProc(proc, 143);
+    });
+
+    it('fails a turn whose chosen agent fell back, naming the agent', async () => {
+      const s = oc({ name: 't', cwd: '/tmp', agent: 'reviewer' });
+      await s.start();
+      const sent = s.send('hi', { waitForComplete: true });
+      void sent.catch(() => undefined);
+      await new Promise((r) => setTimeout(r, 10));
+      proc.stderr.emit('data', Buffer.from('! agent "reviewer" not found. Falling back to default agent\n'));
+      await expect(sent).rejects.toThrow(/agent "reviewer" not found/);
+      expect(proc.kill).toHaveBeenCalled();
+      closeProc(proc, 143);
+      expect(s.getStats().turnsSucceeded).toBe(0);
+    });
+
+    it('leaves other stderr alone', async () => {
+      const s = oc({ name: 't', cwd: '/tmp', agent: 'reviewer' });
+      await s.start();
+      const sent = s.send('hi', { waitForComplete: true });
+      setTimeout(() => {
+        proc.stderr.emit('data', Buffer.from('[rtk] rtk binary not found in PATH — plugin disabled\n'));
+        closeProc(proc, 0);
+      }, 10);
+      await sent;
+      expect(proc.kill).not.toHaveBeenCalled();
+      expect(s.getStats().turnsSucceeded).toBe(1);
+    });
+  });
+
+  describe('agent', () => {
+    it('passes a chosen agent on both lines', async () => {
+      const v1 = oc({ name: 't', cwd: '/tmp', agent: 'reviewer' });
+      await v1.start();
+      await turn(v1, proc);
+      const a1 = argvOf(0);
+      expect(a1[a1.indexOf('--agent') + 1]).toBe('reviewer');
+
+      const v2 = oc({ name: 't2', cwd: '/tmp', agent: 'reviewer' }, V2);
+      await v2.start();
+      const a2 = await nextTurn(v2);
+      expect(a2[a2.indexOf('--agent') + 1]).toBe('reviewer');
+    });
+
+    it('refuses read-only together with a chosen agent at start', async () => {
+      const s = oc({ name: 't', cwd: '/tmp', sandboxMode: 'read-only', agent: 'build' });
+      await expect(s.start()).rejects.toThrow(/read-only.*agent 'build'/i);
+      expect(s.isReady).toBe(false);
+    });
+  });
+
+  it('asks for reasoning events on every turn, on both lines', async () => {
+    const v1 = oc({ name: 't', cwd: '/tmp' });
+    await v1.start();
+    await turn(v1, proc, [started('ses_a')]);
+    expect(argvOf(0)).toContain('--thinking');
+    expect(await nextTurn(v1)).toContain('--thinking');
+
+    const v2 = oc({ name: 't2', cwd: '/tmp' }, V2);
+    await v2.start();
+    expect(await nextTurn(v2)).toContain('--thinking');
+  });
+
+  describe('--auto', () => {
+    it('is sent for dangerouslySkipPermissions', async () => {
+      const s = oc({ name: 't', cwd: '/tmp', dangerouslySkipPermissions: true });
+      await s.start();
+      await turn(s, proc);
+      expect(argvOf(0)).toContain('--auto');
+      const v2 = oc({ name: 't2', cwd: '/tmp', dangerouslySkipPermissions: true }, V2);
+      await v2.start();
+      expect(await nextTurn(v2)).toContain('--auto');
+    });
+
+    it('is not derived from the permission mode, which defaults to bypassPermissions', async () => {
+      const s = oc({ name: 't', cwd: '/tmp', permissionMode: 'bypassPermissions' });
+      await s.start();
+      await turn(s, proc);
+      expect(argvOf(0)).not.toContain('--auto');
+    });
+
+    it('is never sent on a read-only session', async () => {
+      const s = oc({
+        name: 't',
+        cwd: '/tmp',
+        sandboxMode: 'read-only',
+        dangerouslySkipPermissions: true,
+      });
+      await s.start();
+      await turn(s, proc);
+      expect(argvOf(0)).not.toContain('--auto');
+    });
+  });
+
+  describe('--title', () => {
+    it('names a new session after sessionName, else the session name, on the creating turn only', async () => {
+      const named = oc({ name: 't', cwd: '/tmp', sessionName: 'Fix the parser' });
+      await named.start();
+      await turn(named, proc, [started('ses_a')]);
+      expect(argvOf(0)).toContain('--title=Fix the parser');
+      // The session exists now; neither line renames it on a later turn.
+      const second = await nextTurn(named);
+      expect(second.some((a) => a.startsWith('--title'))).toBe(false);
+
+      const plain = oc({ name: 'worker-1', cwd: '/tmp' }, V2);
+      await plain.start();
+      expect(await nextTurn(plain)).toContain('--title=worker-1');
+    });
+
+    it('is not sent when resuming or forking an existing session', async () => {
+      const resumed = oc({ name: 't', cwd: '/tmp', resumeSessionId: 'ses_old' });
+      await resumed.start();
+      await turn(resumed, proc);
+      expect(argvOf(0).some((a) => a.startsWith('--title'))).toBe(false);
+
+      const forked = oc({
+        name: 't2',
+        cwd: '/tmp',
+        resumeSessionId: 'ses_old',
+        forkSession: true,
+      });
+      await forked.start();
+      expect((await nextTurn(forked)).some((a) => a.startsWith('--title'))).toBe(false);
+    });
+  });
+
+  describe('forkSession', () => {
+    it('forks on the first turn and continues the fork, not the parent, afterwards', async () => {
+      const s = oc({
+        name: 't',
+        cwd: '/tmp',
+        resumeSessionId: 'opencode-live-ses_parent',
+        forkSession: true,
+      });
+      await s.start();
+      // Every event of the fork turn carries the new session's id.
+      await turn(s, proc, [started('ses_child'), envelope('text', { part: { id: 'p', text: 'ok' } })]);
+      const first = argvOf(0);
+      expect(first[first.indexOf('--session') + 1]).toBe('ses_parent');
+      expect(first).toContain('--fork');
+
+      const second = await nextTurn(s);
+      expect(second[second.indexOf('--session') + 1]).toBe('ses_child');
+      expect(second).not.toContain('--fork');
+      expect(s.getStats().opencodeSessionId).toBe('ses_child');
+      // What the manager persists and resumes after a restart.
+      expect(s.sessionId).toBe('opencode-live-ses_child');
+    });
+
+    it('forks again on the next turn when the fork turn reported no id', async () => {
+      const s = oc({
+        name: 't',
+        cwd: '/tmp',
+        resumeSessionId: 'ses_parent',
+        forkSession: true,
+      });
+      await s.start();
+      await expect(turn(s, proc, [], 1)).rejects.toThrow();
+      const second = await nextTurn(s);
+      expect(second[second.indexOf('--session') + 1]).toBe('ses_parent');
+      expect(second).toContain('--fork');
+    });
+
+    it('does nothing without a session to fork', async () => {
+      const s = oc({ name: 't', cwd: '/tmp', forkSession: true });
+      await s.start();
+      await turn(s, proc);
+      expect(argvOf(0)).not.toContain('--fork');
+    });
+  });
+
+  describe('noSessionPersistence / skipPersistence', () => {
+    it('creates the OpenCode 2 session archived, on the creating turn only', async () => {
+      const s = oc({ name: 't', cwd: '/tmp', noSessionPersistence: true }, V2);
+      await s.start();
+      await turn(s, proc, [started('ses_a')]);
+      expect(argvOf(0)).toContain('--archived');
+      expect(await nextTurn(s)).not.toContain('--archived');
+    });
+
+    it('archives an OpenCode 2 fork, and never sends --archived to OpenCode 1', async () => {
+      const fork = oc(
+        { name: 't', cwd: '/tmp', skipPersistence: true, resumeSessionId: 'ses_p', forkSession: true },
+        V2,
+      );
+      await fork.start();
+      await turn(fork, proc, [started('ses_f')]);
+      expect(argvOf(0)).toContain('--archived');
+
+      const v1 = oc({ name: 't1', cwd: '/tmp', noSessionPersistence: true });
+      await v1.start();
+      expect(await nextTurn(v1)).not.toContain('--archived');
+    });
+
+    it('deletes the session it created when stopped, on both lines', async () => {
+      const v1 = oc({ name: 't', cwd: '/tmp', noSessionPersistence: true });
+      await v1.start();
+      await turn(v1, proc, [started('ses_v1')]);
+      const v2 = oc({ name: 't2', cwd: '/tmp', skipPersistence: true }, V2);
+      await v2.start();
+      await nextTurn(v2, [started('ses_v2')]);
+
+      vi.useFakeTimers();
+      expect(() => v1.stop()).not.toThrow();
+      expect(() => v2.stop()).not.toThrow();
+      // Not at once: a restart (model switch, tool update) resumes the same id right after stop.
+      expect(execCalls).toHaveLength(0);
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(execCalls).toEqual([
+        { bin: 'opencode', args: ['session', 'delete', 'ses_v1'] },
+        // V2 without --standalone starts (and leaves running) a background service.
+        { bin: V2, args: ['session', 'delete', '--standalone', 'ses_v2'] },
+      ]);
+    });
+
+    it('deletes the fork it made, not the session it forked from', async () => {
+      const s = oc({
+        name: 't',
+        cwd: '/tmp',
+        noSessionPersistence: true,
+        resumeSessionId: 'ses_parent',
+        forkSession: true,
+      });
+      await s.start();
+      await turn(s, proc, [started('ses_child')]);
+      vi.useFakeTimers();
+      s.stop();
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(execCalls.map((c) => c.args)).toEqual([['session', 'delete', 'ses_child']]);
+    });
+
+    it('does not delete a session it was handed to resume', async () => {
+      const s = oc({
+        name: 't',
+        cwd: '/tmp',
+        noSessionPersistence: true,
+        resumeSessionId: 'ses_callers',
+      });
+      await s.start();
+      await turn(s, proc, [started('ses_callers')]);
+      vi.useFakeTimers();
+      s.stop();
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(execCalls).toHaveLength(0);
+    });
+
+    it('keeps a persistent session', async () => {
+      const s = oc({ name: 't', cwd: '/tmp' });
+      await s.start();
+      await turn(s, proc, [started('ses_keep')]);
+      vi.useFakeTimers();
+      s.stop();
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(execCalls).toHaveLength(0);
+    });
+
+    it('hands the session to a restart that resumes it, which deletes it when it stops', async () => {
+      const first = oc({ name: 't', cwd: '/tmp', noSessionPersistence: true });
+      await first.start();
+      await turn(first, proc, [started('ses_x')]);
+      vi.useFakeTimers();
+      first.stop();
+      // What switchModel / updateTools do: restart with the same config, resuming the same id.
+      const restarted = oc({
+        name: 't',
+        cwd: '/tmp',
+        noSessionPersistence: true,
+        resumeSessionId: first.sessionId,
+      });
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(execCalls).toHaveLength(0);
+      restarted.stop();
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(execCalls.map((c) => c.args)).toEqual([['session', 'delete', 'ses_x']]);
+    });
+
+    it('does not fork again when a restart takes over a fork it made', async () => {
+      const first = oc({
+        name: 't',
+        cwd: '/tmp',
+        noSessionPersistence: true,
+        resumeSessionId: 'ses_parent',
+        forkSession: true,
+      });
+      await first.start();
+      await turn(first, proc, [started('ses_child')]);
+      first.stop();
+      const restarted = oc({
+        name: 't',
+        cwd: '/tmp',
+        noSessionPersistence: true,
+        forkSession: true,
+        resumeSessionId: first.sessionId,
+      });
+      await restarted.start();
+      const argv = await nextTurn(restarted);
+      expect(argv[argv.indexOf('--session') + 1]).toBe('ses_child');
+      expect(argv).not.toContain('--fork');
+      restarted.stop();
+      // Claim the pending delete, so no real timer outlives this test.
+      oc({ name: 't', cwd: '/tmp', resumeSessionId: 'ses_child' });
+    });
+
+    it('runs the delete through the session launcher, and never throws when it fails', async () => {
+      const s = oc({
+        name: 't',
+        cwd: '/tmp',
+        noSessionPersistence: true,
+        launcher: ['/opt/sandbox.sh', 'task'],
+      });
+      await s.start();
+      await turn(s, proc, [started('ses_l')]);
+      execFailure = new Error('Session not found: ses_l');
+      vi.useFakeTimers();
+      expect(() => s.stop()).not.toThrow();
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(execCalls).toEqual([{ bin: '/opt/sandbox.sh', args: ['task', 'opencode', 'session', 'delete', 'ses_l'] }]);
+    });
+  });
+
+  describe('images', () => {
+    it('attaches each image with --file=<path> on OpenCode 1', async () => {
+      const s = oc({ name: 't', cwd: '/tmp' });
+      await s.start();
+      await turn(s, proc, [], 0, ['/tmp/a.png', '/tmp/b b.jpg']);
+      const argv = argvOf(0);
+      // The `=` form: yargs array options swallow the tokens that follow a bare `--file`.
+      expect(argv).toContain('--file=/tmp/a.png');
+      expect(argv).toContain('--file=/tmp/b b.jpg');
+      expect(argv).not.toContain('--file');
+      expect(proc.stdin.end).toHaveBeenCalledWith('hi');
+    });
+
+    it('attaches each image with -f <path> on OpenCode 2', async () => {
+      const s = oc({ name: 't', cwd: '/tmp' }, V2);
+      await s.start();
+      await turn(s, proc, [], 0, ['/tmp/a.png', '/tmp/b.png']);
+      const argv = argvOf(0);
+      const files = argv.flatMap((a, i) => (a === '-f' ? [argv[i + 1]] : []));
+      expect(files).toEqual(['/tmp/a.png', '/tmp/b.png']);
+    });
+
+    it('sends no file flag without images', async () => {
+      const s = oc({ name: 't', cwd: '/tmp' });
+      await s.start();
+      await turn(s, proc);
+      expect(argvOf(0).some((a) => a.startsWith('--file') || a === '-f')).toBe(false);
+    });
+  });
+
+  describe('bare', () => {
+    it('runs OpenCode 1 without external plugins', async () => {
+      const s = oc({ name: 't', cwd: '/tmp', bare: true });
+      await s.start();
+      await turn(s, proc);
+      expect(argvOf(0)).toContain('--pure');
+    });
+
+    it('has no OpenCode 2 equivalent, and says so once', async () => {
+      const s = oc({ name: 't', cwd: '/tmp', bare: true }, V2);
+      await s.start();
+      const logs: string[] = [];
+      s.on('log', (m: string) => logs.push(m));
+      await turn(s, proc, [started('ses_a')]);
+      await nextTurn(s);
+      expect(argvOf(0)).not.toContain('--pure');
+      expect(argvOf(1)).not.toContain('--pure');
+      expect(logs.filter((l) => l.includes('bare'))).toHaveLength(1);
+    });
+  });
+
+  it('counts OpenCode 2 retry events in the session stats', async () => {
+    const s = oc({ name: 't', cwd: '/tmp' }, V2);
+    await s.start();
+    const logs: string[] = [];
+    s.on('log', (m: string) => logs.push(m));
+    expect(s.getStats().retries).toBe(0);
+    // `{ type: "retry", messageID, attempt, nextRetryAt, error: Session.StructuredError }` (2.3.2).
+    await turn(s, proc, [
+      envelope('retry', {
+        messageID: 'msg_1',
+        attempt: 1,
+        nextRetryAt: 1795237783404,
+        error: { type: 'unknown', message: 'Overloaded', status: 529 },
+      }),
+      envelope('retry', {
+        messageID: 'msg_1',
+        attempt: 2,
+        nextRetryAt: 1795237793404,
+        error: { type: 'provider.rate-limit', message: 'slow down ANTHROPIC_API_KEY=sk-abcdef' },
+      }),
+      envelope('text', { part: { id: 'p', text: 'OK' } }),
+    ]);
+    const stats = s.getStats();
+    expect(stats.retries).toBe(2);
+    expect(stats.lastRetryError).toBe('provider.rate-limit');
+    expect(logs.some((l) => l.includes('retrying (attempt 1)') && l.includes('Overloaded'))).toBe(true);
+    expect(logs.some((l) => l.includes('sk-abcdef'))).toBe(false);
+  });
+
+  describe('customSessionId', () => {
+    it('creates the OpenCode 2 session under the given id', async () => {
+      const s = oc({ name: 't', cwd: '/tmp', customSessionId: 'ses_mine01' }, V2);
+      await s.start();
+      await turn(s, proc, [started('ses_mine01')]);
+      const first = argvOf(0);
+      expect(first[first.indexOf('--session') + 1]).toBe('ses_mine01');
+      expect(first).toContain('--title=t');
+      const second = await nextTurn(s);
+      expect(second[second.indexOf('--session') + 1]).toBe('ses_mine01');
+      expect(second.filter((a) => a === '--session')).toHaveLength(1);
+    });
+
+    it('refuses an id OpenCode 2 would reject', async () => {
+      const s = oc({ name: 't', cwd: '/tmp', customSessionId: 'my-id' }, V2);
+      await expect(s.start()).rejects.toThrow(/start with "ses"/);
+    });
+
+    it('is not sent to OpenCode 1, which cannot create a session under an id, and says so once', async () => {
+      const s = oc({ name: 't', cwd: '/tmp', customSessionId: 'ses_mine01' });
+      await s.start();
+      const logs: string[] = [];
+      s.on('log', (m: string) => logs.push(m));
+      await turn(s, proc, [started('ses_generated')]);
+      expect(argvOf(0)).not.toContain('--session');
+      await nextTurn(s);
+      expect(logs.filter((l) => l.includes('customSessionId'))).toHaveLength(1);
+    });
+
+    it('gives way to a session being resumed', async () => {
+      const s = oc({ name: 't', cwd: '/tmp', customSessionId: 'ses_mine01', resumeSessionId: 'ses_old' }, V2);
+      await s.start();
+      await turn(s, proc);
+      const argv = argvOf(0);
+      expect(argv[argv.indexOf('--session') + 1]).toBe('ses_old');
+    });
   });
 });
