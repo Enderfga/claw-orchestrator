@@ -382,7 +382,7 @@ A `goal` node runs one `/goal` on one thread: a Claude Code session
 (`"engine": "claude"`, see [On Claude Code](#on-claude-code)) or a Codex
 `codex-app` thread (`"engine": "codex"`). A goal with no engine takes the
 configured default engine when the run starts (Claude Code out of the box), and
-a default no goal runs on is refused then. Codex's app-server runs the goal itself:
+a default no goal runs on is refused then, as is a goal that names another engine. Codex's app-server runs the goal itself:
 `thread/goal/set` starts its turn loop, which keeps going until the goal is
 `complete`, out of budget, `blocked`, or stopped by a usage limit. The node adds
 what an unattended run needs around that loop.

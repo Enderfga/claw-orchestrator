@@ -63,7 +63,10 @@ export function repairBrief(ctx: NodeContext, nodeId: string): string | undefine
  * the repair on a new node) knows nothing of the last attempt otherwise.
  *
  * Codex's goal ends when the agent says so, so the brief goes in front of the
- * objective and tells the agent the checks are what counts. Claude Code's
+ * objective and tells the agent the checks are what counts — and that they run
+ * after it stops. Told only that its own test run does not count, a Codex agent
+ * that had fixed the cause found no way to see the checks pass and marked the
+ * goal `blocked` instead of `complete` (seen on codex 0.171). Claude Code's
  * `/goal` condition is judged by a separate model that reads only the
  * conversation, and the runtime's checks run after the agent stops, where that
  * model cannot see them; anything in the condition about them can never be met.
@@ -73,7 +76,14 @@ export function repairBrief(ctx: NodeContext, nodeId: string): string | undefine
 export function goalRepairBrief(ctx: NodeContext, judgedInConversation: boolean): string | undefined {
   const checks = failingChecks(ctx);
   if (!checks) return undefined;
-  if (!judgedInConversation) return repairBriefText(checks);
+  if (!judgedInConversation) {
+    return (
+      `Your previous attempt did not pass the acceptance checks the runtime ran on this working tree. ` +
+      `These checks are the definition of done; your own test run is not. The runtime runs them again ` +
+      `after you stop, so you will not see them pass here: once you have fixed the cause, mark the goal ` +
+      `complete. ${DATA_NOTICE}:\n\n\`\`\`\n${checks}\n\`\`\`\n\n${FIX_NOTICE}`
+    );
+  }
   return (
     `Before the goal is set again: the previous attempt did not pass the acceptance checks the runtime ` +
     `ran on this working tree. The runtime runs them again after you stop; they are not part of the goal ` +

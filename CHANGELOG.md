@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **A Codex goal's repair pass, and its reattach after a crash, resume its thread again.** Since 7.29.0 the goal
+  node opened its codex-app session as an ephemeral thread, which `thread/resume` cannot reattach: a repair visit
+  after a red verdict, or a reattach after the engine process died, came back on a new thread and failed. The node
+  now keeps the session out of the resume registry only, as it does on Claude Code.
+- **A Codex goal sent back to repair marks itself complete once it has fixed the cause.** Its objective said its
+  own test run did not count, and gave no way to see the runtime's checks pass, so an agent that had fixed the
+  failure marked the goal `blocked`. It now says the checks run again after the agent stops.
+- **A goal node naming an engine other than `claude` or `codex` is refused at start.** It ran on Codex instead:
+  the node treated every engine but `claude` as Codex.
+
 ## [7.30.0] - 2026-11-21
 
 ### Added

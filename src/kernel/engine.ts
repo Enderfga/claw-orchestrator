@@ -463,6 +463,9 @@ function declaredDrift(
  * run halfway through with `unknown node`; a negative retry or visit bound was
  * accepted and then behaved arbitrarily.
  */
+/** The engines a goal runs on; `codex-app` is the session engine `codex` means for a goal. */
+const GOAL_ENGINES = new Set(['claude', 'codex', 'codex-app']);
+
 export function validateSpec(spec: WorkflowSpec): void {
   if (!spec || typeof spec.name !== 'string' || !spec.name.trim()) {
     throw new Error('WorkflowSpec needs a name');
@@ -481,6 +484,15 @@ export function validateSpec(spec: WorkflowSpec): void {
     }
     if (node.timeoutMs !== undefined && (!Number.isFinite(node.timeoutMs) || node.timeoutMs <= 0)) {
       throw new Error(`Node '${node.id}': timeoutMs must be a positive number`);
+    }
+    // A goal runs on Claude Code's /goal or a codex-app thread. Refused, not
+    // mapped: the node treats every engine but claude as codex, so a goal that
+    // named another engine would have run on Codex without a word.
+    if (node.kind === 'goal' && node.engine !== undefined && !GOAL_ENGINES.has(node.engine as string)) {
+      throw new Error(
+        `Node '${node.id}': a goal runs on engine 'claude' or 'codex', not '${String(node.engine)}' ` +
+          `(for another engine, an agent node with a verifier and a repair loop, as in the solve workflow)`,
+      );
     }
     if (node.kind === 'fanout') {
       const goals = (node.agents ?? []).filter((a) => a.objective !== undefined);

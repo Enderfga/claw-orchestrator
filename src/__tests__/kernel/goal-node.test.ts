@@ -149,8 +149,11 @@ describe('goal node', () => {
     expect(m.starts[0]).toMatchObject({
       engine: 'codex-app',
       launcher: ['/opt/sandbox.sh', 'sf', '6 7'],
-      noSessionPersistence: true,
+      skipPersistence: true,
     });
+    // `noSessionPersistence` opens an ephemeral codex thread, which `thread/resume`
+    // cannot reattach: a repair visit or a reattach after a crash would start over.
+    expect(m.starts[0].noSessionPersistence).toBeUndefined();
     expect(m.starts[0].resumeSessionId).toBeUndefined();
     expect(m.stopped).toHaveLength(1);
   });
@@ -424,6 +427,9 @@ describe('goal workflow', () => {
     const second = [...m.sessions.values()][1];
     expect(second.clears).toBe(1);
     expect(second.sets[0].objective).toContain('done-file');
+    // The agent marks the goal done itself, and cannot see the runtime's checks pass.
+    expect(second.sets[0].objective).toContain('runs them again after you stop');
+    expect(second.sets[0].objective).toContain('mark the goal complete');
     expect(second.sets[0].objective).toMatch(/---\n\ncreate done\.txt$/);
   });
 
@@ -932,6 +938,24 @@ describe('goal node on claude', () => {
       tokensUsed: 700,
       timeUsedSeconds: 30,
     });
+  });
+
+  it('refuses at start a goal on an engine that runs no goal, instead of running it on codex', async () => {
+    const m = fakeManager(() => {
+      const s = new FakeGoalSession('t');
+      s.onSet = (_p, self) => self.move('complete', { tokensUsed: 1, timeUsedSeconds: 1 });
+      return s;
+    });
+    const kernel = kernelWith(m);
+    for (const engine of ['agy', 'grok', 'opencode', 'acp']) {
+      await expect(kernel.start(oneGoal({ engine }))).rejects.toThrow(
+        new RegExp(`a goal runs on engine 'claude' or 'codex', not '${engine}'`),
+      );
+    }
+    expect(m.starts).toEqual([]);
+    const done = await kernel.wait((await kernel.start(oneGoal({ engine: 'codex-app' }))).runId);
+    expect(m.starts[0]).toMatchObject({ engine: 'codex-app' });
+    expect(done!.nodes.goal.state).toBe('succeeded');
   });
 
   it('fails clearly when the manager has no goal surface for claude', async () => {

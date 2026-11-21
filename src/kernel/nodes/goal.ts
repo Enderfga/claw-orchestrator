@@ -357,9 +357,10 @@ export async function executeGoalNode(node: NodeSpec, ctx: NodeContext): Promise
         permissionMode: 'bypassPermissions',
         // The node checkpoints the thread id itself; a registry entry would only
         // let a later session of the same name pick the thread up behind its back.
-        // On claude, `noSessionPersistence` also stops the CLI writing the
-        // transcript, and a transcript is what `--resume` reattaches.
-        ...(claude ? { skipPersistence: true } : { noSessionPersistence: true }),
+        // Registry only: `noSessionPersistence` also stops the engine writing the
+        // conversation — claude's transcript, an `ephemeral` codex thread — and
+        // that record is what a repair visit and a reattach after a crash resume.
+        skipPersistence: true,
         ...(threadId ? { resumeSessionId: threadId } : {}),
         ...(claudeId ? { customSessionId: claudeId } : {}),
       });
