@@ -28,11 +28,13 @@
  *
  * Permissions: on opencode 1.17.15's `run`, a tool that would prompt for a
  * permission is auto-REJECTED in non-interactive mode (it does not hang), so a
- * write-enabled session needs no skip flag. (`--dangerously-skip-permissions`,
- * `--auto`, and `--yolo` do exist as of opencode 1.4.0 if an allow-all run is
- * ever wanted — verified against 1.17.15.) OpenCode 2's `run` rejects an `ask`
- * the same way (measured on 2.3.2), but its default policy allows everything,
- * paths outside the project included, where V1 asked for those.
+ * write-enabled session needs no skip flag. `dangerouslySkipPermissions` sends
+ * `--auto` (both lines), which answers those requests "once" instead; a rule
+ * that denies still denies. It is not derived from `permissionMode`, which
+ * defaults to `bypassPermissions` on every one-shot engine. OpenCode 2's `run`
+ * rejects an `ask` the same way (measured on 2.3.2), but its default policy
+ * allows everything, paths outside the project included, where V1 asked for
+ * those.
  *
  * OpenCode 2 (2.x) keeps `run --format json` and the same event stream, and
  * differs where this wrapper touches it (all measured on 2.3.2):
@@ -135,6 +137,61 @@ const READ_ONLY_AGENT_CONFIG_V2 = JSON.stringify({
   },
 });
 
+/**
+ * OpenCode 1's warning for an `--agent` it will not run, after which it runs
+ * the default, writable agent. Two forms: `agent "X" not found` and `agent "X"
+ * is a subagent, not a primary agent`. Measured on 1.19.6: it goes to stderr,
+ * with ANSI colour codes, before the prompt is sent; stdout carries only JSON.
+ * OpenCode 2 fails the turn instead.
+ */
+const AGENT_FALLBACK_RE =
+  /(agent "[^"]*" (?:not found|is a subagent, not a primary agent))?\.? *Falling back to default agent/;
+
+/**
+ * `--flag=value` as one argument: a value that starts with `-` stays a value,
+ * and OpenCode 1's yargs array options (`--file`) cannot swallow the tokens
+ * after a bare flag. Both lines accept the form (measured on 1.19.6 and 2.3.2).
+ */
+function flagValue(flag: string, value: string): string {
+  return `${flag}=${value}`;
+}
+
+/**
+ * Sessions a stopped ephemeral session created, waiting to be deleted, by
+ * OpenCode session id.
+ *
+ * Deletion waits briefly because the session manager's restarts — a model
+ * switch, a tool update — stop a session and at once start it again resuming
+ * the same id, with the same `noSessionPersistence`. A new session constructed
+ * with that id takes the pending delete over (see the constructor) and deletes
+ * it when it stops in turn. The timer is not unref'd, so a process whose last
+ * act is stopping a session still deletes it before exiting.
+ */
+const pendingDeletes = new Map<string, ReturnType<typeof setTimeout>>();
+const DELETE_GRACE_MS = 2_000;
+
+/** `opencode session delete <id>`, best effort. */
+function deleteOpencodeSession(
+  bin: string,
+  id: string,
+  v2: boolean,
+  launcher: readonly string[] | undefined,
+  log: (message: string) => void,
+): void {
+  // V2 without `--standalone` hands the command to the background service, and
+  // starts one (left running) when none is up — measured on 2.3.2.
+  const args = ['session', 'delete', ...(v2 ? ['--standalone'] : []), id];
+  const [head, ...rest] = launcher ?? [];
+  const run = head
+    ? execEngine(head, [...rest, bin, ...args], { timeout: 30_000 })
+    : execEngine(bin, args, { timeout: 30_000 });
+  run.then(
+    () => log(`[opencode] deleted session ${id}`),
+    (err: unknown) =>
+      log(`[opencode] could not delete session ${id}: ${sanitizeSecrets(String((err as Error)?.message ?? err))}`),
+  );
+}
+
 interface TurnState {
   /** Per-part latest text snapshot, keyed by part.id (preserves insertion order). */
   textParts: Map<string, string>;
@@ -147,6 +204,13 @@ interface TurnState {
   errorMessage?: string;
   /** OpenCode 2 refused the `#variant` this turn asked for (`Variant unavailable`). */
   variantUnavailable: boolean;
+  /**
+   * This turn creates or forks a session, so the id its events carry is a new
+   * one this session takes over. A fork's events all carry the fork's id.
+   */
+  adoptSessionId: boolean;
+  /** The session it adopts was made by this turn (a new one or a fork), not named by the caller. */
+  createsSession: boolean;
 }
 
 /** The text of an `error` event: V2 sends `{ error: { type, message } }`, V1 a string or `{ data: { message } }`. */
@@ -236,14 +300,37 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
    */
   private readonly _refusedVariants = new Set<string>();
 
-  /** The "effort not sent without a model" note is logged once per session. */
-  private _loggedEffortWithoutModel = false;
+  /** Notes about options a line cannot honour, logged once per session each. */
+  private readonly _notes = new Set<string>();
+
+  /**
+   * The first turn forks `opencodeSessionId` (`forkSession` with a resumed id).
+   * Cleared once a turn has adopted the fork's id.
+   */
+  private _forkPending = false;
+
+  /**
+   * `opencodeSessionId` was made by this session — a new session or a fork —
+   * or taken over from a stopped one that made it, rather than named by the
+   * caller. Only such a session is deleted on stop.
+   */
+  private _ownsSession = false;
+
+  /** API retries OpenCode 2 reported (`retry` events), and the last one's category. */
+  private _retries = 0;
+  private _lastRetryError?: string;
 
   protected override _continuesConversation(): boolean {
     return !!this.opencodeSessionId;
   }
 
   override async start(): Promise<this> {
+    // The read-only guarantee is our own agent; a session cannot also run another.
+    if (this.options.sandboxMode === 'read-only' && this.options.agent) {
+      throw new Error(
+        `OpenCode read-only sessions run claw-orchestrator's own read-only agent, so they cannot also run agent '${this.options.agent}'. Drop one of agent and sandboxMode 'read-only'.`,
+      );
+    }
     const version = await opencodeVersion(this.engineBin);
     if (isOpencodeV2Prerelease(version)) {
       throw new Error(
@@ -252,7 +339,19 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
       );
     }
     this._v2 = isOpencodeV2(version);
+    // OpenCode 2's session ids are checked to start with "ses" (2.3.2); any other
+    // fails the turn after the process has started.
+    const customId = this.options.customSessionId;
+    if (this._v2 && customId && !this.opencodeSessionId && !customId.startsWith('ses')) {
+      throw new Error(`OpenCode 2 session ids start with "ses"; customSessionId '${customId}' would be refused`);
+    }
     return super.start();
+  }
+
+  private _noteOnce(key: string, message: string): void {
+    if (this._notes.has(key)) return;
+    this._notes.add(key);
+    this.emit(SESSION_EVENT.LOG, `[opencode] ${message}`);
   }
 
   constructor(config: SessionConfig, opencodeBin?: string) {
@@ -271,7 +370,50 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
     // Process-level resume: a persisted id comes back as the raw OpenCode id,
     // never one of our generated `opencode-<ts>-<rand>` handles.
     if (config.resumeSessionId && !/^opencode-\d+-/.test(config.resumeSessionId)) {
-      this.opencodeSessionId = config.resumeSessionId.replace(/^opencode-live-/, '');
+      const id = config.resumeSessionId.replace(/^opencode-live-/, '');
+      this.opencodeSessionId = id;
+      // A restart of a stopped ephemeral session: take its pending delete over.
+      // It continues that session — it does not fork it a second time.
+      const pending = pendingDeletes.get(id);
+      if (pending) {
+        clearTimeout(pending);
+        pendingDeletes.delete(id);
+        this._ownsSession = true;
+      }
+      this._forkPending = !!config.forkSession && !pending;
+    }
+  }
+
+  /** Not kept: `noSessionPersistence`, or the registry-only `skipPersistence`. */
+  private get _ephemeral(): boolean {
+    return !!(this.options.noSessionPersistence || this.options.skipPersistence);
+  }
+
+  /**
+   * Stop, then delete the OpenCode session an ephemeral session created. Best
+   * effort, and it never throws: OpenCode 1 has no flag that keeps a session
+   * off disk, and an OpenCode 2 session is only archived (`--archived`).
+   */
+  override stop(): void {
+    super.stop();
+    try {
+      const id = this.opencodeSessionId;
+      if (!id || !this._ownsSession || !this._ephemeral || pendingDeletes.has(id)) return;
+      if (!/^ses[\w-]*$/.test(id)) return;
+      this._ownsSession = false;
+      const bin = this.engineBin;
+      const v2 = this._v2;
+      const launcher = this.options.launcher;
+      const log = (m: string) => this.emit(SESSION_EVENT.LOG, m);
+      pendingDeletes.set(
+        id,
+        setTimeout(() => {
+          pendingDeletes.delete(id);
+          deleteOpencodeSession(bin, id, v2, launcher, log);
+        }, DELETE_GRACE_MS),
+      );
+    } catch {
+      // stop() must not throw.
     }
   }
 
@@ -297,13 +439,33 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
     // background service when one is running, which reads its own configuration
     // and not this process's environment (see the header).
     if (this._v2) args.push('--standalone');
+    // Reasoning events. Both lines send `reasoning` only with this flag, which
+    // changes nothing else in the JSON output; they go to the log channel.
+    args.push('--thinking');
 
     // Continue OpenCode's own session rather than starting a fresh one. Verified
     // against 1.18.18: without this the second turn answers "you never asked me
     // to remember anything"; with it the same turn recalls the first turn's
     // content. `--continue` is deliberately not used — it means "the last
     // session on this machine", which would collide across concurrent sessions.
-    if (this.opencodeSessionId) args.push('--session', this.opencodeSessionId);
+    const forking = this._forkPending && !!this.opencodeSessionId;
+    const customId = !this.opencodeSessionId ? this.options.customSessionId : undefined;
+    if (this.opencodeSessionId) {
+      args.push('--session', this.opencodeSessionId);
+      // The fork is a new session; its id comes back on every event of this turn.
+      if (forking) args.push('--fork');
+    } else if (customId && this._v2) {
+      // OpenCode 2 creates the session under this id, or continues it if it exists.
+      args.push('--session', customId);
+    } else if (customId) {
+      this._noteOnce('customSessionId', 'customSessionId not sent: OpenCode 1 cannot create a session under an id');
+    }
+    const creating = !this.opencodeSessionId;
+    // Both lines apply a title only to a session they create (not to a resumed
+    // one or a fork), and OpenCode 1 then skips its title-generation model call.
+    if (creating) args.push(flagValue('--title', this.options.sessionName || this.options.name));
+    // OpenCode 2 only: archived on creation and on fork, as it applies it.
+    if (this._v2 && this._ephemeral && (creating || forking)) args.push('--archived');
 
     const readOnly = this.options.sandboxMode === 'read-only';
     if (readOnly) {
@@ -314,6 +476,26 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
       // edit/bash/external_directory outright, so read-only is enforced by the
       // permission engine rather than requested politely.
       args.push('--agent', READ_ONLY_AGENT);
+    } else if (this.options.agent) {
+      args.push('--agent', this.options.agent);
+    }
+    const agentName = readOnly ? READ_ONLY_AGENT : this.options.agent;
+
+    // Never on a read-only session: there a request the agent's rules leave to
+    // `ask` must stay rejected.
+    if (this.options.dangerouslySkipPermissions && !readOnly) args.push('--auto');
+
+    if (this.options.bare) {
+      if (this._v2) this._noteOnce('bare', 'bare not sent: OpenCode 2 has no plugin-free mode');
+      else args.push('--pure');
+    }
+
+    // Images: OpenCode 1 reads a local file through its Read tool, which hands
+    // an image to the model as an attachment; OpenCode 2 sends it as a data URL
+    // and refuses one over 10 MiB.
+    for (const image of options.images ?? []) {
+      if (this._v2) args.push('-f', image);
+      else args.push(flagValue('--file', image));
     }
 
     // opencode wants `provider/model` format. Only pass through if it looks correct.
@@ -337,13 +519,12 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
       if (model && !model.includes('#')) {
         const withVariant = `${model}#${effort}`;
         if (!this._refusedVariants.has(withVariant)) model = variantTried = withVariant;
-      } else if (!model && !this._loggedEffortWithoutModel) {
+      } else if (!model) {
         // A variant names one model's level; with no model OpenCode picks the
         // default, and there is nothing to attach the level to.
-        this._loggedEffortWithoutModel = true;
-        this.emit(
-          SESSION_EVENT.LOG,
-          `[opencode] effort '${effort}' not sent: OpenCode 2 takes a reasoning variant only with a provider/model`,
+        this._noteOnce(
+          'effort',
+          `effort '${effort}' not sent: OpenCode 2 takes a reasoning variant only with a provider/model`,
         );
       }
     }
@@ -359,14 +540,12 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
         erroredTools: new Set(),
         gotUsage: false,
         variantUnavailable: false,
+        adoptSessionId: creating || forking,
+        // A V2 session under `customSessionId` may be the caller's existing one.
+        createsSession: (creating && !customId) || forking,
       };
       let stderr = '';
       let settled = false;
-      // Read-only safety: if our injected agent fails to load, opencode prints
-      // `agent "clawo-readonly" not found. Falling back to default agent` (to
-      // stdout) and silently runs the DEFAULT, writable agent. We must never let
-      // a read-only session degrade to writable — detect that line and fail.
-      let readOnlyAgentMissing = false;
 
       const proc = spawnEngine(this.engineBin, args, {
         launcher: this.options.launcher,
@@ -392,6 +571,29 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
         }
       }, timeout);
 
+      // OpenCode 1 runs its DEFAULT, writable agent when the one asked for does
+      // not load, and says so only in a warning (see AGENT_FALLBACK_RE). For a
+      // read-only session that is the sandbox gone; for a chosen agent it is the
+      // wrong agent. The warning comes before the prompt is sent, so the turn is
+      // killed on sight rather than refused after it ran.
+      const refuseAgentFallback = (text: string): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        killEngineTree(proc);
+        // It reached the engine, so it counts as a turn, but not as a success.
+        this._recordTurnComplete(false);
+        const said = text.match(AGENT_FALLBACK_RE)?.[1] ?? `agent "${agentName}" did not load`;
+        reject(
+          new Error(
+            readOnly
+              ? `OpenCode read-only enforcement failed: ${said}, so the turn would have run on the default, writable agent. ` +
+                  'Refused before it ran. (Check that OPENCODE_CONFIG_CONTENT is honored by this opencode version.)'
+              : `OpenCode did not run the agent this session asked for: ${said}. Refused rather than run on the default agent.`,
+          ),
+        );
+      };
+
       const rl = readline.createInterface({ input: proc.stdout!, crlfDelay: Infinity });
       this._currentRl = rl;
       rl.on('line', (line: string) => {
@@ -401,9 +603,8 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
           this._handleStreamEvent(event, options, state);
         } catch {
           // Non-JSON line — opencode banner or stray text. Treat as plain text.
-          if (readOnly && /\bnot found\. Falling back to default agent/i.test(line)) {
-            readOnlyAgentMissing = true;
-          }
+          // Earlier builds wrote the agent warning here rather than to stderr.
+          if (agentName && AGENT_FALLBACK_RE.test(line)) refuseAgentFallback(line);
           const fallback = line + '\n';
           // Accumulate fallback text under one stable key (the old code wrote to
           // __raw_<size> but read __raw_acc, so it never actually accumulated).
@@ -421,6 +622,8 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
         const sanitized = sanitizeSecrets(data.toString());
         stderr += sanitized;
         this.emit(SESSION_EVENT.LOG, `[opencode-stderr] ${sanitized}`);
+        // Tested on everything received so far: the warning can span chunks.
+        if (agentName && AGENT_FALLBACK_RE.test(stderr)) refuseAgentFallback(stderr);
       });
 
       proc.on('close', (code) => {
@@ -445,23 +648,6 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
             `[opencode] ${state.errorMessage ?? `variant refused: ${variantTried}`}; running on the model's default`,
           );
           this._run(message, options).then(resolve, reject);
-          return;
-        }
-
-        // A read-only session whose enforcement agent failed to load ran writable.
-        // Refuse the result rather than hand back output produced without the
-        // sandbox the caller asked for.
-        if (readOnlyAgentMissing) {
-          // Refused on purpose: it reached the engine, so it counts as a turn, but
-          // it is not a success by any reading.
-          this._recordTurnComplete(false);
-          reject(
-            new Error(
-              "OpenCode read-only enforcement failed: the 'clawo-readonly' agent did not load, so the session " +
-                'would have run with write access. Refusing the turn. (Check that OPENCODE_CONFIG_CONTENT is honored ' +
-                'by this opencode version.)',
-            ),
-          );
           return;
         }
 
@@ -518,11 +704,18 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
   private _handleStreamEvent(event: Record<string, unknown>, options: SessionSendOptions, state: TurnState): void {
     const type = event.type as string;
 
-    // Capture session id from envelope on first event that carries one. The raw
-    // id is kept separately because that is the form `--session` expects; the
-    // prefixed one is our display/persistence handle.
+    // Capture the session id from the first event that carries one, on a turn
+    // that created or forked a session. The raw id is kept separately because
+    // that is the form `--session` expects; the prefixed one is our display and
+    // persistence handle, which a restart resumes — after a fork, the fork's.
     const sid = (event.sessionID as string) || (event.sessionId as string) || (event.session_id as string);
-    if (sid && !this.opencodeSessionId) this.opencodeSessionId = sid;
+    if (sid && state.adoptSessionId) {
+      state.adoptSessionId = false;
+      this.opencodeSessionId = sid;
+      this.sessionId = `opencode-live-${sid}`;
+      this._forkPending = false;
+      if (state.createsSession) this._ownsSession = true;
+    }
     if (sid && !this.sessionId?.startsWith('opencode-live-')) {
       this.sessionId = `opencode-live-${sid}`;
     }
@@ -594,6 +787,20 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
         // No-op: lifecycle marker only.
         break;
 
+      case 'retry': {
+        // OpenCode 2 only: `{ messageID, attempt, nextRetryAt, error }`, where
+        // `error` is a Session.StructuredError `{ type, message, status? }` (2.3.2).
+        const err = (event.error ?? {}) as { type?: unknown; message?: unknown; status?: unknown };
+        this._retries++;
+        const category = typeof err.type === 'string' && err.type !== 'unknown' ? err.type : undefined;
+        const status = typeof err.status === 'number' ? String(err.status) : undefined;
+        this._lastRetryError = category ?? status ?? 'unknown';
+        const said = typeof err.message === 'string' ? sanitizeSecrets(err.message) : this._lastRetryError;
+        const attempt = typeof event.attempt === 'number' ? event.attempt : this._retries;
+        this.emit(SESSION_EVENT.LOG, `[opencode] retrying (attempt ${attempt}): ${said}`);
+        break;
+      }
+
       case 'step_finish': {
         if (!part) break;
         const tokens = part.tokens as
@@ -650,6 +857,11 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
    */
   getStats(): ReturnType<BaseOneShotSession['getStats']> {
     const base = super.getStats();
-    return { ...base, opencodeSessionId: this.opencodeSessionId };
+    return {
+      ...base,
+      retries: this._retries,
+      ...(this._lastRetryError ? { lastRetryError: this._lastRetryError } : {}),
+      opencodeSessionId: this.opencodeSessionId,
+    };
   }
 }

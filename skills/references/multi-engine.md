@@ -502,14 +502,22 @@ Wraps the [OpenCode](https://github.com/anomalyco/opencode) CLI with `run --form
 - Cost is what opencode reports on each `step_finish` (`part.cost`), so a free model costs $0; the registry estimate applies only when no cost is reported. `opencode run --format json` does not name the model it ran
 - A failed turn reports the message of opencode's `error` event when there is one
 - Reasoning effort maps to `--variant`, opencode's provider-specific effort knob. opencode does not validate the value: a level the provider does not offer runs the turn at its default rather than failing
+- Every turn runs with `--thinking`, without which opencode sends no `reasoning` events; reasoning goes to the log channel, never into the result
 - `appendSystemPrompt`: opencode has no system-prompt flag, so it is placed at the top of the first message of each new conversation
+- `agent` → `--agent <name>`. When 1.x cannot run the agent (not found, or a subagent), it prints a warning to stderr and runs the default agent; the wrapper kills the turn on sight of that warning and fails it instead. `agent` together with `sandboxMode: 'read-only'` is refused at session start
+- `dangerouslySkipPermissions` → `--auto`: a request that would have asked for permission is approved once instead of rejected; a rule that denies still denies. Never sent on a read-only session, and not derived from `permissionMode`
+- The turn that creates a session passes `--title <sessionName, else the session name>`. opencode applies a title only to a session it creates, not to a resumed one or a fork
+- `forkSession` with `resumeSessionId`: the first turn runs `--session <id> --fork`, and the session continues the fork's own id from then on; that id is also what a restart (model switch, tool update) resumes
+- `noSessionPersistence` (or `skipPersistence`): when the session stops, the opencode session it created (or forked) is deleted with `opencode session delete <id>`, run under the session's `launcher`; best effort, and stopping never fails because of it. The delete waits two seconds, so a restart that resumes the same id takes the session over and deletes it when it stops in turn. A session the caller named (`resumeSessionId` without `forkSession`, or `customSessionId`) is never deleted
+- `images` on a send: one `--file=<path>` per image. opencode reads the file with its Read tool, which passes an image to the model as an attachment, so the model must take images
+- `bare` → `--pure` (no external plugins)
 - The message is written to the subprocess's stdin, which is then closed: opencode waits for EOF before it starts
 - Provider-agnostic: opencode's `--model` expects `provider/model` form (e.g. `anthropic/claude-sonnet-4`). The wrapper passes `--model` through only when the value contains a `/`; otherwise opencode's own default applies
 - `sandboxMode: 'read-only'` runs a generated `clawo-readonly` agent (`--agent clawo-readonly` plus an `OPENCODE_CONFIG_CONTENT` env var defining it):
   - it denies `edit`, `bash`, `external_directory`, `webfetch` and `task` at the permission level, and also removes those tools via the agent's `tools` map
   - denying `task` matters: otherwise the agent can hand a write to a subagent that runs under the default writable agent
   - OpenCode's built-in `plan` agent is not used, because it permits both `bash` and `edit`
-  - if the `clawo-readonly` agent fails to load, the turn is refused rather than run with write access
+  - if the `clawo-readonly` agent fails to load, the turn is killed when 1.x warns that it is falling back to the default agent (before the prompt is sent) and refused, rather than run with write access
   - to test a change to this config, use adversarial prompts that include asking the agent to delegate; `opencode agent list` shows compiled rules that look the same for a safe and an unsafe agent
 - Install OpenCode 2 with `curl -fsSL https://opencode.ai/v2/install | bash`, or OpenCode 1.x with `npm install -g opencode-ai` or `brew install anomalyco/tap/opencode`. Auth via `opencode auth login` **or** any provider env var (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, etc.) — opencode picks up either path
 - The `0.0.0-beta-N` builds that preceded OpenCode 2's first release (from `opencode upgrade --major` and the `@opencode-ai/cli` npm package) are refused at session start: they send no `step_finish`, so a turn has no tokens and no cost. If the version cannot be read, the session starts as OpenCode 1.x
@@ -534,6 +542,11 @@ OpenCode 2 keeps `run --format json` and the same event stream, including `step_
 - Effort is sent as part of the model, `--model provider/model#effort`; there is no `--variant`. A variant the model does not offer fails the turn before the model is called (`Variant unavailable`), so the wrapper runs the turn again without it and does not ask for that variant again in the session; the level degrades as it does on 1.x. A model already written as `provider/model#variant` is passed as is. Without a `provider/model`, effort is not sent, and the session logs that once
 - The read-only agent is defined in the V2 format: ordered `permissions` rules that deny every action and then allow only `read`, `glob` and `grep`, with `.env` reads left to ask (a non-interactive run rejects an ask). Agent rules apply after the user's global and project rules, so a user's `allow` cannot reopen them. Measured: a write, a shell heredoc, a delegation to a subagent and a read outside the project were each refused, and the denied tools are not offered to the model
 - An `--agent` that does not exist fails the turn, rather than falling back to the default agent as 1.x does
+- Images are passed as `-f <path>` and sent to the model as data URLs; OpenCode 2 refuses a file over 10 MiB, which fails the turn
+- `noSessionPersistence` (or `skipPersistence`) also creates the session (or fork) with `--archived`, and the delete on stop runs with `--standalone`: without it the command goes to the background service and starts one when none is running
+- `customSessionId` (an id starting with `ses`; anything else is refused at session start): the first turn runs `--session <id>`, which creates the session under that id, or continues it if it already exists. OpenCode 1 cannot create a session under a given id, so there the option is not sent and the session logs that once
+- `bare` has no equivalent; the session logs that once
+- `retry` events (an API call being retried) count in the session's `retries`, with the error's type, else its HTTP status, as `lastRetryError`
 - Writable sessions run under OpenCode 2's default policy, which allows file access outside the project without asking; 1.x asked, which a non-interactive run rejects. To keep the 1.x behaviour, add `{ "action": "external_directory", "resource": "*", "effect": "ask" }` to `permissions` in your OpenCode configuration
 - The shell tool is named `shell` (1.x: `bash`), and the permission actions `subagent` and `edit` replace `task`, `write` and `patch`
 
