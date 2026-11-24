@@ -2313,7 +2313,10 @@ export class SessionManager {
     // this guard rejected. A provider-qualified string stays accepted because
     // the error message below offers it.
     const resolvedModel = this._resolveModel(model, managed.config.modelOverrides);
-    const looksValid = !!lookupModel(resolvedModel) || resolvedModel.includes('/');
+    // agy names its models its own way (an effort suffix, orchestrators, other vendors' models it serves),
+    // mostly not in the registry: `agy models` knows them, and agy refuses at the next turn a name it doesn't
+    const looksValid =
+      managed.config.engine === 'agy' || !!lookupModel(resolvedModel) || resolvedModel.includes('/');
     if (!looksValid) {
       throw new Error(
         `Unknown model '${model}' (resolved: '${resolvedModel}'). Use a known alias (opus, sonnet, haiku, gemini-pro, etc.) or a full provider/model string.`,

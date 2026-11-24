@@ -1525,6 +1525,20 @@ describe('SessionManager', () => {
       expect(mockSessions.length).toBe(2); // original + new
     });
 
+    // agy names its models its own way — an effort suffix (gemini-4-neon-high), orchestrators, models of other
+    // vendors served through it (gpt-oss-120b-medium) — and most are not in the registry: `agy models` is
+    // what knows them, and agy itself refuses a name it doesn't. 2026-11-24: every switch the phone offered
+    // for an agy assistant was refused here.
+    it('an agy session takes the names agy lists, which the registry does not', async () => {
+      for (const model of ['gemini-4-neon-high', 'gemini-pro-orchestrator-argon', 'gpt-oss-120b-medium']) {
+        const name = `agy-switch-${model}`;
+        await mgr.startSession({ name, cwd: '/tmp', engine: 'agy', model: 'gemini-3.5-flash' });
+        lastMock().setBusy(false);
+        await expect(mgr.switchModel(name, model)).resolves.toBeDefined();
+        await mgr.stopSession(name);
+      }
+    });
+
     it('uses the agy conversation UUID, not the synthetic session ID, when switching models', async () => {
       await mgr.startSession({ name: 'agy-switch', cwd: '/tmp', engine: 'agy', model: 'gemini-3.5-flash' });
       lastMock().conversationId = '11111111-2222-3333-4444-555555555555';
