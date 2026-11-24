@@ -136,6 +136,12 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
   private _isReady = false;
   private _isPaused = false;
   private _isBusy = false;
+  /**
+   * A user message was written and its turn's `result` has not come: set by every
+   * send, waited on or not (a goal's turns and inbox deliveries are not waited on),
+   * cleared by the result and by the process ending.
+   */
+  private _turnOpen = false;
   private currentRequestId = 0;
   private _streamCallbacks: StreamCallbacks | null = null;
   private _contextHighFired = false;
@@ -224,6 +230,11 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
   }
   get isBusy(): boolean {
     return this._isBusy;
+  }
+
+  /** A turn is running, whoever started it and whether anyone waits on it. */
+  get turnRunning(): boolean {
+    return this._isBusy || this._turnOpen;
   }
 
   /**
@@ -628,6 +639,7 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
     this.proc.on('close', (code) => {
       if (superseded()) return;
       this._isReady = false;
+      this._turnOpen = false;
       this.removeAccountSettings();
       this.emit(SESSION_EVENT.CLOSE, code);
     });
@@ -858,6 +870,7 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
         break;
 
       case 'result': {
+        this._turnOpen = false;
         const usage = (event as Record<string, unknown>).usage as Record<string, number> | undefined;
         if (usage) this._applyTurnUsage(usage, true);
         // A turn the account refused: the CLI answers it itself (model `<synthetic>`)
@@ -971,6 +984,7 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
     stdin.write(JSON.stringify(payload) + '\n', (err) => {
       if (err) this._emitError(new Error(`Failed to write to stdin: ${err.message}`));
     });
+    this._turnOpen = true;
 
     if (options.callbacks) this._streamCallbacks = options.callbacks;
 
@@ -1341,6 +1355,7 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
       this.proc = null;
     }
     this._isReady = false;
+    this._turnOpen = false;
   }
 
   // ─── Private ─────────────────────────────────────────────────────────────

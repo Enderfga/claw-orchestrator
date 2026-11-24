@@ -476,6 +476,15 @@ program
   });
 
 program
+  .command('session-interrupt <name>')
+  .description("Stop the session's running turn; the session and its conversation stay")
+  .action(async (name) => {
+    const r = await api('/session/interrupt', 'POST', { name });
+    if (!r.ok) fail(r.error);
+    else console.log(r.interrupted ? 'Interrupted.' : 'No turn was running.');
+  });
+
+program
   .command('session-compact <name>')
   .description('Compact session')
   .option('--summary <text>', 'Custom summary')

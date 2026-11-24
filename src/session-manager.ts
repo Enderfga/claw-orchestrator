@@ -1108,17 +1108,24 @@ function readClosedLedgerRestore(ledgerDir: string): ClosedLedgerRestore | null 
 export async function interruptRunning(session: unknown, engine: string): Promise<{ interrupted: boolean }> {
   const s = session as {
     isBusy?: boolean;
+    turnRunning?: boolean;
     interruptTurn?: () => boolean;
     interrupt?: () => Promise<{ interrupted: boolean }>;
     interruptRun?: () => boolean;
   };
-  // nothing running: nothing to send (the Claude CLI takes an interrupt between turns as well, and the
-  // answer would have said a turn was stopped)
-  if (s.isBusy === false) return { interrupted: false };
-  if (typeof s.interruptTurn === 'function') return { interrupted: s.interruptTurn() };
-  if (typeof s.interrupt === 'function') return await s.interrupt();
+  // Each engine decides from its own record of the running turn, not from `isBusy`, which only a send
+  // that waits sets: a goal's turns and inbox deliveries run with nobody waiting.
+  // A one-shot engine: the turn's process.
   if (typeof s.interruptRun === 'function') return { interrupted: s.interruptRun() };
-  throw new Error(`A ${engine} session can't be interrupted`);
+  if (typeof s.interruptTurn === 'function') {
+    // The Claude CLI takes an interrupt between turns too, and the answer would say a turn was stopped:
+    // ask only while one runs.
+    const running = typeof s.turnRunning === 'boolean' ? s.turnRunning : s.isBusy !== false;
+    return { interrupted: running ? s.interruptTurn() : false };
+  }
+  // codex app-server: its current turn id, a goal loop's turn included.
+  if (typeof s.interrupt === 'function') return await s.interrupt();
+  throw new Error(`An ${engine} session can't be interrupted`);
 }
 
 export class SessionManager {

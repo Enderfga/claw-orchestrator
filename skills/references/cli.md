@@ -158,6 +158,19 @@ clawo session-grep <name> <pattern> [-n, --limit <n>]
 
 Case-insensitive regular-expression search over the session's recent event history (`--limit` default 50). Prints the time and event type of each match.
 
+### session-interrupt
+
+```bash
+clawo session-interrupt <name>
+```
+
+Stops the turn the session is running, by its engine's own means: the Claude CLI's interrupt control
+request, Codex app-server's `turn/interrupt`, or, on a one-shot engine (`codex`, `agy`, `grok`,
+`opencode`), the turn's process. The session stays, and its next send continues the same conversation.
+A turn nobody waits on counts too — a goal's, or an inbox delivery. Prints `No turn was running.` when
+there was none; ACP and custom-engine sessions cannot be interrupted this way. Over HTTP:
+`POST /session/interrupt {"name": "<session>"}` returns `{ ok, interrupted }`.
+
 ### session-compact
 
 ```bash

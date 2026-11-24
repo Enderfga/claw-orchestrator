@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`clawo session-interrupt <name>` and `POST /session/interrupt` stop a session's running turn**, by its
+  engine's own means: the Claude CLI's interrupt control request, Codex app-server's `turn/interrupt`, or a
+  one-shot engine's process for the turn (Codex exec, Antigravity, Grok, OpenCode). The session stays and its
+  conversation carries on with the next send. A turn nobody waits on — a goal's, an inbox delivery — is stopped
+  too, and between turns nothing is sent: the answer is `interrupted: false`.
+
 ## [7.33.0] - 2026-11-24
 
 ### Added
