@@ -333,6 +333,8 @@ export interface GoalArgs extends CommonArgs {
   model?: string;
   effort?: string;
   sandboxMode?: GoalNode['sandboxMode'];
+  /** Claude Code: the account, or `auto` for the rotation (`GoalNode.claudeAccount`). */
+  claudeAccount?: string;
   /** Argv prefix the engine runs under, e.g. a sandbox wrapper. */
   launcher?: string[];
   /** Start on this existing thread or Claude session (its goal is replaced). */
@@ -365,6 +367,7 @@ export function goalWorkflow(args: GoalArgs): WorkflowSpec {
     model: args.model,
     effort: args.effort,
     sandboxMode: args.sandboxMode,
+    ...(args.claudeAccount ? { claudeAccount: args.claudeAccount } : {}),
     launcher: args.launcher,
     threadId: args.threadId,
     tokenBudget: args.tokenBudget,

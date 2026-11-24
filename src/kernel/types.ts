@@ -288,6 +288,12 @@ export interface GoalNode extends NodeBase {
   effort?: string;
   /** Codex's own sandbox; Claude Code has no equivalent and ignores it. */
   sandboxMode?: 'read-only' | 'workspace-write' | 'danger-full-access';
+  /**
+   * Claude Code only: the account to run under, or `auto` for the rotation in
+   * the accounts file; at a usage limit the goal moves to the next account and
+   * goes on. Unset uses the configured default.
+   */
+  claudeAccount?: string;
   /** Argv prefix the engine runs under, e.g. a sandbox wrapper. Caller-authored. */
   launcher?: string[];
   /**

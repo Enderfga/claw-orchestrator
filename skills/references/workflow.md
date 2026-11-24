@@ -444,6 +444,11 @@ what an unattended run needs around that loop.
   to at most 15 min. Every attempt counts before it is made, reopening a dead
   app-server included; past `capacityRetry.max` the node fails. The count is part
   of the checkpoint, so it carries across process restarts and repair visits.
+- **A Claude Code goal under a rotation of accounts moves on instead of waiting.** With `claudeAccount`
+  (`auto`, or an account in the accounts file's `rotation`), a turn the account refuses for its usage moves
+  the session to the next available account, continuing the same conversation, and the goal resumes at once
+  without spending an attempt (`accountSwitches` in the node's data). Only when no other account is
+  available does it wait as above. See [multi-engine.md](./multi-engine.md#claude-accounts-and-rotation).
   Codex also marks a goal `blocked` when its turn fails on one of those capacity
   errors (a model at capacity ends the turn with `serverOverloaded`); that goal is
   resumed the same way, on the same thread. A goal `blocked` for any other reason

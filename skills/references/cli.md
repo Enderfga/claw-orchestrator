@@ -295,26 +295,27 @@ clawo goal "<objective>" | --objective-file <file>
            [--cwd <dir>] [--wait] [--json]
 ```
 
-| Option             | Default            | Notes                                                                                                                                                   |
-| ------------------ | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--objective-file` | —                  | Read the objective from a file instead of the argument. A goal accepts at most 4,000 characters                                                         |
-| `-e, --engine`     | the default engine | Who runs the goal: `claude`, `codex` (a `codex-app` thread), `agy`, `grok`, `opencode` or `acp` (with `--acp-agent`), or the shorthand of the same name |
-| `-c, --check`      | —                  | A command check, repeatable, run after the goal. Split on whitespace; quote-needing commands go in `--contract`                                         |
-| `--contract`       | —                  | A contract JSON file; `--check` entries are appended to it                                                                                              |
-| `--check-timeout`  | 10                 | Minutes for each `--check` (at least 1). The verifier's node timeout is sized from the checks                                                           |
-| `--launcher`       | —                  | Run the engine under this command, one argv element per flag: `--launcher ./sandbox.sh --launcher task --launcher "0 1"`                                |
-| `-m, --model`      | the engine's own   | Model                                                                                                                                                   |
-| `--effort`         | the engine's own   | Reasoning effort                                                                                                                                        |
-| `--sandbox`        | the engine's own   | The session's sandbox mode (Claude Code has none). With an outer sandbox as the boundary, `danger-full-access`                                          |
-| `--thread`         | —                  | Start on this existing thread (codex thread, claude session, another engine's conversation id): its goal is replaced, its history kept                  |
-| `--token-budget`   | —                  | The goal stops as `budgetLimited` past this                                                                                                             |
-| `--isolate`        | off                | Work in a git worktree of HEAD, saved to a local branch `clawo/<runId>` when the goal ends; your checkout is not written                                |
-| `--max-budget`     | —                  | Spend cap for the whole run in USD; the goal stops when it is reached                                                                                   |
-| `--goal-timeout`   | none               | Wall-clock minutes for one goal pass                                                                                                                    |
-| `--max-repairs`    | `1`                | Times a red verdict sends the goal back to the same thread                                                                                              |
-| `--cwd`            | current directory  | Project directory                                                                                                                                       |
-| `-w, --wait`       | off                | Follow the run; exit `0` only if it completes                                                                                                           |
-| `--json`           | off                | Print `{ runId, state }`, or with `--wait` the final run record                                                                                         |
+| Option             | Default                | Notes                                                                                                                                                   |
+| ------------------ | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--objective-file` | —                      | Read the objective from a file instead of the argument. A goal accepts at most 4,000 characters                                                         |
+| `-e, --engine`     | the default engine     | Who runs the goal: `claude`, `codex` (a `codex-app` thread), `agy`, `grok`, `opencode` or `acp` (with `--acp-agent`), or the shorthand of the same name |
+| `-c, --check`      | —                      | A command check, repeatable, run after the goal. Split on whitespace; quote-needing commands go in `--contract`                                         |
+| `--contract`       | —                      | A contract JSON file; `--check` entries are appended to it                                                                                              |
+| `--check-timeout`  | 10                     | Minutes for each `--check` (at least 1). The verifier's node timeout is sized from the checks                                                           |
+| `--launcher`       | —                      | Run the engine under this command, one argv element per flag: `--launcher ./sandbox.sh --launcher task --launcher "0 1"`                                |
+| `-m, --model`      | the engine's own       | Model                                                                                                                                                   |
+| `--effort`         | the engine's own       | Reasoning effort                                                                                                                                        |
+| `--sandbox`        | the engine's own       | The session's sandbox mode (Claude Code has none). With an outer sandbox as the boundary, `danger-full-access`                                          |
+| `--thread`         | —                      | Start on this existing thread (codex thread, claude session, another engine's conversation id): its goal is replaced, its history kept                  |
+| `--token-budget`   | —                      | The goal stops as `budgetLimited` past this                                                                                                             |
+| `--claude-account` | the configured default | Claude Code: the account, or `auto` for the rotation; at a usage limit the goal moves to the next account and goes on                                   |
+| `--isolate`        | off                    | Work in a git worktree of HEAD, saved to a local branch `clawo/<runId>` when the goal ends; your checkout is not written                                |
+| `--max-budget`     | —                      | Spend cap for the whole run in USD; the goal stops when it is reached                                                                                   |
+| `--goal-timeout`   | none                   | Wall-clock minutes for one goal pass                                                                                                                    |
+| `--max-repairs`    | `1`                    | Times a red verdict sends the goal back to the same thread                                                                                              |
+| `--cwd`            | current directory      | Project directory                                                                                                                                       |
+| `-w, --wait`       | off                    | Follow the run; exit `0` only if it completes                                                                                                           |
+| `--json`           | off                    | Print `{ runId, state }`, or with `--wait` the final run record                                                                                         |
 
 `clawo workflow show <runId>` prints the goal's status, tokens, time, resume
 attempts and thread id while it runs; `clawo workflow steer <runId> "<text>"`

@@ -1301,6 +1301,11 @@ const plugin = {
           },
           acpAgent: { ...ACP_AGENT_ID_SCHEMA, description: '`goal` with engine acp: the ACP agent preset.' },
           model: { type: 'string', description: "`goal` only: model (default: the engine's own)." },
+          claudeAccount: {
+            type: 'string',
+            description:
+              '`goal` on Claude Code: the account to run under, or `auto` for the rotation; at a usage limit the goal moves to the next account.',
+          },
           tokenBudget: { type: 'number', description: '`goal` only: tokens the goal may spend.' },
           launcher: {
             type: 'array',
@@ -1369,6 +1374,7 @@ const plugin = {
               engine: args.engine as GoalArgs['engine'],
               acpAgent: args.acpAgent as string | undefined,
               model: args.model as string | undefined,
+              ...(typeof args.claudeAccount === 'string' ? { claudeAccount: args.claudeAccount } : {}),
               tokenBudget: args.tokenBudget as number | undefined,
               launcher: args.launcher as string[] | undefined,
               maxRepairs: args.maxRepairs as number | undefined,

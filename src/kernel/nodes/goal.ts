@@ -88,6 +88,8 @@ export interface GoalNodeData {
   lastMessage?: string;
   /** The thread's spend so far, priced from codex's cumulative token totals. */
   costUsd?: number;
+  /** Times a usage limit moved the goal's Claude session to the next account. */
+  accountSwitches?: number;
   /** The engine and model the goal ran on, for the run's ledger row. */
   engine?: string;
   model?: string;
@@ -366,7 +368,11 @@ export async function executeGoalNode(node: NodeSpec, ctx: NodeContext): Promise
         cwd: spec.cwd || ctx.cwd,
         model: spec.model,
         effort: spec.effort as never,
-        ...(claude ? {} : { sandboxMode: spec.sandboxMode }),
+        ...(claude
+          ? spec.claudeAccount
+            ? { claudeAccount: spec.claudeAccount }
+            : {}
+          : { sandboxMode: spec.sandboxMode }),
         ...(spec.disallowedTools?.length ? { disallowedTools: spec.disallowedTools } : {}),
         ...(engineName === 'acp' && spec.acpAgent ? { acpAgent: spec.acpAgent } : {}),
         launcher: spec.launcher,
@@ -583,6 +589,19 @@ export async function executeGoalNode(node: NodeSpec, ctx: NodeContext): Promise
       const needsResume = status === 'paused' || status === 'usageLimited' || stalled || capacityBlocked;
       if (!needsResume) {
         retryAt = null;
+      } else if (
+        retryAt === null &&
+        claude &&
+        status === 'usageLimited' &&
+        (await manager.rotateClaudeAccount?.(sessionName).catch(() => false))
+      ) {
+        // Under a rotation of Claude accounts, the session moved to the next one:
+        // the goal goes on now rather than waiting for this account's limit to
+        // reset. Bounded by the rotation: a spent account is not picked again.
+        data.accountSwitches = (data.accountSwitches ?? 0) + 1;
+        ctx.logger.info(`[goal ${ctx.runId}/${spec.id}] usage limit: moved to the next Claude account; resuming now`);
+        lastNews = Date.now();
+        absorb(await live.setGoal({ status: 'active' }).catch(() => live.goal));
       } else if (retryAt === null) {
         const stop = spendRecovery(
           stalled ? 'stalled' : capacityBlocked ? `blocked by ${data.lastError?.code ?? 'a capacity error'}` : status,

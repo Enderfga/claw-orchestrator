@@ -36,6 +36,8 @@ export interface SessionManagerLike {
    * `open` is what the node knows about the thread; Codex keeps that itself.
    */
   goalSession?(name: string, open?: GoalSessionOpen): GoalSession | undefined;
+  /** Move a Claude session its account refused to the next account in the rotation; true when it moved. */
+  rotateClaudeAccount?(name: string): Promise<boolean>;
 }
 
 export interface AgentStepArgs {

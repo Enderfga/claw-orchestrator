@@ -174,6 +174,41 @@ describe('Claude accounts', () => {
     }
   }, 30_000);
 
+  it('moves a session whose own goal turn the account refused, outside sendMessage', async () => {
+    const spawns = setup(
+      { accounts: { spent: {}, fresh: {} }, rotation: ['spent', 'fresh'] },
+      { spent: 'tok-spent', fresh: 'tok-fresh' },
+    );
+    const mgr = manager() as Manager & {
+      goalSession(n: string): {
+        goal: { status: string } | null;
+        setGoal(p: Record<string, unknown>): Promise<unknown>;
+      };
+      rotateClaudeAccount(n: string): Promise<boolean>;
+    };
+    const name = await start(mgr, { claudeAccount: 'spent' });
+    try {
+      // A goal drives its turns inside the session, so sendMessage's rotation never sees them.
+      const goal = mgr.goalSession(name);
+      await goal.setGoal({ objective: 'make it pass', tokenBudget: null });
+      for (let i = 0; i < 100 && goal.goal?.status !== 'usageLimited'; i++) await new Promise((r) => setTimeout(r, 50));
+      expect(goal.goal?.status).toBe('usageLimited');
+      expect(mgr.getStatus(name).claudeAccount).toBe('spent');
+
+      expect(await mgr.rotateClaudeAccount(name)).toBe(true);
+      expect(mgr.getStatus(name).claudeAccount).toBe('fresh');
+      expect((await mgr.sendMessage(name, 'again', { timeout: 10_000 })).output).toBe('reply from tok-fresh');
+      const tokens = spawns().map((s) => s.token);
+      expect(tokens).toEqual(['tok-spent', 'tok-fresh']);
+      // The new process continues the same conversation.
+      expect(spawns()[1].resume).toBeTruthy();
+      // Nothing is left to move to: the spent account is not picked again.
+      expect(await mgr.rotateClaudeAccount(name)).toBe(false);
+    } finally {
+      await mgr.stopSession(name);
+    }
+  }, 30_000);
+
   it('leaves an account at its switch threshold before the next turn', async () => {
     const spawns = setup(
       { accounts: { busy: {}, idle: {} }, rotation: ['busy', 'idle'], switchAt: 0.9 },

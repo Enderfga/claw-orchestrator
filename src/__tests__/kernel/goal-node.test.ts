@@ -1117,3 +1117,51 @@ describe("a goal's spend in the run's ledger row", () => {
     expect(row!.agents).toEqual([{ engine: 'codex-app', model: 'gpt-6.1-terra', costUsd: 0.4, turns: 1 }]);
   });
 });
+
+describe("a Claude goal at its account's usage limit", () => {
+  function claudeGoal(rotate: (name: string) => Promise<boolean>) {
+    let sets = 0;
+    const m = fakeManager(() => {
+      const s = new FakeGoalSession('sess-C');
+      // The first turn is refused for the account's usage; after that, the goal is met.
+      s.onSet = (_p, self) => self.move(++sets === 1 ? 'usageLimited' : 'complete');
+      return s;
+    });
+    Object.assign(m, { goalSession: (name: string) => m.sessions.get(name), rotateClaudeAccount: rotate });
+    return m;
+  }
+
+  it('moves to the next account and goes on at once, without spending a resume', async () => {
+    const rotated: string[] = [];
+    const m = claudeGoal(async (name) => (rotated.push(name), true));
+    const kernel = kernelWith(m);
+    // No resume allowed, and a long backoff: only the account switch can carry it on.
+    const run = await kernel.start(oneGoal({ engine: 'claude', capacityRetry: { max: 0, backoffMs: 60_000 } }));
+    const done = await kernel.wait(run.runId);
+    expect(done!.nodes.goal.state).toBe('succeeded');
+    expect(rotated).toEqual([String(m.starts[0].name)]);
+    expect(done!.nodes.goal.data).toMatchObject({ accountSwitches: 1, resumes: 0 });
+  });
+
+  it('waits for the limit as before when no other account can take it', async () => {
+    const m = claudeGoal(async () => false);
+    const kernel = kernelWith(m);
+    const run = await kernel.start(oneGoal({ engine: 'claude', capacityRetry: { max: 0, backoffMs: 60_000 } }));
+    const done = await kernel.wait(run.runId);
+    expect(done!.nodes.goal.state).toBe('failed');
+    expect(done!.nodes.goal.error).toMatch(/did not recover after 0 resume attempts \(last: usageLimited/);
+  });
+
+  it('passes the account it was given to the session', async () => {
+    const m = claudeGoal(async () => false);
+    const kernel = kernelWith(m);
+    await kernel.wait(
+      (
+        await kernel.start(
+          oneGoal({ engine: 'claude', claudeAccount: 'auto', capacityRetry: { max: 0, backoffMs: 60_000 } }),
+        )
+      ).runId,
+    );
+    expect(m.starts[0]).toMatchObject({ engine: 'claude', claudeAccount: 'auto' });
+  });
+});

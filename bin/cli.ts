@@ -1156,6 +1156,10 @@ addEngineFlags(program.command('goal'), 'Run the goal on')
   .option('--effort <level>', 'Reasoning effort')
   .option('--sandbox <mode>', 'Sandbox: read-only | workspace-write | danger-full-access (Claude Code has none)')
   .option(
+    '--claude-account <name>',
+    'Claude Code: the account to run under, or auto for the rotation; at a usage limit the goal moves to the next account',
+  )
+  .option(
     '--launcher <arg>',
     'Run the engine under this command, one argv element per flag, e.g. --launcher ./sandbox.sh --launcher task --launcher "0 1"',
     collect,
@@ -1225,6 +1229,7 @@ addEngineFlags(program.command('goal'), 'Run the goal on')
       model: opts.model,
       effort: opts.effort,
       sandboxMode: opts.sandbox,
+      ...(opts.claudeAccount ? { claudeAccount: opts.claudeAccount } : {}),
       launcher: opts.launcher.length ? opts.launcher : undefined,
       threadId: opts.thread,
       tokenBudget: opts.tokenBudget ? parseInt(opts.tokenBudget, 10) : undefined,

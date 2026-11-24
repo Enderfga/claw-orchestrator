@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **A Claude Code goal moves to the next Claude account at a usage limit.** With `claudeAccount` (`clawo goal
+  --claude-account auto`, or `claudeAccount` on a goal node or the `goal` template of `workflow_start`), a turn
+  the account refuses moves the goal's session to the next available account in the rotation, continuing the
+  same conversation, and the goal resumes at once instead of waiting for the limit to reset. A goal drives its
+  turns inside its session, so the rotation `sendMessage` applies after each turn never saw them.
+
+### Changed
+
+- **The skill description opens with when to use it.** Codex shows about 120 characters of each skill's
+  description when many skills are installed; ours spent them on a definition, so a Codex session asked for a
+  second opinion from Gemini or a review by several models did not reach for it. The description now starts
+  with those scenarios, and also names metric checks and comparing models across runs (`clawo runs --by
+  model`).
+
 ## [7.32.0] - 2026-11-24
 
 ### Added

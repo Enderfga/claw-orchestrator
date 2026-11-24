@@ -2423,6 +2423,21 @@ export class SessionManager {
   }
 
   /**
+   * After a turn that did not go through `sendMessage` — a goal drives its own
+   * turns inside the session — do what `sendMessage` does after a turn: record
+   * what it reported about the account's usage and, when the account refused it
+   * (the CLI said so), move the session to the next available account in the
+   * rotation. True when it moved; the conversation goes on under the new
+   * account. False when the account was not spent, the session is not under a
+   * rotated account, or every other account is spent.
+   */
+  async rotateClaudeAccount(name: string): Promise<boolean> {
+    const managed = this.sessions.get(name);
+    if (!managed) return false;
+    return this._rotateAfterTurn(name, managed);
+  }
+
+  /**
    * Restart the session's CLI under `next`, resuming the same conversation. An
    * account whose credential cannot be read, or whose process does not start,
    * is set aside for an hour; a failed start puts the session back on the account

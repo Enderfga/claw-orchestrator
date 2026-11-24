@@ -160,7 +160,9 @@ continues under another account by its own session id. Accounts are listed in
   same conversation, at most once per account. It also moves before a turn once any of the account's
   usage windows has reached `switchAt`, as reported by the CLI after every turn. A refused account is
   skipped until its window resets, and the server shares this across its sessions. An account outside
-  `rotation` never moves. A session started with `noSessionPersistence` keeps no transcript to
+  `rotation` never moves. A Claude Code goal (`clawo goal --claude-account auto`, `claudeAccount` on a goal
+  node) moves the same way when the account refuses one of its turns, and goes on at once instead of waiting
+  for the limit to reset. A session started with `noSessionPersistence` keeps no transcript to
   resume, so it does not move either: its turn fails with the limit.
 
 ### OpenAI Codex (`engine: 'codex'`)
