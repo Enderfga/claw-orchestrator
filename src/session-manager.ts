@@ -167,6 +167,7 @@ import {
 } from './verify/contract.js';
 import { ensureForumSpool, forumMetrics, forumPost, forumSnapshot, resolveForum } from './kernel/forum.js';
 import { runContract } from './verify/runner.js';
+import { chooseCheckEnv } from './verify/check-env.js';
 import {
   evidenceDir,
   listEvidence,
@@ -2133,10 +2134,13 @@ export class SessionManager {
     }
     const dir = kernelRunDir(runId);
     const evidenceId = nextEvidenceId(dir, 'verify');
+    // No record of who did the work: the contract's own `checkEnv`, else the server's environment.
+    const checkEnv = chooseCheckEnv(contract, undefined);
     const { results, rounds } = await runContract(contract, {
       cwd: args.cwd,
       artifactDir: evidenceDir(dir, evidenceId),
       baseSha: args.baseSha,
+      ...(checkEnv.env ? { env: checkEnv.env } : {}),
       logger: this.logger,
     });
     return writeEvidence({
@@ -2150,6 +2154,7 @@ export class SessionManager {
       contractHash: contractFingerprint(contract),
       results,
       rounds,
+      checkEnv: { mode: checkEnv.mode, reason: checkEnv.reason, passEnv: checkEnv.passEnv },
       logger: this.logger,
     });
   }

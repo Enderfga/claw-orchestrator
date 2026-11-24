@@ -18,6 +18,7 @@ import { evidenceDir, makeEvidenceId, writeEvidence } from '../../verify/evidenc
 import { runContract, type FixerSpawner } from '../../verify/runner.js';
 import { contractFingerprint } from '../../verify/contract.js';
 import { fileBaselineStore } from '../../verify/metric.js';
+import { chooseCheckEnv } from '../../verify/check-env.js';
 import * as path from 'node:path';
 
 /** How long one fix turn may run; `contractBudget` sizes the node with it. */
@@ -91,6 +92,8 @@ export async function executeVerifierNode(node: NodeSpec, ctx: NodeContext): Pro
   const dir = runDir(ctx.runId);
   const cwd = spec.cwd || ctx.cwd;
 
+  // A run whose agents worked in a sandbox runs its checks without the server's secrets.
+  const checkEnv = chooseCheckEnv(contract, ctx.record.spec);
   const spent = { costUsd: 0 };
   const { results, passed, rounds } = await runContract(
     contract,
@@ -104,6 +107,7 @@ export async function executeVerifierNode(node: NodeSpec, ctx: NodeContext): Pro
       baseTests: ctx.record.baseTests ?? (ctx.record.baseSha ? null : undefined),
       // A metric's base value is measured once a run, not on every repair.
       baselines: fileBaselineStore(path.join(dir, 'metric-baselines.json')),
+      ...(checkEnv.env ? { env: checkEnv.env } : {}),
       logger: ctx.logger,
       signal: ctx.signal,
     },
@@ -121,6 +125,7 @@ export async function executeVerifierNode(node: NodeSpec, ctx: NodeContext): Pro
     contractHash,
     results,
     rounds,
+    checkEnv: { mode: checkEnv.mode, reason: checkEnv.reason, passEnv: checkEnv.passEnv },
     logger: ctx.logger,
   });
 

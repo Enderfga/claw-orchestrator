@@ -35,7 +35,7 @@ import {
 export type ExecFn = (
   cmd: string,
   args: string[],
-  opts: { cwd?: string; timeoutMs?: number; signal?: { aborted: boolean } },
+  opts: { cwd?: string; timeoutMs?: number; signal?: { aborted: boolean }; env?: NodeJS.ProcessEnv },
 ) => Promise<ExecResult>;
 
 export interface FixerArgs {
@@ -63,6 +63,11 @@ export interface VerifyContext {
   baseTests?: TestSnapshot | null;
   /** Where a `metric` check keeps the base commit's value; in memory for this call when unset. */
   baselines?: BaselineStore;
+  /**
+   * The environment command and metric checks run with (`chooseCheckEnv`);
+   * unset, the server's minus its own credential.
+   */
+  env?: NodeJS.ProcessEnv;
   exec?: ExecFn;
   fetchFn?: typeof fetch;
   logger?: Logger;
@@ -94,6 +99,7 @@ async function runCommandCheck(
     cwd,
     timeoutMs: spec.timeoutMs ?? DEFAULT_CHECK_TIMEOUT_MS,
     ...(ctx.signal ? { signal: ctx.signal } : {}),
+    ...(ctx.env ? { env: ctx.env } : {}),
   });
   const cmdline = [spec.cmd, ...(spec.args ?? [])].join(' ');
   const expect = spec.expectExit ?? 0;
@@ -382,6 +388,7 @@ async function runOne(check: ContractCheck, index: number, ctx: VerifyContext): 
           ...(ctx.baseSha ? { baseSha: ctx.baseSha } : {}),
           baselines: ctx.baselines ?? memoryBaselineStore(),
           ...(ctx.signal ? { signal: ctx.signal } : {}),
+          ...(ctx.env ? { env: ctx.env } : {}),
         })),
       };
   }

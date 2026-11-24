@@ -42,7 +42,7 @@ Concretely: there is no shell string anywhere. A `command` check is argv.
 
 Each check may also carry an `id` (default `<type>-<n>`, used in the evidence) and
 `required`. The contract itself is `{ id?, checks, fixOnFailureRounds?,
-protectTests?, protectPaths? }`. `forbidPaths` and `requirePaths` are path prefixes matched by
+protectTests?, protectPaths?, checkEnv?, passEnv? }`. `forbidPaths` and `requirePaths` are path prefixes matched by
 whole segments (`src` covers `src/a.ts`, not `srcfoo/a.ts`), not globs. A `file`
 check's `matches` is compiled with RE2, so matching takes linear time whatever
 the file holds; lookarounds and backreferences are refused as an invalid matcher.
@@ -175,6 +175,32 @@ bundle behind the run's current verdict, whose id `workflow_status` reports.
 
 Bundle writes are best-effort. The verdict is already decided by the check
 results, so a bundle that fails to land loses the record, never the answer.
+
+## The checks' environment
+
+A check usually runs code the agent wrote, and it runs outside whatever sandbox the agent worked in.
+When the agent was sandboxed — Codex and `codex-app` by default (`workspace-write`: no network, and
+no variable named like a secret in its shell), an explicit `sandboxMode` of `read-only` or
+`workspace-write` on any engine, or a `launcher` — a check with the server's environment would be the
+way out for that code: run outside the sandbox with every key the server holds. So in a run where any
+agent, goal, or fan-out or council agent worked in a sandbox, command and `metric` checks run with a
+**minimal environment**:
+
+- kept: `PATH`, `HOME`, `USER`, `SHELL`, `LANG`, `TERM`, `TMPDIR`, `TZ`, `CI`, CA bundle paths, and the
+  toolchains' own variables (`LC_*`, `XDG_*`, `NODE_*`, `npm_config_*`, `PYTHON*`, `PIP_*`, `UV_*`,
+  `CONDA_*`, `VIRTUAL_ENV`, `GO*` paths, `CARGO_HOME`, `RUSTUP_HOME`, `JAVA_HOME`, …);
+- dropped, even when a prefix above matches: any name containing `KEY`, `SECRET`, `TOKEN`, `PASSWORD`,
+  `PASSPHRASE`, `CREDENTIAL`, `AUTH` or `COOKIE`, and every other variable;
+- passed as well: the names in the contract's `passEnv` — exact names, or prefixes ending in `*`
+  (`"passEnv": ["OPENAI_API_KEY", "AWS_*"]`; `--pass-env` on `solve`, `goal` and `fanout`).
+
+A run with no sandboxed agent keeps the server's environment, as before (minus the server's own
+credential, which no check ever gets). `checkEnv: "minimal"` or `"inherit"` on the contract (`--check-env`)
+decides it either way. The evidence bundle records the mode, why, and the `passEnv` names
+(`checkEnv`), never a value; `clawo verify` prints it when the environment was minimal. `verify_run` has
+no record of who did the work and inherits unless the contract says `minimal`; Autoloop's gate decides by
+the Coder's engine. The base-commit run of a `metric` check, and every fix-on-red re-run, use the same
+environment.
 
 ## Fix-on-red
 

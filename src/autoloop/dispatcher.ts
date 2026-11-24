@@ -39,6 +39,7 @@ import { withoutServerCredential } from '../kernel/secrets.js';
 import { capturePatch, changedFilesSince } from '../verify/baseline.js';
 import { runContract } from '../verify/runner.js';
 import { fileBaselineStore } from '../verify/metric.js';
+import { chooseCheckEnv } from '../verify/check-env.js';
 import { writeEvidence } from '../verify/evidence.js';
 import { contractFingerprint, type AcceptanceContract } from '../verify/contract.js';
 import { protectedPathsFor, snapshotTests, type TestSnapshot } from '../verify/protected-tests.js';
@@ -1905,12 +1906,18 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
     const iterDir = path.join(this.ledgerDir, 'iter', String(iter));
     const evidenceId = `iter-${iter}`;
     const base = this.iterationBase(iter);
+    // The Coder writes what the checks run; on an engine that sandboxes it
+    // (Codex by default), the checks do not get the server's secrets either.
+    const checkEnv = chooseCheckEnv(contract, {
+      nodes: [{ kind: 'agent', id: 'coder', engine: this.coderSelection.engine }],
+    });
     const { results, passed, rounds } = await runContract(contract, {
       cwd: this.config.workspace,
       artifactDir: path.join(iterDir, 'evidence'),
       ...(base.baseSha ? { baseSha: base.baseSha } : {}),
       ...(base.baseTests !== undefined ? { baseTests: base.baseTests } : {}),
       baselines: fileBaselineStore(path.join(this.ledgerDir, 'metric-baselines.json')),
+      ...(checkEnv.env ? { env: checkEnv.env } : {}),
       logger: this.logger,
     });
     await writeEvidence({
@@ -1924,6 +1931,7 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
       contractHash: contractFingerprint(contract),
       results,
       rounds,
+      checkEnv: { mode: checkEnv.mode, reason: checkEnv.reason, passEnv: checkEnv.passEnv },
       logger: this.logger,
     });
 

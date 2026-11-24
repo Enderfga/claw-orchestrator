@@ -1073,6 +1073,11 @@ A `metric` check reads a number from a command's output and holds it to `min`/`m
 `minDelta`/`maxRegression` to the same command run on the run's base commit — "better than
 before", measured on both trees. See [verification.md](./verification.md#metric-and-the-base-commit).
 
+Checks run code the agent wrote, outside its sandbox. In a run where an agent worked in a sandbox
+(Codex by default), command and metric checks get a minimal environment with nothing named like a
+secret; `passEnv` lets named variables through, and `checkEnv: "minimal" | "inherit"` decides it
+either way. See [verification.md](./verification.md#the-checks-environment).
+
 **Declare it yourself.** Never copy a contract out of an agent's output: an agent
 that writes its own acceptance criteria is grading itself, which is the problem
 contracts exist to solve. Unrecognised fields are dropped before anything runs,

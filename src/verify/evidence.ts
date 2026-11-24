@@ -43,6 +43,12 @@ export interface EvidenceBundle {
    * Undefined outside a git repo, where we cannot tell.
    */
   treeFingerprint?: string;
+  /**
+   * The environment the command and metric checks ran with, and why: `minimal`
+   * or `inherit` (see `check-env.ts`), with the names `passEnv` let through.
+   * Names only, never values. Absent on bundles from before it was recorded.
+   */
+  checkEnv?: { mode: 'inherit' | 'minimal'; reason: string; passEnv: string[] };
 }
 
 export function evidenceRoot(runDir: string): string {
@@ -107,6 +113,7 @@ export interface WriteEvidenceArgs {
   contractHash?: string;
   results: CheckResult[];
   rounds: number;
+  checkEnv?: EvidenceBundle['checkEnv'];
   logger?: Logger;
 }
 
@@ -142,6 +149,7 @@ export async function writeEvidence(args: WriteEvidenceArgs): Promise<EvidenceBu
     results: args.results,
     changedFiles,
     treeFingerprint: await treeFingerprint(args.cwd),
+    ...(args.checkEnv ? { checkEnv: args.checkEnv } : {}),
   };
 
   try {
@@ -221,6 +229,10 @@ export function formatEvidence(bundle: EvidenceBundle): string {
     lines.push(`base ${bundle.baseSha.slice(0, 12)}${bundle.headSha ? ` → head ${bundle.headSha.slice(0, 12)}` : ''}`);
   }
   if (bundle.rounds > 0) lines.push(`${bundle.rounds} fix round(s) consumed`);
+  if (bundle.checkEnv?.mode === 'minimal') {
+    const pass = bundle.checkEnv.passEnv.length ? `; passEnv: ${bundle.checkEnv.passEnv.join(', ')}` : '';
+    lines.push(`checks ran with a minimal environment (${bundle.checkEnv.reason}${pass})`);
+  }
   lines.push('');
   for (const r of bundle.results) {
     const mark = r.passed ? 'PASS' : r.required ? 'FAIL' : 'warn';

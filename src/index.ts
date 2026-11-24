@@ -1337,6 +1337,18 @@ const plugin = {
                 description:
                   "Files or directories, relative to the run cwd, protected like the tests: a judge's config, fixtures, a benchmark. Scripts a command check runs by path are protected without being named. Not applied by verify_run.",
               },
+              checkEnv: {
+                type: 'string',
+                enum: ['minimal', 'inherit'],
+                description:
+                  "The environment command and metric checks run with. Default: `minimal` (toolchain variables, nothing named like a secret, plus passEnv) when an agent of the run worked in a sandbox — Codex by default — else the server's.",
+              },
+              passEnv: {
+                type: 'array',
+                items: { type: 'string' },
+                description:
+                  'Variables a minimal check environment also passes: names, or prefixes ending in * (AWS_*).',
+              },
               checks: {
                 type: 'array',
                 minItems: 1,
@@ -1623,6 +1635,18 @@ const plugin = {
                 items: { type: 'string' },
                 description:
                   "Files or directories, relative to the run cwd, protected like the tests: a judge's config, fixtures, a benchmark. Scripts a command check runs by path are protected without being named. Not applied by verify_run.",
+              },
+              checkEnv: {
+                type: 'string',
+                enum: ['minimal', 'inherit'],
+                description:
+                  "The environment command and metric checks run with. Default: `minimal` (toolchain variables, nothing named like a secret, plus passEnv) when an agent of the run worked in a sandbox — Codex by default — else the server's.",
+              },
+              passEnv: {
+                type: 'array',
+                items: { type: 'string' },
+                description:
+                  'Variables a minimal check environment also passes: names, or prefixes ending in * (AWS_*).',
               },
               checks: {
                 type: 'array',

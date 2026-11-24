@@ -819,13 +819,23 @@ function buildContract(
   checks: string[],
   contractFile: string | undefined,
   timeoutMs?: number,
+  env: { passEnv?: string[]; checkEnv?: string } = {},
 ): Record<string, unknown> | undefined {
+  let contract: Record<string, unknown> | undefined;
   if (contractFile) {
     const raw = JSON.parse(fs.readFileSync(contractFile, 'utf-8')) as Record<string, unknown>;
-    if (!checks.length) return raw;
-    return { ...raw, checks: [...((raw.checks as unknown[]) ?? []), ...checksFromFlags(checks, timeoutMs)] };
+    contract = checks.length
+      ? { ...raw, checks: [...((raw.checks as unknown[]) ?? []), ...checksFromFlags(checks, timeoutMs)] }
+      : raw;
+  } else if (checks.length) {
+    contract = { checks: checksFromFlags(checks, timeoutMs) };
   }
-  return checks.length ? { checks: checksFromFlags(checks, timeoutMs) } : undefined;
+  if (!contract) return undefined;
+  if (env.checkEnv) contract.checkEnv = env.checkEnv;
+  if (env.passEnv?.length) {
+    contract.passEnv = [...new Set([...((contract.passEnv as string[] | undefined) ?? []), ...env.passEnv])];
+  }
+  return contract;
 }
 
 function checksFromFlags(checks: string[], timeoutMs?: number): Array<Record<string, unknown>> {
@@ -1020,6 +1030,16 @@ addAgentFlags(
       [],
     )
     .option('--contract <file>', 'Acceptance contract JSON file (merged with --check)')
+    .option(
+      '--pass-env <name>',
+      'Let a check see this variable (or NAME_* prefix) when it runs with a minimal environment (repeatable)',
+      collect,
+      [],
+    )
+    .option(
+      '--check-env <mode>',
+      'minimal | inherit: the environment checks run with (default: minimal when an agent worked in a sandbox)',
+    )
     .option('--max-repairs <n>', 'Repair attempts while the checks are red', '3')
     .option(
       '--isolate',
@@ -1068,7 +1088,7 @@ addAgentFlags(
     ...(opts.isolate ? { isolation: 'worktree' as const } : {}),
     ...(opts.maxBudget ? { maxBudgetUsd: parseFloat(opts.maxBudget) } : {}),
   });
-  await startWorkflow(spec, cwd, buildContract(opts.check, opts.contract), opts);
+  await startWorkflow(spec, cwd, buildContract(opts.check, opts.contract, undefined, opts), opts);
 });
 
 addAgentFlags(
@@ -1092,6 +1112,16 @@ addAgentFlags(
     .option('--agent-timeout <minutes>', 'How long each agent may run (default 30)')
     .option('-c, --check <command>', 'Acceptance check the runtime runs afterwards (repeatable)', collect, [])
     .option('--contract <file>', 'Acceptance contract JSON file (merged with --check)')
+    .option(
+      '--pass-env <name>',
+      'Let a check see this variable (or NAME_* prefix) when it runs with a minimal environment (repeatable)',
+      collect,
+      [],
+    )
+    .option(
+      '--check-env <mode>',
+      'minimal | inherit: the environment checks run with (default: minimal when an agent worked in a sandbox)',
+    )
     .option('--cwd <dir>', 'Project directory', process.cwd())
     .option('-w, --wait', 'Follow the run until it ends, then print every answer and where each is saved')
     .option('--json', 'Machine-readable output'),
@@ -1128,7 +1158,7 @@ addAgentFlags(
     agentTimeoutMs,
     ...(opts.maxBudget ? { maxBudgetUsd: parseFloat(opts.maxBudget) } : {}),
   });
-  const runId = await startWorkflow(spec, cwd, buildContract(opts.check, opts.contract), opts);
+  const runId = await startWorkflow(spec, cwd, buildContract(opts.check, opts.contract, undefined, opts), opts);
   if (!runId || !opts.wait || opts.json) return;
   const s = await api(`/workflow/${encodeURIComponent(runId)}/state`);
   type FanoutData = { results?: Array<{ agent: string; outputFile?: string }>; synthesisFile?: string };
@@ -1175,6 +1205,16 @@ addEngineFlags(program.command('goal'), 'Run the goal on')
   .option('--check-timeout <minutes>', 'Timeout for each --check (default 10)')
   .option('--contract <file>', 'Acceptance contract JSON file (merged with --check)')
   .option(
+    '--pass-env <name>',
+    'Let a check see this variable (or NAME_* prefix) when it runs with a minimal environment (repeatable)',
+    collect,
+    [],
+  )
+  .option(
+    '--check-env <mode>',
+    'minimal | inherit: the environment checks run with (default: minimal when an agent worked in a sandbox)',
+  )
+  .option(
     '--isolate',
     "Work in a git worktree of the repository's HEAD; what the run leaves is saved to a local branch clawo/<runId>, and your checkout is not written",
   )
@@ -1219,7 +1259,7 @@ addEngineFlags(program.command('goal'), 'Run the goal on')
     }
     const minutes = (v: string | undefined) => (v ? Math.max(1, parseFloat(v)) * 60_000 : undefined);
     const cwd = path.resolve(opts.cwd);
-    const contract = buildContract(opts.check, opts.contract, minutes(opts.checkTimeout));
+    const contract = buildContract(opts.check, opts.contract, minutes(opts.checkTimeout), opts);
     const spec = goalWorkflow({
       task: objective,
       cwd,

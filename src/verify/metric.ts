@@ -105,6 +105,8 @@ export interface MetricContext {
   baseSha?: string;
   baselines?: BaselineStore;
   signal?: { aborted: boolean };
+  /** The environment the command runs with, on both trees; unset, the server's minus its credential. */
+  env?: NodeJS.ProcessEnv;
 }
 
 type Outcome = Omit<CheckResult, 'id' | 'required' | 'type'>;
@@ -113,10 +115,16 @@ async function measure(
   spec: MetricCheck,
   cwd: string,
   signal: { aborted: boolean } | undefined,
+  env: NodeJS.ProcessEnv | undefined,
 ): Promise<{ value?: number; detail: string; tail?: string; timedOut?: boolean; durationMs: number }> {
   const dir = spec.cwd ? path.resolve(cwd, spec.cwd) : cwd;
   const timeoutMs = spec.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const r = await exec(spec.cmd, spec.args ?? [], { cwd: dir, timeoutMs, ...(signal ? { signal } : {}) });
+  const r = await exec(spec.cmd, spec.args ?? [], {
+    cwd: dir,
+    timeoutMs,
+    ...(signal ? { signal } : {}),
+    ...(env ? { env } : {}),
+  });
   const cmdline = [spec.cmd, ...(spec.args ?? [])].join(' ');
   const output = `${r.out}\n${r.err}`;
   if (r.timedOut)
@@ -180,7 +188,7 @@ async function baselineOf(spec: MetricCheck, ctx: MetricContext): Promise<{ valu
       return rel.startsWith('..') || path.isAbsolute(rel) ? dir : path.join(tree, rel);
     };
     const baseSpec = spec.cwd && path.isAbsolute(spec.cwd) ? { ...spec, cwd: inBase(spec.cwd) } : spec;
-    const m = await measure(baseSpec, inBase(ctx.cwd), ctx.signal);
+    const m = await measure(baseSpec, inBase(ctx.cwd), ctx.signal, ctx.env);
     if (m.value === undefined) return { error: `on the base commit: ${m.detail}` };
     ctx.baselines?.set(key, m.value);
     return { value: m.value };
@@ -193,7 +201,7 @@ async function baselineOf(spec: MetricCheck, ctx: MetricContext): Promise<{ valu
 const fmt = (n: number): string => (Number.isInteger(n) ? String(n) : n.toPrecision(6).replace(/\.?0+$/, ''));
 
 export async function runMetricCheck(spec: MetricCheck, ctx: MetricContext): Promise<Outcome> {
-  const m = await measure(spec, ctx.cwd, ctx.signal);
+  const m = await measure(spec, ctx.cwd, ctx.signal, ctx.env);
   if (m.value === undefined) {
     return { passed: false, durationMs: m.durationMs, timedOut: m.timedOut, detail: m.detail, tail: m.tail };
   }

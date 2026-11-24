@@ -17,6 +17,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Checks in a run with a sandboxed agent no longer see the server's secrets.** A check runs code the agent
+  wrote, outside the agent's sandbox. When an agent, goal, or fan-out or council agent of the run was sandboxed —
+  Codex and `codex-app` by default, an explicit `read-only` / `workspace-write` `sandboxMode`, or a `launcher` —
+  command and metric checks now run with a minimal environment: `PATH`, `HOME`, locale, temp dirs and toolchain
+  variables, without any name containing `KEY`, `SECRET`, `TOKEN`, `PASSWORD`, `AUTH` and the like. A check that
+  needs one names it: `passEnv` on the contract (`--pass-env OPENAI_API_KEY`, prefixes as `AWS_*`), or
+  `checkEnv: "inherit"` (`--check-env inherit`) for the old behaviour. Runs whose agents were not sandboxed, and
+  `verify_run`, are unchanged. The evidence bundle records which environment the checks had.
 - **The skill description opens with when to use it.** Codex shows about 120 characters of each skill's
   description when many skills are installed; ours spent them on a definition, so a Codex session asked for a
   second opinion from Gemini or a review by several models did not reach for it. The description now starts

@@ -134,6 +134,15 @@ export interface AcceptanceContract {
    * command check runs by path are protected without being named here.
    */
   protectPaths?: string[];
+  /**
+   * The environment command and metric checks run with. `minimal`: what
+   * toolchains need, nothing named like a secret, plus `passEnv`. `inherit`: the
+   * server's, minus its own credential. Unset: minimal when an agent of the run
+   * worked in a sandbox, inherited otherwise (see `check-env.ts`).
+   */
+  checkEnv?: 'inherit' | 'minimal';
+  /** Variables a minimal environment passes as well: names, or prefixes ending in `*` (`AWS_*`). */
+  passEnv?: string[];
 }
 
 export interface CheckResult {
@@ -329,6 +338,14 @@ export function normalizeContract(raw: unknown): AcceptanceContract | undefined 
     ...(Array.isArray(r.protectPaths)
       ? { protectPaths: r.protectPaths.filter((p): p is string => typeof p === 'string' && p.trim() !== '') }
       : {}),
+    ...(r.checkEnv === 'inherit' || r.checkEnv === 'minimal' ? { checkEnv: r.checkEnv } : {}),
+    ...(Array.isArray(r.passEnv)
+      ? {
+          passEnv: r.passEnv.filter(
+            (p): p is string => typeof p === 'string' && /^[A-Za-z_][A-Za-z0-9_]*\*?$/.test(p.trim()),
+          ),
+        }
+      : {}),
   };
 }
 
@@ -365,12 +382,15 @@ const FINGERPRINT_SCHEME = 'clawo-contract/1';
  */
 function rulesOf(contract: AcceptanceContract): unknown {
   const paths = [...new Set(contract.protectPaths ?? [])].sort();
+  const passEnv = [...new Set(contract.passEnv ?? [])].sort();
   return {
     scheme: FINGERPRINT_SCHEME,
     checks: contract.checks.map(checkRules),
     protectTests: contract.protectTests !== false,
     // Only when there are any, so a contract without them keeps the fingerprint it always had.
     ...(paths.length ? { protectPaths: paths } : {}),
+    ...(contract.checkEnv ? { checkEnv: contract.checkEnv } : {}),
+    ...(passEnv.length ? { passEnv } : {}),
   };
 }
 
@@ -407,6 +427,9 @@ export function compareContracts(
   if ((prev.protectTests !== false) !== (next.protectTests !== false)) return 'changed';
   const paths = (c: AcceptanceContract) => [...new Set(c.protectPaths ?? [])].sort().join('\n');
   if (paths(prev) !== paths(next)) return 'changed';
+  // What the checks may see is part of what they judge.
+  const env = (c: AcceptanceContract) => `${c.checkEnv ?? ''}|${[...new Set(c.passEnv ?? [])].sort().join(',')}`;
+  if (env(prev) !== env(next)) return 'changed';
   const count = (c: AcceptanceContract) => {
     const m = new Map<string, number>();
     for (const check of c.checks) {
