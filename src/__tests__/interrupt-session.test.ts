@@ -24,6 +24,14 @@ describe('interruptRunning', () => {
     expect(await interruptRunning(s, 'agy')).toEqual({ interrupted: true });
   });
 
+  it('no turn running: nothing is sent, and it says nothing was interrupted', async () => {
+    // the Claude CLI answers an interrupt even between turns: without this, "interrupted" was reported
+    // for a session that had nothing running
+    const s = { isBusy: false, interruptTurn: vi.fn(() => true) };
+    expect(await interruptRunning(s, 'claude')).toEqual({ interrupted: false });
+    expect(s.interruptTurn).not.toHaveBeenCalled();
+  });
+
   it('nothing to stop it with: says so', async () => {
     await expect(interruptRunning({}, 'custom')).rejects.toThrow(/custom/);
   });

@@ -1107,10 +1107,14 @@ function readClosedLedgerRestore(ledgerDir: string): ClosedLedgerRestore | null 
  */
 export async function interruptRunning(session: unknown, engine: string): Promise<{ interrupted: boolean }> {
   const s = session as {
+    isBusy?: boolean;
     interruptTurn?: () => boolean;
     interrupt?: () => Promise<{ interrupted: boolean }>;
     interruptRun?: () => boolean;
   };
+  // nothing running: nothing to send (the Claude CLI takes an interrupt between turns as well, and the
+  // answer would have said a turn was stopped)
+  if (s.isBusy === false) return { interrupted: false };
   if (typeof s.interruptTurn === 'function') return { interrupted: s.interruptTurn() };
   if (typeof s.interrupt === 'function') return await s.interrupt();
   if (typeof s.interruptRun === 'function') return { interrupted: s.interruptRun() };
