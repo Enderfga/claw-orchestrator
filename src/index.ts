@@ -959,7 +959,7 @@ const plugin = {
     registerTool({
       name: 'fanout_start',
       description:
-        'Run one task across N engine/model agents IN PARALLEL and collect their answers (optional synthesis). Cross-engine best-of-N / diverse-perspective primitive. No rounds, votes, or worktrees — use council for isolated parallel edits. Runs in background; poll with fanout_status.',
+        "Run one task across N engine/model agents IN PARALLEL and collect their answers (optional synthesis): the way to have Claude Code, Codex, Antigravity and others review, analyse or compare the same thing at once. Each agent can have its own engine, model (the engine's own id, e.g. gpt-6.2-astra, gemini-4-neon-high), effort, cwd and sandboxMode. No rounds, votes, or worktrees — use council for isolated parallel edits. Runs in background; poll with fanout_status, whose results name each answer's file (outputFile) for reading long reports whole.",
       parameters: {
         type: 'object',
         properties: {
@@ -985,7 +985,11 @@ const plugin = {
                   type: 'string',
                   enum: ENGINE_TYPES,
                 },
-                model: { type: 'string' },
+                model: {
+                  type: 'string',
+                  description:
+                    "The engine's own model id (claude-fable-5-2, gpt-6.2-astra, gemini-4-neon-high, …) or a clawo alias; passed to the engine as given, and an id the engine does not know fails that agent's turn with the engine's error.",
+                },
                 effort: { type: 'string', enum: EFFORT_LEVELS },
                 prompt: {
                   type: 'string',
@@ -1053,7 +1057,11 @@ const plugin = {
             ...ACP_AGENT_ID_SCHEMA,
             description: 'With synthesisEngine "acp": the ACP agent preset the synthesis pass starts.',
           },
-          agentTimeoutMs: { type: 'number', description: 'Per-agent timeout in ms (default 600000).' },
+          agentTimeoutMs: {
+            type: 'number',
+            description:
+              'Per-agent timeout in ms (default 1800000, 30 min). A turn that outlives it ends with timedOut: true and the text it had written so far.',
+          },
           maxTurnsPerAgent: { type: 'number', description: 'Max agent loop turns (default 30).' },
           maxBudgetUsd: { type: 'number', description: 'Per-agent spend cap (USD).' },
         },
@@ -1078,7 +1086,8 @@ const plugin = {
 
     registerTool({
       name: 'fanout_status',
-      description: 'Poll a running or finished fan-out by id; returns per-agent results and any synthesis.',
+      description:
+        'Poll a running or finished fan-out by id; returns per-agent results and any synthesis. Each result names outputFile, the answer written to the run directory (outputs/<agent>.md; synthesisFile for the synthesis), so a long report can be read whole.',
       parameters: {
         type: 'object',
         properties: { id: { type: 'string', description: 'Fan-out id from fanout_start.' } },

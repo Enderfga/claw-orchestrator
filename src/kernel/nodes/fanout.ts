@@ -7,6 +7,7 @@
  * them entirely. Here the node output is checkpointed like any other.
  */
 
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { NodeContext, NodeResult, RunKernel } from '../engine.js';
 import {
@@ -20,7 +21,7 @@ import {
 import type { FanoutAgentResult, FanoutSession } from '../../fanout.js';
 import { forumBrief, forumHub, forumTeamOf, openAsks, resolveForum, unreadFor } from '../forum.js';
 import type { GoalNodeData } from './goal.js';
-import { loadRun } from '../store.js';
+import { loadRun, runDir } from '../store.js';
 import { sanitizeCwd } from '../../validation.js';
 import type { EngineType } from '../../types.js';
 
@@ -82,6 +83,7 @@ async function runFanout(node: NodeSpec, ctx: NodeContext, kernel: RunKernel | u
   const byName = new Map<string, FanoutAgentResult>();
   for (const r of [...(turns?.results ?? []), ...goals]) byName.set(r.agent, r);
   const results = spec.agents.map((a) => byName.get(a.name)).filter((r): r is FanoutAgentResult => !!r);
+  const synthesisFile = writeOutputs(ctx, results, turns?.synthesis);
   const failures = results.filter((r) => !r.ok);
   const body =
     turns?.synthesis ??
@@ -110,6 +112,7 @@ async function runFanout(node: NodeSpec, ctx: NodeContext, kernel: RunKernel | u
       agentCount: spec.agents.length,
       results,
       synthesis: turns?.synthesis,
+      ...(synthesisFile ? { synthesisFile } : {}),
       synthesisError: turns?.synthesisError,
       ...(goalAgents.length > 0 ? { goalRuns } : {}),
       ...(forum
@@ -117,6 +120,43 @@ async function runFanout(node: NodeSpec, ctx: NodeContext, kernel: RunKernel | u
         : {}),
     },
   };
+}
+
+/**
+ * Every agent's output, and the synthesis, as files in the run directory
+ * (`outputs/<agent>.md`, `outputs/synthesis.md`), each result naming its own.
+ * A caller reads a long report there whole: an MCP client may cut a large tool
+ * result, and three full reviews in one status reply are large. A failed turn's
+ * file holds the error and whatever the agent had written. Best effort: a file
+ * that cannot be written leaves its result without `outputFile`.
+ */
+function writeOutputs(
+  ctx: NodeContext,
+  results: FanoutAgentResult[],
+  synthesis: string | undefined,
+): string | undefined {
+  let dir: string;
+  try {
+    dir = path.join(runDir(ctx.runId), 'outputs');
+    fs.mkdirSync(dir, { recursive: true });
+  } catch {
+    return undefined;
+  }
+  const write = (name: string, text: string): string | undefined => {
+    const file = path.join(dir, `${name.replace(/[^A-Za-z0-9._-]/g, '_')}.md`);
+    try {
+      fs.writeFileSync(file, text);
+      return file;
+    } catch {
+      return undefined;
+    }
+  };
+  for (const r of results) {
+    const text = r.ok ? r.output : `<!-- failed: ${r.error ?? 'unknown error'} -->\n\n${r.output}`;
+    const file = write(r.agent, text);
+    if (file) r.outputFile = file;
+  }
+  return synthesis ? write('synthesis', synthesis) : undefined;
 }
 
 /**

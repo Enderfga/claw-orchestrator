@@ -262,7 +262,8 @@ describe('multi-agent runners wait for a slot', () => {
     ];
     expect(fanouts).toHaveLength(4);
     for (const n of fanouts) {
-      expect(n.agentTimeoutMs).toBe(600_000);
+      // 30 minutes, as for a council seat: a review of a codebase takes 15 to 30.
+      expect(n.agentTimeoutMs).toBe(1_800_000);
       expect(n.timeoutMs).toBe(fanoutNodeBudget(2, n.synthesize));
     }
     for (const n of councils) {

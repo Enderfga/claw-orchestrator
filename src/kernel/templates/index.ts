@@ -130,6 +130,8 @@ export function councilWorkflow(args: CouncilArgs): WorkflowSpec {
 export interface FanoutArgs extends CommonArgs {
   agents: FanoutAgentSpec[];
   synthesize?: boolean;
+  /** How long each agent's turn may run. Default 30 minutes. */
+  agentTimeoutMs?: number;
 }
 
 export function fanoutWorkflow(args: FanoutArgs): WorkflowSpec {
@@ -145,8 +147,8 @@ export function fanoutWorkflow(args: FanoutArgs): WorkflowSpec {
         agents: args.agents,
         synthesize: args.synthesize,
         cwd: args.cwd,
-        agentTimeoutMs: FANOUT_AGENT_TIMEOUT_MS,
-        timeoutMs: fanoutAgentsBudget(args.agents, args.synthesize),
+        agentTimeoutMs: args.agentTimeoutMs ?? FANOUT_AGENT_TIMEOUT_MS,
+        timeoutMs: fanoutAgentsBudget(args.agents, args.synthesize, args.agentTimeoutMs),
       },
     ],
   };

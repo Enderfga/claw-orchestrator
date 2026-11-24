@@ -1031,10 +1031,11 @@ addAgentFlags(
     .option('--opencode', 'Add an OpenCode agent')
     .option('--acp <preset>', 'Add an ACP agent (repeatable)', collect, [])
     .option('-s, --synthesize', 'Merge the answers in a final pass (needs two or more agents)')
+    .option('--agent-timeout <minutes>', 'How long each agent may run (default 30)')
     .option('-c, --check <command>', 'Acceptance check the runtime runs afterwards (repeatable)', collect, [])
     .option('--contract <file>', 'Acceptance contract JSON file (merged with --check)')
     .option('--cwd <dir>', 'Project directory', process.cwd())
-    .option('-w, --wait', 'Follow the run until it ends, then print every answer')
+    .option('-w, --wait', 'Follow the run until it ends, then print every answer and where each is saved')
     .option('--json', 'Machine-readable output'),
   { model: false, appendSystemPrompt: false },
 ).action(async (task: string, opts) => {
@@ -1060,12 +1061,20 @@ addAgentFlags(
   }
   if (!(await enginesKnown(agents))) return;
   const cwd = path.resolve(opts.cwd);
-  const spec = fanoutWorkflow({ task, cwd, agents: agents as never, synthesize: !!opts.synthesize });
+  const agentTimeoutMs = opts.agentTimeout ? Math.max(1, parseFloat(opts.agentTimeout)) * 60_000 : undefined;
+  const spec = fanoutWorkflow({ task, cwd, agents: agents as never, synthesize: !!opts.synthesize, agentTimeoutMs });
   const runId = await startWorkflow(spec, cwd, buildContract(opts.check, opts.contract), opts);
   if (!runId || !opts.wait || opts.json) return;
   const s = await api(`/workflow/${encodeURIComponent(runId)}/state`);
-  const node = (s.run as { nodes?: Record<string, { output?: string }> } | undefined)?.nodes?.fanout;
+  type FanoutData = { results?: Array<{ agent: string; outputFile?: string }>; synthesisFile?: string };
+  const node = (s.run as { nodes?: Record<string, { output?: string; data?: FanoutData }> } | undefined)?.nodes?.fanout;
   if (node?.output) console.log(`\n${node.output}`);
+  // Each answer whole, as a file: the printed text is the same, but a caller reads one report at a time there.
+  const files = [
+    ...(node?.data?.results ?? []).filter((r) => r.outputFile).map((r) => `  ${r.agent}: ${r.outputFile}`),
+    ...(node?.data?.synthesisFile ? [`  synthesis: ${node.data.synthesisFile}`] : []),
+  ];
+  if (files.length) console.log(`\nSaved:\n${files.join('\n')}`);
 });
 
 addEngineFlags(program.command('goal'), 'Run the goal on')

@@ -1,6 +1,6 @@
 ---
 name: claw-orchestrator
-description: Manage persistent coding sessions across Claude Code, Codex, Antigravity (agy), Grok Build, OpenCode, any Agent Client Protocol agent (Kimi Code, dsh) and custom CLIs. Use when orchestrating multi-engine coding agents, starting/sending/stopping sessions, running durable, resumable workflows (solve / fanout / council / goal on any engine) and having the runtime verify the result against an acceptance contract, fanning one task out to several engines, running multi-agent council collaborations, cross-session messaging, ultraplan deep planning, ultrareview parallel code review, autoloop autonomous workspace iteration, ultraapp building deployable web apps from a structured Q&A interview, switching models/tools at runtime, running Claude sessions under several Claude accounts with rotation at the usage limit, tracking per-turn cost and spend caps across engines, exposing the orchestrator's 81 tools as an MCP server to Hermes Agent / Claude Desktop / Cursor / Cline / Continue / Zed / Windsurf / Goose, or running as an Agent Client Protocol (ACP) agent that Zed / JetBrains / Neovim / Emacs / VS Code / dsh can drive directly. Triggers on "default engine", "clawo config", "same flags on every engine", "goal on agy", "goal on any engine", "start a session", "send to session", "run council", "ultraplan", "ultrareview", "autoloop", "ultraapp", "Forge tab", "build a web app", "one-click app", "AppSpec", "autonomous iteration", "iterate until goal", "auto research", "switch model", "hand off a session", "session handoff", "switch engine", "continue on codex", "continue on claude", "move this session to another engine", "multi-agent coding", "coding session", "session inbox", "grok session", "grok build", "opencode", "mcp server", "clawo-mcp", "hermes mcp", "model context protocol", "ultracode", "dynamic workflow", "fanout", "fan-out", "best-of-N", "steer turn", "interrupt turn", "fork thread", "rollback turns", "acp", "agent client protocol", "clawo acp", "zed agent", "jetbrains agent", "external agent", "dsh subagent", "deepseek harness", "acp engine", "acp agent", "kimi code", "kimi acp", "dsh acp", "any acp agent", "clawo runs", "run ledger", "session cost", "coding-agent token usage", "spend cap", "budget limit", "maxBudgetUsd", "durable workflow", "resume a run", "autoloop_resume", "resume autoloop", "verify a coding run", "acceptance contract", "evidence bundle", "did the agent's tests actually pass", "protected tests", "agent edited the tests", "human gate", "repair loop", "clawo workflow", "clawo verify", "clawo solve", "clawo fanout", "fix and verify", "solve from the terminal", "codex goal", "/goal", "clawo goal", "long-horizon goal", "unattended codex run", "goal node", "run codex in a sandbox", "launcher", "claude account", "multiple claude accounts", "account rotation", "usage limit", "claudeAccount", "team forum", "workflow forum", "agents share a forum", "agent-to-agent messages", "message a busy session", "clawo forum".
+description: Run Claude Code, Codex, Antigravity (agy), Grok, OpenCode and ACP agents from one place. Use when the user wants several engines or models to work on the same thing at once — review, analyse, compare or brainstorm in parallel, in whatever language they ask (`clawo fanout` or fanout_start, with per-agent engine, model, cwd and read-only); to run one agent unattended until a goal is met and checked (`clawo goal`, `clawo solve`); to keep a coding session on any engine (session_start / session_send); and for council, ultraplan / ultrareview, autoloop, ultraapp, cost ledgers, and serving the tools over MCP or ACP.
 metadata:
   {
     'openclaw':
@@ -37,6 +37,43 @@ metadata:
 # Claw Orchestrator Skill
 
 Claw Orchestrator — persistent multi-engine coding session manager for claw-style agent systems. Runs as a standalone CLI/server, with first-class OpenClaw plugin support. Wraps Claude Code, Codex, Antigravity, Grok Build, OpenCode, any Agent Client Protocol agent, and custom CLIs into headless agentic engines with 81 tools.
+
+## Several engines on one task (review, analysis, comparison)
+
+One call runs the same task on every agent in parallel; each agent has its own engine, model, effort, `cwd` and
+`sandboxMode`. From a shell, no MCP tool needed:
+
+```bash
+clawo fanout "Review the poker game in this repo for correctness, fairness and UX; cite file:line for each finding." \
+  -e codex:gpt-6.2-astra,agy:gemini-4-neon-high,claude:claude-fable-5-2 \
+  --sandbox read-only --agent-timeout 40 --synthesize --cwd /path/to/repo --wait
+```
+
+Run it as a background command: it exits when every agent has answered, so its exit is the completion notice. It
+prints each answer, then where each is saved (`~/.claw-orchestrator/wf/<runId>/outputs/<agent>.md`, and
+`synthesis.md`). The same through MCP:
+
+```javascript
+fanout_start({
+  task: 'Review the poker game for correctness, fairness and UX; cite file:line for each finding.',
+  projectDir: '/path/to/repo',
+  agents: [
+    { name: 'codex', engine: 'codex', model: 'gpt-6.2-astra', effort: 'high', sandboxMode: 'read-only' },
+    { name: 'agy', engine: 'agy', model: 'gemini-4-neon-high', sandboxMode: 'read-only' },
+    { name: 'claude', engine: 'claude', model: 'claude-fable-5-2', sandboxMode: 'read-only' },
+  ],
+  agentTimeoutMs: 2_400_000, // 40 min; the default is 30
+  synthesize: true,
+});
+fanout_status({ id }); // results[i].output, .outputFile (the whole answer), .timedOut; synthesis, synthesisFile
+```
+
+- `model` is the engine's own id (or a clawo alias) and goes to the engine as given; an id the engine does not know
+  fails that agent at once with the engine's own error, never a silent fallback.
+- An agent that outlives its timeout ends `timedOut: true`, with the text it had streamed so far as its output (agy
+  streams nothing before it finishes). The others' answers stand.
+- `cwd` per agent (absolute, or relative to `projectDir`) when agents write; `sandboxMode: 'read-only'` for reviewers.
+  An agent with an `objective` runs as a goal instead of one turn ([workflow.md](references/workflow.md#goal)).
 
 ## Engine Quick Reference
 

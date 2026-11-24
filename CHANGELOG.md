@@ -9,16 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Fan-out answers are saved as files.** Each agent's output, and the synthesis, are written to the run directory
+  (`outputs/<agent>.md`, `outputs/synthesis.md`); `fanout_status` results name them (`outputFile`, `synthesisFile`), and
+  `clawo fanout --wait` prints where each is saved. A long report can be read whole there, where an MCP client may cut
+  a large tool result.
+- **A fan-out agent that runs out of time says so and keeps what it wrote**: `timedOut: true`, an error naming the
+  timeout, and the text the agent had streamed as its output (agy streams nothing before its turn ends).
+- `clawo fanout --agent-timeout <minutes>`.
 - **`autoCompactWindow` on Antigravity.** The session field now also reaches agy, as `AGY_CLI_AUTO_COMPACT_OVERRIDE`
   (agy 1.5.15+): the token count at which agy compacts the conversation, at least 100000, or `auto` for agy's own
   threshold. A smaller value is refused at start; below the size of a message, agy fails the turn.
 
 ### Changed
 
+- **A fan-out agent may run 30 minutes by default** (`agentTimeoutMs`), not 10: a review or an analysis of a whole
+  codebase takes 15 to 30. The skill description now leads with running several engines on one task, and SKILL.md
+  opens with a recipe for it.
 - Tested engine versions: Claude Code 2.1.331, Codex 0.172.0, Antigravity 1.5.16 and OpenCode 2 2.4.1. OpenCode 2 is
-  documented as installed from npm, `@opencode/cli`. Since agy 1.5.16
-  its Auto mode, which `permissionMode: 'auto'` selects, also creates and edits files outside the workspace without
-  asking when they are inside a version-controlled repository; see multi-engine.md.
+  documented as installed from npm, `@opencode/cli`. Since agy 1.5.16 its Auto mode, which `permissionMode: 'auto'`
+  selects, also creates and edits files outside the workspace without asking when they are inside a version-controlled
+  repository; see multi-engine.md.
 
 ## [7.31.0] - 2026-11-21
 

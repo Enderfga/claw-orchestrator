@@ -238,24 +238,35 @@ cancelled. Unknown engine names are refused before anything starts.
 
 ## `clawo fanout`
 
-Ask several engines the same thing in parallel, optionally merging the answers.
+Ask several engines the same thing in parallel — a review, an analysis, a comparison — optionally merging the
+answers.
 
 ```bash
 clawo fanout "<task>" [--engines <list>] [--claude] [--codex] … [--acp <preset>]... [--synthesize]
-             [--effort <level>] [--permission-mode <mode>] [--sandbox <mode>] [--check "<command>"]...
-             [--contract <file>] [--cwd <dir>] [--wait] [--json]
+             [--effort <level>] [--permission-mode <mode>] [--sandbox <mode>] [--agent-timeout <minutes>]
+             [--check "<command>"]... [--contract <file>] [--cwd <dir>] [--wait] [--json]
+
+# Three reviewers, read-only, each on its own model, 40 minutes each, merged:
+clawo fanout "Review this repo's poker game for correctness and fairness; cite file:line." \
+  -e codex:gpt-6.2-astra,agy:gemini-4-neon-high,claude:claude-fable-5-2 \
+  --sandbox read-only --agent-timeout 40 --synthesize --wait
 ```
 
-| Option                                       | Default                        | Notes                                                                                                                                                                            |
-| -------------------------------------------- | ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `-e, --engines`                              | the default engine and `codex` | Comma-separated agents, `engine[:model]` each, or `acp:<preset>` for an ACP agent; an engine may repeat. Each shorthand (`--codex`, `--agy`, `--acp <preset>`, …) adds one agent |
-| `--effort`, `--permission-mode`, `--sandbox` | —                              | The session flags of the same names, for every agent                                                                                                                             |
-| `-s, --synthesize`                           | off                            | Merge the answers in a final pass. It runs only when at least two agents answered                                                                                                |
-| `-c, --check`                                | —                              | A command check, repeatable, run after the fan-out, as for `solve`                                                                                                               |
-| `--contract`                                 | —                              | A contract JSON file; `--check` entries are appended to it                                                                                                                       |
-| `--cwd`                                      | current directory              | Project directory                                                                                                                                                                |
-| `-w, --wait`                                 | off                            | Follow the run to the end, then print every answer under a `## <agent>` heading — or the synthesis, if one ran                                                                   |
-| `--json`                                     | off                            | Print `{ runId, state }`, or with `--wait` the final run record                                                                                                                  |
+With `--wait` the command returns when every agent has answered, so started as a background command its exit is the
+completion notice; nothing needs polling. A model is the engine's own id, passed as given; an id the engine does not
+know fails that agent within seconds with the engine's error.
+
+| Option                                       | Default                        | Notes                                                                                                                                                                                                                 |
+| -------------------------------------------- | ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `-e, --engines`                              | the default engine and `codex` | Comma-separated agents, `engine[:model]` each, or `acp:<preset>` for an ACP agent; an engine may repeat. Each shorthand (`--codex`, `--agy`, `--acp <preset>`, …) adds one agent                                      |
+| `--effort`, `--permission-mode`, `--sandbox` | —                              | The session flags of the same names, for every agent                                                                                                                                                                  |
+| `-s, --synthesize`                           | off                            | Merge the answers in a final pass. It runs only when at least two agents answered                                                                                                                                     |
+| `--agent-timeout`                            | 30                             | Minutes each agent may run. One that runs out is reported as timed out, with what it had written so far                                                                                                               |
+| `-c, --check`                                | —                              | A command check, repeatable, run after the fan-out, as for `solve`                                                                                                                                                    |
+| `--contract`                                 | —                              | A contract JSON file; `--check` entries are appended to it                                                                                                                                                            |
+| `--cwd`                                      | current directory              | Project directory                                                                                                                                                                                                     |
+| `-w, --wait`                                 | off                            | Follow the run to the end, then print every answer under a `## <agent>` heading — or the synthesis, if one ran — and the file each is saved in (`~/.claw-orchestrator/wf/<runId>/outputs/<agent>.md`, `synthesis.md`) |
+| `--json`                                     | off                            | Print `{ runId, state }`, or with `--wait` the final run record                                                                                                                                                       |
 
 ## `clawo goal`
 

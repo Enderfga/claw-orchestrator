@@ -252,7 +252,9 @@ persona and the shared task. The spec stores `prompt` and `persona` separately,
 so a resumed node reconstructs the same message.
 
 On `fanout` and `council`, `timeoutMs` bounds the whole node and `agentTimeoutMs` one
-agent's send. They differ because agents beyond the free session slots wait for one, so
+agent's send (30 minutes by default on both). A fan-out writes each agent's output, and the synthesis, to
+`outputs/<agent>.md` and `outputs/synthesis.md` in the run directory, and its results name them (`outputFile`,
+`synthesisFile`); an agent whose send timed out is `timedOut: true`, with what it had streamed as its output. They differ because agents beyond the free session slots wait for one, so
 the node can run several agents' worth of time. Without `agentTimeoutMs`, `timeoutMs`
 serves as both. `fanout_start`, `ultrareview_start`,
 `council_start` and the built-in `fanout`, `council` and `solve` workflows set both: the

@@ -307,3 +307,42 @@ describe('Fanout — synthesis turn reports a returned error', () => {
     expect(session.synthesisError).toBeUndefined();
   });
 });
+
+// ── A turn that runs out of time is named as such, and keeps what it wrote.
+describe('Fanout agent timeout', () => {
+  it('defaults to 30 minutes per agent', async () => {
+    const { manager } = makeManager();
+    await new Fanout(baseConfig([{ name: 'a' }]), manager as never).run();
+    expect(manager.sendMessage).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.any(String),
+      expect.objectContaining({ timeout: 1_800_000 }),
+    );
+  });
+
+  it('marks a timed-out turn and keeps the text it had streamed', async () => {
+    const manager = {
+      startSession: vi.fn(async (config: { name?: string }) => ({ name: config.name }) as never),
+      sendMessage: vi.fn(async (_name: string, _message: string, options: { onChunk?: (t: string) => void }) => {
+        options.onChunk?.('Finding 1: the deck is ');
+        options.onChunk?.('shuffled with Math.random.');
+        throw new Error('Timeout waiting for Codex response');
+      }),
+      stopSession: vi.fn(async () => {}),
+    };
+    const session = await new Fanout(
+      baseConfig([{ name: 'rev' }], { agentTimeoutMs: 120_000 }),
+      manager as never,
+    ).run();
+    const r = session.results[0];
+    expect(r).toMatchObject({ ok: false, timedOut: true, output: 'Finding 1: the deck is shuffled with Math.random.' });
+    expect(r.error).toMatch(
+      /^timed out after 2 min \(agentTimeoutMs 120000\); the output is what the agent had written/,
+    );
+    // Any other failure keeps its own message and is not called a timeout.
+    const { manager: m2 } = makeManager({ fail: new Set(['x']) });
+    const other = (await new Fanout(baseConfig([{ name: 'x' }]), m2 as never).run()).results[0];
+    expect(other.timedOut).toBeUndefined();
+    expect(other.error).toBe('boom:x');
+  });
+});

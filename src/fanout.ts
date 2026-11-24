@@ -112,8 +112,17 @@ export interface FanoutAgentResult {
   /** The directory this agent ran in. */
   cwd?: string;
   ok: boolean;
+  /**
+   * The agent's answer. On a failed turn, what it had written before it failed —
+   * as much as its engine streams: agy hands over its reply only when the turn
+   * ends, so a timed-out agy turn has none.
+   */
   output: string;
   error?: string;
+  /** The turn ran out of `agentTimeoutMs`; `output` is what came before that. */
+  timedOut?: boolean;
+  /** The output written to the run directory, so a long report can be read whole. */
+  outputFile?: string;
   durationMs: number;
   /** What this agent's turn cost, as its send measured it. */
   costUsd?: number;
@@ -130,6 +139,8 @@ export interface FanoutSession {
   finishedAt?: string;
   results: FanoutAgentResult[];
   synthesis?: string;
+  /** The synthesis written to the run directory. */
+  synthesisFile?: string;
   /** Set when synthesis was requested but failed, so callers can tell it apart from "not requested". */
   synthesisError?: string;
   /** Every agent turn and the synthesis pass, summed — the fan-out's share of its run's cost. */
@@ -139,7 +150,17 @@ export interface FanoutSession {
   suspended?: { at: string; reason: string };
 }
 
-export const DEFAULT_AGENT_TIMEOUT_MS = 600_000;
+/**
+ * How long one agent's turn may run. 30 minutes, as for a council seat: a review
+ * or an analysis of a whole codebase takes 15 to 30 (10 minutes, the earlier
+ * default, cut them off).
+ */
+export const DEFAULT_AGENT_TIMEOUT_MS = 1_800_000;
+
+/** A send that failed because the turn outlived its timeout, in any engine's wording. */
+export function isTurnTimeout(message: string): boolean {
+  return /\btime(?:d)?\s?out\b|\btimeout\b/i.test(message);
+}
 const DEFAULT_MAX_TURNS = 30;
 
 function agentMessage(spec: FanoutAgentSpec, task: string): string {
@@ -221,6 +242,9 @@ export class Fanout {
     }
     const sessionName = `${this.session.id}-${spec.name}`;
     const start = Date.now();
+    const timeoutMs = this.config.agentTimeoutMs ?? DEFAULT_AGENT_TIMEOUT_MS;
+    // What the agent has written so far, kept for a turn that does not finish.
+    let streamed = '';
     let leave: (() => void) | undefined;
     let cwd = this.config.projectDir;
     try {
@@ -247,9 +271,12 @@ export class Fanout {
         sessionName,
         preface ? `${preface}\n\n---\n\n${message}` : message,
         {
-          timeout: this.config.agentTimeoutMs ?? DEFAULT_AGENT_TIMEOUT_MS,
+          timeout: timeoutMs,
           parentRunId: this.session.id,
           nodeKind: 'fanout',
+          onChunk: (text: string) => {
+            streamed += text;
+          },
         },
       );
       const after = this._stats(sessionName);
@@ -260,14 +287,15 @@ export class Fanout {
       const ok =
         !result.error &&
         (before && after ? (after.turns > before.turns ? after.turnsSucceeded > before.turnsSucceeded : true) : true);
+      const error = ok ? undefined : result.error || 'engine did not report the turn as succeeded';
       return {
         agent: spec.name,
         engine,
         model: spec.model,
         cwd,
         ok,
-        output: result.output,
-        error: ok ? undefined : result.error || 'engine did not report the turn as succeeded',
+        output: result.output || (ok ? '' : streamed),
+        ...(error ? this._failure(error, timeoutMs) : {}),
         durationMs: Date.now() - start,
         ...(result.usage ? { costUsd: this._charge(result.usage.costUsd) } : {}),
       };
@@ -278,8 +306,8 @@ export class Fanout {
         model: spec.model,
         cwd,
         ok: false,
-        output: '',
-        error: (err as Error).message,
+        output: streamed,
+        ...this._failure((err as Error).message, timeoutMs),
         durationMs: Date.now() - start,
       };
     } finally {
@@ -288,6 +316,16 @@ export class Fanout {
         // Best-effort cleanup; a dead session is fine to ignore.
       });
     }
+  }
+
+  /** A failed turn's error, said plainly when the cause was the timeout. */
+  private _failure(message: string, timeoutMs: number): { error: string; timedOut?: true } {
+    if (!isTurnTimeout(message)) return { error: message };
+    const minutes = Math.round(timeoutMs / 60_000);
+    return {
+      error: `timed out after ${minutes} min (agentTimeoutMs ${timeoutMs}); the output is what the agent had written by then (${message})`,
+      timedOut: true,
+    };
   }
 
   /**
