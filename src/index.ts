@@ -103,6 +103,11 @@ interface PluginAPI {
     handler: (...args: unknown[]) => Promise<boolean>;
   }): void;
   registerService(def: { id: string; start: () => void; stop: () => void }): void;
+  /**
+   * A host that already runs a SessionManager (`clawo serve`) hands it in: the
+   * tools act on its sessions and runs, and no second manager or server starts.
+   */
+  sessionManager?: SessionManager;
 }
 
 function isAgentToolResult(result: unknown): result is AgentToolResult {
@@ -147,6 +152,24 @@ const ACP_AGENT_ID_SCHEMA = {
 /**
  * OpenClaw plugin object — standard format
  */
+/**
+ * The plugin's tools bound to `manager`, for a host that runs its own manager
+ * and HTTP server (`clawo serve`): its `/tool` route then calls them.
+ */
+export function toolsFor(manager: SessionManager): Map<string, ToolDefinition> {
+  const tools = new Map<string, ToolDefinition>();
+  plugin.register({
+    pluginConfig: {},
+    logger: { info: () => {}, warn: () => {}, error: () => {} },
+    registerTool: (def) => tools.set(def.name, def),
+    on: () => {},
+    registerHttpRoute: () => {},
+    registerService: () => {},
+    sessionManager: manager,
+  });
+  return tools;
+}
+
 const plugin = {
   id: 'claw-orchestrator',
   name: 'Claw Orchestrator',
@@ -156,11 +179,15 @@ const plugin = {
   register(api: PluginAPI): void {
     const rawConfig = (api.pluginConfig || {}) as Partial<PluginConfig>;
 
+    // Every tool, as registered, for the embedded server's `/tool` route.
+    const tools = new Map<string, ToolDefinition>();
     const registerTool = (definition: ToolDefinition): void => {
-      api.registerTool({
+      const tool: ToolDefinition = {
         ...definition,
         execute: async (toolCallId, params) => normalizeToolResult(await definition.execute(toolCallId, params)),
-      });
+      };
+      tools.set(definition.name, tool);
+      api.registerTool(tool);
     };
 
     // ─── Lazy Init ────────────────────────────────────────────────────────
@@ -170,7 +197,7 @@ const plugin = {
     // thereafter. This keeps memory overhead at zero for users who have the
     // plugin installed but do not actively use Claude Code sessions.
 
-    let manager: SessionManager | null = null;
+    let manager: SessionManager | null = api.sessionManager ?? null;
     let server: EmbeddedServer | null = null;
 
     function getManager(): SessionManager {
@@ -196,6 +223,7 @@ const plugin = {
         if (process.env.CLAWO_NO_EMBEDDED_SERVER !== '1') {
           api.logger.info('[claw-orchestrator] Starting embedded HTTP server');
           server = new EmbeddedServer(manager);
+          server.setTools(tools as never);
           server.start().catch((err) => api.logger.error('[claw-orchestrator] Embedded server failed to start:', err));
         }
       }

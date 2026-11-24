@@ -167,6 +167,9 @@ program
 
     const server = new EmbeddedServer(manager, parseInt(opts.port), opts.host);
     controlToken = () => server.controlToken();
+    // Every plugin tool, on this manager, behind POST /tool/<name> (`clawo tool`).
+    const { toolsFor } = await import('../src/index.js');
+    server.setTools(toolsFor(manager) as never);
     const port = await server.start();
     // start() resolves 0 when the port is taken, which lets the plugin defer to
     // a server already running. Here nothing else would serve, and the router
@@ -1162,6 +1165,45 @@ addEngineFlags(program.command('goal'), 'Run the goal on')
       maxRepairs: Math.max(0, parseInt(opts.maxRepairs, 10) || 0),
     });
     await startWorkflow(spec, cwd, contract, opts);
+  });
+
+program
+  .command('tool')
+  .description(
+    'Call any plugin tool on the server by name, with its parameters as JSON — every tool, including those with no command of their own (ultrareview_start, council_start, session_handoff, autoloop_start, codex_steer, …)',
+  )
+  .argument('[name]', 'The tool, e.g. ultrareview_start; omit to list them')
+  .argument('[params]', 'Its parameters as a JSON object (see skills/references/tools.md)')
+  .option('--file <file>', 'Read the parameters from a JSON file')
+  .option('--json', 'Print the raw reply')
+  .action(async (name: string | undefined, params: string | undefined, opts) => {
+    if (!name) {
+      const r = await api('/tool');
+      if (r.ok === false) return void fail(r);
+      if (opts.json) return void console.log(JSON.stringify(r));
+      for (const t of (r.tools as Array<{ name: string; description?: string }>) ?? []) {
+        console.log(`${t.name.padEnd(28)} ${(t.description ?? '').split('. ')[0].slice(0, 110)}`);
+      }
+      return;
+    }
+    let body: unknown = {};
+    try {
+      const text = opts.file ? fs.readFileSync(opts.file, 'utf-8') : params;
+      body = text?.trim() ? JSON.parse(text) : {};
+    } catch (err) {
+      fail(`the parameters are not JSON: ${(err as Error).message}`);
+      return;
+    }
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      fail('the parameters must be a JSON object');
+      return;
+    }
+    const r = await api(`/tool/${encodeURIComponent(name)}`, 'POST', body);
+    if (r.ok === false) return void fail(r);
+    console.log(JSON.stringify(opts.json ? r : r.result, null, opts.json ? 0 : 2));
+    // A tool that reports a failure in its own result fails the command too.
+    const result = r.result as { ok?: unknown } | undefined;
+    if (result && typeof result === 'object' && result.ok === false) process.exitCode = 1;
   });
 
 // An action that throws (an unreadable --message-file, a contract that is not

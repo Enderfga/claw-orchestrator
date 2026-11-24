@@ -119,6 +119,7 @@ const READ_ROUTES = new Set([
   '/workflow/list',
   '/autoloop/list',
   '/ultraapp/list',
+  '/tool',
 ]);
 const READ_ROUTE_PATTERN =
   /^\/(?:council\/[^/]+\/(?:state|events)|workflow\/[^/]+\/(?:state|evidence|events)|autoloop\/[^/]+\/(?:state|push_log|chat_history|events|resume-requirements)|ultraapp\/(?!new$)[^/]+(?:\/(?:artifacts|events))?)$/;
@@ -291,6 +292,18 @@ export function loginRedirectTarget(raw: string | null | undefined): string {
   return u.pathname + u.search + u.hash;
 }
 
+/**
+ * A plugin tool as the server calls it: `POST /tool/<name>` runs it with the body
+ * as its parameters, and `GET /tool` lists them. The plugin entry hands these
+ * over (`setTools`), so every tool, not only those with a route of their own, is
+ * reachable over HTTP and from `clawo tool`.
+ */
+export interface HttpTool {
+  description?: string;
+  parameters?: unknown;
+  execute(toolCallId: string, params: Record<string, unknown>): Promise<{ content?: unknown; details?: unknown }>;
+}
+
 export class EmbeddedServer {
   private server: http.Server | null = null;
   private manager: SessionManager;
@@ -300,6 +313,13 @@ export class EmbeddedServer {
   private _rateLimitCleanupTimer: ReturnType<typeof setInterval> | null = null;
   private _rateLimit: number;
   private host: string;
+
+  private tools: ReadonlyMap<string, HttpTool> = new Map();
+
+  /** The plugin's tools, for `GET /tool` and `POST /tool/<name>`. */
+  setTools(tools: ReadonlyMap<string, HttpTool>): void {
+    this.tools = tools;
+  }
 
   constructor(manager: SessionManager, port?: number, host?: string) {
     this.manager = manager;
@@ -1066,6 +1086,31 @@ export class EmbeddedServer {
         } else {
           json(200, { ok: true, session });
         }
+        return;
+      }
+
+      // ─── Any plugin tool — GET /tool lists them, POST /tool/<name> runs one ─
+      //
+      // The body is the tool's parameters, checked like every other body above
+      // (an inline custom engine is refused). The reply carries the tool's own
+      // result; a tool that reports a failure answers `ok: false` inside it.
+
+      if (path === '/tool') {
+        json(200, {
+          ok: true,
+          tools: [...this.tools].map(([name, t]) => ({ name, description: t.description })),
+        });
+        return;
+      }
+      const toolMatch = path.match(/^\/tool\/([A-Za-z0-9_]+)$/);
+      if (toolMatch) {
+        const tool = this.tools.get(toolMatch[1]);
+        if (!tool) {
+          json(404, { ok: false, error: `no tool '${toolMatch[1]}' (GET /tool lists them)` });
+          return;
+        }
+        const out = await tool.execute(`http-${crypto.randomUUID()}`, body);
+        json(200, { ok: true, result: out.details ?? out.content });
         return;
       }
 
