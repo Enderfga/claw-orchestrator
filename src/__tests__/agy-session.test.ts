@@ -1508,7 +1508,9 @@ describe('PersistentAgySession', () => {
       expect(fs.existsSync(logFile)).toBe(false);
     });
 
-    it('compact() returns no-op message', async () => {
+    // agy compacts through its own /compact now (agy-compact.test.ts); with no conversation there is nothing to
+    // compact, and no turn is run
+    it('compact() with no conversation yet: nothing to compact', async () => {
       const session = new PersistentAgySession({
         name: 'test',
         cwd: '/tmp',
@@ -1517,7 +1519,7 @@ describe('PersistentAgySession', () => {
       await session.start();
 
       const result = await session.compact();
-      expect(result.text).toContain('does not support compaction');
+      expect(result.text).toMatch(/nothing to compact/i);
     });
 
     it('prices an effort-qualified slug as its base model', async () => {
