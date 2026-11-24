@@ -416,14 +416,22 @@ export function goalWorkflow(args: GoalArgs): WorkflowSpec {
 function contractBudget(contract: AcceptanceContract | undefined): number {
   const checks = contract?.checks ?? [];
   const sum = checks.reduce((total, c) => {
-    const spec = ('spec' in c ? c.spec : c) as { type?: string; timeoutMs?: number };
+    const spec = ('spec' in c ? c.spec : c) as {
+      type?: string;
+      timeoutMs?: number;
+      minDelta?: number;
+      maxRegression?: number;
+    };
     const fallback =
       spec.type === 'http'
         ? DEFAULT_HTTP_TIMEOUT_MS
         : spec.type === 'screenshot'
           ? DEFAULT_SCREENSHOT_TIMEOUT_MS
           : DEFAULT_CHECK_TIMEOUT_MS;
-    return total + (spec.timeoutMs && spec.timeoutMs > 0 ? spec.timeoutMs : fallback);
+    const once = spec.timeoutMs && spec.timeoutMs > 0 ? spec.timeoutMs : fallback;
+    // A metric compared with the base runs twice: on the candidate, and once on the base commit.
+    const runs = spec.type === 'metric' && (spec.minDelta !== undefined || spec.maxRegression !== undefined) ? 2 : 1;
+    return total + once * runs;
   }, 0);
   const fixRounds = contract?.fixOnFailureRounds ?? 0;
   // Each fix round is a run of the checks and a fix turn before it.

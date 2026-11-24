@@ -135,6 +135,79 @@ function normalizeToolResult(result: unknown): AgentToolResult {
  * (fan-out, council, workflow templates): a preset id only. An inline config can
  * carry an environment, and the spec is written to disk.
  */
+/** One acceptance-contract check, as the contract parameters of `workflow_start` and `verify_run` take it. */
+const CHECK_ITEM_SCHEMA = {
+  type: 'object',
+  description:
+    "One check. `command` runs argv and gates on the exit code; `http` polls a URL; `screenshot` captures the page at each viewport and stores the PNGs as evidence (it does NOT judge the pixels); `diff_policy` asserts what the run was allowed to touch; `file` asserts a path exists / matches; `metric` reads a number from a command's output and holds it to bounds and, with `minDelta` / `maxRegression`, to the same command run on the run's base commit.",
+  properties: {
+    type: { type: 'string', enum: ['command', 'http', 'screenshot', 'diff_policy', 'file', 'metric'] },
+    required: {
+      type: 'boolean',
+      description: 'Default true. A failing non-required check is recorded but does not refute the run.',
+    },
+    cmd: { type: 'string', description: 'command / metric: executable name. No shell string — argv only.' },
+    args: { type: 'array', items: { type: 'string' }, description: 'command / metric: arguments.' },
+    cwd: { type: 'string', description: 'command / metric: directory, relative to the run cwd.' },
+    expectExit: { type: 'number', description: 'command: passing exit code (default 0).' },
+    url: { type: 'string', description: 'http / screenshot: target URL.' },
+    expectStatus: { type: 'number', description: 'http: expected status (default 200).' },
+    viewports: {
+      type: 'array',
+      description: 'screenshot: [{ width, height, label? }].',
+      items: {
+        type: 'object',
+        properties: {
+          width: { type: 'number' },
+          height: { type: 'number' },
+          label: { type: 'string' },
+        },
+        required: ['width', 'height'],
+      },
+    },
+    maxFiles: { type: 'number', description: 'diff_policy: cap on changed files.' },
+    forbidPaths: {
+      type: 'array',
+      items: { type: 'string' },
+      description: 'diff_policy: paths that must not be touched.',
+    },
+    requirePaths: {
+      type: 'array',
+      items: { type: 'string' },
+      description: 'diff_policy: at least one change must land under one of these.',
+    },
+    path: { type: 'string', description: 'file: path relative to the run cwd.' },
+    exists: { type: 'boolean', description: 'file: default true; false asserts absence.' },
+    matches: { type: 'string', description: 'file: regex the contents must match.' },
+    json: {
+      type: 'string',
+      description: 'metric: dotted path to the value in the output parsed as JSON (`results.score`, `runs.0.ms`).',
+    },
+    pattern: {
+      type: 'string',
+      description:
+        'metric: RE2 pattern whose first group is the value. Without `json` or `pattern`, the last number printed.',
+    },
+    direction: {
+      type: 'string',
+      enum: ['higher', 'lower'],
+      description: 'metric: which way is better (default higher).',
+    },
+    min: { type: 'number', description: 'metric: lowest passing value.' },
+    max: { type: 'number', description: 'metric: highest passing value.' },
+    minDelta: {
+      type: 'number',
+      description: "metric: must beat the base commit's value by at least this much, in `direction`.",
+    },
+    maxRegression: {
+      type: 'number',
+      description: "metric: may be worse than the base commit's value by at most this much.",
+    },
+    timeoutMs: { type: 'number', description: 'Per-check wall clock.' },
+  },
+  required: ['type'],
+};
+
 const AUTOLOOP_ENGINES = ENGINE_TYPES.filter((e) => e !== 'acp');
 
 const ACP_AGENT_ID_SCHEMA = {
@@ -1253,57 +1326,16 @@ const plugin = {
                 description:
                   'Default true. In a workflow run with a command check, refute the run when a test file or test configuration changed during it. Set false when changing tests is the task. Not applied by verify_run.',
               },
+              protectPaths: {
+                type: 'array',
+                items: { type: 'string' },
+                description:
+                  "Files or directories, relative to the run cwd, protected like the tests: a judge's config, fixtures, a benchmark. Scripts a command check runs by path are protected without being named. Not applied by verify_run.",
+              },
               checks: {
                 type: 'array',
                 minItems: 1,
-                items: {
-                  type: 'object',
-                  description:
-                    'One check. `command` runs argv and gates on the exit code; `http` polls a URL; `screenshot` captures the page at each viewport and stores the PNGs as evidence (it does NOT judge the pixels); `diff_policy` asserts what the run was allowed to touch; `file` asserts a path exists / matches.',
-                  properties: {
-                    type: { type: 'string', enum: ['command', 'http', 'screenshot', 'diff_policy', 'file'] },
-                    required: {
-                      type: 'boolean',
-                      description:
-                        'Default true. A failing non-required check is recorded but does not refute the run.',
-                    },
-                    cmd: { type: 'string', description: 'command: executable name. No shell string — argv only.' },
-                    args: { type: 'array', items: { type: 'string' }, description: 'command: arguments.' },
-                    cwd: { type: 'string', description: 'command: directory, relative to the run cwd.' },
-                    expectExit: { type: 'number', description: 'command: passing exit code (default 0).' },
-                    url: { type: 'string', description: 'http / screenshot: target URL.' },
-                    expectStatus: { type: 'number', description: 'http: expected status (default 200).' },
-                    viewports: {
-                      type: 'array',
-                      description: 'screenshot: [{ width, height, label? }].',
-                      items: {
-                        type: 'object',
-                        properties: {
-                          width: { type: 'number' },
-                          height: { type: 'number' },
-                          label: { type: 'string' },
-                        },
-                        required: ['width', 'height'],
-                      },
-                    },
-                    maxFiles: { type: 'number', description: 'diff_policy: cap on changed files.' },
-                    forbidPaths: {
-                      type: 'array',
-                      items: { type: 'string' },
-                      description: 'diff_policy: paths that must not be touched.',
-                    },
-                    requirePaths: {
-                      type: 'array',
-                      items: { type: 'string' },
-                      description: 'diff_policy: at least one change must land under one of these.',
-                    },
-                    path: { type: 'string', description: 'file: path relative to the run cwd.' },
-                    exists: { type: 'boolean', description: 'file: default true; false asserts absence.' },
-                    matches: { type: 'string', description: 'file: regex the contents must match.' },
-                    timeoutMs: { type: 'number', description: 'Per-check wall clock.' },
-                  },
-                  required: ['type'],
-                },
+                items: CHECK_ITEM_SCHEMA,
               },
             },
             required: ['checks'],
@@ -1580,57 +1612,16 @@ const plugin = {
                 description:
                   'Default true. In a workflow run with a command check, refute the run when a test file or test configuration changed during it. Set false when changing tests is the task. Not applied by verify_run.',
               },
+              protectPaths: {
+                type: 'array',
+                items: { type: 'string' },
+                description:
+                  "Files or directories, relative to the run cwd, protected like the tests: a judge's config, fixtures, a benchmark. Scripts a command check runs by path are protected without being named. Not applied by verify_run.",
+              },
               checks: {
                 type: 'array',
                 minItems: 1,
-                items: {
-                  type: 'object',
-                  description:
-                    'One check. `command` runs argv and gates on the exit code; `http` polls a URL; `screenshot` captures the page at each viewport and stores the PNGs as evidence (it does NOT judge the pixels); `diff_policy` asserts what the run was allowed to touch; `file` asserts a path exists / matches.',
-                  properties: {
-                    type: { type: 'string', enum: ['command', 'http', 'screenshot', 'diff_policy', 'file'] },
-                    required: {
-                      type: 'boolean',
-                      description:
-                        'Default true. A failing non-required check is recorded but does not refute the run.',
-                    },
-                    cmd: { type: 'string', description: 'command: executable name. No shell string — argv only.' },
-                    args: { type: 'array', items: { type: 'string' }, description: 'command: arguments.' },
-                    cwd: { type: 'string', description: 'command: directory, relative to the run cwd.' },
-                    expectExit: { type: 'number', description: 'command: passing exit code (default 0).' },
-                    url: { type: 'string', description: 'http / screenshot: target URL.' },
-                    expectStatus: { type: 'number', description: 'http: expected status (default 200).' },
-                    viewports: {
-                      type: 'array',
-                      description: 'screenshot: [{ width, height, label? }].',
-                      items: {
-                        type: 'object',
-                        properties: {
-                          width: { type: 'number' },
-                          height: { type: 'number' },
-                          label: { type: 'string' },
-                        },
-                        required: ['width', 'height'],
-                      },
-                    },
-                    maxFiles: { type: 'number', description: 'diff_policy: cap on changed files.' },
-                    forbidPaths: {
-                      type: 'array',
-                      items: { type: 'string' },
-                      description: 'diff_policy: paths that must not be touched.',
-                    },
-                    requirePaths: {
-                      type: 'array',
-                      items: { type: 'string' },
-                      description: 'diff_policy: at least one change must land under one of these.',
-                    },
-                    path: { type: 'string', description: 'file: path relative to the run cwd.' },
-                    exists: { type: 'boolean', description: 'file: default true; false asserts absence.' },
-                    matches: { type: 'string', description: 'file: regex the contents must match.' },
-                    timeoutMs: { type: 'number', description: 'Per-check wall clock.' },
-                  },
-                  required: ['type'],
-                },
+                items: CHECK_ITEM_SCHEMA,
               },
             },
             required: ['checks'],

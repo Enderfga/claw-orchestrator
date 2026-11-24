@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`metric` checks: "better than before", measured.** A contract check that reads a number from a command's output
+  (`json` path, RE2 `pattern`, or the last number printed) and holds it to `min`/`max` and, with `minDelta` /
+  `maxRegression`, to the same command run on the run's base commit in a temporary worktree — so "faster" or "more
+  accurate" is decided by measuring both trees, not by an agent's report. The base value is measured once per run;
+  the benchmark scripts a metric runs are protected like the tests.
+- **One ledger row per workflow run.** As a run ends it writes its verdict, cost, duration and spend by engine and
+  model (`~/.claw-orchestrator/runs/outcomes/`), goals included, whose spend no turn row recorded. `clawo runs --by
+  model` (or `engine`, `workflow`, `run`) compares the verified rate, cost and cost per verified run across runs;
+  `GET /runs/outcomes` serves the same.
 - **Runs in a worktree of their own.** `isolation: "worktree"` on a spec (`clawo solve --isolate`, `clawo goal
   --isolate`, `isolation` on `workflow_start`) runs the workflow in a git worktree of the repository's HEAD, on a
   local branch `clawo/<runId>`, with the checkout's untracked `node_modules`/`.venv` linked in. The caller's

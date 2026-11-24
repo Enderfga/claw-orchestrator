@@ -71,7 +71,35 @@ export interface FileCheck {
   matches?: string;
 }
 
-export type CheckSpec = CommandCheck | HttpCheck | ScreenshotCheck | DiffPolicyCheck | FileCheck;
+/**
+ * A number the runtime measures, not one an agent reports: the command runs, the
+ * value is read from its output, and the check holds it to absolute bounds
+ * and, with `minDelta` / `maxRegression`, to the same command run on the run's
+ * base commit — so "faster", "more accurate", "smaller" is decided by
+ * measurement on both trees.
+ */
+export interface MetricCheck {
+  type: 'metric';
+  cmd: string;
+  args?: string[];
+  /** Relative to the run cwd when not absolute. */
+  cwd?: string;
+  timeoutMs?: number;
+  /** A dotted path into the output parsed as JSON (`results.score`, `runs.0.ms`). */
+  json?: string;
+  /** An RE2 pattern whose first group is the number. Without `json` or `pattern`, the last number printed. */
+  pattern?: string;
+  /** Which way is better. Default `higher`. */
+  direction?: 'higher' | 'lower';
+  min?: number;
+  max?: number;
+  /** Better than the base commit's value by at least this much. */
+  minDelta?: number;
+  /** Worse than the base commit's value by at most this much. */
+  maxRegression?: number;
+}
+
+export type CheckSpec = CommandCheck | HttpCheck | ScreenshotCheck | DiffPolicyCheck | FileCheck | MetricCheck;
 
 export interface ContractCheck {
   /** Stable id used in the evidence bundle. Generated when omitted. */
@@ -120,6 +148,8 @@ export interface CheckResult {
   tail?: string;
   /** Paths (relative to the evidence dir) of files this check produced. */
   artifacts?: string[];
+  /** A `metric` check: the value measured, and the base commit's when it was compared. */
+  metric?: { value: number; baseline?: number };
   /** Set when the check was killed by its own timeout rather than exiting. */
   timedOut?: boolean;
 }
@@ -193,6 +223,34 @@ function normalizeSpec(raw: unknown): CheckSpec | undefined {
         forbidPaths: strArray(r.forbidPaths),
         requirePaths: strArray(r.requirePaths),
       };
+    case 'metric': {
+      const cmd = str(r.cmd);
+      if (!cmd) return undefined;
+      const direction =
+        r.direction === 'lower'
+          ? 'lower'
+          : r.direction === undefined || r.direction === 'higher'
+            ? 'higher'
+            : undefined;
+      if (!direction) return undefined;
+      const m: MetricCheck = {
+        type: 'metric',
+        cmd,
+        args: strArray(r.args) ?? [],
+        cwd: str(r.cwd),
+        timeoutMs: num(r.timeoutMs),
+        json: str(r.json),
+        pattern: str(r.pattern),
+        direction,
+        min: num(r.min),
+        max: num(r.max),
+        minDelta: num(r.minDelta),
+        maxRegression: num(r.maxRegression),
+      };
+      // A metric with nothing to hold it to would pass whatever it measured.
+      if ([m.min, m.max, m.minDelta, m.maxRegression].every((v) => v === undefined)) return undefined;
+      return m;
+    }
     case 'file': {
       const p = str(r.path);
       if (!p) return undefined;

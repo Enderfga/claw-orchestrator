@@ -88,6 +88,9 @@ export interface GoalNodeData {
   lastMessage?: string;
   /** The thread's spend so far, priced from codex's cumulative token totals. */
   costUsd?: number;
+  /** The engine and model the goal ran on, for the run's ledger row. */
+  engine?: string;
+  model?: string;
   /**
    * How much of `costUsd` has been reported to the run. A result reports the
    * difference, so spend from an attempt that never returned — the process was
@@ -379,6 +382,13 @@ export async function executeGoalNode(node: NodeSpec, ctx: NodeContext): Promise
       });
     } catch (err) {
       return `could not start the ${engineName} session: ${(err as Error).message}`;
+    }
+    data.engine = engineName;
+    try {
+      const model = manager.getStatus?.(sessionName).model ?? spec.model;
+      if (model) data.model = model;
+    } catch {
+      if (spec.model) data.model = spec.model;
     }
     const opening = {
       threadId: threadId ?? claudeId,

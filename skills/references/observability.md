@@ -88,6 +88,32 @@ Programmatically: `manager.getRunLedger({ since, session, engine, parent, verifi
 epoch milliseconds; one it cannot parse widens the query rather than emptying it.
 `clawo runs` reads the last 24 h and prints 50 rows by default.
 
+### One row per workflow run
+
+Turn rows say what each session spent, not whether the work was any good. As every
+workflow run (`solve`, `goal`, `fanout`, council, a custom spec) ends, the kernel also
+writes one **run row** to `~/.claw-orchestrator/runs/outcomes/<day>.jsonl`: `runId`,
+`workflow`, `state`, `outcome` (`verified` / `refuted` / `unverified`), `costUsd`,
+`durationMs`, `cwd`, `contractId`, `evidenceId`, `error`, the `branch` an isolated run
+saved to, and `agents` — the run's spend by engine and model, from its turns under the
+run's id and from its goal nodes, whose turns run inside their session and are not
+turn rows. A run that is resumed and ends again writes another row; readers keep the
+latest.
+
+```bash
+clawo runs --by model                      # last 30 days, grouped by the models a run used
+clawo runs --by model --workflow solve     # only solve runs
+clawo runs --by engine --since 7d
+clawo runs --by run                        # the run rows themselves
+```
+
+Grouped by `model` (or `engine`), a run's key is every engine/model that spent in it
+(`claude:opus + codex:gpt-6.1-terra`); a run is not split between the models that took
+part. Each group shows runs, verified, refuted, unchecked (no contract), the verified
+rate — verified over verified plus refuted, so an unchecked run counts as neither — the
+total cost, the cost per verified run and the median duration. Over HTTP:
+`GET /runs/outcomes?since=30d&by=model&workflow=solve` returns `{ ok, rows, groups }`.
+
 ## Spend caps
 
 Set `maxBudgetUsd` on a session (or on a council / fanout, which applies it per

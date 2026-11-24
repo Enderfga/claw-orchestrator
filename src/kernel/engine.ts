@@ -45,6 +45,7 @@
  * finishes on its own schedule. The kernel does not pretend otherwise.
  */
 
+import { appendRunOutcome, readRunLedger, spendFromTurns } from '../run-ledger.js';
 import { EventEmitter } from 'node:events';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -427,7 +428,7 @@ function normalizeSpecContracts(spec: WorkflowSpec, override: unknown): Workflow
       const problems = contractProblems(raw).filter((p) => !p.endsWith('(optional, dropped)'));
       throw new Error(
         `${what} was refused: ${problems.join('; ') || 'no recognised checks'}. Every check needs a \`type\` of ` +
-          'command | http | screenshot | diff_policy | file, and a `command` check needs `cmd`.',
+          'command | http | screenshot | diff_policy | file | metric, a `command` check needs `cmd`, and a `metric` check needs `cmd` and a bound (`min`, `max`, `minDelta` or `maxRegression`).',
       );
     }
     return contract;
@@ -1326,10 +1327,63 @@ export class RunKernel extends EventEmitter {
       [{ ts, type: 'run_state', state, outcome, error }],
     );
     if (!ok) return false;
+    if (terminal) this._recordOutcome(txn.record);
     // Hand the run back once it is over, so another owner can pick it up
     // without waiting out the lease. After the writes, never before.
     if (terminal) this._scheduleRelease(txn.guard);
     return true;
+  }
+
+  /**
+   * The run's row in the ledger: its verdict, cost and spend by engine and
+   * model. Its agents' turns are in the ledger already, under the run's id; a
+   * goal's are not (it is driven inside its session), so each goal node adds
+   * what it spent. Best-effort: the run has ended whatever happens here.
+   */
+  private _recordOutcome(record: RunRecord): void {
+    try {
+      const agents = spendFromTurns(
+        readRunLedger({ parent: record.runId, since: record.createdAt, limit: Number.MAX_SAFE_INTEGER }, this.logger),
+      );
+      for (const node of record.spec.nodes) {
+        if (node.kind !== 'goal') continue;
+        const data = record.nodes[node.id]?.data as { costUsd?: number; engine?: string; model?: string } | undefined;
+        if (!data?.engine || !data.costUsd) continue;
+        const same = agents.find((a) => a.engine === data.engine && a.model === data.model);
+        if (same) {
+          same.costUsd = Math.round((same.costUsd + data.costUsd) * 10000) / 10000;
+          same.turns += 1;
+        } else {
+          agents.push({
+            engine: data.engine,
+            ...(data.model ? { model: data.model } : {}),
+            costUsd: data.costUsd,
+            turns: 1,
+          });
+        }
+      }
+      const ended = record.endedAt ?? new Date().toISOString();
+      appendRunOutcome(
+        {
+          ts: ended,
+          runId: record.runId,
+          workflow: record.workflow,
+          state: record.state,
+          outcome: record.outcome,
+          costUsd: Math.round((record.costUsd ?? 0) * 10000) / 10000,
+          durationMs: Math.max(0, Date.parse(ended) - Date.parse(record.createdAt)),
+          cwd: record.cwd,
+          agents,
+          ...(record.error ? { error: record.error.slice(0, 500) } : {}),
+          ...(record.spec.contract?.id ? { contractId: record.spec.contract.id } : {}),
+          ...(record.evidenceId ? { evidenceId: record.evidenceId } : {}),
+          ...(record.isolation ? { branch: record.isolation.branch } : {}),
+        },
+        this.logger,
+      );
+    } catch (err) {
+      this.logger.warn?.(`[kernel ${record.runId}] could not write the run's ledger row: ${(err as Error).message}`);
+    }
   }
 
   private _setNodeState(

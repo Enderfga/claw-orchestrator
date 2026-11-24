@@ -1098,3 +1098,22 @@ describe("a goal under the run's spend cap", () => {
     expect(session.sets.at(-1)).toEqual({ status: 'paused' });
   });
 });
+
+describe("a goal's spend in the run's ledger row", () => {
+  it('is counted under the engine and model the goal ran on', async () => {
+    const m = fakeManager(() => {
+      const s = new FakeGoalSession('thread-L');
+      s.onSet = (_p, self) => self.move('complete', { tokensUsed: 10, timeUsedSeconds: 1 });
+      return s;
+    });
+    Object.assign(m, { getStatus: () => ({ model: 'gpt-6.1-terra', stats: { costUsd: 0.4 } }) });
+    const kernel = kernelWith(m);
+    const run = await kernel.start(oneGoal());
+    const done = await kernel.wait(run.runId);
+    expect(done!.state).toBe('completed');
+    const { readRunOutcomes } = await import('../../run-ledger.js');
+    const row = readRunOutcomes().find((r) => r.runId === run.runId);
+    expect(row).toMatchObject({ workflow: 'goal-test', outcome: 'unverified', costUsd: 0.4 });
+    expect(row!.agents).toEqual([{ engine: 'codex-app', model: 'gpt-6.1-terra', costUsd: 0.4, turns: 1 }]);
+  });
+});

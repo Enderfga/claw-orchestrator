@@ -361,3 +361,234 @@ export function formatRunTable(rows: RunLedgerRow[]): string {
       : '');
   return [header, ...lines].join('\n') + footer;
 }
+
+// ─── One row per run ────────────────────────────────────────────────────────
+//
+// Turn rows say what each session spent; they cannot say whether the work was
+// any good, nor which runs a model took part in. A run row can: it is written
+// once as a workflow run ends, with the run's verdict and its spend split by
+// engine and model, so success and cost can be compared per model across runs.
+// Kept in `outcomes/` beside the turn shards, which the turn reader never opens.
+
+/** What one engine/model spent in a run. */
+export interface RunAgentSpend {
+  engine: string;
+  /** The model that answered; absent when the engine used its default and did not name it. */
+  model?: string;
+  costUsd: number;
+  /** Turns recorded for it; a goal counts as one. */
+  turns: number;
+}
+
+export interface RunOutcomeRow {
+  /** When the run ended. */
+  ts: string;
+  runId: string;
+  workflow: string;
+  state: string;
+  /** `verified` / `refuted` / `unverified` — a run with no contract is unverified, not failed. */
+  outcome: string;
+  costUsd: number;
+  durationMs: number;
+  cwd: string;
+  /** Spend by engine and model, from the run's turns and its goals. */
+  agents: RunAgentSpend[];
+  error?: string;
+  contractId?: string;
+  evidenceId?: string;
+  /** The local branch the run's work was saved to, when it ran in a worktree of its own. */
+  branch?: string;
+}
+
+export type RunOutcomeGrouping = 'model' | 'engine' | 'workflow';
+
+export interface RunOutcomeGroup {
+  key: string;
+  runs: number;
+  verified: number;
+  refuted: number;
+  /** Runs with no acceptance contract: nothing was checked. */
+  unverified: number;
+  /** Runs that did not complete (failed or cancelled), whatever their verdict. */
+  notCompleted: number;
+  /** verified / (verified + refuted); undefined when no run in the group was checked. */
+  verifiedRate?: number;
+  costUsd: number;
+  /** Total cost over verified runs; undefined with none verified. */
+  costPerVerified?: number;
+  medianDurationMs: number;
+}
+
+function outcomesDir(): string {
+  return path.join(runsDir(), 'outcomes');
+}
+
+/** Best-effort, like `appendRunRow`: a ledger failure never touches the run. */
+export function appendRunOutcome(row: RunOutcomeRow, logger?: Logger): void {
+  try {
+    const day = row.ts.slice(0, 10).replace(/[^0-9-]/g, '');
+    const file = path.join(outcomesDir(), `${day}.jsonl`);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.appendFileSync(file, JSON.stringify(row) + '\n');
+  } catch (err) {
+    logger?.warn?.(`[run-ledger] run row append failed: ${(err as Error).message}`);
+  }
+}
+
+/** Spend by engine and model from a run's turn rows. */
+export function spendFromTurns(rows: RunLedgerRow[]): RunAgentSpend[] {
+  const by = new Map<string, RunAgentSpend>();
+  for (const r of rows) {
+    const key = `${r.engine}|${r.model ?? ''}`;
+    const s = by.get(key) ?? { engine: r.engine, ...(r.model ? { model: r.model } : {}), costUsd: 0, turns: 0 };
+    s.costUsd = round4(s.costUsd + (r.costUsd || 0));
+    s.turns++;
+    by.set(key, s);
+  }
+  return [...by.values()];
+}
+
+/**
+ * Run rows, oldest first. A run that ended, was resumed and ended again has a row
+ * for each end; only its latest counts.
+ */
+export function readRunOutcomes(
+  query: { since?: string | number; workflow?: string; limit?: number } = {},
+  logger?: Logger,
+): RunOutcomeRow[] {
+  const dir = outcomesDir();
+  const since = parseSince(query.since);
+  const latest = new Map<string, RunOutcomeRow>();
+  for (const shard of listShardsNewestFirst(dir)) {
+    if (since !== undefined) {
+      const shardEnd = Date.parse(`${shard.slice(0, 10)}T23:59:59.999Z`);
+      if (!Number.isNaN(shardEnd) && shardEnd < since) break;
+    }
+    let raw: string;
+    try {
+      raw = fs.readFileSync(path.join(dir, shard), 'utf8');
+    } catch (err) {
+      logger?.warn?.(`[run-ledger] read failed for outcomes/${shard}: ${(err as Error).message}`);
+      continue;
+    }
+    for (const line of raw.split('\n')) {
+      if (!line.trim()) continue;
+      let row: RunOutcomeRow;
+      try {
+        row = JSON.parse(line) as RunOutcomeRow;
+      } catch {
+        continue;
+      }
+      if (!row || typeof row.runId !== 'string' || typeof row.ts !== 'string' || !Array.isArray(row.agents)) continue;
+      const prev = latest.get(row.runId);
+      if (!prev || prev.ts <= row.ts) latest.set(row.runId, row);
+    }
+  }
+  let rows = [...latest.values()].sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0));
+  if (since !== undefined) rows = rows.filter((r) => Date.parse(r.ts) >= since);
+  if (query.workflow) rows = rows.filter((r) => r.workflow === query.workflow);
+  const limit = query.limit && query.limit > 0 ? query.limit : undefined;
+  return limit ? rows.slice(-limit) : rows;
+}
+
+/**
+ * The group a run belongs to. By model, a run is keyed by every engine/model
+ * that spent in it (`claude:opus + codex:gpt-6.1-terra`): a run is not split
+ * between the models that took part, and none is picked as the one that did
+ * the work.
+ */
+export function outcomeKey(row: RunOutcomeRow, by: RunOutcomeGrouping): string {
+  if (by === 'workflow') return row.workflow;
+  const parts = new Set(row.agents.map((a) => (by === 'engine' ? a.engine : `${a.engine}:${a.model ?? 'default'}`)));
+  return parts.size ? [...parts].sort().join(' + ') : '(no agent turns)';
+}
+
+export function groupRunOutcomes(rows: RunOutcomeRow[], by: RunOutcomeGrouping): RunOutcomeGroup[] {
+  const groups = new Map<string, RunOutcomeRow[]>();
+  for (const r of rows) {
+    const k = outcomeKey(r, by);
+    groups.set(k, [...(groups.get(k) ?? []), r]);
+  }
+  const out: RunOutcomeGroup[] = [];
+  for (const [key, rs] of groups) {
+    const verified = rs.filter((r) => r.outcome === 'verified').length;
+    const refuted = rs.filter((r) => r.outcome === 'refuted').length;
+    const costUsd = round4(rs.reduce((s, r) => s + (r.costUsd || 0), 0));
+    const durations = rs.map((r) => r.durationMs || 0).sort((a, b) => a - b);
+    const mid = durations.length >> 1;
+    out.push({
+      key,
+      runs: rs.length,
+      verified,
+      refuted,
+      unverified: rs.length - verified - refuted,
+      notCompleted: rs.filter((r) => r.state !== 'completed').length,
+      ...(verified + refuted > 0 ? { verifiedRate: verified / (verified + refuted) } : {}),
+      costUsd,
+      ...(verified > 0 ? { costPerVerified: round4(costUsd / verified) } : {}),
+      medianDurationMs: durations.length % 2 ? durations[mid] : Math.round((durations[mid - 1] + durations[mid]) / 2),
+    });
+  }
+  return out.sort((a, b) => b.runs - a.runs || a.key.localeCompare(b.key));
+}
+
+/** Groups as a fixed-width table for the CLI. Pure. */
+export function formatOutcomeGroups(groups: RunOutcomeGroup[], by: RunOutcomeGrouping): string {
+  if (groups.length === 0) return 'No workflow runs recorded in this window.';
+  const width = Math.min(60, Math.max(by.length + 2, ...groups.map((g) => g.key.length + 2)));
+  const header = [
+    pad(by.toUpperCase(), width),
+    pad('RUNS', 5),
+    pad('VERIFIED', 9),
+    pad('REFUTED', 8),
+    pad('UNCHECKED', 10),
+    pad('RATE', 6),
+    pad('COST', 10),
+    pad('$/VERIFIED', 11),
+    'MEDIAN',
+  ].join(' ');
+  const lines = groups.map((g) =>
+    [
+      pad(g.key, width),
+      pad(String(g.runs), 5),
+      pad(String(g.verified), 9),
+      pad(String(g.refuted), 8),
+      pad(String(g.unverified), 10),
+      // Over checked runs only: an unchecked run is neither a pass nor a fail.
+      pad(g.verifiedRate === undefined ? '—' : `${Math.round(g.verifiedRate * 100)}%`, 6),
+      pad(`$${g.costUsd.toFixed(2)}`, 10),
+      pad(g.costPerVerified === undefined ? '—' : `$${g.costPerVerified.toFixed(2)}`, 11),
+      `${Math.round(g.medianDurationMs / 1000)}s`,
+    ].join(' '),
+  );
+  const notDone = groups.reduce((s, g) => s + g.notCompleted, 0);
+  return (
+    [header, ...lines].join('\n') +
+    '\nRATE is verified / (verified + refuted); unchecked runs had no acceptance contract.' +
+    (notDone ? `\n${notDone} run(s) did not complete (failed or cancelled).` : '')
+  );
+}
+
+/** Run rows as a table for the CLI. Pure. */
+export function formatOutcomeRows(rows: RunOutcomeRow[]): string {
+  if (rows.length === 0) return 'No workflow runs recorded in this window.';
+  const header = [
+    pad('ENDED', 20),
+    pad('RUN', 22),
+    pad('WORKFLOW', 10),
+    pad('OUTCOME', 11),
+    pad('COST', 9),
+    'MODELS',
+  ].join(' ');
+  const lines = rows.map((r) =>
+    [
+      pad(r.ts.replace('T', ' ').slice(0, 19), 20),
+      pad(r.runId, 22),
+      pad(r.workflow, 10),
+      pad(r.state === 'completed' ? r.outcome : r.state, 11),
+      pad(`$${(r.costUsd || 0).toFixed(4)}`, 9),
+      outcomeKey(r, 'model'),
+    ].join(' '),
+  );
+  return [header, ...lines].join('\n');
+}

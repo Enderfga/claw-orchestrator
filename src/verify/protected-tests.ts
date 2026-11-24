@@ -195,7 +195,9 @@ function referencedScripts(command: string): string[] {
 /** The scripts a contract's command checks run by name. */
 export function contractScripts(contract: AcceptanceContract): string[] {
   return contract.checks.flatMap((c) =>
-    c.spec.type === 'command' ? referencedScripts([c.spec.cmd, ...(c.spec.args ?? [])].join(' ')) : [],
+    c.spec.type === 'command' || c.spec.type === 'metric'
+      ? referencedScripts([c.spec.cmd, ...(c.spec.args ?? [])].join(' '))
+      : [],
   );
 }
 
@@ -301,7 +303,7 @@ export function protectedPathsFor(contracts: Array<AcceptanceContract | undefine
     if (!contract) continue;
     for (const p of contract.protectPaths ?? []) if (typeof p === 'string' && p.trim()) out.add(p.trim());
     for (const c of contract.checks) {
-      if (c.spec.type !== 'command') continue;
+      if (c.spec.type !== 'command' && c.spec.type !== 'metric') continue;
       const dir = c.spec.cwd ? path.resolve(cwd, c.spec.cwd) : cwd;
       for (const token of [c.spec.cmd, ...(c.spec.args ?? [])]) {
         if (!token || token.startsWith('-') || !/[\\/.]/.test(token)) continue;
@@ -403,7 +405,11 @@ export async function checkProtectedTests(
  */
 export function protectsFiles(contract: AcceptanceContract): boolean {
   if (contract.protectTests === false) return false;
-  return (contract.protectPaths?.length ?? 0) > 0 || contract.checks.some((check) => check?.spec?.type === 'command');
+  // A metric runs the repository's code too: loosening its benchmark changes the number.
+  return (
+    (contract.protectPaths?.length ?? 0) > 0 ||
+    contract.checks.some((check) => check?.spec?.type === 'command' || check?.spec?.type === 'metric')
+  );
 }
 
 /** The contracts of a spec: the run's and every inline verifier's. */

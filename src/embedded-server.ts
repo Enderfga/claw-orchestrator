@@ -22,6 +22,7 @@ import { boundedErrorReason } from './sanitize.js';
 import type { EffortLevel, EngineType } from './types.js';
 import { handleChatCompletion } from './openai-compat.js';
 import { getModelList } from './models.js';
+import { groupRunOutcomes, readRunOutcomes, type RunOutcomeGrouping } from './run-ledger.js';
 import { MAX_UPLOAD_BODY_BYTES } from './ultraapp/files.js';
 
 import {
@@ -110,6 +111,7 @@ const READ_ROUTES = new Set([
   '/session/cost',
   '/session/team-list',
   '/runs',
+  '/runs/outcomes',
   '/agents',
   '/skills',
   '/rules',
@@ -841,6 +843,27 @@ export class EmbeddedServer {
           limit: limitRaw ? Number(limitRaw) : undefined,
         });
         json(200, { ok: true, rows, summary });
+        return;
+      }
+
+      // One row per workflow run: its verdict, cost and spend by engine/model.
+      // `by` groups them (model / engine / workflow), for comparing success and
+      // cost across runs.
+      if (path === '/runs/outcomes') {
+        const pick = (key: string): string | undefined =>
+          (body[key] as string | undefined) ?? query.get(key) ?? undefined;
+        const by = pick('by');
+        if (by !== undefined && !['model', 'engine', 'workflow'].includes(by)) {
+          json(400, { ok: false, error: '`by` is one of model, engine, workflow' });
+          return;
+        }
+        const limitRaw = pick('limit');
+        const rows = readRunOutcomes({
+          since: pick('since'),
+          workflow: pick('workflow'),
+          limit: limitRaw ? Number(limitRaw) : undefined,
+        });
+        json(200, { ok: true, rows, ...(by ? { groups: groupRunOutcomes(rows, by as RunOutcomeGrouping) } : {}) });
         return;
       }
 

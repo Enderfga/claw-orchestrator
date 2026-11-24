@@ -393,8 +393,18 @@ program
 
 program
   .command('runs')
-  .description('Show the durable run ledger — one row per turn, across engines, surviving restarts')
-  .option('-s, --since <window>', 'Only turns since this point: 30m / 24h / 7d, or an ISO timestamp', '24h')
+  .description(
+    'Show the durable run ledger — one row per turn, across engines, surviving restarts; --by compares workflow runs',
+  )
+  .option(
+    '-s, --since <window>',
+    'Only turns (runs, with --by) since this point: 30m / 24h / 7d, or an ISO timestamp. Default 24h; 30d with --by',
+  )
+  .option(
+    '--by <key>',
+    'One row per workflow run instead of per turn: `run` lists them; `model`, `engine` or `workflow` groups them with verified rate and cost',
+  )
+  .option('--workflow <name>', 'With --by: only runs of this workflow (solve, goal, fanout, …)')
   .option('-n, --limit <n>', 'Max rows', '50')
   .option('--session <name>', 'Filter by session name')
   .option('--engine <engine>', 'Filter by engine')
@@ -403,7 +413,36 @@ program
   .option('--refuted', 'Only turns whose acceptance contract failed')
   .option('--json', 'Emit raw JSON instead of a table')
   .action(async (opts) => {
-    const params = new URLSearchParams({ since: opts.since, limit: String(parseInt(opts.limit, 10) || 50) });
+    if (opts.by) {
+      if (!['run', 'model', 'engine', 'workflow'].includes(opts.by)) {
+        fail('--by is one of run, model, engine, workflow');
+        return;
+      }
+      const q = new URLSearchParams({ since: opts.since ?? '30d' });
+      if (opts.by !== 'run') q.set('by', opts.by);
+      else q.set('limit', String(parseInt(opts.limit, 10) || 50));
+      if (opts.workflow) q.set('workflow', opts.workflow);
+      const out = await api(`/runs/outcomes?${q.toString()}`);
+      if (!out.ok) {
+        fail(out.error);
+        return;
+      }
+      if (opts.json) {
+        console.log(JSON.stringify(opts.by === 'run' ? { rows: out.rows } : { groups: out.groups }, null, 2));
+        return;
+      }
+      const ledger = await import('../src/run-ledger.js');
+      console.log(
+        opts.by === 'run'
+          ? ledger.formatOutcomeRows(out.rows as Parameters<typeof ledger.formatOutcomeRows>[0])
+          : ledger.formatOutcomeGroups(
+              out.groups as Parameters<typeof ledger.formatOutcomeGroups>[0],
+              opts.by as Parameters<typeof ledger.formatOutcomeGroups>[1],
+            ),
+      );
+      return;
+    }
+    const params = new URLSearchParams({ since: opts.since ?? '24h', limit: String(parseInt(opts.limit, 10) || 50) });
     if (opts.session) params.set('session', opts.session);
     if (opts.engine) params.set('engine', opts.engine);
     if (opts.parent) params.set('parent', opts.parent);

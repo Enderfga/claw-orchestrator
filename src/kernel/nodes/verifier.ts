@@ -17,6 +17,8 @@ import type { NodeSpec, VerifierNode } from '../types.js';
 import { evidenceDir, makeEvidenceId, writeEvidence } from '../../verify/evidence.js';
 import { runContract, type FixerSpawner } from '../../verify/runner.js';
 import { contractFingerprint } from '../../verify/contract.js';
+import { fileBaselineStore } from '../../verify/metric.js';
+import * as path from 'node:path';
 
 /** How long one fix turn may run; `contractBudget` sizes the node with it. */
 export const FIXER_TURN_TIMEOUT_MS = 20 * 60_000;
@@ -100,6 +102,8 @@ export async function executeVerifierNode(node: NodeSpec, ctx: NodeContext): Pro
       // before snapshots, or one git could not take) reports it as not checked;
       // outside a repository it does not apply.
       baseTests: ctx.record.baseTests ?? (ctx.record.baseSha ? null : undefined),
+      // A metric's base value is measured once a run, not on every repair.
+      baselines: fileBaselineStore(path.join(dir, 'metric-baselines.json')),
       logger: ctx.logger,
       signal: ctx.signal,
     },

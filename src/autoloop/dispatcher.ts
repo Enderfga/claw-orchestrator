@@ -38,6 +38,7 @@ import { spawn } from 'node:child_process';
 import { withoutServerCredential } from '../kernel/secrets.js';
 import { capturePatch, changedFilesSince } from '../verify/baseline.js';
 import { runContract } from '../verify/runner.js';
+import { fileBaselineStore } from '../verify/metric.js';
 import { writeEvidence } from '../verify/evidence.js';
 import { contractFingerprint, type AcceptanceContract } from '../verify/contract.js';
 import { protectedPathsFor, snapshotTests, type TestSnapshot } from '../verify/protected-tests.js';
@@ -1909,6 +1910,7 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
       artifactDir: path.join(iterDir, 'evidence'),
       ...(base.baseSha ? { baseSha: base.baseSha } : {}),
       ...(base.baseTests !== undefined ? { baseTests: base.baseTests } : {}),
+      baselines: fileBaselineStore(path.join(this.ledgerDir, 'metric-baselines.json')),
       logger: this.logger,
     });
     await writeEvidence({

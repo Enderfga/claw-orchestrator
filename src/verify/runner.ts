@@ -20,6 +20,7 @@ import { compileSafeRegex, type SafeRegex } from '../validation.js';
 import { exec as realExec, lastLines, type ExecResult } from '../kernel/exec.js';
 import { changedFilesSince, isUnder, resolveIn } from './baseline.js';
 import { checkProtectedTests, contractScripts, protectsFiles, type TestSnapshot } from './protected-tests.js';
+import { memoryBaselineStore, runMetricCheck, type BaselineStore } from './metric.js';
 import {
   contractPassed,
   DEFAULT_CHECK_TIMEOUT_MS,
@@ -60,6 +61,8 @@ export interface VerifyContext {
    * Omitted (`verify_run`, autoloop, ultraapp): the check does not apply.
    */
   baseTests?: TestSnapshot | null;
+  /** Where a `metric` check keeps the base commit's value; in memory for this call when unset. */
+  baselines?: BaselineStore;
   exec?: ExecFn;
   fetchFn?: typeof fetch;
   logger?: Logger;
@@ -371,6 +374,16 @@ async function runOne(check: ContractCheck, index: number, ctx: VerifyContext): 
       return { ...base, ...(await runDiffPolicyCheck(check.spec, ctx)) };
     case 'file':
       return { ...base, ...runFileCheck(check.spec, ctx) };
+    case 'metric':
+      return {
+        ...base,
+        ...(await runMetricCheck(check.spec, {
+          cwd: ctx.cwd,
+          ...(ctx.baseSha ? { baseSha: ctx.baseSha } : {}),
+          baselines: ctx.baselines ?? memoryBaselineStore(),
+          ...(ctx.signal ? { signal: ctx.signal } : {}),
+        })),
+      };
   }
 }
 

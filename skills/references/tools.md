@@ -1056,13 +1056,21 @@ spawns no repair session, so `fixOnFailureRounds` does not apply either.
     { "type": "screenshot", "url": "http://localhost:3000/", "viewports": [{ "width": 1440, "height": 900 }] },
     { "type": "diff_policy", "forbidPaths": ["configs"], "maxFiles": 40 },
     { "type": "file", "path": "dist/index.js" },
+    { "type": "metric", "cmd": "node", "args": ["bench.js"], "json": "ms", "direction": "lower", "minDelta": 5 },
   ],
+  "protectPaths": ["bench/fixtures"],
 }
 ```
 
-`protectTests` (default on) refutes a workflow run whose test files or test configuration
-changed during it; set it to `false` when changing tests is the task. See
+`protectTests` (default on) refutes a workflow run whose test files, test configuration or
+lint/type-check configuration changed during it; set it to `false` when changing tests is the
+task. `protectPaths` names more files or directories to protect the same way, and scripts a
+check runs by path are protected without being named. See
 [verification.md](./verification.md#protected-tests).
+
+A `metric` check reads a number from a command's output and holds it to `min`/`max`, and with
+`minDelta`/`maxRegression` to the same command run on the run's base commit — "better than
+before", measured on both trees. See [verification.md](./verification.md#metric-and-the-base-commit).
 
 **Declare it yourself.** Never copy a contract out of an agent's output: an agent
 that writes its own acceptance criteria is grading itself, which is the problem

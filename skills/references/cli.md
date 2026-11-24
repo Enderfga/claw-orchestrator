@@ -170,6 +170,7 @@ Compacts the conversation; `--summary` is passed to the engine's compaction (`/c
 
 ```bash
 clawo runs [-s, --since <window>] [-n, --limit <n>] [--session <name>] [--engine <engine>] [--parent <id>] [--verified | --refuted] [--json]
+clawo runs --by <run|model|engine|workflow> [-s, --since <window>] [--workflow <name>] [--json]
 ```
 
 Show the durable per-turn record kept at `~/.claw-orchestrator/runs/`. Unlike
@@ -180,7 +181,12 @@ fanout / autoloop / workflow run; `--verified` / `--refuted` keep only turns who
 acceptance contract passed / failed. Costs marked with a trailing `~` came from
 estimated token counts. The `VERIFIED` column reads `yes`, `NO`, or `—` ("no
 contract was declared, so nothing checked it"). `--json` prints `{ rows, summary }`.
-See [observability.md](observability.md).
+
+`--by` reads the per-run rows instead — one per workflow run, written as it ends, with its
+verdict, cost and spend by engine and model. `--by run` lists them; `--by model`, `engine`
+or `workflow` groups them, with the verified rate over checked runs, total cost, cost per
+verified run and median duration. `--since` defaults to `30d` there. See
+[observability.md](observability.md#one-row-per-workflow-run).
 
 ## Agents, Skills and Rules
 

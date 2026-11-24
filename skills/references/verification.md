@@ -31,13 +31,14 @@ Concretely: there is no shell string anywhere. A `command` check is argv.
 
 ## Check types
 
-| Type          | Fields                                                                        | What it does                                                                | Passes when                                                                                                       |
-| ------------- | ----------------------------------------------------------------------------- | --------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `command`     | `cmd`, `args`, `cwd`, `expectExit`, `timeoutMs`                               | Runs argv in a directory (`cwd` is relative to where the checks run)        | Exit code equals `expectExit` (default 0)                                                                         |
-| `http`        | `url`, `expectStatus`, `timeoutMs`, `intervalMs`                              | GETs a URL every `intervalMs` (default 1 s) until the deadline              | Status equals `expectStatus` (default 200)                                                                        |
-| `screenshot`  | `url`, `viewports` (`[{ width, height, label? }]`), `browserBin`, `timeoutMs` | Captures the page at each viewport with headless Chrome and stores the PNGs | Every viewport produced a non-empty image                                                                         |
-| `diff_policy` | `maxFiles`, `forbidPaths`, `requirePaths`                                     | Compares the change set against the recorded baseline                       | At most `maxFiles` files changed, none under a `forbidPaths` entry, and at least one under a `requirePaths` entry |
-| `file`        | `path`, `exists`, `matches`                                                   | Checks a path, relative to where the checks run                             | Exists (or is absent when `exists: false`) and, if `matches` is given, its contents match that regex              |
+| Type          | Fields                                                                                                         | What it does                                                                                                                                    | Passes when                                                                                                              |
+| ------------- | -------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `command`     | `cmd`, `args`, `cwd`, `expectExit`, `timeoutMs`                                                                | Runs argv in a directory (`cwd` is relative to where the checks run)                                                                            | Exit code equals `expectExit` (default 0)                                                                                |
+| `http`        | `url`, `expectStatus`, `timeoutMs`, `intervalMs`                                                               | GETs a URL every `intervalMs` (default 1 s) until the deadline                                                                                  | Status equals `expectStatus` (default 200)                                                                               |
+| `screenshot`  | `url`, `viewports` (`[{ width, height, label? }]`), `browserBin`, `timeoutMs`                                  | Captures the page at each viewport with headless Chrome and stores the PNGs                                                                     | Every viewport produced a non-empty image                                                                                |
+| `diff_policy` | `maxFiles`, `forbidPaths`, `requirePaths`                                                                      | Compares the change set against the recorded baseline                                                                                           | At most `maxFiles` files changed, none under a `forbidPaths` entry, and at least one under a `requirePaths` entry        |
+| `file`        | `path`, `exists`, `matches`                                                                                    | Checks a path, relative to where the checks run                                                                                                 | Exists (or is absent when `exists: false`) and, if `matches` is given, its contents match that regex                     |
+| `metric`      | `cmd`, `args`, `cwd`, `json` or `pattern`, `direction`, `min`, `max`, `minDelta`, `maxRegression`, `timeoutMs` | Runs argv and reads one number from its standard output; with `minDelta` or `maxRegression`, runs the same command on the run's base commit too | The number is within `min`/`max`, and better than the base's by at least `minDelta` and worse by at most `maxRegression` |
 
 Each check may also carry an `id` (default `<type>-<n>`, used in the evidence) and
 `required`. The contract itself is `{ id?, checks, fixOnFailureRounds?,
@@ -60,6 +61,46 @@ As the `contract` argument of `workflow_start` or `verify_run`:
   ],
 }
 ```
+
+### `metric` and the base commit
+
+A `metric` check turns "faster", "more accurate" or "smaller" into something the runtime
+measures rather than something an agent reports. The command runs in the tree the agent
+handed over; its value is read from standard output by `json` (a dotted path into the output
+parsed as JSON, or its last line that is JSON: `results.score`, `runs.0.ms`), by `pattern` (an
+RE2 pattern whose first group is the number), or, with neither, as the last number printed.
+A command that exits non-zero, or prints no readable value, fails the check. `direction` is
+`higher` (default) or `lower`; a metric check needs at least one of `min`, `max`, `minDelta`
+and `maxRegression`.
+
+`minDelta` and `maxRegression` compare against the **base commit**: the commit the run started
+from (the per-iteration commit in Autoloop, `base` in `verify_run`). The same command runs in
+a temporary detached worktree of that commit — never the candidate's tree, never your checkout —
+with the candidate's untracked `node_modules`/`.venv` linked in, from the same subdirectory and
+with an absolute `cwd` moved to the same place, so both measurements run under the same tools.
+The base value is measured once per run and check and kept beside the run
+(`metric-baselines.json`), so repair rounds do not measure it again. A run with no base commit
+fails such a check. Uncommitted changes in the checkout are not in the base: commit first, or
+run with `isolation: "worktree"`, which starts from HEAD.
+
+The scripts the command runs by path (`node bench/run.js`) are protected like the tests, so an
+agent cannot improve the number by editing the benchmark. Both values are in the evidence
+(`metric: { value, baseline }` on the check's result).
+
+```jsonc
+{
+  "type": "metric",
+  "cmd": "node",
+  "args": ["bench/run.js", "--json"],
+  "json": "p50ms",
+  "direction": "lower",
+  "minDelta": 5,
+  "timeoutMs": 300000,
+}
+```
+
+A noisy measurement needs a margin wider than its noise, or a benchmark that repeats and
+reports a median; the check compares one run on each side.
 
 ### `required`
 
