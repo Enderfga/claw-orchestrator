@@ -143,6 +143,30 @@ describe('PersistentAgySession', () => {
       expect(spawnArgs[spawnArgs.indexOf('--settings') + 1]).toBe(settings);
     });
 
+    it('sets the compaction window through AGY_CLI_AUTO_COMPACT_OVERRIDE, and refuses one too small to run in', async () => {
+      const session = new PersistentAgySession({ name: 'test', cwd: '/tmp', autoCompactWindow: 300000 } as never);
+      await session.start();
+      const sendPromise = session.send('hello', { waitForComplete: true });
+      setTimeout(() => succeedProc(mockProc), 10);
+      await sendPromise;
+      const env = (mockSpawn.mock.calls[0][2] as { env: Record<string, string> }).env;
+      expect(env.AGY_CLI_AUTO_COMPACT_OVERRIDE).toBe('300000');
+
+      mockSpawn.mockClear();
+      mockSpawn.mockReturnValue((mockProc = createMockProcess()));
+      const auto = new PersistentAgySession({ name: 'test2', cwd: '/tmp', autoCompactWindow: 'auto' } as never);
+      await auto.start();
+      const second = auto.send('hello', { waitForComplete: true });
+      setTimeout(() => succeedProc(mockProc), 10);
+      await second;
+      const env2 = (mockSpawn.mock.calls[0][2] as { env: Record<string, string> }).env;
+      expect(env2.AGY_CLI_AUTO_COMPACT_OVERRIDE).toBe(process.env.AGY_CLI_AUTO_COMPACT_OVERRIDE);
+
+      expect(() => new PersistentAgySession({ name: 't3', cwd: '/tmp', autoCompactWindow: 20000 } as never)).toThrow(
+        /autoCompactWindow must be 'auto' or a whole token count of at least 100000/,
+      );
+    });
+
     it('uses plan mode for read-only sessions', async () => {
       const session = new PersistentAgySession({
         name: 'test',

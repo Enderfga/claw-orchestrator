@@ -120,7 +120,8 @@
       "--prompt": "covered: alias of -p, which the wrapper passes",
       "--prompt-interactive": "skip: interactive, continues in the terminal after the prompt; agy exits 2 when combined with -p",
       "--remote-agent": "skip: runs the conversation on Google's remote agents in a cloud workspace, not in the session's local cwd",
-      "--remote-control": "skip: interactive, opens a remote-control connection to a terminal session"
+      "--remote-control": "skip: interactive, opens a remote-control connection to a terminal session",
+      "--resume": "covered: agy 1.5.16 alias of --conversation, which the wrapper passes to resume a conversation"
     },
     "commands": {
       "acp": "skip: alternative transport (ACP stdio server) to the same agent; the native wrapper reads usage and cost from stream-json; reachable through the acp engine",
@@ -262,7 +263,8 @@
       "session": "supported: session delete --standalone <id> on stop of a noSessionPersistence session",
       "stats": "skip: usage statistics; per-turn usage comes from step_finish",
       "uninstall": "skip: removes OpenCode",
-      "upgrade": "skip: upgrades OpenCode; done through its own channel in the weekly check"
+      "upgrade": "skip: upgrades OpenCode; done through its own channel in the weekly check",
+      "machine": "skip: registers and removes remote machines for the user's own setup; runs use --standalone locally"
     }
   }
 }

@@ -162,6 +162,27 @@ function agyPrintTimeoutSec(timeoutMs: number): number {
 
 // ─── PersistentAgySession ───────────────────────────────────────────────────
 
+/** The smallest compaction window accepted, as on Claude Code: below it a turn has too little room to run. */
+const MIN_AGY_AUTOCOMPACT_WINDOW = 100_000;
+
+/**
+ * `autoCompactWindow` → `AGY_CLI_AUTO_COMPACT_OVERRIDE` (agy 1.5.15+): the token
+ * count at which agy compacts the conversation. Measured on 1.5.16 in print
+ * mode: a window of 110000 compacted a conversation of two 65K-token messages
+ * on the second turn (a summary pass of ~27K input and ~600 output tokens), and
+ * one below the size of the message itself failed the turn
+ * (`maxMessageTokens must be positive`). `auto` leaves agy's own default.
+ */
+export function agyAutoCompactEnv(window: SessionConfig['autoCompactWindow']): Record<string, string> {
+  if (window == null || window === 'auto') return {};
+  if (!Number.isInteger(window) || window < MIN_AGY_AUTOCOMPACT_WINDOW) {
+    throw new Error(
+      `autoCompactWindow must be 'auto' or a whole token count of at least ${MIN_AGY_AUTOCOMPACT_WINDOW} (got ${JSON.stringify(window)})`,
+    );
+  }
+  return { AGY_CLI_AUTO_COMPACT_OVERRIDE: String(window) };
+}
+
 export class PersistentAgySession extends BaseOneShotSession {
   /**
    * Antigravity conversation ID for this session. Captured from the agy log
@@ -193,6 +214,8 @@ export class PersistentAgySession extends BaseOneShotSession {
     });
     // Non-UUID ids (synthetic session ids from persistence/restart paths) are
     // ignored: starting a fresh conversation beats resuming a broken one.
+    // Refused at start, not at the first turn.
+    agyAutoCompactEnv(config.autoCompactWindow);
     if (isAgyConversationId(config.resumeSessionId)) {
       this.agyConversationId = config.resumeSessionId;
     }
@@ -426,7 +449,7 @@ export class PersistentAgySession extends BaseOneShotSession {
       const proc = spawnEngine(this.engineBin, args, {
         launcher: this.options.launcher,
         cwd: this.options.cwd,
-        env: { ...process.env },
+        env: { ...process.env, ...agyAutoCompactEnv(this.options.autoCompactWindow) },
         stdio: ['ignore', 'pipe', 'pipe'],
       });
       this.currentProc = proc;

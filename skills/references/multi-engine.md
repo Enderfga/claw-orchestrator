@@ -45,7 +45,7 @@ as options (see the notes under [Antigravity](#google-antigravity-engine-agy) an
 
 ### Claude Code (`engine: 'claude'`)
 
-Default engine. Long-running subprocess with streaming JSON I/O. Tested with Claude Code CLI **2.1.330**.
+Default engine. Long-running subprocess with streaming JSON I/O. Tested with Claude Code CLI **2.1.331**.
 
 - Persistent multi-turn conversations
 - Real-time streaming (text, tool_use, tool_result, system events)
@@ -165,7 +165,7 @@ continues under another account by its own session id. Accounts are listed in
 
 ### OpenAI Codex (`engine: 'codex'`)
 
-Wraps the `codex exec` subcommand. Each `send()` spawns a new process. Tested with `codex` CLI **0.171.0**.
+Wraps the `codex exec` subcommand. Each `send()` spawns a new process. Tested with `codex` CLI **0.172.0**.
 
 - Non-interactive execution via `codex exec --sandbox workspace-write --skip-git-repo-check --json`
 - Real `usage` from the `turn.completed` JSON event (input, output, cached, reasoning tokens). **These are cumulative over the thread, not per turn**, so they replace the session totals rather than being added to them; subtracting consecutive values gives one turn's prompt
@@ -208,7 +208,7 @@ await manager.startSession({
 
 ### OpenAI Codex App-Server (`engine: 'codex-app'`)
 
-Wraps `codex app-server --listen stdio:// --enable goals` as a long-running JSON-RPC subprocess. **Required for `/goal` long-horizon objective support** — Codex's exec subcommand has no goal surface. Tested with `codex` CLI **0.171.0**.
+Wraps `codex app-server --listen stdio:// --enable goals` as a long-running JSON-RPC subprocess. **Required for `/goal` long-horizon objective support** — Codex's exec subcommand has no goal surface. Tested with `codex` CLI **0.172.0**.
 
 - Long-running subprocess; one `codex app-server` per session
 - JSON-RPC 2.0 over stdio with v2 protocol method names (`initialize`, `thread/start`, `turn/start`, ...)
@@ -248,7 +248,7 @@ await manager.codexGoal('codex-goal-task', { action: 'set', objective: 'build a 
 
 Wraps Google's **Antigravity CLI** (`agy`) — the successor to Gemini CLI (consumer
 Gemini CLI tiers stopped serving 2026-06-18). Each `send()` spawns a new process
-in print mode, with the message as the `-p` argument. Tested with `agy` **1.5.13**.
+in print mode, with the message as the `-p` argument. Tested with `agy` **1.5.16**.
 
 - One-shot execution per message (no persistent subprocess)
 - **Structured output and real usage** — `--output-format stream-json` emits an
@@ -293,7 +293,11 @@ in print mode, with the message as the `-p` argument. Tested with `agy` **1.5.13
   - `default`, `manual` and `dontAsk` → `--sandbox` (terminal-restricted) in agy's
     Default mode (`"agentMode": ""` merged into `--settings`). A headless run cannot
     ask, so every tool call that needs permission is refused;
-  - `acceptEdits` → `--mode accept-edits`, `auto` → `--mode auto`, `plan` → `--mode plan`;
+  - `acceptEdits` → `--mode accept-edits`, `auto` → `--mode auto`, `plan` → `--mode plan`.
+    Auto mode is agy's own policy and widens with agy releases: since 1.5.14 it reads
+    files outside the workspace without asking, and since 1.5.16 it also creates and
+    edits them when the file is inside a version-controlled repository or the change
+    only adds content;
   - `sandboxMode: 'read-only'` → `--mode plan` (takes precedence).
 
   Since agy reads only the last `--settings` it is given, the Default mode is merged
@@ -304,6 +308,10 @@ in print mode, with the message as the `-p` argument. Tested with `agy` **1.5.13
   `--mode plan` when its preserved conversation is resumed.
 
 - `settings` is passed as `--settings`: settings.json keys as inline JSON or a file path, for this run only. agy refuses a key it does not know.
+- `autoCompactWindow` → the `AGY_CLI_AUTO_COMPACT_OVERRIDE` environment variable (agy 1.5.15+): the token count
+  at which agy compacts the conversation, at least 100000; `auto` leaves agy's own threshold. Measured on 1.5.16 in
+  print mode: a window of 110000 compacted a conversation of two 65K-token messages on the second turn, and a
+  window smaller than the message failed the turn.
 - Session options passed on every turn (each turn is a new process):
   - `jsonSchema` → `--json-schema`. agy enforces it on the turn's final result,
     returning the JSON as the reply text and the parsed value as `structured_output`
@@ -504,7 +512,7 @@ await manager.startSession({
 
 ### OpenCode (`engine: 'opencode'`)
 
-Wraps the [OpenCode](https://github.com/anomalyco/opencode) CLI with `run --format json`. Each `send()` spawns a new process. Tested with `opencode` **1.19.6** and OpenCode 2 **2.3.2**; the session reads `opencode --version` once at start and drives either line (see [OpenCode 2](#opencode-2) for what differs).
+Wraps the [OpenCode](https://github.com/anomalyco/opencode) CLI with `run --format json`. Each `send()` spawns a new process. Tested with `opencode` **1.19.6** and OpenCode 2 **2.4.1**; the session reads `opencode --version` once at start and drives either line (see [OpenCode 2](#opencode-2) for what differs).
 
 - Conversation continuity: the session id from the event envelope is captured and passed back as `--session <id>` on later sends, so the model sees prior turns. `--continue` is deliberately not used: it means "the last session on this machine", which collides between concurrent sessions.
 - NDJSON event stream with envelope `{ type, timestamp, sessionID, ... }`

@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.32.0] - 2026-11-24
+
+### Added
+
+- **`autoCompactWindow` on Antigravity.** The session field now also reaches agy, as `AGY_CLI_AUTO_COMPACT_OVERRIDE`
+  (agy 1.5.15+): the token count at which agy compacts the conversation, at least 100000, or `auto` for agy's own
+  threshold. A smaller value is refused at start; below the size of a message, agy fails the turn.
+
+### Changed
+
+- Tested engine versions: Claude Code 2.1.331, Codex 0.172.0, Antigravity 1.5.16 and OpenCode 2 2.4.1. Since agy 1.5.16
+  its Auto mode, which `permissionMode: 'auto'` selects, also creates and edits files outside the workspace without
+  asking when they are inside a version-controlled repository; see multi-engine.md.
+
 ## [7.31.0] - 2026-11-21
 
 ### Added

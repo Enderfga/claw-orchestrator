@@ -217,7 +217,7 @@ export const SESSION_START_PROPERTIES: Record<string, Record<string, unknown>> =
   autoCompactWindow: {
     type: ['string', 'number'],
     description:
-      "Claude engine only (`--autocompact`): the CLI's auto-compaction window, `auto` or a token count of at least 100000. Applies within a turn, unlike autoCompactPercent.",
+      "The engine's own auto-compaction window, `auto` or a token count of at least 100000: claude `--autocompact`, agy `AGY_CLI_AUTO_COMPACT_OVERRIDE`. Applies within a turn, unlike autoCompactPercent.",
   },
   appendSubagentSystemPrompt: {
     type: 'string',
