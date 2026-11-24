@@ -751,6 +751,25 @@ export class PersistentAgySession extends BaseOneShotSession {
     }
   }
 
+  /**
+   * agy's own `/compact` (a summary pass over the conversation; measured on 1.5.14: a SUCCESS result with no
+   * text, and the conversation still recalls what came before), run as a turn of its own. Slash commands are
+   * on for that turn whatever the session says, or the message would reach the model as text.
+   */
+  async compact(_summary?: string): Promise<TurnResult> {
+    if (!this.agyConversationId) {
+      const message = 'Nothing to compact yet: this agy session has no conversation';
+      return { text: message, event: { type: 'result', result: message } };
+    }
+    const disabled = this.options.disableSlashCommands;
+    this.options.disableSlashCommands = false;
+    try {
+      return (await this.send('/compact', { timeout: 600_000 })) as TurnResult;
+    } finally {
+      this.options.disableSlashCommands = disabled;
+    }
+  }
+
   /** Override getStats to expose the captured conversation ID. */
   getStats(): ReturnType<BaseOneShotSession['getStats']> {
     const base = super.getStats();

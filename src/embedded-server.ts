@@ -874,6 +874,13 @@ export class EmbeddedServer {
       }
 
       if (path === '/session/model') {
+        // now: switch at once, the conversation kept (a restart that resumes it); otherwise the model is only
+        // recorded and applies when the session next starts
+        if (body.now === true) {
+          const info = await this.manager.switchModel(body.name as string, body.model as string);
+          json(200, { ok: true, ...info });
+          return;
+        }
         this.manager.setModel(body.name as string, body.model as string);
         json(200, { ok: true });
         return;
