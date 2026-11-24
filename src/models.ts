@@ -752,7 +752,10 @@ const ONE_M_SUFFIX = /\[1m\]$/i;
 
 export function getContextWindow(model: string): number {
   const clean = model.replace(/^(anthropic|openai|openai-codex|google|gemini|agy|cursor|grok|xai)\//g, '');
-  const known = lookupModel(resolveAlias(clean.replace(ONE_M_SUFFIX, '')));
+  const bare = resolveAlias(clean.replace(ONE_M_SUFFIX, ''));
+  // agy names a model with its thinking effort (gemini-4-hydrogen-high): the window is the base model's.
+  // Unfound, it fell back to 200,000 and a conversation at 19 % of a million read as 95 % full.
+  const known = lookupModel(bare) ?? lookupModel(bare.replace(/-(low|medium|high|xhigh)$/, ''));
   const window = known?.contextWindow ?? 200_000;
   return ONE_M_SUFFIX.test(clean) ? Math.max(window, 1_000_000) : window;
 }
