@@ -169,3 +169,48 @@ describe('the directories a run works in', () => {
     await kernel.wait(ok.runId);
   });
 });
+
+describe("the run's spend cap", () => {
+  it('fails the run before a node once it is spent, and hands each agent what is left', async () => {
+    const starts: Array<Record<string, unknown>> = [];
+    let spent = 0;
+    const manager = {
+      async startSession(config: Record<string, unknown>) {
+        starts.push(config);
+        return { name: config.name } as never;
+      },
+      async sendMessage() {
+        spent += 0.6;
+        return { output: 'ok', events: [] } as never;
+      },
+      async stopSession() {},
+      getStatus() {
+        return { stats: { turns: 1, turnsSucceeded: 1, costUsd: spent } } as never;
+      },
+    };
+    const kernel = kernelWith(manager);
+    const run = await kernel.start({
+      name: 'budget',
+      cwd: tmp,
+      maxBudgetUsd: 1,
+      nodes: [
+        { id: 'a', kind: 'agent', prompt: 'x', engine: 'claude', next: 'b' },
+        { id: 'b', kind: 'agent', prompt: 'y', engine: 'claude', next: 'c' },
+        { id: 'c', kind: 'agent', prompt: 'z', engine: 'claude' },
+      ],
+    });
+    const done = await kernel.wait(run.runId);
+    expect(done!.state).toBe('failed');
+    expect(done!.error).toMatch(/the run's budget is spent: \$1\.\d+ of \$1\.00 \(maxBudgetUsd\), before node 'c'/);
+    expect(done!.nodes.c.state).toBe('pending');
+    // Each session's own cap is what was left when it started.
+    expect(starts.map((c) => Number((c.maxBudgetUsd as number).toFixed(2)))).toEqual([1, 0.4]);
+  });
+
+  it('refuses a cap that is not a positive amount', async () => {
+    const kernel = kernelWith(recordingManager(() => 'ok').manager);
+    await expect(
+      kernel.start({ name: 'b', cwd: tmp, maxBudgetUsd: 0, nodes: [{ id: 'a', kind: 'agent', prompt: 'x' }] }),
+    ).rejects.toThrow(/maxBudgetUsd must be a positive number/);
+  });
+});

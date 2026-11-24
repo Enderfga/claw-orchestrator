@@ -364,6 +364,19 @@ export type NodeSpec =
 // ─── Workflow spec ──────────────────────────────────────────────────────────
 
 export interface WorkflowSpec {
+  /**
+   * Run in a git worktree of its own, from the repository's HEAD, on a local
+   * branch `clawo/<runId>` that keeps whatever the run left when it ends; the
+   * caller's checkout is never written. `{ mode: 'worktree', link }` names the
+   * untracked dependency directories linked in (default `node_modules`, `.venv`).
+   */
+  isolation?: import('./isolation.js').IsolationSpec;
+  /**
+   * The run's spend cap in USD, across every node. Checked before each node;
+   * each node's sessions get what is left as their own cap, and a goal stops
+   * when it has spent it. Reaching it fails the run.
+   */
+  maxBudgetUsd?: number;
   name: string;
   nodes: NodeSpec[];
   cwd?: string;
@@ -516,6 +529,8 @@ export interface RunRecord {
    * says: an inline verifier that passed after it does not stand in for it.
    */
   runContractVerdict?: { node: string; evidenceId: string; passed: boolean };
+  /** The worktree a `isolation: 'worktree'` run works in, its branch, and the commit it was saved as. */
+  isolation?: import('./isolation.js').RunIsolation;
   verdict?: {
     node: string;
     evidenceId: string;

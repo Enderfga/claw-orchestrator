@@ -99,6 +99,13 @@ export interface AcceptanceContract {
    * a contract with a command check; set `false` when changing tests is the task.
    */
   protectTests?: boolean;
+  /**
+   * More files the run may not change, relative to the run's directory: a judge
+   * script, an evaluation config, a fixture — a file or a directory. Changing
+   * one refutes the run, as changing a test does. The repository files a
+   * command check runs by path are protected without being named here.
+   */
+  protectPaths?: string[];
 }
 
 export interface CheckResult {
@@ -261,6 +268,9 @@ export function normalizeContract(raw: unknown): AcceptanceContract | undefined 
     checks,
     fixOnFailureRounds: num(r.fixOnFailureRounds),
     ...(r.protectTests === false ? { protectTests: false } : {}),
+    ...(Array.isArray(r.protectPaths)
+      ? { protectPaths: r.protectPaths.filter((p): p is string => typeof p === 'string' && p.trim() !== '') }
+      : {}),
   };
 }
 
@@ -296,10 +306,13 @@ const FINGERPRINT_SCHEME = 'clawo-contract/1';
  * that match are the same rules; two that differ may still be equivalent.
  */
 function rulesOf(contract: AcceptanceContract): unknown {
+  const paths = [...new Set(contract.protectPaths ?? [])].sort();
   return {
     scheme: FINGERPRINT_SCHEME,
     checks: contract.checks.map(checkRules),
     protectTests: contract.protectTests !== false,
+    // Only when there are any, so a contract without them keeps the fingerprint it always had.
+    ...(paths.length ? { protectPaths: paths } : {}),
   };
 }
 
@@ -334,6 +347,8 @@ export function compareContracts(
 ): 'same' | 'adds-checks' | 'removes-checks' | 'changed' {
   if (contractFingerprint(prev) === contractFingerprint(next)) return 'same';
   if ((prev.protectTests !== false) !== (next.protectTests !== false)) return 'changed';
+  const paths = (c: AcceptanceContract) => [...new Set(c.protectPaths ?? [])].sort().join('\n');
+  if (paths(prev) !== paths(next)) return 'changed';
   const count = (c: AcceptanceContract) => {
     const m = new Map<string, number>();
     for (const check of c.checks) {

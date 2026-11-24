@@ -41,7 +41,7 @@ Concretely: there is no shell string anywhere. A `command` check is argv.
 
 Each check may also carry an `id` (default `<type>-<n>`, used in the evidence) and
 `required`. The contract itself is `{ id?, checks, fixOnFailureRounds?,
-protectTests? }`. `forbidPaths` and `requirePaths` are path prefixes matched by
+protectTests?, protectPaths? }`. `forbidPaths` and `requirePaths` are path prefixes matched by
 whole segments (`src` covers `src/a.ts`, not `srcfoo/a.ts`), not globs. A `file`
 check's `matches` is compiled with RE2, so matching takes linear time whatever
 the file holds; lookarounds and backreferences are refused as an invalid matcher.
@@ -181,6 +181,17 @@ whether it passed or not and runs again before every fixer round.
   name (`npm run verify`), and whatever those run in turn through `npm run`, `yarn`,
   `pnpm`, `bun`, `npm-run-all` or `run-s`/`run-p`, including their `pre`/`post` hooks.
   Other scripts, dependencies and key order may change.
+- **Counted as check configuration:** `tsconfig*.json`/`jsconfig*.json`, `eslint.config.*`,
+  `.eslintrc*`, `.eslintignore`, `.prettierrc*`, `prettier.config.*`, `.prettierignore`,
+  `biome.json(c)`, `ruff.toml`/`.ruff.toml`, `mypy.ini`, `.flake8`, `.pylintrc`,
+  `.golangci.y(a)ml` and `.stylelintrc*` — edited, deleted, or added anywhere (a new
+  `.eslintrc` in a subdirectory loosens the rules there). Loosening one is the cheapest
+  way to turn a lint or type check green.
+- **Named by the contract:** `protectPaths`, files or directories relative to the run's
+  directory (a judge's config, its fixtures), and every repository file a command check
+  runs by path — `node eval/judge.mjs`, `bash scripts/check.sh`, `./run.sh` — so a judge
+  cannot be rewritten to exit 0. A contract with `protectPaths` is protected even without a
+  command check.
 - **Allowed:** adding test files, packages, and test configuration that governs no test
   the run started with (a new package with its own `jest.config.ts`). New configuration
   in a directory at or above such a test — a `conftest.py` beside existing tests — is
@@ -190,13 +201,16 @@ whether it passed or not and runs again before every fixer round.
 - **Opting out:** set `"protectTests": false` when changing existing tests is the task.
 - **Where it applies:** kernel runs in a git repository with a `command` check that
   protects tests, including a subflow's verifier, which uses its parent run's record.
-  The record is taken only for such runs and for runs with a `subflow` node. A run in
-  a repository that has no record (created before this check existed, or one git could
-  not list) reports it as not checked (not required), and so does a verifier running
-  outside the recorded repository. `verify_run`, UltraApp's build gate and Autoloop's
-  gate have no record of the tree before the work and are not covered.
+  The record is taken only for such runs and for runs with a `subflow` node. A record
+  git could not take in a repository fails the check, rather than letting the run pass
+  unchecked. A run with no record (created before this check existed) reports it as not
+  checked (not required), and so does a verifier running outside the recorded
+  repository. Autoloop records the tests at the start of each iteration and is covered;
+  `verify_run` and UltraApp's build gate have no record of the tree before the work and
+  are not covered.
 - **What it does not catch:** tests inside source files (Rust `#[cfg(test)]`), test
-  settings inside general config (`vite.config.*`, `pyproject.toml`, `setup.cfg`),
+  settings inside general config (`vite.config.*`, `pyproject.toml`, `setup.cfg`,
+  `Makefile` — name them in `protectPaths` when they matter),
   files hidden by `.gitignore`, and source code that special-cases the test
   environment. It closes the direct route, not every route.
 

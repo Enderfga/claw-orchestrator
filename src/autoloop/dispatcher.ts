@@ -40,7 +40,7 @@ import { capturePatch, changedFilesSince } from '../verify/baseline.js';
 import { runContract } from '../verify/runner.js';
 import { writeEvidence } from '../verify/evidence.js';
 import { contractFingerprint, type AcceptanceContract } from '../verify/contract.js';
-import { snapshotTests, type TestSnapshot } from '../verify/protected-tests.js';
+import { protectedPathsFor, snapshotTests, type TestSnapshot } from '../verify/protected-tests.js';
 import { type AnyAutoloopMessage, Msg, type SendTimeoutPayload } from './messages.js';
 import {
   DEFAULT_SEND_TIMEOUT_MS,
@@ -1955,7 +1955,9 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
     if (fs.existsSync(file)) return;
     const head = await this.runGit(['git', 'rev-parse', 'HEAD']);
     const baseSha = head.code === 0 ? head.out.trim() : undefined;
-    const baseTests = baseSha ? await snapshotTests(this.config.workspace) : undefined;
+    const baseTests = baseSha
+      ? await snapshotTests(this.config.workspace, protectedPathsFor([this.config.contract], this.config.workspace))
+      : undefined;
     fs.writeFileSync(file, JSON.stringify({ baseSha: baseSha ?? null, baseTests: baseTests ?? null }));
   }
 

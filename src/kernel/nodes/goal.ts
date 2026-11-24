@@ -546,6 +546,20 @@ export async function executeGoalNode(node: NodeSpec, ctx: NodeContext): Promise
         absorb(await live.getGoal().catch(() => live.goal));
       }
 
+      // The run's spend cap: a goal is one node however long it runs, so the
+      // check between nodes alone would let one goal spend without bound.
+      if (ctx.budgetUsd !== undefined) {
+        readCost();
+        const spentHere = (data.costUsd ?? 0) - reported;
+        if (spentHere >= ctx.budgetUsd) {
+          await live.interrupt().catch(() => undefined);
+          await live.setGoal({ status: 'paused' }).catch(() => undefined);
+          return fail(
+            `the run's budget is spent: this goal cost $${spentHere.toFixed(2)} of the $${ctx.budgetUsd.toFixed(2)} left (maxBudgetUsd)`,
+          );
+        }
+      }
+
       // Codex ends a goal turn that hit a capacity error and marks the goal
       // `blocked`; the cause comes with the turn, not as a goal status. That is
       // the same transient condition `usageLimited` names, so it is resumed the

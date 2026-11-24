@@ -45,7 +45,8 @@ export async function executeCouncilNode(node: NodeSpec, ctx: NodeContext): Prom
       projectDir: spec.projectDir || ctx.cwd,
       agentTimeoutMs: spec.agentTimeoutMs ?? spec.timeoutMs,
       maxTurnsPerAgent: spec.maxTurnsPerAgent,
-      maxBudgetUsd: spec.maxBudgetUsd,
+      // The node's per-agent cap, held to what is left of the run's.
+      maxBudgetUsd: minDefined(spec.maxBudgetUsd, ctx.budgetUsd),
       defaultPermissionMode: spec.defaultPermissionMode as never,
       // A cancelled run, or an attempt the kernel timed out, must not keep opening rounds.
       signal: ctx.signal,
@@ -105,4 +106,8 @@ export async function executeCouncilNode(node: NodeSpec, ctx: NodeContext): Prom
       projectDir: spec.projectDir || ctx.cwd,
     },
   };
+}
+
+function minDefined(a: number | undefined, b: number | undefined): number | undefined {
+  return a === undefined ? b : b === undefined ? a : Math.min(a, b);
 }

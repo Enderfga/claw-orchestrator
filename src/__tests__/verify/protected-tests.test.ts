@@ -390,3 +390,53 @@ describe('isTestPath', () => {
     'docs/spec/api.yaml',
   ])('does not treat %s as a test path', (p) => expect(isTestPath(p)).toBe(false));
 });
+
+describe('protected files beyond the tests', () => {
+  it('refutes a loosened lint or type-check configuration, edited or added', async () => {
+    write('tsconfig.json', '{"compilerOptions":{"strict":true}}\n');
+    git('add -A');
+    git('commit -m tsconfig');
+    const snap = await snapshotTests(repo);
+    write('tsconfig.json', '{"compilerOptions":{"strict":false}}\n');
+    expect((await guard(snap))?.passed).toBe(false);
+
+    write('tsconfig.json', '{"compilerOptions":{"strict":true}}\n');
+    write('src/legacy/.eslintrc.json', '{"rules":{}}\n');
+    const added = await guard(snap);
+    expect(added?.passed).toBe(false);
+    expect(added?.detail).toContain('src/legacy/.eslintrc.json');
+  });
+
+  it('protects the paths a contract names, and the scripts its command checks run by path', async () => {
+    write('eval/judge.mjs', 'process.exit(0)\n');
+    write('eval/fixtures/case1.json', '{"expect":3}\n');
+    git('add -A');
+    git('commit -m judge');
+    const c = normalizeContract({
+      checks: [{ type: 'command', cmd: 'node', args: ['eval/judge.mjs', '--strict'] }],
+      protectPaths: ['eval/fixtures'],
+    })!;
+    const { protectedPathsFor } = await import('../../verify/protected-tests.js');
+    expect(protectedPathsFor([c], repo).sort()).toEqual(['eval/fixtures', 'eval/judge.mjs']);
+    const snap = await snapshotTests(repo, protectedPathsFor([c], repo));
+    expect(snap?.extra?.sort()).toEqual(['eval/fixtures', 'eval/judge.mjs']);
+
+    write('eval/fixtures/case1.json', '{"expect":4}\n');
+    const fixture = await guard(snap, c);
+    expect(fixture?.passed).toBe(false);
+    expect(fixture?.detail).toContain('eval/fixtures/case1.json');
+
+    write('eval/fixtures/case1.json', '{"expect":3}\n');
+    write('eval/judge.mjs', 'process.exit(0) // always green\n');
+    expect((await guard(snap, c))?.passed).toBe(false);
+
+    write('eval/judge.mjs', 'process.exit(0)\n');
+    expect((await guard(snap, c))?.passed).toBe(true);
+  });
+
+  it('fails, rather than passing unchecked, when the tests could not be recorded in a repository', async () => {
+    const r = await guard({ root: repo, files: {}, error: 'git could not list the files in the repository' });
+    expect(r).toMatchObject({ passed: false, required: true });
+    expect(r?.detail).toMatch(/could not be recorded when the run started/);
+  });
+});

@@ -1084,3 +1084,17 @@ describe('fan-out agents that run goals', () => {
     expect(data.goalRuns).toEqual((record.nodes.impl.data as { goalRuns: Record<string, string> }).goalRuns);
   });
 });
+
+describe("a goal under the run's spend cap", () => {
+  it('stops, paused, once it has spent what was left of the cap', async () => {
+    const m = fakeManager(() => new FakeGoalSession('thread-$'));
+    const withCost = { ...m, getStatus: () => ({ stats: { costUsd: 2.5 } }) };
+    const kernel = kernelWith(withCost as never);
+    const run = await kernel.start({ ...oneGoal(), maxBudgetUsd: 2 });
+    const done = await kernel.wait(run.runId);
+    expect(done!.nodes.goal.state).toBe('failed');
+    expect(done!.nodes.goal.error).toMatch(/the run's budget is spent: this goal cost \$2\.50 of the \$2\.00 left/);
+    const session = [...m.sessions.values()][0];
+    expect(session.sets.at(-1)).toEqual({ status: 'paused' });
+  });
+});

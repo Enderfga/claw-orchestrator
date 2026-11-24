@@ -1204,6 +1204,17 @@ const plugin = {
             },
           },
           humanGate: { type: 'boolean', description: '`solve` only: park for approval before writing anything.' },
+          maxBudgetUsd: {
+            type: 'number',
+            description:
+              'Template runs: the spend cap for the whole run in USD; each node gets what is left, and reaching it fails the run. A spec sets the same with `maxBudgetUsd` at its top level.',
+          },
+          isolation: {
+            type: 'string',
+            enum: ['worktree'],
+            description:
+              "`solve` / `goal`: run in a git worktree of the repository's HEAD. What the run leaves is committed to a local branch clawo/<runId> when it ends (verified or not; nothing is pushed), and the caller's checkout is never written. A spec sets the same with `isolation` at its top level.",
+          },
           maxRounds: { type: 'number', description: '`council` only: max collaboration rounds (default 15).' },
           maxRepairs: {
             type: 'number',
@@ -1311,7 +1322,13 @@ const plugin = {
           if (template === 'council') {
             spec = councilWorkflow({ task, cwd, agents, maxRounds: args.maxRounds as number | undefined });
           } else if (template === 'fanout') {
-            spec = fanoutWorkflow({ task, cwd, agents, synthesize: agents.length >= 2 });
+            spec = fanoutWorkflow({
+              task,
+              cwd,
+              agents,
+              synthesize: agents.length >= 2,
+              ...(typeof args.maxBudgetUsd === 'number' ? { maxBudgetUsd: args.maxBudgetUsd } : {}),
+            });
           } else if (template === 'goal') {
             spec = goalWorkflow({
               task,
@@ -1323,6 +1340,8 @@ const plugin = {
               tokenBudget: args.tokenBudget as number | undefined,
               launcher: args.launcher as string[] | undefined,
               maxRepairs: args.maxRepairs as number | undefined,
+              ...(args.isolation ? { isolation: args.isolation as 'worktree' } : {}),
+              ...(typeof args.maxBudgetUsd === 'number' ? { maxBudgetUsd: args.maxBudgetUsd } : {}),
             });
           } else {
             spec = solveWorkflow({
@@ -1333,6 +1352,8 @@ const plugin = {
               reviewers: args.reviewers as SolveArgs['reviewers'],
               humanGate: args.humanGate as boolean | undefined,
               maxRepairs: args.maxRepairs as number | undefined,
+              ...(args.isolation ? { isolation: args.isolation as 'worktree' } : {}),
+              ...(typeof args.maxBudgetUsd === 'number' ? { maxBudgetUsd: args.maxBudgetUsd } : {}),
             });
           }
         }

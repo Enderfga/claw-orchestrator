@@ -715,6 +715,29 @@ after the forum in _Test-Time Compute Scales Better with Parallel Agent Teams_
   counted when the post is handed to the turn in flight; the engine takes it in at
   its next tool round.
 
+## Isolation and spend
+
+**`isolation: "worktree"`** (top level of the spec; `clawo solve --isolate`, `clawo goal --isolate`,
+`isolation` on `workflow_start` templates) runs the whole workflow in a git worktree of the repository's HEAD,
+at `~/.claw-orchestrator/worktrees/<runId>`, on a new local branch `clawo/<runId>`. The caller's checkout is
+never written: uncommitted changes there are not part of the run, and two runs on one repository do not edit
+the same files. Every directory of the checkout the spec names — the run's, each node's and fan-out agent's,
+each check's — is moved into the worktree when the run starts. Untracked dependency directories (`node_modules`
+and `.venv` unless `{ "mode": "worktree", "link": [...] }` names others) are linked in from the checkout, so
+the project's tools run without an install; when git would list a link, `/<name>` is added to the repository's
+`.git/info/exclude`, which the checkout already ignores.
+
+When the run ends — verified, refuted, failed or cancelled — what it left is committed to `clawo/<runId>`
+(hooks skipped; the message names the outcome), and the worktree is removed. The branch is for you to merge,
+inspect or delete; nothing is pushed. `isolation` on the run record names the branch, the base and the commit.
+Resuming a finished run checks the branch out again and continues there. A directory not in a git repository
+with a commit is refused at start.
+
+**`maxBudgetUsd`** (top level; `--max-budget <usd>` on `solve`, `goal` and `fanout`) caps the whole run's
+spend. Before each node the kernel compares what the run has spent with the cap and fails the run when it is
+reached (a verifier still runs, to say what state the run left); each node's sessions get what is left as their
+own cap, a fan-out's and council's agents too, and a goal stops, paused, once it has spent it.
+
 ## Control
 
 | Action        | Tool               | HTTP                              | CLI                                     |

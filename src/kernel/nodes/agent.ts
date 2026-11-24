@@ -212,6 +212,9 @@ async function runAgentNode(
       ...(spec.appendSystemPrompt ? { appendSystemPrompt: spec.appendSystemPrompt } : {}),
       ...(spec.disallowedTools?.length ? { disallowedTools: spec.disallowedTools } : {}),
       ...(spec.sandboxMode ? { sandboxMode: spec.sandboxMode } : {}),
+      // What is left of the run's cap, as the session's own: the session
+      // manager refuses a turn once its spend reaches it.
+      ...(ctx.budgetUsd !== undefined ? { maxBudgetUsd: ctx.budgetUsd } : {}),
       permissionMode: (spec.permissionMode as never) ?? 'bypassPermissions',
     },
   });

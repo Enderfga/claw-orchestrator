@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Runs in a worktree of their own.** `isolation: "worktree"` on a spec (`clawo solve --isolate`, `clawo goal
+  --isolate`, `isolation` on `workflow_start`) runs the workflow in a git worktree of the repository's HEAD, on a
+  local branch `clawo/<runId>`, with the checkout's untracked `node_modules`/`.venv` linked in. The caller's
+  checkout is never written; when the run ends — verified or not — what it left is committed to the branch and the
+  worktree is removed, and a resume checks the branch out again. Nothing is pushed.
+- **A spend cap for the whole run.** `maxBudgetUsd` on a spec (`--max-budget` on `solve`, `goal`, `fanout`) fails
+  the run before a node once it is reached; each node's sessions get what is left, and a goal stops once it has
+  spent it.
+- **More is protected from an agent that would loosen its checks.** Lint, format and type-check configuration
+  (`tsconfig*.json`, ESLint, Prettier, Biome, Ruff, mypy, flake8, pylint, golangci, stylelint) is compared like
+  the tests; a contract's `protectPaths` names more files or directories (a judge's config, fixtures), and the
+  repository scripts a command check runs by path (`node eval/judge.mjs`) are protected without being named. A
+  test record git could not take in a repository now fails the check instead of letting the run pass unchecked.
 - **Fan-out answers are saved as files.** Each agent's output, and the synthesis, are written to the run directory
   (`outputs/<agent>.md`, `outputs/synthesis.md`); `fanout_status` results name them (`outputFile`, `synthesisFile`), and
   `clawo fanout --wait` prints where each is saved. A long report can be read whole there, where an MCP client may cut

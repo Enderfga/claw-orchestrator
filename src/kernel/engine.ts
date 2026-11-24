@@ -47,6 +47,7 @@
 
 import { EventEmitter } from 'node:events';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
 import path from 'node:path';
 import { defaultEngine } from '../clawo-config.js';
 import { sanitizeCwd } from '../validation.js';
@@ -61,7 +62,22 @@ import {
 } from '../verify/contract.js';
 import { forumTeam, isForumName, normalizeForumConfig, type ForumBinding } from './forum.js';
 import { captureBaseline, treeFingerprint } from '../verify/baseline.js';
-import { needsTestSnapshot, snapshotTests, type TestSnapshot } from '../verify/protected-tests.js';
+import {
+  createRunWorktree,
+  discardRunWorktree,
+  finalizeRunWorktree,
+  restoreRunWorktree,
+  specInWorktree,
+  worktreeDir,
+  type RunIsolation,
+} from './isolation.js';
+import {
+  needsTestSnapshot,
+  protectedPathsFor,
+  snapshotTests,
+  specContracts,
+  type TestSnapshot,
+} from '../verify/protected-tests.js';
 import type { SessionManagerLike } from './agent-step.js';
 import {
   acquireLease,
@@ -167,6 +183,11 @@ export interface NodeContext {
    * not cut by a shorter default of its own.
    */
   timeoutMs?: number;
+  /**
+   * What is left of the run's `maxBudgetUsd` when this attempt starts; undefined
+   * without a cap. A node gives its sessions no more than this.
+   */
+  budgetUsd?: number;
   manager?: SessionManagerLike;
   logger: Logger;
   signal: { aborted: boolean };
@@ -570,6 +591,9 @@ export function validateSpec(spec: WorkflowSpec): void {
     }
   }
 
+  if (spec.maxBudgetUsd !== undefined && (typeof spec.maxBudgetUsd !== 'number' || !(spec.maxBudgetUsd > 0))) {
+    throw new Error(`Workflow '${spec.name}': maxBudgetUsd must be a positive number of USD`);
+  }
   if (spec.maxNodeVisits !== undefined && (!Number.isInteger(spec.maxNodeVisits) || spec.maxNodeVisits < 1)) {
     throw new Error(`Workflow '${spec.name}': maxNodeVisits must be a positive integer`);
   }
@@ -762,7 +786,7 @@ export class RunKernel extends EventEmitter {
   // ─── Lifecycle ────────────────────────────────────────────────────────────
 
   async start(rawSpec: WorkflowSpec, opts: StartOptions = {}): Promise<RunRecord> {
-    const spec = stampEngines(prepareSpec(normalizeSpecContracts(rawSpec, opts.contract)), configuredEngines());
+    let spec = stampEngines(prepareSpec(normalizeSpecContracts(rawSpec, opts.contract)), configuredEngines());
     validateSpec(spec);
     checkSpecDirs(spec, opts.cwd);
     if (spec.forum !== undefined) {
@@ -786,8 +810,18 @@ export class RunKernel extends EventEmitter {
     if (!isValidRunId(runId)) {
       throw new Error(`Invalid run id ${JSON.stringify(runId)}: must be a single path segment ([A-Za-z0-9._-])`);
     }
-    const cwd = opts.cwd || spec.cwd || process.cwd();
+    let cwd = opts.cwd || spec.cwd || process.cwd();
     const now = new Date().toISOString();
+
+    // A worktree of its own, before anything reads the tree or the spec is
+    // stored: the run's directories, and the spec on disk, are the worktree's.
+    let isolation: RunIsolation | undefined;
+    if (spec.isolation) {
+      const made = createRunWorktree(cwd, runId, worktreeDir(runId), spec.isolation);
+      isolation = made.isolation;
+      cwd = made.cwd;
+      spec = specInWorktree(spec, isolation);
+    }
 
     const nodes: Record<string, NodeRecord> = {};
     for (const n of spec.nodes) {
@@ -806,6 +840,7 @@ export class RunKernel extends EventEmitter {
       nodes,
       costUsd: 0,
       ...(opts.forum ? { forum: { runId: opts.forum.runId, agent: opts.forum.agent } } : {}),
+      ...(isolation ? { isolation } : {}),
     };
     // The rules this run is verified under, named once, here.
     const contractHashes = specContractHashes(spec);
@@ -824,13 +859,21 @@ export class RunKernel extends EventEmitter {
     // run. A fresh directory also means a fresh incarnation id, which is what
     // stops a guard from the previous life of this run id from ever being valid
     // again.
-    const guard = createAndAcquire(runId, spec, this.ownerId);
+    let guard: ReturnType<typeof createAndAcquire>;
+    try {
+      guard = createAndAcquire(runId, spec, this.ownerId);
+    } catch (err) {
+      // No run, so nothing of its worktree may stay: the worktree and its empty branch go.
+      if (isolation) discardRunWorktree(isolation);
+      throw err;
+    }
     record.baseSha = await captureBaseline(cwd);
     // Only a protected-tests check reads it (a subflow may hold one), and reading
     // every test file is not free in a large repository. It needs a repository,
     // not a commit: a project with no commits yet is protected too.
     if (opts.baseTests) record.baseTests = opts.baseTests;
-    else if (needsTestSnapshot(spec)) record.baseTests = await snapshotTests(cwd);
+    else if (needsTestSnapshot(spec))
+      record.baseTests = await snapshotTests(cwd, protectedPathsFor(specContracts(spec), cwd));
     const { txn, signal } = this._open(guard, record);
     if (!txn.apply(() => undefined, [{ ts: now, type: 'run_created', runId, workflow: spec.name }])) {
       throw new Error(`Run '${runId}' could not be checkpointed: the claim was lost before it started`);
@@ -918,6 +961,17 @@ export class RunKernel extends EventEmitter {
     }
 
     const guard = acquireLease(runId, this.ownerId);
+    // A run that ended in a worktree had it removed; it goes back on the branch.
+    let restoredWorktree = false;
+    if (record.isolation && (record.isolation.removed || !fs.existsSync(record.isolation.worktree))) {
+      try {
+        restoreRunWorktree(record.isolation);
+        restoredWorktree = true;
+      } catch (err) {
+        releaseLease(guard);
+        throw new Error(`Run '${runId}' could not get its worktree back: ${(err as Error).message}`);
+      }
+    }
     const { txn, signal } = this._open(guard, record);
     const pendingSteers = this._unconsumedSteers(runId);
 
@@ -949,6 +1003,10 @@ export class RunKernel extends EventEmitter {
           draft.verdict = undefined;
         }
         draft.error = undefined;
+        // Back to work in the run's worktree: the branch holds what it left.
+        if (restoredWorktree && draft.isolation) {
+          draft.isolation = { ...draft.isolation, removed: false, commit: undefined, saveError: undefined };
+        }
         draft.updatedAt = new Date().toISOString();
       })
     ) {
@@ -1234,11 +1292,30 @@ export class RunKernel extends EventEmitter {
     const ts = new Date().toISOString();
     const terminal = isTerminalRunState(state);
     const outcome = txn.record.outcome;
+    // A run in a worktree of its own saves what it left on its branch as it ends,
+    // and the worktree goes. Once: a later terminal write finds it done.
+    const iso = txn.record.isolation;
+    let saved: { commit?: string; error?: string } | undefined;
+    if (terminal && iso && !iso.removed && !txn.lost) {
+      try {
+        saved = {
+          commit: finalizeRunWorktree(iso, `clawo ${txn.record.workflow} ${txn.guard.runId}: ${state}, ${outcome}`),
+        };
+      } catch (err) {
+        saved = { error: (err as Error).message };
+        this.logger.warn?.(`[kernel ${txn.guard.runId}] could not save the run's worktree: ${saved.error}`);
+      }
+    }
     const ok = txn.apply(
       (draft) => {
         draft.state = state;
         draft.updatedAt = ts;
         if (error) draft.error = error;
+        if (saved && draft.isolation) {
+          draft.isolation = saved.commit
+            ? { ...draft.isolation, commit: saved.commit, removed: true }
+            : { ...draft.isolation, saveError: saved.error };
+        }
         // Terminal states carry `endedAt`; this is the one place that stamps it.
         if (terminal) {
           draft.endedAt = ts;
@@ -1427,6 +1504,18 @@ export class RunKernel extends EventEmitter {
         this._setRunState(handle, 'failed', `unknown node '${nodeId}'`);
         return txn.record;
       }
+      // The run's spend cap, before the next node can add to it. A verifier
+      // still runs: judging the tree costs only its fix rounds, and a run out of
+      // money should still say what state it left.
+      const cap = txn.record.spec.maxBudgetUsd;
+      if (cap !== undefined && (txn.record.costUsd ?? 0) >= cap && spec.kind !== 'verifier') {
+        this._setRunState(
+          handle,
+          'failed',
+          `the run's budget is spent: $${(txn.record.costUsd ?? 0).toFixed(2)} of $${cap.toFixed(2)} (maxBudgetUsd), before node '${nodeId}'`,
+        );
+        return txn.record;
+      }
 
       // The visit counter is part of the loop bound, so it is committed like any
       // other state rather than incremented on a record nobody agreed to.
@@ -1553,6 +1642,9 @@ export class RunKernel extends EventEmitter {
         cwd: txn.record.cwd,
         attempt,
         ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+        ...(txn.record.spec.maxBudgetUsd !== undefined
+          ? { budgetUsd: Math.max(0, txn.record.spec.maxBudgetUsd - (txn.record.costUsd ?? 0)) }
+          : {}),
         manager: this.manager,
         logger: this.logger,
         signal: {

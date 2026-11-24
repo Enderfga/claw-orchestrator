@@ -91,6 +91,10 @@ export interface CommonArgs {
   task: string;
   cwd?: string;
   contract?: AcceptanceContract;
+  /** Run in a worktree of its own, saved to a local branch (`WorkflowSpec.isolation`). */
+  isolation?: WorkflowSpec['isolation'];
+  /** The run's spend cap in USD (`WorkflowSpec.maxBudgetUsd`). */
+  maxBudgetUsd?: number;
 }
 
 export interface CouncilArgs extends CommonArgs {
@@ -138,6 +142,7 @@ export interface FanoutArgs extends CommonArgs {
 export function fanoutWorkflow(args: FanoutArgs): WorkflowSpec {
   return {
     name: 'fanout',
+    ...(args.maxBudgetUsd ? { maxBudgetUsd: args.maxBudgetUsd } : {}),
     cwd: args.cwd,
     contract: args.contract,
     nodes: [
@@ -308,6 +313,8 @@ export function solveWorkflow(args: SolveArgs): WorkflowSpec {
   // would double the most expensive part of the run to learn nothing new.
   return {
     name: 'solve',
+    ...(args.isolation ? { isolation: args.isolation } : {}),
+    ...(args.maxBudgetUsd ? { maxBudgetUsd: args.maxBudgetUsd } : {}),
     cwd: args.cwd,
     contract: args.contract,
     // Each repair pass revisits implement / verify / the router once. The
@@ -368,6 +375,8 @@ export function goalWorkflow(args: GoalArgs): WorkflowSpec {
   };
   return {
     name: 'goal',
+    ...(args.isolation ? { isolation: args.isolation } : {}),
+    ...(args.maxBudgetUsd ? { maxBudgetUsd: args.maxBudgetUsd } : {}),
     cwd: args.cwd,
     contract: args.contract,
     maxNodeVisits: maxRepairs + 3,

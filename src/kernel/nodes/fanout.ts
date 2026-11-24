@@ -289,7 +289,8 @@ async function runTurnAgents(
       synthesisAcpAgent: spec.synthesisAcpAgent,
       synthesisPermissionMode: spec.synthesisPermissionMode as never,
       maxTurnsPerAgent: spec.maxTurnsPerAgent,
-      maxBudgetUsd: spec.maxBudgetUsd,
+      // The node's per-agent cap, held to what is left of the run's.
+      maxBudgetUsd: minDefined(spec.maxBudgetUsd, ctx.budgetUsd),
       agentTimeoutMs: spec.agentTimeoutMs ?? spec.timeoutMs,
       // A cancelled run, or an attempt the kernel timed out, must stop taking
       // queued agents off the queue rather than keep starting paid turns.
@@ -319,4 +320,8 @@ async function runTurnAgents(
   if (ctx.signal.aborted) return undefined;
   setHandle(fanout);
   return fanout.run();
+}
+
+function minDefined(a: number | undefined, b: number | undefined): number | undefined {
+  return a === undefined ? b : b === undefined ? a : Math.min(a, b);
 }

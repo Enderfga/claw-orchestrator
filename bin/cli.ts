@@ -982,6 +982,11 @@ addAgentFlags(
     )
     .option('--contract <file>', 'Acceptance contract JSON file (merged with --check)')
     .option('--max-repairs <n>', 'Repair attempts while the checks are red', '3')
+    .option(
+      '--isolate',
+      "Work in a git worktree of the repository's HEAD; what the run leaves is saved to a local branch clawo/<runId>, and your checkout is not written",
+    )
+    .option('--max-budget <usd>', 'Spend cap for the whole run in USD; it fails when reached')
     .option('--human-gate', 'Wait for `clawo workflow approve` before writing anything')
     .option('--cwd <dir>', 'Project directory', process.cwd())
     .option('-w, --wait', 'Follow the run until it ends; exit 1 unless it completes')
@@ -1021,6 +1026,8 @@ addAgentFlags(
     reviewers: reviewers as never,
     humanGate: opts.humanGate,
     maxRepairs: Math.max(0, parseInt(opts.maxRepairs, 10) || 0),
+    ...(opts.isolate ? { isolation: 'worktree' as const } : {}),
+    ...(opts.maxBudget ? { maxBudgetUsd: parseFloat(opts.maxBudget) } : {}),
   });
   await startWorkflow(spec, cwd, buildContract(opts.check, opts.contract), opts);
 });
@@ -1041,6 +1048,7 @@ addAgentFlags(
     .option('--grok', 'Add a Grok agent')
     .option('--opencode', 'Add an OpenCode agent')
     .option('--acp <preset>', 'Add an ACP agent (repeatable)', collect, [])
+    .option('--max-budget <usd>', 'Spend cap for the whole run in USD; it fails when reached')
     .option('-s, --synthesize', 'Merge the answers in a final pass (needs two or more agents)')
     .option('--agent-timeout <minutes>', 'How long each agent may run (default 30)')
     .option('-c, --check <command>', 'Acceptance check the runtime runs afterwards (repeatable)', collect, [])
@@ -1073,7 +1081,14 @@ addAgentFlags(
   if (!(await enginesKnown(agents))) return;
   const cwd = path.resolve(opts.cwd);
   const agentTimeoutMs = opts.agentTimeout ? Math.max(1, parseFloat(opts.agentTimeout)) * 60_000 : undefined;
-  const spec = fanoutWorkflow({ task, cwd, agents: agents as never, synthesize: !!opts.synthesize, agentTimeoutMs });
+  const spec = fanoutWorkflow({
+    task,
+    cwd,
+    agents: agents as never,
+    synthesize: !!opts.synthesize,
+    agentTimeoutMs,
+    ...(opts.maxBudget ? { maxBudgetUsd: parseFloat(opts.maxBudget) } : {}),
+  });
   const runId = await startWorkflow(spec, cwd, buildContract(opts.check, opts.contract), opts);
   if (!runId || !opts.wait || opts.json) return;
   const s = await api(`/workflow/${encodeURIComponent(runId)}/state`);
@@ -1116,6 +1131,11 @@ addEngineFlags(program.command('goal'), 'Run the goal on')
   .option('-c, --check <command>', 'Acceptance check the runtime runs after the goal (repeatable)', collect, [])
   .option('--check-timeout <minutes>', 'Timeout for each --check (default 10)')
   .option('--contract <file>', 'Acceptance contract JSON file (merged with --check)')
+  .option(
+    '--isolate',
+    "Work in a git worktree of the repository's HEAD; what the run leaves is saved to a local branch clawo/<runId>, and your checkout is not written",
+  )
+  .option('--max-budget <usd>', 'Spend cap for the whole run in USD; it fails when reached')
   .option('--max-repairs <n>', 'Times a red verdict sends the goal back to the same thread', '1')
   .option('--cwd <dir>', 'Project directory', process.cwd())
   .option('-w, --wait', 'Follow the run until it ends; exit 1 unless it completes')
@@ -1171,6 +1191,8 @@ addEngineFlags(program.command('goal'), 'Run the goal on')
       tokenBudget: opts.tokenBudget ? parseInt(opts.tokenBudget, 10) : undefined,
       goalTimeoutMs: minutes(opts.goalTimeout),
       maxRepairs: Math.max(0, parseInt(opts.maxRepairs, 10) || 0),
+      ...(opts.isolate ? { isolation: 'worktree' as const } : {}),
+      ...(opts.maxBudget ? { maxBudgetUsd: parseFloat(opts.maxBudget) } : {}),
     });
     await startWorkflow(spec, cwd, contract, opts);
   });

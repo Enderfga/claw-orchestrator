@@ -19,7 +19,7 @@ import type { Logger } from '../logger.js';
 import { compileSafeRegex, type SafeRegex } from '../validation.js';
 import { exec as realExec, lastLines, type ExecResult } from '../kernel/exec.js';
 import { changedFilesSince, isUnder, resolveIn } from './baseline.js';
-import { checkProtectedTests, contractScripts, type TestSnapshot } from './protected-tests.js';
+import { checkProtectedTests, contractScripts, protectsFiles, type TestSnapshot } from './protected-tests.js';
 import {
   contractPassed,
   DEFAULT_CHECK_TIMEOUT_MS,
@@ -390,11 +390,7 @@ export async function runChecks(
   // First, so it judges the tree the agent handed over rather than one a test
   // command may have rewritten. Only a command check runs the repository's tests,
   // so only then can editing them change the verdict.
-  if (
-    contract.protectTests !== false &&
-    ctx.baseTests !== undefined &&
-    contract.checks.some((c) => c.spec.type === 'command')
-  ) {
+  if (ctx.baseTests !== undefined && protectsFiles(contract)) {
     results.push(await checkProtectedTests(ctx.cwd, ctx.baseTests, contractScripts(contract)));
   }
   for (let i = 0; i < contract.checks.length; i++) {
