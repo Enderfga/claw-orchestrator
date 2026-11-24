@@ -122,9 +122,17 @@ const ENGINES: Engine[] = [
     // enough that a hang does not stall the whole sweep.
     liveTimeoutMs: 90_000,
   },
+  // OpenCode 1.x — npm `opencode-ai`, which stays on that line. Still supported
+  // for callers on it, but this machine runs OpenCode 2, so the 1.x binary is
+  // checked through OPENCODE1_BIN: install it into a scratch prefix
+  // (`npm i --prefix <dir> opencode-ai@latest`) and point the variable at
+  // `<dir>/node_modules/.bin/opencode`.
   {
     id: 'opencode',
-    bin: 'opencode',
+    bin: process.env.OPENCODE1_BIN ?? '',
+    missingBin:
+      'OPENCODE1_BIN is not set — install opencode-ai into a scratch prefix and point it at that 1.x binary to check its flags and run a live turn',
+    passBin: true,
     wrapper: 'src/persistent-opencode-session.ts',
     helpArgv: ['run', '--help'],
     upstream: () => npmLatest('opencode-ai'),
@@ -132,18 +140,17 @@ const ENGINES: Engine[] = [
     liveCwd: 'repo',
     otherLineFlags: ['--standalone', '--archived'],
   },
-  // OpenCode 2 ships as GitHub release binaries and a curl installer, not on
-  // npm, where `opencode-ai` stays on the 1.x line. Its first release, 2.2.0,
-  // went unseen for three weeks because this sweep only asked npm. It replaces
-  // the V1 binary when installed, so it is checked through OPENCODE2_BIN.
+  // OpenCode 2 — npm `@opencode/cli` (what its installer downloads), and also
+  // GitHub release binaries. Its first release, 2.2.0, went unseen for three
+  // weeks because this sweep only asked `opencode-ai`. The installed `opencode`
+  // is checked unless OPENCODE2_BIN names another binary.
   {
     id: 'opencode2',
-    bin: process.env.OPENCODE2_BIN ?? '',
-    missingBin: 'OPENCODE2_BIN is not set — point it at an OpenCode 2 binary to check its flags and run a live turn',
+    bin: process.env.OPENCODE2_BIN || 'opencode',
     passBin: true,
     wrapper: 'src/persistent-opencode-session.ts',
     helpArgv: ['run', '--help'],
-    upstream: () => ghLatestStable('anomalyco/opencode', /^v(2\.\d+\.\d+)$/),
+    upstream: () => npmLatest('@opencode/cli'),
     session: { file: 'persistent-opencode-session.js', cls: 'PersistentOpencodeSession' },
     liveCwd: 'repo',
     otherLineFlags: ['--variant', '--pure'],

@@ -108,6 +108,10 @@ npx tsx scripts/sweep.ts --no-live   # versions + flags only, costs nothing
 npx tsx scripts/sweep.ts --json --out report.json
 ```
 
+The installed `opencode` is OpenCode 2 (`@opencode/cli`). The 1.x line (`opencode-ai`) is still supported and
+checked through `OPENCODE1_BIN`: install it into a scratch prefix (`npm i --prefix <dir> opencode-ai@latest`) and
+point the variable at `<dir>/node_modules/.bin/opencode`; without it that row is skipped.
+
 ## Conventions
 
 - **ESM only** — `"type": "module"` in package.json, `.js` extensions in imports

@@ -15,7 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Tested engine versions: Claude Code 2.1.331, Codex 0.172.0, Antigravity 1.5.16 and OpenCode 2 2.4.1. Since agy 1.5.16
+- Tested engine versions: Claude Code 2.1.331, Codex 0.172.0, Antigravity 1.5.16 and OpenCode 2 2.4.1. OpenCode 2 is
+  documented as installed from npm, `@opencode/cli`. Since agy 1.5.16
   its Auto mode, which `permissionMode: 'auto'` selects, also creates and edits files outside the workspace without
   asking when they are inside a version-controlled repository; see multi-engine.md.
 
