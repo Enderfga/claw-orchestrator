@@ -443,6 +443,16 @@ export abstract class BaseOneShotSession extends EventEmitter implements ISessio
     this.emit(SESSION_EVENT.CLOSE, 143);
   }
 
+  /**
+   * Stop the turn now running: its process ends, the session stays ready, and the conversation id is kept
+   * (the next send resumes the same conversation). False when no turn is running.
+   */
+  interruptRun(): boolean {
+    if (!this.currentProc) return false;
+    this._cleanupProc();
+    return true;
+  }
+
   /** Override in subclasses that need extra cleanup (readline, stream destroy). */
   protected _cleanupProc(): void {
     if (this.currentProc) {

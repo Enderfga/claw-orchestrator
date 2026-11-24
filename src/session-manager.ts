@@ -1099,6 +1099,24 @@ function readClosedLedgerRestore(ledgerDir: string): ClosedLedgerRestore | null 
   return { iter: i, metric_history: history };
 }
 
+/**
+ * Stop a session's running turn by the means its engine has: the Claude CLI's `interrupt` control request
+ * (`interruptTurn`), codex app-server's turn/interrupt (`interrupt`), or, for an engine that runs a process
+ * per turn (agy and the other one-shot engines), that process ended (`interruptRun`; the conversation id is
+ * kept, so the next send carries on). `interrupted: false`: no turn was running.
+ */
+export async function interruptRunning(session: unknown, engine: string): Promise<{ interrupted: boolean }> {
+  const s = session as {
+    interruptTurn?: () => boolean;
+    interrupt?: () => Promise<{ interrupted: boolean }>;
+    interruptRun?: () => boolean;
+  };
+  if (typeof s.interruptTurn === 'function') return { interrupted: s.interruptTurn() };
+  if (typeof s.interrupt === 'function') return await s.interrupt();
+  if (typeof s.interruptRun === 'function') return { interrupted: s.interruptRun() };
+  throw new Error(`A ${engine} session can't be interrupted`);
+}
+
 export class SessionManager {
   private sessions = new Map<string, ManagedSession>();
   /** Goal adapters over `claude` sessions, by session name; dropped when the session stops. */
@@ -2217,6 +2235,15 @@ export class SessionManager {
         type: ev.type,
         content: JSON.stringify(ev.event),
       }));
+  }
+
+  /**
+   * Stop the turn a session is running, whatever runs it (see `interruptRunning`). The session stays: its
+   * conversation carries on with the next send.
+   */
+  async interruptSession(name: string): Promise<{ interrupted: boolean }> {
+    const managed = this._getSession(name);
+    return interruptRunning(managed.session, managed.config.engine ?? 'claude');
   }
 
   async compactSession(name: string, summary?: string): Promise<void> {

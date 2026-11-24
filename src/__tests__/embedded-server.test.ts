@@ -52,6 +52,7 @@ function createMockManager(): SessionManager {
     setEffort: vi.fn(),
     grepSession: vi.fn().mockResolvedValue([]),
     compactSession: vi.fn().mockResolvedValue(undefined),
+    interruptSession: vi.fn().mockResolvedValue({ interrupted: true }),
     listAgents: vi.fn().mockReturnValue([]),
     createAgent: vi.fn().mockReturnValue('/path/to/agent'),
     listSkills: vi.fn().mockReturnValue([]),
@@ -643,6 +644,16 @@ describe('EmbeddedServer', () => {
       });
       expect(res.status).toBe(200);
       expect(manager.sendMessage).toHaveBeenCalledWith('test', 'hello', expect.any(Object));
+    });
+
+    it('routes /session/interrupt to manager.interruptSession', async () => {
+      const res = await request(port, '/session/interrupt', {
+        method: 'POST',
+        body: { name: 'test' },
+      });
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({ ok: true, interrupted: true });
+      expect(manager.interruptSession).toHaveBeenCalledWith('test');
     });
 
     it('routes /session/status to manager.getStatus', async () => {

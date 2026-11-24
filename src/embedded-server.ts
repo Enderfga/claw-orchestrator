@@ -815,6 +815,12 @@ export class EmbeddedServer {
         return;
       }
 
+      if (path === '/session/interrupt') {
+        const r = await this.manager.interruptSession(body.name as string);
+        json(200, { ok: true, ...r });
+        return;
+      }
+
       if (path === '/session/compact') {
         await this.manager.compactSession(body.name as string, body.summary as string | undefined);
         json(200, { ok: true });
