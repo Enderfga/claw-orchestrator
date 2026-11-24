@@ -2675,3 +2675,67 @@ describe('ClaudeAgentDispatcher — role rebind', () => {
     expect(() => dispatcher.requestRoleRebind('coder', { model: 'x' })).toThrow(/has stopped/);
   });
 });
+
+describe('ClaudeAgentDispatcher — the acceptance gate', () => {
+  /**
+   * The gate checked an iteration against nothing: no base commit (so
+   * `diff_policy` saw only untracked files, the iteration being committed by
+   * then) and no test snapshot (so a Coder that edited the tests was not seen).
+   * Each iteration now records where it started, before the Coder's turn.
+   */
+  it("holds an advance whose iteration edited the tests, judged against the iteration's own start", async () => {
+    const { execFileSync } = await import('node:child_process');
+    const workspace = tmpRoot;
+    fs.mkdirSync(path.join(workspace, 'tests'));
+    fs.writeFileSync(path.join(workspace, 'tests', 'a.test.js'), 'assert(1 === 1)\n');
+    fs.writeFileSync(
+      path.join(workspace, 'package.json'),
+      JSON.stringify({ scripts: { test: 'node tests/a.test.js' } }),
+    );
+    for (const args of [
+      ['init'],
+      ['config', 'user.email', 't@e'],
+      ['config', 'user.name', 't'],
+      ['add', '-A'],
+      ['commit', '-m', 'base'],
+    ]) {
+      execFileSync('git', args, { cwd: workspace });
+    }
+    const ic = plannerControl('iter_complete', {
+      summary: 'made it pass',
+      eval_output: { metric: 1 },
+      files_changed: [],
+    });
+    const rc = plannerControl('review_complete', { decision: 'advance', metric: 1, audit_notes: 'looks right' });
+    const { manager } = makeStubManager({ sendOutputs: [`done\n${ic}`, `ok\n${rc}`] });
+    // The Coder's turn edits a test, as a reward-hacking Coder would.
+    const send = manager.sendMessage as unknown as { getMockImplementation(): (...a: unknown[]) => unknown };
+    const real = send.getMockImplementation();
+    (
+      manager.sendMessage as unknown as { mockImplementation(f: (...a: unknown[]) => unknown): void }
+    ).mockImplementation(async (...a: unknown[]) => {
+      if (String(a[0]).endsWith('-coder'))
+        fs.writeFileSync(path.join(workspace, 'tests', 'a.test.js'), 'process.exit(0)\n');
+      return real(...a);
+    });
+    const dispatcher = new ClaudeAgentDispatcher({
+      manager,
+      runId: 'r1',
+      workspace,
+      contract: { checks: [{ spec: { type: 'command', cmd: 'node', args: ['-e', '0'] }, required: true }] },
+    });
+    const ledgerDir = path.join(workspace, 'tasks', 'r1');
+    await dispatcher.spawnSubagents();
+    await dispatcher.deliver(Msg.directive(0, { goal: 'g', constraints: [], success_criteria: [], max_attempts: 1 }));
+    const base = JSON.parse(fs.readFileSync(path.join(ledgerDir, 'iter', '0', 'base.json'), 'utf8'));
+    expect(base.baseSha).toMatch(/^[0-9a-f]{40}$/);
+    expect(Object.keys(base.baseTests.files)).toContain('tests/a.test.js');
+
+    const out = await dispatcher.deliver(Msg.reviewRequest(0, { iter: 0, ledger_path: ledgerDir, prior_metrics: [] }));
+    const verdict = out.find((m) => m.type === 'review_verdict') as {
+      payload: { decision: string; audit_notes: string };
+    };
+    expect(verdict.payload.decision).toBe('hold');
+    expect(verdict.payload.audit_notes).toMatch(/\[acceptance\] advance withheld/);
+  });
+});

@@ -23,6 +23,7 @@ import type {
   WorkflowSpec,
 } from '../types.js';
 import { DEFAULT_AGENT_TIMEOUT_MS as FANOUT_AGENT_TIMEOUT_MS } from '../../fanout.js';
+import { FIXER_TURN_TIMEOUT_MS } from '../nodes/verifier.js';
 import { DEFAULT_NODE_TIMEOUT_MS } from '../engine.js';
 import {
   DEFAULT_AGENT_TIMEOUT_MS as COUNCIL_AGENT_TIMEOUT_MS,
@@ -214,6 +215,13 @@ export function solveWorkflow(args: SolveArgs): WorkflowSpec {
     ...(args.implementer?.sandboxMode ? { sandboxMode: args.implementer.sandboxMode } : {}),
     ...(args.implementer?.appendSystemPrompt ? { appendSystemPrompt: args.implementer.appendSystemPrompt } : {}),
     cwd: args.cwd,
+    // What the scouts found, and on a repair what the reviewers found: before
+    // this the implementer got the task alone, and the fan-outs' findings were
+    // recorded and never read.
+    inputs: ['triage', 'review'],
+    // A repair continues the implementer's own conversation, so it knows what it
+    // already tried instead of starting cold with only the failing checks.
+    continueConversation: true,
     // A failed implementation attempt still goes to the verifier, so the
     // evidence bundle records what was actually wrong rather than just "the
     // agent errored".
@@ -242,7 +250,29 @@ export function solveWorkflow(args: SolveArgs): WorkflowSpec {
     });
   }
 
-  nodes.push({ id: 'verify', kind: 'verifier', contract: 'run', cwd: args.cwd, onFailure: 'continue' });
+  nodes.push({
+    id: 'verify',
+    kind: 'verifier',
+    contract: 'run',
+    cwd: args.cwd,
+    onFailure: 'continue',
+    // Sized from the checks and any fix rounds, as on the goal template; the
+    // kernel's 30-minute default cut a long judge off.
+    timeoutMs: contractBudget(args.contract),
+    // A fix-on-red round runs as the implementer did, with no more permission.
+    ...(args.implementer
+      ? {
+          fixer: {
+            ...(args.implementer.engine ? { engine: args.implementer.engine } : {}),
+            ...(args.implementer.model ? { model: args.implementer.model } : {}),
+            ...(args.implementer.acpAgent ? { acpAgent: args.implementer.acpAgent } : {}),
+            ...(args.implementer.effort ? { effort: args.implementer.effort } : {}),
+            ...(args.implementer.permissionMode ? { permissionMode: args.implementer.permissionMode } : {}),
+            ...(args.implementer.sandboxMode ? { sandboxMode: args.implementer.sandboxMode } : {}),
+          },
+        }
+      : {}),
+  });
 
   // Loop back only while the verifier is red AND there is repair budget left.
   // The `visits_lt` guard is what stops this becoming an infinite retry; the
@@ -386,7 +416,10 @@ function contractBudget(contract: AcceptanceContract | undefined): number {
           : DEFAULT_CHECK_TIMEOUT_MS;
     return total + (spec.timeoutMs && spec.timeoutMs > 0 ? spec.timeoutMs : fallback);
   }, 0);
-  return Math.max(30 * 60_000, sum * ((contract?.fixOnFailureRounds ?? 0) + 1) + 5 * 60_000);
+  const fixRounds = contract?.fixOnFailureRounds ?? 0;
+  // Each fix round is a run of the checks and a fix turn before it.
+  const fixTurns = fixRounds * (FIXER_TURN_TIMEOUT_MS + SESSION_READY_TIMEOUT_MS);
+  return Math.max(30 * 60_000, sum * (fixRounds + 1) + fixTurns + 5 * 60_000);
 }
 
 // ─── Legacy mode workflows ──────────────────────────────────────────────────

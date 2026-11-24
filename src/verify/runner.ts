@@ -31,13 +31,20 @@ import {
   type ContractCheck,
 } from './contract.js';
 
-export type ExecFn = (cmd: string, args: string[], opts: { cwd?: string; timeoutMs?: number }) => Promise<ExecResult>;
+export type ExecFn = (
+  cmd: string,
+  args: string[],
+  opts: { cwd?: string; timeoutMs?: number; signal?: { aborted: boolean } },
+) => Promise<ExecResult>;
 
 export interface FixerArgs {
   cwd: string;
+  /** The first failing required check, as before; `failures` lists them all. */
   failingCheck: string;
   tail: string;
   round: number;
+  /** Every failing required check, so a fixer facing a red build and red tests sees both. */
+  failures: Array<{ id: string; detail: string; tail: string }>;
 }
 
 export type FixerSpawner = (args: FixerArgs) => Promise<void>;
@@ -80,7 +87,11 @@ async function runCommandCheck(
 ): Promise<Omit<CheckResult, 'id' | 'required' | 'type'>> {
   const run = ctx.exec ?? realExec;
   const cwd = spec.cwd ? resolveIn(ctx.cwd, spec.cwd) : ctx.cwd;
-  const r = await run(spec.cmd, spec.args ?? [], { cwd, timeoutMs: spec.timeoutMs ?? DEFAULT_CHECK_TIMEOUT_MS });
+  const r = await run(spec.cmd, spec.args ?? [], {
+    cwd,
+    timeoutMs: spec.timeoutMs ?? DEFAULT_CHECK_TIMEOUT_MS,
+    ...(ctx.signal ? { signal: ctx.signal } : {}),
+  });
   const cmdline = [spec.cmd, ...(spec.args ?? [])].join(' ');
   const expect = spec.expectExit ?? 0;
   const passed = r.code === expect;
@@ -93,8 +104,22 @@ async function runCommandCheck(
       : passed
         ? `\`${cmdline}\` exited ${r.code}`
         : `\`${cmdline}\` exited ${r.code}, expected ${expect}`,
-    tail: passed ? undefined : lastLines(r.err || r.out, TAIL_LINES),
+    tail: passed ? undefined : checkTail(r.out, r.err),
   };
+}
+
+/**
+ * The end of a failed command's output, both streams. `stderr || stdout` dropped
+ * stdout whenever stderr had anything in it — and test runners print their
+ * failures to stdout while npm prints its warnings to stderr, so the repair
+ * agent got the warnings and not the failing assertion.
+ */
+export function checkTail(out: string, err: string): string {
+  const o = out.trimEnd();
+  const e = err.trimEnd();
+  if (!o) return lastLines(e, TAIL_LINES);
+  if (!e) return lastLines(o, TAIL_LINES);
+  return `${lastLines(o, TAIL_LINES - 50)}\n--- stderr ---\n${lastLines(e, 50)}`;
 }
 
 async function runHttpCheck(
@@ -373,8 +398,21 @@ export async function runChecks(
     results.push(await checkProtectedTests(ctx.cwd, ctx.baseTests, contractScripts(contract)));
   }
   for (let i = 0; i < contract.checks.length; i++) {
-    if (ctx.signal?.aborted) break;
     const check = contract.checks[i];
+    if (ctx.signal?.aborted) {
+      // Recorded, not left out: a verdict is the checks that passed, so a list
+      // cut short by a cancel read as a pass (an aborted two-check contract
+      // returned no results and `passed: true`).
+      results.push({
+        id: check.id || `${check.spec.type}-${i + 1}`,
+        type: check.spec.type,
+        required: check.required !== false,
+        passed: false,
+        durationMs: 0,
+        detail: 'not run — the run was cancelled',
+      });
+      continue;
+    }
     if (opts.stopOnRequiredFailure && results.some((r) => r.required && !r.passed) && check.required !== false) {
       results.push({
         id: check.id || `${check.spec.type}-${i + 1}`,
@@ -420,7 +458,8 @@ export async function runContract(
     if (contractPassed(results) || rounds >= maxRounds || ctx.signal?.aborted) {
       return { results, passed: contractPassed(results), rounds };
     }
-    const failed = results.find((r) => r.required && !r.passed);
+    const failures = results.filter((r) => r.required && !r.passed);
+    const failed = failures[0];
     rounds++;
     ctx.logger?.info?.(`[verify] round ${rounds}/${maxRounds} — fixing: ${failed?.detail ?? 'unknown'}`);
     await spawnFixer!({
@@ -428,6 +467,7 @@ export async function runContract(
       failingCheck: failed?.detail ?? 'unknown',
       tail: failed?.tail ?? '',
       round: rounds,
+      failures: failures.map((r) => ({ id: r.id, detail: r.detail, tail: r.tail ?? '' })),
     });
   }
 }

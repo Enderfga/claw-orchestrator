@@ -648,25 +648,26 @@ Three-agent autonomous iteration loop (Planner / Coder / Reviewer) over a git wo
 
 Start a chat-mode autoloop. Planner starts immediately; Coder + Reviewer start only after the Planner receives plan approval and emits `spawn_subagents`.
 
-| Parameter                  | Type        | Required | Description                                                                                      |
-| -------------------------- | ----------- | -------- | ------------------------------------------------------------------------------------------------ |
-| `run_id`                   | string      | yes      | Stable run identifier                                                                            |
-| `workspace`                | string      | yes      | Git workspace path                                                                               |
-| `planner_engine`           | EngineType  |          | Planner engine (default `claude`)                                                                |
-| `planner_model`            | string      |          | Planner model (Claude default `opus`; other engines use their own default when omitted)          |
-| `planner_effort`           | EffortLevel |          | Fixed Planner reasoning effort; omission keeps the session default                               |
-| `planner_custom_engine`    | object      |          | Trusted `CustomEngineConfig` when Planner engine is `custom`. **Local callers only** — see below |
-| `coder_engine`             | EngineType  |          | Default Coder engine (default `claude`)                                                          |
-| `coder_model`              | string      |          | Default Coder model (Claude default `sonnet`)                                                    |
-| `coder_effort`             | EffortLevel |          | Fixed Coder reasoning effort; omission keeps the session default                                 |
-| `coder_custom_engine`      | object      |          | Trusted config when Coder may use `custom`. **Local callers only**                               |
-| `reviewer_engine`          | EngineType  |          | Default Reviewer engine (default `claude`)                                                       |
-| `reviewer_model`           | string      |          | Default Reviewer model (Claude default `sonnet`)                                                 |
-| `reviewer_effort`          | EffortLevel |          | Fixed Reviewer reasoning effort; omission keeps the session default                              |
-| `reviewer_custom_engine`   | object      |          | Trusted config when Reviewer may use `custom`. **Local callers only**                            |
-| `send_timeout_ms`          | number      |          | Per-agent send cap in ms (default 600000; inclusive 5000–7200000)                                |
-| `activity_lease_ms`        | number      |          | Inactivity lease in ms (default 1800000; inclusive 60000–7200000)                                |
-| `autoloop_hard_timeout_ms` | number      |          | Absolute run cap in ms (default 86400000; inclusive 600000–259200000)                            |
+| Parameter                  | Type        | Required | Description                                                                                                                                                                               |
+| -------------------------- | ----------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `run_id`                   | string      | yes      | Stable run identifier                                                                                                                                                                     |
+| `workspace`                | string      | yes      | Git workspace path                                                                                                                                                                        |
+| `planner_engine`           | EngineType  |          | Planner engine (default `claude`)                                                                                                                                                         |
+| `planner_model`            | string      |          | Planner model (Claude default `opus`; other engines use their own default when omitted)                                                                                                   |
+| `planner_effort`           | EffortLevel |          | Fixed Planner reasoning effort; omission keeps the session default                                                                                                                        |
+| `planner_custom_engine`    | object      |          | Trusted `CustomEngineConfig` when Planner engine is `custom`. **Local callers only** — see below                                                                                          |
+| `coder_engine`             | EngineType  |          | Default Coder engine (default `claude`)                                                                                                                                                   |
+| `coder_model`              | string      |          | Default Coder model (Claude default `sonnet`)                                                                                                                                             |
+| `coder_effort`             | EffortLevel |          | Fixed Coder reasoning effort; omission keeps the session default                                                                                                                          |
+| `coder_custom_engine`      | object      |          | Trusted config when Coder may use `custom`. **Local callers only**                                                                                                                        |
+| `reviewer_engine`          | EngineType  |          | Default Reviewer engine (default `claude`)                                                                                                                                                |
+| `reviewer_model`           | string      |          | Default Reviewer model (Claude default `sonnet`)                                                                                                                                          |
+| `reviewer_effort`          | EffortLevel |          | Fixed Reviewer reasoning effort; omission keeps the session default                                                                                                                       |
+| `reviewer_custom_engine`   | object      |          | Trusted config when Reviewer may use `custom`. **Local callers only**                                                                                                                     |
+| `send_timeout_ms`          | number      |          | Per-agent send cap in ms (default 600000; inclusive 5000–7200000)                                                                                                                         |
+| `activity_lease_ms`        | number      |          | Inactivity lease in ms (default 1800000; inclusive 60000–7200000)                                                                                                                         |
+| `autoloop_hard_timeout_ms` | number      |          | Absolute run cap in ms (default 86400000; inclusive 600000–259200000)                                                                                                                     |
+| `contract`                 | object      |          | Acceptance contract the runtime runs before a Reviewer's `advance` stands; on red the iteration is held. Judged against the commit and tests each iteration started from. Caller-authored |
 
 > **Custom engines are local-only.** A `CustomEngineConfig` names an executable to
 > spawn plus its argv and env, so it may only be supplied by a caller that already

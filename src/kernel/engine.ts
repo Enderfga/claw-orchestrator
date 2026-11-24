@@ -47,7 +47,9 @@
 
 import { EventEmitter } from 'node:events';
 import crypto from 'node:crypto';
+import path from 'node:path';
 import { defaultEngine } from '../clawo-config.js';
+import { sanitizeCwd } from '../validation.js';
 import type { EngineType } from '../types.js';
 import { createConsoleLogger, type Logger } from '../logger.js';
 import {
@@ -158,6 +160,13 @@ export interface NodeContext {
    * one's session.
    */
   attempt: number;
+  /**
+   * How long this attempt may run: the node's `timeoutMs`, or the kernel's node
+   * default; undefined for the kinds that own their timeout (autoloop, goal). A
+   * node whose work is one engine turn gives the turn this long, so the turn is
+   * not cut by a shorter default of its own.
+   */
+  timeoutMs?: number;
   manager?: SessionManagerLike;
   logger: Logger;
   signal: { aborted: boolean };
@@ -465,6 +474,34 @@ function declaredDrift(
  * run halfway through with `unknown node`; a negative retry or visit bound was
  * accepted and then behaved arbitrarily.
  */
+/**
+ * Every directory a run would work in, checked as a session's is
+ * (`sanitizeCwd`: not `/`, a system directory or `~/.ssh` and its kind). A
+ * session started on its own was checked; one started by a workflow node was
+ * not, so `POST /workflow/new` put an agent with `bypassPermissions` wherever
+ * its spec said. Checked here, the one place every start goes through.
+ */
+function checkSpecDirs(spec: WorkflowSpec, startCwd: string | undefined): void {
+  const base = startCwd ?? spec.cwd ?? process.cwd();
+  const check = (dir: unknown, from: string, where: string): void => {
+    if (typeof dir !== 'string' || !dir) return;
+    try {
+      sanitizeCwd(path.resolve(from, dir));
+    } catch (err) {
+      throw new Error(`${where}: ${(err as Error).message}`);
+    }
+  };
+  check(startCwd, process.cwd(), `Workflow '${spec.name}'`);
+  check(spec.cwd, process.cwd(), `Workflow '${spec.name}'`);
+  for (const node of spec.nodes) {
+    const own = node as { cwd?: unknown; projectDir?: unknown; agents?: Array<{ name?: string; cwd?: unknown }> };
+    check(own.cwd, base, `Node '${node.id}'`);
+    check(own.projectDir, base, `Node '${node.id}'`);
+    const nodeDir = typeof own.cwd === 'string' && own.cwd ? path.resolve(base, own.cwd) : base;
+    for (const a of own.agents ?? []) check(a.cwd, nodeDir, `Node '${node.id}': agent '${a.name ?? '?'}'`);
+  }
+}
+
 /** Why a goal cannot run on `engine` (with `acpAgent`), if it cannot. */
 function goalEngineProblem(engine: unknown, acpAgent: unknown): string | undefined {
   if (!GOAL_ENGINES.includes(engine as GoalEngine)) {
@@ -727,6 +764,7 @@ export class RunKernel extends EventEmitter {
   async start(rawSpec: WorkflowSpec, opts: StartOptions = {}): Promise<RunRecord> {
     const spec = stampEngines(prepareSpec(normalizeSpecContracts(rawSpec, opts.contract)), configuredEngines());
     validateSpec(spec);
+    checkSpecDirs(spec, opts.cwd);
     if (spec.forum !== undefined) {
       const forum = normalizeForumConfig(spec.forum, `Workflow '${spec.name}': forum`);
       if (forum) {
@@ -1293,6 +1331,7 @@ export class RunKernel extends EventEmitter {
     timeoutMs: number | undefined,
     attemptSignal: { aborted: boolean },
     inflight: Set<Promise<unknown>>,
+    onTimeout?: () => void,
   ): Promise<NodeResult> {
     const executor = this.executors[node.kind];
     if (!executor) {
@@ -1310,6 +1349,14 @@ export class RunKernel extends EventEmitter {
                 // is a separate, user-initiated thing. Conflating the two made a hung
                 // node report the whole run as `cancelled`.
                 attemptSignal.aborted = true;
+                // Stop the attempt's own work where it published a way to: a
+                // timed-out agent turn kept running beside its retry, in the same
+                // tree, and kept spending.
+                try {
+                  onTimeout?.();
+                } catch {
+                  // Best-effort, as for cancel.
+                }
                 resolve({ ok: false, error: `node timed out after ${timeoutMs}ms` });
               },
               Math.min(timeoutMs, MAX_TIMER_MS),
@@ -1494,6 +1541,8 @@ export class RunKernel extends EventEmitter {
       // A node sees one signal that is the union of "this attempt gave up" and
       // "the whole run was cancelled"; the kernel keeps them apart.
       const attemptSignal = { aborted: false };
+      // What this attempt published to stop it, for its own timeout.
+      let attemptHandle: unknown;
       const ctx: NodeContext = {
         runId: txn.guard.runId,
         // A live view of the committed record, so a node holding `ctx` across an
@@ -1503,6 +1552,7 @@ export class RunKernel extends EventEmitter {
         },
         cwd: txn.record.cwd,
         attempt,
+        ...(timeoutMs !== undefined ? { timeoutMs } : {}),
         manager: this.manager,
         logger: this.logger,
         signal: {
@@ -1525,7 +1575,10 @@ export class RunKernel extends EventEmitter {
           txn.emit(event);
         },
         runContract: txn.record.spec.contract,
-        setHandle: (h) => handle.handles.set(spec.id, h),
+        setHandle: (h) => {
+          attemptHandle = h;
+          handle.handles.set(spec.id, h);
+        },
         publish: (data) =>
           txn.apply((draft) => {
             const node = draft.nodes[spec.id];
@@ -1543,7 +1596,9 @@ export class RunKernel extends EventEmitter {
         },
       };
 
-      last = await this._executeNode(spec, ctx, timeoutMs, attemptSignal, handle.inflight);
+      last = await this._executeNode(spec, ctx, timeoutMs, attemptSignal, handle.inflight, () =>
+        (attemptHandle as { abort?: () => void } | undefined)?.abort?.(),
+      );
       if (last.ok || handle.signal.aborted) return last;
 
       if (attempt < maxAttempts) {
@@ -1671,6 +1726,10 @@ export class RunKernel extends EventEmitter {
           node.evidenceId = result.evidenceId;
           draft.evidenceId = result.evidenceId;
           draft.outcome = result.passed ? 'verified' : 'refuted';
+          const declared = draft.spec.nodes.find((n) => n.id === nodeId);
+          if (declared?.kind === 'verifier' && declared.contract === 'run') {
+            draft.runContractVerdict = { node: nodeId, evidenceId: result.evidenceId, passed: !!result.passed };
+          }
           draft.outcomeReason = undefined;
           draft.verdict = {
             node: nodeId,
@@ -1709,6 +1768,16 @@ export class RunKernel extends EventEmitter {
     // Only when there is a verdict to protect: a run that was never verified has
     // nothing to lose by ending promptly, and blocking it would make one hung
     // node delay every run that contained it.
+    // The declared contract's own last verdict decides when it failed: a later
+    // inline verifier's pass overwrote `outcome` and certified a run whose
+    // contract was red (a failed run verifier with `onFailure: 'continue'`).
+    const declared = txn.record.spec.contract ? txn.record.runContractVerdict : undefined;
+    if (outcome === 'verified' && declared && !declared.passed) {
+      outcome = 'refuted';
+      downgrade =
+        `the run's acceptance contract failed (evidence ${declared.evidenceId}, node ${declared.node}); ` +
+        `a later verifier's pass does not stand in for it`;
+    }
     if (outcome === 'verified' && !(await this._awaitQuiescence(handle, QUIESCE_GRACE_MS))) {
       outcome = 'unverified';
       downgrade =

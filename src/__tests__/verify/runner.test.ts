@@ -302,3 +302,33 @@ describe('http checks — a server that accepts and never answers', () => {
     expect(r.detail).toMatch(/gave up after \d+ms, budget 600ms/);
   }, 10_000);
 });
+
+describe('a cancelled contract', () => {
+  it('does not pass: checks it never ran are recorded as not passed', async () => {
+    const { runContract } = await import('../../verify/runner.js');
+    const r = await runContract(
+      {
+        checks: [{ spec: { type: 'file', path: 'a' } }, { spec: { type: 'file', path: 'b' }, required: false }],
+      } as never,
+      { cwd: process.cwd(), artifactDir: '/tmp/none', signal: { aborted: true } },
+    );
+    expect(r.passed).toBe(false);
+    expect(r.results.map((x) => [x.passed, x.required, x.detail])).toEqual([
+      [false, true, 'not run — the run was cancelled'],
+      [false, false, 'not run — the run was cancelled'],
+    ]);
+  });
+
+  it('kills a running command check when the run is cancelled, instead of waiting out its timeout', async () => {
+    const { runContract } = await import('../../verify/runner.js');
+    const signal = { aborted: false };
+    setTimeout(() => (signal.aborted = true), 300);
+    const t0 = Date.now();
+    const r = await runContract(
+      { checks: [{ spec: { type: 'command', cmd: process.execPath, args: ['-e', 'setTimeout(() => {}, 60000)'] } }] },
+      { cwd: process.cwd(), artifactDir: '/tmp/none', signal },
+    );
+    expect(Date.now() - t0).toBeLessThan(10_000);
+    expect(r.passed).toBe(false);
+  }, 20_000);
+});

@@ -122,8 +122,11 @@ attempt share its bundle, which records how many were used:
   shot-<label>.png   screenshots, when a screenshot check ran
 ```
 
-A failed command's tail is the last 200 lines of its stderr, or of its stdout when
-stderr is empty; a failed `diff_policy` logs the change set it judged.
+A failed command's tail is the last 200 lines of its output: stdout, then the last 50
+lines of stderr under `--- stderr ---` when it has both (test runners print their
+failures to stdout); a failed `diff_policy` logs the change set it judged. A check a
+cancelled run never reached is recorded as not passed, so a cut-short list cannot pass,
+and a command check running when the run is cancelled is killed.
 
 Read one with `clawo verify <runId>` (`--evidence <id>` for an earlier bundle) or
 `GET /workflow/<id>/evidence` (`?evidenceId=`); without an id both return the
@@ -138,10 +141,13 @@ results, so a bundle that fails to land loses the record, never the answer.
 **re-runs the whole check list**. The fixer's own claim to have fixed it is
 ignored; only the re-run decides. Set it to 0 (the default) to disable.
 
-Each round's fixer is a session in the checks' directory, with
-`bypassPermissions`, given the first failing required check and its output tail,
-framed as data. Fix-on-red runs only inside a workflow's verifier node:
-`verify_run` runs the checks once and ignores the field.
+Each round's fixer is a session in the checks' directory, given every failing required
+check and its output, framed as data, with a 20-minute turn. It runs as the verifier
+node's `fixer` says (engine, model, permissions, sandbox; `solve` gives it the
+implementer's), otherwise on the default engine with `bypassPermissions`. Its cost
+counts toward the run's. The verifier's node timeout includes the fix turns.
+Fix-on-red runs only inside a workflow's verifier node: `verify_run` runs the checks
+once and ignores the field.
 
 ## Protected tests
 

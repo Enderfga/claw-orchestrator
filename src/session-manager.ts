@@ -159,7 +159,12 @@ import {
   splitAgentSecrets,
 } from './kernel/templates/index.js';
 import type { KernelEvent, RunRecord, RunState, WorkflowSpec } from './kernel/types.js';
-import { contractFingerprint, contractProblems, normalizeContract } from './verify/contract.js';
+import {
+  contractFingerprint,
+  contractProblems,
+  normalizeContract,
+  type AcceptanceContract,
+} from './verify/contract.js';
 import { ensureForumSpool, forumMetrics, forumPost, forumSnapshot, resolveForum } from './kernel/forum.js';
 import { runContract } from './verify/runner.js';
 import {
@@ -4644,6 +4649,8 @@ export class SessionManager {
     sendTimeoutMs?: number;
     activityLeaseMs?: number;
     autoloopHardTimeoutMs?: number;
+    /** The caller's acceptance contract, which a Reviewer's `advance` must pass. */
+    contract?: AcceptanceContract;
     /** Internal restart marker: a failed timeout migration must not append a
      *  cleanup decision or purge the resumable session registry. Never stored. */
     _resumeTimeoutMigration?: boolean;
@@ -4718,6 +4725,7 @@ export class SessionManager {
       reviewerEffort: opts.reviewerEffort,
       reviewerCustomEngine: opts.reviewerCustomEngine,
       sendTimeoutMs: opts.sendTimeoutMs,
+      ...(opts.contract ? { contract: opts.contract } : {}),
       suppressFailedStartAudit: opts._resumeTimeoutMigration,
       logger: this.logger,
       pushPolicyRef: pushPolicy,
@@ -4916,7 +4924,20 @@ export class SessionManager {
     sendTimeoutMs?: number;
     activityLeaseMs?: number;
     autoloopHardTimeoutMs?: number;
+    /**
+     * Checks the runtime runs before a Reviewer's `advance` stands; on red the
+     * iteration is held. Caller-authored, like a workflow's contract. Stored
+     * with the run, so a resume keeps it.
+     */
+    contract?: unknown;
   }): Promise<{ runId: string; plannerSession: string; state: AutoloopState }> {
+    if (opts.contract !== undefined) {
+      const contract = normalizeContract(opts.contract);
+      if (!contract || contract.checks.length === 0) {
+        throw new Error('autoloop contract must be an acceptance contract with at least one valid check');
+      }
+      opts = { ...opts, contract };
+    }
     // Fail before the run directory exists, so a rejected start leaves nothing.
     validateAutoloopTimeoutConfig({
       sendTimeoutMs: opts.sendTimeoutMs,

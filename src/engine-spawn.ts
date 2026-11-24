@@ -131,10 +131,29 @@ export function killEngineTree(child: ChildProcess): void {
         /* fall through to a plain kill */
       }
     }
-    child.kill('SIGTERM');
+    signalEngineGroup(child, 'SIGTERM');
   } catch {
     // Already exited.
   }
+}
+
+/**
+ * Signal an engine process and the processes it started. Off Windows an engine
+ * runs in its own process group (`spawnEngine`), so the group gets the signal:
+ * signalling the engine alone left the commands it was running — a test run, a
+ * build, a dev server — going after its turn was stopped, still writing to the
+ * tree. A process that is not a group leader gets the signal itself.
+ */
+export function signalEngineGroup(child: ChildProcess, signal: NodeJS.Signals): void {
+  if (process.platform !== 'win32' && child.pid) {
+    try {
+      process.kill(-child.pid, signal);
+      return;
+    } catch {
+      // Not a group leader, or the group is gone: signal the process.
+    }
+  }
+  child.kill(signal);
 }
 
 /** Engine processes told to stop, whether through `killEngineTree` or a direct `kill`. */
@@ -191,7 +210,7 @@ export class EngineProcessSet {
       if (!this.isStopping(child)) continue;
       if (await this.waitForClose(child, this.graceMs)) continue;
       try {
-        child.kill('SIGKILL');
+        signalEngineGroup(child, 'SIGKILL');
       } catch {
         // Already exited.
       }
@@ -252,7 +271,9 @@ export function spawnEngine(
   args: string[],
   options: SpawnOptions & { launcher?: readonly string[] },
 ): ChildProcess {
-  const { launcher, ...spawnOptions } = options;
+  const { launcher, ...given } = options;
+  // Its own process group off Windows, so stopping it stops what it started; see signalEngineGroup.
+  const spawnOptions: SpawnOptions = { ...given, detached: given.detached ?? process.platform !== 'win32' };
   const cwd = typeof spawnOptions.cwd === 'string' ? spawnOptions.cwd : undefined;
   const env = engineEnv(spawnOptions.env, cwd);
   if (launcher && launcher.length > 0) {

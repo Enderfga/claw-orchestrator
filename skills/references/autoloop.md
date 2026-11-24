@@ -621,10 +621,12 @@ rewritten to `hold`, the failing checks are appended to `audit_notes`, and the
 bundle is written to `<ledger>/evidence/iter-<n>/`. A passing contract fires
 `on_target_hit`. Without a contract the Reviewer's verdict is used as-is.
 
-**The contract is library-level only.** It is set on the dispatcher config
-(`contract` in `ClaudeAgentDispatcherConfig`) and is not yet exposed through
-`autoloop_start` or the HTTP API, so a run started from the tool or
-`POST /autoloop/new` has no contract.
+Pass it as `contract` to `autoloop_start` or in the body of `POST /autoloop/new`
+(caller-authored, as for a workflow; it is stored with the run, so a resume keeps
+it). Before each Coder turn the loop records where the iteration starts,
+`iter/<n>/base.json`: the commit and a snapshot of the tests. The checks are judged
+against it, so `diff_policy` sees the iteration's own changes and test protection
+refutes an iteration that edited the tests its checks run.
 
 ## Lifecycle and resume
 

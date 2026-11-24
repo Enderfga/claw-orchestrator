@@ -27,7 +27,7 @@
  */
 
 import { ChildProcess } from 'node:child_process';
-import { spawnEngine } from './engine-spawn.js';
+import { killEngineTree, signalEngineGroup, spawnEngine, STOPPED_ENGINE_GRACE_MS } from './engine-spawn.js';
 import { EventEmitter } from 'node:events';
 import * as readline from 'node:readline';
 import * as fs from 'node:fs';
@@ -436,11 +436,19 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
       this._rl = null;
     }
     if (this.proc) {
-      try {
-        this.proc.kill('SIGTERM');
-      } catch {
-        // Already gone.
-      }
+      // The app-server and the commands its turns started, then SIGKILL for a
+      // group that ignored the SIGTERM.
+      const proc = this.proc;
+      killEngineTree(proc);
+      const escalate = setTimeout(() => {
+        try {
+          signalEngineGroup(proc, 'SIGKILL');
+        } catch {
+          // Already gone.
+        }
+      }, STOPPED_ENGINE_GRACE_MS);
+      escalate.unref?.();
+      proc.once('close', () => clearTimeout(escalate));
       this.proc = null;
     }
     this._isReady = false;

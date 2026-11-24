@@ -211,6 +211,61 @@ describe('honesty about verification', () => {
     expect(done!.state).toBe('failed');
   });
 
+  it('refutes a run whose declared contract failed, even when a later verifier passes', async () => {
+    // The run verifier fails and the run goes on (`onFailure: 'continue'`); an
+    // inline verifier after it passes. Its verdict overwrote the outcome, and the
+    // run ended `verified` with its declared contract red.
+    const { kernel } = makeKernel({
+      verifier: async (node): Promise<NodeResult> =>
+        node.id === 'verify'
+          ? { ok: false, passed: false, evidenceId: 'verify-01', error: 'red' }
+          : { ok: true, passed: true, evidenceId: `${node.id}-01` },
+    });
+    const started = await kernel.start({
+      name: 'overwritten-gate',
+      contract: { checks: [{ spec: { type: 'command', cmd: 'false' }, required: true }] },
+      nodes: [
+        { id: 'verify', kind: 'verifier', contract: 'run', onFailure: 'continue' },
+        { id: 'inline', kind: 'verifier', contract: { checks: [{ spec: { type: 'command', cmd: 'true' } }] } },
+      ],
+    });
+    const done = await kernel.wait(started.runId);
+    expect(done!.nodes.inline.state).toBe('succeeded');
+    expect(done!.outcome).toBe('refuted');
+    expect(done!.outcomeReason).toMatch(/run's acceptance contract failed \(evidence verify-01/);
+    expect(done!.state).toBe('failed');
+  });
+
+  it('lets a repaired run contract stand: the last run verdict decides', async () => {
+    let round = 0;
+    // The real router, so the red verdict sends control back to `fix`.
+    const kernel = registerDefaultExecutors(new RunKernel({ nodeTimeoutMs: 5000 }));
+    kernel.setExecutor('agent', async () => ({ ok: true, output: 'fixed' }));
+    kernel.setExecutor('verifier', async (): Promise<NodeResult> => {
+      round += 1;
+      return round === 1
+        ? { ok: false, passed: false, evidenceId: 'verify-01', error: 'red' }
+        : { ok: true, passed: true, evidenceId: 'verify-02' };
+    });
+    const started = await kernel.start({
+      name: 'repaired',
+      maxNodeVisits: 4,
+      contract: { checks: [{ spec: { type: 'command', cmd: 'true' }, required: true }] },
+      nodes: [
+        { id: 'fix', kind: 'agent', prompt: 'fix' },
+        { id: 'verify', kind: 'verifier', contract: 'run', onFailure: 'continue' },
+        {
+          id: 'gate',
+          kind: 'router',
+          routes: [{ when: { type: 'node_failed', node: 'verify' }, to: 'fix' }],
+        },
+      ],
+    });
+    const done = await kernel.wait(started.runId);
+    expect(done!.runContractVerdict).toMatchObject({ evidenceId: 'verify-02', passed: true });
+    expect(done!.outcome).toBe('verified');
+  });
+
   it('records consensus votes without letting them decide anything', async () => {
     const { kernel } = makeKernel({
       council: async (): Promise<NodeResult> => ({

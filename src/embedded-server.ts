@@ -1316,6 +1316,7 @@ export class EmbeddedServer {
           send_timeout_ms?: unknown;
           activity_lease_ms?: unknown;
           autoloop_hard_timeout_ms?: unknown;
+          contract?: unknown;
         };
         const workspace = input.workspace;
         if (typeof workspace !== 'string' || !workspace.trim()) {
@@ -1351,6 +1352,7 @@ export class EmbeddedServer {
             reviewerEngine: input.reviewer_engine,
             reviewerModel: input.reviewer_model,
             reviewerEffort: input.reviewer_effort,
+            ...(input.contract !== undefined ? { contract: input.contract } : {}),
             ...timeoutConfig,
           });
           json(200, {

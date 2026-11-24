@@ -26,6 +26,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+Found by reviewing this repository with three engines on clawo's own fan-out:
+
+- **`solve`'s implementer had five minutes a turn.** An agent node passed no timeout to its turn, which fell back
+  to the session manager's five-minute default inside a node allowed thirty. A turn now runs for the node's
+  timeout.
+- **`solve`'s implementer reads the triage and review findings, and a repair continues its conversation.** The
+  scouts' and reviewers' answers were recorded and read by no node; agent nodes take `inputs` (earlier nodes'
+  output, framed as data) and `continueConversation`.
+- **A run whose declared contract failed is refuted, whatever a later verifier says.** A later inline verifier's
+  pass overwrote the outcome, so a run with a red run-level contract could end `verified`.
+- **A repair sees more of what failed.** A failed command check keeps stdout as well as stderr (test runners print
+  failures to stdout); a repair visit gets twenty telling lines per check and where the logs are; a fix-on-red
+  round sees every failing check, runs within a 20-minute turn as the verifier's `fixer` says (`solve` passes the
+  implementer's engine and permissions), and its cost counts toward the run's.
+- **Cancel and timeouts stop the work.** A cancelled or timed-out agent node stops its session; engines run in
+  their own process group, so stopping one stops the commands it started; a command check running when its run
+  is cancelled is killed, and checks a cancelled run never reached count as not passed instead of being left out.
+- **Every directory a run works in is checked at start**, as a session's is: a workflow node could run in a system
+  or credentials directory.
+- **Autoloop's acceptance gate judges each iteration against where it started.** It had no base commit and no
+  test snapshot, so `diff_policy` saw nothing and edited tests went unseen, and it could not be configured:
+  `autoloop_start` and `POST /autoloop/new` now take `contract`.
 - **`--wait` follows a run to its end.** `clawo solve`, `fanout` and `goal` with `--wait` exited 1 with the run still
   running after five minutes without an event (Node's fetch drops a silent response body). The event stream now carries
   a heartbeat, and the CLI opens it again whenever it ends before the run does.

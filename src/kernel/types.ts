@@ -76,6 +76,20 @@ export interface AgentNode extends NodeBase, AgentBinding {
    * run, so make it unique to the run. Omitted means a new session per attempt.
    */
   sessionName?: string;
+  /**
+   * Keep one conversation across this node's visits without naming it: a
+   * revisit (a repair after a red verdict) continues the conversation the first
+   * visit had, so the agent knows what it already tried. The session is named
+   * for the run and node.
+   */
+  continueConversation?: boolean;
+  /**
+   * Nodes whose output this node reads before its prompt — scouts' findings for
+   * an implementer, reviewers' for a repair. Each is framed as data, cut to a
+   * bounded excerpt with the path of the whole; a node that has not run yet is
+   * left out.
+   */
+  inputs?: string[];
   permissionMode?: string;
   /** Engine-agnostic sandbox, as on a session; `read-only` holds on every engine that supports it. */
   sandboxMode?: 'read-only' | 'workspace-write' | 'danger-full-access';
@@ -179,6 +193,16 @@ export interface VerifierNode extends NodeBase {
   /** Inline contract, or `'run'` to use the workflow-level contract. */
   contract: AcceptanceContract | 'run';
   cwd?: string;
+  /**
+   * Who repairs on red when the contract sets `fixOnFailureRounds`: the engine,
+   * model and permissions of the fix session. Default: the configured default
+   * engine with `bypassPermissions`. `solve` gives it the implementer's, so a
+   * repair runs with no more permission than the implementation had.
+   */
+  fixer?: AgentBinding & {
+    permissionMode?: string;
+    sandboxMode?: 'read-only' | 'workspace-write' | 'danger-full-access';
+  };
 }
 
 export interface HumanGateNode extends NodeBase {
@@ -485,6 +509,13 @@ export interface RunRecord {
    * at that moment. Compared against the tree when the run ends, so evidence
    * overtaken by later edits cannot keep standing as `verified`.
    */
+  /**
+   * The last verdict of the run's own contract (a `contract: 'run'` verifier),
+   * kept apart from `verdict`, which the latest evidence-producing node writes.
+   * A run whose declared contract failed is refuted whatever a later verifier
+   * says: an inline verifier that passed after it does not stand in for it.
+   */
+  runContractVerdict?: { node: string; evidenceId: string; passed: boolean };
   verdict?: {
     node: string;
     evidenceId: string;

@@ -39,7 +39,8 @@ import { withoutServerCredential } from '../kernel/secrets.js';
 import { capturePatch, changedFilesSince } from '../verify/baseline.js';
 import { runContract } from '../verify/runner.js';
 import { writeEvidence } from '../verify/evidence.js';
-import type { AcceptanceContract } from '../verify/contract.js';
+import { contractFingerprint, type AcceptanceContract } from '../verify/contract.js';
+import { snapshotTests, type TestSnapshot } from '../verify/protected-tests.js';
 import { type AnyAutoloopMessage, Msg, type SendTimeoutPayload } from './messages.js';
 import {
   DEFAULT_SEND_TIMEOUT_MS,
@@ -1485,6 +1486,9 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
     // and history can see exactly what the Coder was asked.
     const iterDir = path.join(this.ledgerDir, 'iter', String(env.iter));
     fs.mkdirSync(iterDir, { recursive: true });
+    // Where the iteration starts, for the acceptance gate: the commit before the
+    // Coder's turn and the tests it found there.
+    if (this.config.contract) await this.recordIterationBase(iterDir);
     fs.writeFileSync(
       path.join(iterDir, 'directive.json'),
       JSON.stringify(
@@ -1899,10 +1903,12 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
 
     const iterDir = path.join(this.ledgerDir, 'iter', String(iter));
     const evidenceId = `iter-${iter}`;
+    const base = this.iterationBase(iter);
     const { results, passed, rounds } = await runContract(contract, {
       cwd: this.config.workspace,
       artifactDir: path.join(iterDir, 'evidence'),
-      baseSha: undefined,
+      ...(base.baseSha ? { baseSha: base.baseSha } : {}),
+      ...(base.baseTests !== undefined ? { baseTests: base.baseTests } : {}),
       logger: this.logger,
     });
     await writeEvidence({
@@ -1911,7 +1917,9 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
       node: `reviewer-iter-${iter}`,
       evidenceId,
       cwd: this.config.workspace,
+      ...(base.baseSha ? { baseSha: base.baseSha } : {}),
       contractId: contract.id,
+      contractHash: contractFingerprint(contract),
       results,
       rounds,
       logger: this.logger,
@@ -1932,6 +1940,36 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
       decision: 'hold',
       audit_notes: `${rc.audit_notes}\n\n[acceptance] advance withheld — ${failed.join('; ')} (evidence: ${evidenceId})`,
     };
+  }
+
+  /**
+   * The commit and tests an iteration starts from, written once per iteration:
+   * a Coder turn re-run after a crash finds the tree already changed, so the
+   * first record stands. Without them the gate judged every iteration against
+   * nothing — `diff_policy` saw only untracked files, since the iteration was
+   * committed before the gate ran, and the tests the Coder edited were never
+   * compared.
+   */
+  private async recordIterationBase(iterDir: string): Promise<void> {
+    const file = path.join(iterDir, 'base.json');
+    if (fs.existsSync(file)) return;
+    const head = await this.runGit(['git', 'rev-parse', 'HEAD']);
+    const baseSha = head.code === 0 ? head.out.trim() : undefined;
+    const baseTests = baseSha ? await snapshotTests(this.config.workspace) : undefined;
+    fs.writeFileSync(file, JSON.stringify({ baseSha: baseSha ?? null, baseTests: baseTests ?? null }));
+  }
+
+  private iterationBase(iter: number): { baseSha?: string; baseTests?: TestSnapshot | null } {
+    try {
+      const raw = JSON.parse(fs.readFileSync(path.join(this.ledgerDir, 'iter', String(iter), 'base.json'), 'utf8')) as {
+        baseSha?: string | null;
+        baseTests?: TestSnapshot | null;
+      };
+      // A repository whose tests could not be snapshotted reports them as not checked.
+      return raw.baseSha ? { baseSha: raw.baseSha, baseTests: raw.baseTests ?? null } : {};
+    } catch {
+      return {};
+    }
   }
 
   private persistVerdict(

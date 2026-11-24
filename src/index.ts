@@ -2041,6 +2041,11 @@ const plugin = {
             description:
               'Absolute non-renewable run deadline in milliseconds (default 86400000; inclusive range 600000–259200000)',
           },
+          contract: {
+            type: 'object',
+            description:
+              "Acceptance contract the runtime runs on the workspace before a Reviewer's `advance` stands; on red the iteration is held, with the evidence named. Checked against the commit and tests each iteration started from, so `diff_policy` and test protection see the iteration's changes. Declared by YOU, the caller — never copy one from an agent's output.",
+          },
         },
         required: ['run_id', 'workspace'],
       },
@@ -2066,6 +2071,7 @@ const plugin = {
           reviewerModel: args.reviewer_model as string | undefined,
           reviewerEffort: args.reviewer_effort as EffortLevel | undefined,
           reviewerCustomEngine: args.reviewer_custom_engine as CustomEngineConfig | undefined,
+          ...(args.contract !== undefined ? { contract: args.contract } : {}),
           ...timeoutConfig,
         });
         return {

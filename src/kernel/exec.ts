@@ -38,7 +38,16 @@ export interface ExecOptions {
   input?: string;
   /** Per-stream capture cap. Older bytes are dropped, keeping the tail. */
   maxCaptureBytes?: number;
+  /**
+   * Polled while the command runs; once set the command's process group is
+   * killed, as on a timeout. A cancelled run's check stopped only between
+   * checks, so a long test suite ran on to its own timeout.
+   */
+  signal?: { aborted: boolean };
 }
+
+/** How often a running command looks at its `signal`. */
+const SIGNAL_POLL_MS = 200;
 
 /** Only the tail of output is ever used, so a runaway printer cannot OOM us. */
 export const MAX_CAPTURE_BYTES = 512 * 1024;
@@ -87,11 +96,13 @@ export function exec(cmd: string, args: string[] = [], opts: ExecOptions = {}): 
     let timedOut = false;
     let settled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let poll: ReturnType<typeof setInterval> | undefined;
 
     const finish = (code: number | null): void => {
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
+      if (poll) clearInterval(poll);
       resolve({ code, out, err, timedOut, durationMs: Date.now() - startedAt });
     };
 
@@ -120,6 +131,22 @@ export function exec(cmd: string, args: string[] = [], opts: ExecOptions = {}): 
         killTree(child.pid);
       }, timeoutMs);
       if (typeof timer.unref === 'function') timer.unref();
+    }
+    if (opts.signal) {
+      const signal = opts.signal;
+      const stop = (): void => {
+        err = appendCapped(err, `\n[exec] cancelled — killed\n`, cap);
+        killTree(child.pid);
+      };
+      if (signal.aborted) stop();
+      else {
+        poll = setInterval(() => {
+          if (!signal.aborted) return;
+          clearInterval(poll);
+          stop();
+        }, SIGNAL_POLL_MS);
+        if (typeof poll.unref === 'function') poll.unref();
+      }
     }
 
     // One decoder per stream: a multi-byte character split across two chunks
