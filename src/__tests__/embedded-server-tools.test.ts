@@ -20,7 +20,12 @@ function freePort(): Promise<number> {
   });
 }
 
-function call(port: number, path: string, method = 'GET', body?: unknown): Promise<{ status: number; body: any }> {
+function call(
+  port: number,
+  path: string,
+  method = 'GET',
+  body?: unknown,
+): Promise<{ status: number; body: Record<string, unknown> }> {
   return new Promise((resolve, reject) => {
     const req = http.request(
       { hostname: '127.0.0.1', port, path, method, headers: { 'Content-Type': 'application/json' } },
@@ -73,7 +78,7 @@ describe('the /tool route', () => {
   it('lists the tools, runs one with the body as its parameters, and returns its result', async () => {
     const list = await call(port, '/tool');
     expect(list.status).toBe(200);
-    expect(list.body.tools.map((t: { name: string }) => t.name)).toEqual(['echo_tool', 'refusing_tool']);
+    expect((list.body.tools as Array<{ name: string }>).map((t) => t.name)).toEqual(['echo_tool', 'refusing_tool']);
 
     const r = await call(port, '/tool/echo_tool', 'POST', { name: 'rev', engines: ['codex'] });
     expect(r.status).toBe(200);

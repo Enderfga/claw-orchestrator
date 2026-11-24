@@ -162,6 +162,23 @@ function agyPrintTimeoutSec(timeoutMs: number): number {
 
 // ─── PersistentAgySession ───────────────────────────────────────────────────
 
+/**
+ * Sent ahead of every turn of a read-only session. Read-only runs in agy's plan
+ * mode, where a headless run refuses shell commands and file edits; measured on
+ * agy 1.5.16, a refused tool then ends the turn with no reply at all ("no output
+ * produced"), so an agent that reached for `cat` or `rg` while reviewing a
+ * codebase returned nothing. Its own file tools still read. Allowing commands
+ * instead is not read-only: `command(*)` also approves a command's request to
+ * run outside the terminal sandbox (`BypassSandbox`), which then wrote to the
+ * workspace, the home directory and git.
+ */
+/** Continuations a read-only turn gets after a refused tool ended it empty. */
+export const AGY_READ_ONLY_CONTINUATIONS = 2;
+
+export const AGY_READ_ONLY_NOTE =
+  'This session is read-only: shell commands and file edits are refused, and a refused tool ends your turn with no ' +
+  'answer. Read with your file tools (view_file, grep_search, list_dir, find_by_name) and give your answer as text.';
+
 /** The smallest compaction window accepted, as on Claude Code: below it a turn has too little room to run. */
 const MIN_AGY_AUTOCOMPACT_WINDOW = 100_000;
 
@@ -261,7 +278,8 @@ export class PersistentAgySession extends BaseOneShotSession {
     // file, and had to ESTIMATE tokens — so this engine's cost was a guess.
     // --log-file is still passed as the fallback id source for a turn that dies
     // before emitting any event.
-    const prompt = AGY_FLAG_LIKE_PROMPT_RE.test(message) ? `${message}\n` : message;
+    const text = this.options.sandboxMode === 'read-only' ? `${AGY_READ_ONLY_NOTE}\n\n${message}` : message;
+    const prompt = AGY_FLAG_LIKE_PROMPT_RE.test(text) ? `${text}\n` : text;
     const args: string[] = ['-p', prompt, '--output-format', 'stream-json', '--log-file', this._logFile];
 
     // Permission mode, always named rather than left to agy's own default: agy
@@ -409,7 +427,40 @@ export class PersistentAgySession extends BaseOneShotSession {
     );
   }
 
-  protected _run(message: string, options: SessionSendOptions): Promise<TurnResult> {
+  /**
+   * One turn, continued when a read-only session's turn ended on a refused tool.
+   *
+   * Plan mode refuses shell commands and edits, and agy then ends the turn with
+   * no reply. The conversation is kept, so it is told which tool was refused and
+   * continues from where it stopped, with its file tools — at most
+   * `AGY_READ_ONLY_CONTINUATIONS` times, within the turn's own timeout.
+   */
+  protected async _run(message: string, options: SessionSendOptions): Promise<TurnResult> {
+    const deadline = Date.now() + (options.timeout || 300_000);
+    let next = message;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await this._runOnce(next, { ...options, timeout: Math.max(1, deadline - Date.now()) });
+      } catch (err) {
+        const denied = (err as { agyToolDenial?: string[] }).agyToolDenial;
+        const room = deadline - Date.now();
+        const retry =
+          denied !== undefined &&
+          this.options.sandboxMode === 'read-only' &&
+          !!this.agyConversationId &&
+          attempt < AGY_READ_ONLY_CONTINUATIONS &&
+          room > 30_000;
+        if (!retry) throw err;
+        const tools = denied.length ? denied.map((t) => `\`${t}\``).join(', ') : 'the tool you called';
+        next =
+          `${tools} is refused in this read-only session, and that ended your turn without an answer. Continue the ` +
+          'same task from where you stopped, using only view_file, grep_search, list_dir and find_by_name, and give ' +
+          'your answer as text.';
+      }
+    }
+  }
+
+  private _runOnce(message: string, options: SessionSendOptions): Promise<TurnResult> {
     const timeout = options.timeout || 300_000;
     const args = this._buildArgs(message, timeout, options.effort);
 
@@ -650,13 +701,16 @@ export class PersistentAgySession extends BaseOneShotSession {
           reject(new Error(stderr || `Antigravity exited with code ${code}`));
         } else if (emptyResponse) {
           const echoableDenials = permissionDenials.filter((name) => AGY_ECHOABLE_TOOL_NAME_RE.test(name));
+          const denied = echoableDenials.length > 0 || hasAgyToolPermissionDenial(turnLog ?? '');
           const emptyResponseError =
             echoableDenials.length > 0
               ? `Antigravity returned an empty response after denying tool confirmation for ${echoableDenials.map((name) => `"${name}"`).join(', ')}; the turn failed but the session remains available for retry`
-              : hasAgyToolPermissionDenial(turnLog ?? '')
+              : denied
                 ? TOOL_DENIAL_EMPTY_RESPONSE_ERROR
                 : EMPTY_RESPONSE_ERROR;
-          reject(new Error(emptyResponseError));
+          const err = new Error(emptyResponseError) as Error & { agyToolDenial?: string[] };
+          if (denied) err.agyToolDenial = echoableDenials;
+          reject(err);
         } else {
           resolve({ text, event });
         }

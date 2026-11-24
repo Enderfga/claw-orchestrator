@@ -214,10 +214,28 @@ export const __rejectCustomEngineOverHttpForTest = rejectCustomEngineOverHttp;
  * hardened for exactly this and the other three were not, so the guard lives in
  * one place now rather than in each closure that remembers to have it.
  */
+/**
+ * How often an open event stream gets a comment line when nothing else is sent.
+ * A long node can go many minutes without an event, and Node's fetch drops a
+ * response body that has been silent for five: `clawo … --wait` then saw its
+ * stream end with the run still running, and exited 1 mid-run.
+ */
+const SSE_HEARTBEAT_MS = 25_000;
+
 function sseSender(res: http.ServerResponse): (event: string, data: unknown) => void {
   let closed = false;
+  const heartbeat = setInterval(() => {
+    if (closed || res.writableEnded || !res.writable) return;
+    try {
+      res.write(': keepalive\n\n');
+    } catch {
+      closed = true;
+    }
+  }, SSE_HEARTBEAT_MS);
+  heartbeat.unref?.();
   res.on('close', () => {
     closed = true;
+    clearInterval(heartbeat);
   });
   return (event: string, data: unknown): void => {
     if (closed || res.writableEnded || !res.writable) return;

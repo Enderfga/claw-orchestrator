@@ -414,8 +414,19 @@ session through the HTTP surface, which refuses inline configs because those nam
 a binary and its arguments. See [multi-engine.md](./multi-engine.md) for the tiers
 and what a community preset does and does not claim.
 
-## Tools Without a CLI Command
+## `clawo tool`
 
-Tools without a CLI command are reachable through the OpenClaw plugin, the MCP
-server (`clawo-mcp`, see [mcp.md](./mcp.md)), or the `SessionManager` API. See
-[Tools Reference](./tools.md) for full parameter documentation.
+Every plugin tool, by name, with its parameters as JSON — including those with no command of their own
+(`ultrareview_start`, `ultraplan_start`, `council_start`, `session_handoff`, `autoloop_start`, `codex_steer`, …):
+
+```bash
+clawo tool                                   # list them
+clawo tool ultrareview_start '{"cwd":"/path/to/repo","agentCount":4,"engines":["claude","codex"],"focus":"security"}'
+clawo tool ultrareview_status '{"id":"<the id it returned>"}'
+clawo tool session_handoff '{"name":"fix","engine":"codex"}'   # continue session `fix` on Codex
+```
+
+The server runs the tool on its own sessions and runs (`POST /tool/<name>`, the body being the parameters;
+`GET /tool` lists them), and the command prints the tool's result. It exits 1 when the server cannot run the
+tool, or when the tool's result says `ok: false`. Parameters: [Tools Reference](./tools.md). The same tools are also
+served by the MCP server (`clawo-mcp`, see [mcp.md](./mcp.md)) and the OpenClaw plugin.

@@ -184,6 +184,22 @@ describe('PersistentAgySession', () => {
       expect(spawnArgs).toContain('--mode');
       expect(spawnArgs).toContain('plan');
       expect(spawnArgs).not.toContain('--dangerously-skip-permissions');
+      // Told that shell and edits are refused, so it reads with its file tools instead of ending empty.
+      const prompt = spawnArgs[spawnArgs.indexOf('-p') + 1];
+      expect(prompt.startsWith('This session is read-only: shell commands and file edits are refused')).toBe(true);
+      expect(prompt.endsWith('\n\nhello')).toBe(true);
+      // No command allow-rule: `command(*)` also approves running outside the terminal sandbox.
+      expect(spawnArgs.join(' ')).not.toContain('command(');
+    });
+
+    it('sends a writable session its message as given', async () => {
+      const session = new PersistentAgySession({ name: 'test', cwd: '/tmp', permissionMode: 'bypassPermissions' });
+      await session.start();
+      const sendPromise = session.send('hello', { waitForComplete: true });
+      setTimeout(() => succeedProc(mockProc), 10);
+      await sendPromise;
+      const spawnArgs = mockSpawn.mock.calls[0][1] as string[];
+      expect(spawnArgs[spawnArgs.indexOf('-p') + 1]).toBe('hello');
     });
 
     async function argsFor(config: Record<string, unknown>): Promise<string[]> {
@@ -867,8 +883,8 @@ describe('PersistentAgySession', () => {
       const session = new PersistentAgySession({
         name: 'test',
         cwd: '/tmp',
+        // A manual (Default mode) session: denied too, and not continued as a read-only one is.
         permissionMode: 'manual',
-        sandboxMode: 'read-only',
       });
       await session.start();
 
@@ -917,12 +933,53 @@ describe('PersistentAgySession', () => {
       expect(session.getStats()).toMatchObject({ turns: 2, turnsSucceeded: 1 });
     });
 
+    it('continues a read-only turn that a refused tool ended empty, in the same conversation', async () => {
+      const session = new PersistentAgySession({ name: 'test', cwd: '/tmp', sandboxMode: 'read-only' });
+      await session.start();
+      const second = createMockProcess();
+      mockSpawn.mockReturnValueOnce(mockProc).mockReturnValueOnce(second);
+
+      const sendPromise = session.send('review the lock', { waitForComplete: true, timeout: 120_000 });
+      const logFile = logPathFromSpawn(0);
+      tmpLogs.push(logFile);
+      fs.writeFileSync(
+        logFile,
+        'E0904 tool_confirmation_manager.go:188] mode: soft-denying tool confirmation "Bash"\n',
+      );
+      feedText(
+        mockProc,
+        JSON.stringify({ event: 'init', conversation_id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' }) + '\n',
+      );
+      setTimeout(() => closeProc(mockProc, 0), 10);
+      // The continuation, once the first process has closed.
+      for (let i = 0; i < 200 && mockSpawn.mock.calls.length < 2; i++) await new Promise((r) => setTimeout(r, 5));
+      feedText(
+        second,
+        JSON.stringify({
+          event: 'result',
+          result: { conversation_id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', status: 'SUCCESS', response: 'Found it.' },
+        }) + '\n',
+      );
+      setTimeout(() => closeProc(second, 0), 10);
+
+      await expect(sendPromise).resolves.toMatchObject({ text: 'Found it.' });
+      const args = mockSpawn.mock.calls[1][1] as string[];
+      expect(args).toEqual(
+        expect.arrayContaining(['--conversation', 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', '--mode', 'plan']),
+      );
+      const prompt = args[args.indexOf('-p') + 1];
+      expect(prompt).toContain(
+        '`Bash` is refused in this read-only session, and that ended your turn without an answer',
+      );
+      expect(prompt).toContain('using only view_file, grep_search, list_dir and find_by_name');
+    });
+
     it('uses the generic denial diagnosis when the denied tool name is not an identifier', async () => {
       const session = new PersistentAgySession({
         name: 'test',
         cwd: '/tmp',
+        // A manual (Default mode) session: denied too, and not continued as a read-only one is.
         permissionMode: 'manual',
-        sandboxMode: 'read-only',
       });
       await session.start();
 

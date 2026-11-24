@@ -875,32 +875,40 @@ async function followRun(runId: string): Promise<number> {
     }
     ctrl.abort();
   })();
-  try {
-    const res = await fetch(`${getBaseUrl()}/workflow/${encodeURIComponent(runId)}/events`, {
-      headers,
-      signal: ctrl.signal,
-    });
-    const reader = res.body?.getReader();
-    const decoder = new TextDecoder();
-    let buf = '';
-    while (reader) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-      let cut: number;
-      while ((cut = buf.indexOf('\n\n')) !== -1) {
-        const block = buf.slice(0, cut);
-        buf = buf.slice(cut + 2);
-        if (!block.startsWith('event: workflow-event')) continue;
-        const data = block.slice(block.indexOf('data: ') + 6);
-        const e = JSON.parse(data) as { type: string; node?: string; state?: string };
-        if (e.type === 'node_state' && e.node && e.state) line(e.node, e.state);
-        if (e.type === 'run_state' && e.state && RUN_DONE.has(e.state)) ctrl.abort();
+  // A stream that ends while the run is still going — the server restarted, the
+  // connection dropped, a long silence timed the body out — is opened again:
+  // `--wait` returns when the run does, not when its stream does.
+  while (!ctrl.signal.aborted) {
+    try {
+      const res = await fetch(`${getBaseUrl()}/workflow/${encodeURIComponent(runId)}/events`, {
+        headers,
+        signal: ctrl.signal,
+      });
+      const reader = res.body?.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+      while (reader) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let cut: number;
+        while ((cut = buf.indexOf('\n\n')) !== -1) {
+          const block = buf.slice(0, cut);
+          buf = buf.slice(cut + 2);
+          if (!block.startsWith('event: workflow-event')) continue;
+          const data = block.slice(block.indexOf('data: ') + 6);
+          const e = JSON.parse(data) as { type: string; node?: string; state?: string };
+          if (e.type === 'node_state' && e.node && e.state) line(e.node, e.state);
+          if (e.type === 'run_state' && e.state && RUN_DONE.has(e.state)) ctrl.abort();
+        }
       }
+    } catch {
+      // Aborted on purpose when the run ended, or the stream dropped.
     }
-  } catch {
-    // Aborted on purpose when the run ended, or the stream dropped: the final
-    // state below is read fresh either way.
+    if (ctrl.signal.aborted) break;
+    const now = await runState(runId);
+    if (!now || RUN_DONE.has(now.state)) break;
+    await new Promise((res) => setTimeout(res, 2000));
   }
   ended = true;
   wake();

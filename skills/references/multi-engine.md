@@ -298,7 +298,12 @@ in print mode, with the message as the `-p` argument. Tested with `agy` **1.5.16
     files outside the workspace without asking, and since 1.5.16 it also creates and
     edits them when the file is inside a version-controlled repository or the change
     only adds content;
-  - `sandboxMode: 'read-only'` → `--mode plan` (takes precedence).
+  - `sandboxMode: 'read-only'` → `--mode plan` (takes precedence). Plan mode refuses shell commands and edits, and
+    a headless agy turn whose tool is refused ends with no reply (measured on 1.5.16). So every read-only turn tells
+    the agent to read with its file tools, and a turn a refused tool ended empty is continued in the same
+    conversation, at most twice within the turn's timeout, naming the refused tool. Allowing commands instead is not
+    read-only: an allow rule such as `command(*)` also approves a command's request to run outside agy's terminal
+    sandbox, which then wrote to the workspace, the home directory and git (measured).
 
   Since agy reads only the last `--settings` it is given, the Default mode is merged
   into the session's own `settings`, which must then be a JSON object, inline or in a

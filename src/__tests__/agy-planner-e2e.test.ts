@@ -7,15 +7,13 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 
 import { ClaudeAgentDispatcher } from '../autoloop/dispatcher.js';
-import { Msg, type AnyAutoloopMessage } from '../autoloop/messages.js';
+import { Msg } from '../autoloop/messages.js';
 import type { SpawnSubagentsArgs } from '../autoloop/planner-tools.js';
 import { nullLogger } from '../logger.js';
 import { SessionManager } from '../session-manager.js';
 
 const FIXTURE_PATH = fileURLToPath(new URL('./fixtures/agy-planner-1.1.26.mjs', import.meta.url));
 const CONVERSATION_ID = 'a126a126-bbbb-4ccc-8ddd-eeeeeeeeeeee';
-const DENIAL_ERROR =
-  'Antigravity returned an empty response after a tool permission denial; the turn failed but the session remains available for retry';
 const ORIGINAL_PLAN = Buffer.from('# original plan\r\nbyte stable\r\n');
 const ORIGINAL_GOAL = Buffer.from('{"original":true}\n');
 const RECOVERED_PLAN = '# recovered plan\n\nExact fixture bytes.\n';
@@ -64,28 +62,10 @@ describe('agy Planner subprocess recovery', () => {
     });
 
     try {
-      let denial: unknown;
-      let firstMessages: AnyAutoloopMessage[] = [];
-      try {
-        firstMessages = await dispatcher.deliver(Msg.chat(0, { text: 'inspect and propose a plan' }));
-      } catch (error) {
-        denial = error;
-      }
-
-      expect(denial).toBeInstanceOf(Error);
-      expect((denial as Error).message).toBe(DENIAL_ERROR);
-      expect(fs.readFileSync(planPath)).toEqual(ORIGINAL_PLAN);
-      expect(fs.readFileSync(goalPath)).toEqual(ORIGINAL_GOAL);
-      expect(plannerTemps(workspace)).toEqual([]);
-      expect(spawnSubagents).not.toHaveBeenCalled();
-      expect(firstMessages.filter(({ type }) => type === 'directive')).toEqual([]);
-      expect(manager.getStatus(dispatcher.sessionNames.planner).stats).toMatchObject({
-        agyConversationId: CONVERSATION_ID,
-        turns: 1,
-        turnsSucceeded: 0,
-      });
-
-      const recoveredMessages = await dispatcher.deliver(Msg.chat(0, { text: 'continue in the same conversation' }));
+      // The first turn is soft-denied and ends empty; a read-only agy session
+      // continues it in the same conversation by itself, so the one delivery
+      // comes back with the recovered plan.
+      const recoveredMessages = await dispatcher.deliver(Msg.chat(0, { text: 'inspect and propose a plan' }));
 
       expect(observedAtSpawn).toEqual([
         {

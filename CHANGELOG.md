@@ -16,9 +16,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A fan-out agent that runs out of time says so and keeps what it wrote**: `timedOut: true`, an error naming the
   timeout, and the text the agent had streamed as its output (agy streams nothing before its turn ends).
 - `clawo fanout --agent-timeout <minutes>`.
+- **`clawo tool <name> '<json>'` calls any plugin tool**, through `POST /tool/<name>` on the server (`GET /tool` lists
+  them), so a shell reaches the tools that have no command of their own: ultrareview, ultraplan, council, autoloop,
+  ultraapp, session handoff, codex steer and the rest. SKILL.md now opens with a table of tasks and the command for
+  each.
 - **`autoCompactWindow` on Antigravity.** The session field now also reaches agy, as `AGY_CLI_AUTO_COMPACT_OVERRIDE`
   (agy 1.5.15+): the token count at which agy compacts the conversation, at least 100000, or `auto` for agy's own
   threshold. A smaller value is refused at start; below the size of a message, agy fails the turn.
+
+### Fixed
+
+- **`--wait` follows a run to its end.** `clawo solve`, `fanout` and `goal` with `--wait` exited 1 with the run still
+  running after five minutes without an event (Node's fetch drops a silent response body). The event stream now carries
+  a heartbeat, and the CLI opens it again whenever it ends before the run does.
+- **A read-only Antigravity session no longer ends a turn empty when the agent reaches for a shell command.** Plan mode
+  refuses the command and agy ended the turn with no reply, so a read-only review on agy often returned nothing. Each
+  read-only turn now tells the agent to read with its file tools, and a turn a refused tool ended empty is continued in
+  the same conversation, at most twice.
 
 ### Changed
 
