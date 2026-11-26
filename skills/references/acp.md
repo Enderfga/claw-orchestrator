@@ -135,10 +135,9 @@ another engine starts a new one, since one engine cannot read another's.
 
 Other engines are absent for different reasons:
 
-- **`gemini`** and **`cursor`** — legacy engines (the Gemini CLI is sunset and
-  superseded by Antigravity; Cursor is superseded by Grok Build in this lineup).
-  Their models are filtered out of the list; a model name that routes to one, set
-  through `CLAWO_ACP_MODEL`, still works.
+- **`gemini`** — a legacy engine (the Gemini CLI is sunset and superseded by
+  Antigravity). Its models are filtered out of the list; a model name that routes
+  to it, set through `CLAWO_ACP_MODEL`, still works.
 - **`opencode`** — its models are open-ended `provider/model` strings with nothing
   in the registry to enumerate, and no model name routes to it (a `provider/model`
   string resolves to the Claude Code engine), so the ACP agent does not start

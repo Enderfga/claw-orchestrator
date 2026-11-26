@@ -42,7 +42,13 @@ import type { GoalSession, GoalSnapshot, GoalStatus } from './kernel/nodes/goal.
 import type { EngineType } from './types.js';
 
 /** Engines whose goals this adapter runs: one turn per send, and no goal loop of their own. */
-export const TURN_GOAL_ENGINES: ReadonlySet<EngineType> = new Set<EngineType>(['agy', 'grok', 'opencode', 'acp']);
+export const TURN_GOAL_ENGINES: ReadonlySet<EngineType> = new Set<EngineType>([
+  'agy',
+  'grok',
+  'opencode',
+  'cursor',
+  'acp',
+]);
 
 /** What the adapter needs from a session. Every one-shot engine's session provides it. */
 export interface TurnGoalHost {

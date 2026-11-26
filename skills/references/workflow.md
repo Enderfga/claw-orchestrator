@@ -364,12 +364,12 @@ test suite would double the most expensive part of the run to learn nothing new.
 defaults to `solve`); `clawo solve`, `clawo fanout` and `clawo goal` build the same
 specs and post them.
 
-| Template  | Nodes                                                                                                                                                                    | Arguments                                                                                                                                                                               |
-| --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `solve`   | `triage` (fan-out) → `approve` (human gate, only with `humanGate`) → `implement` (agent) → `review` (fan-out, only with `reviewers`) → `verify` → `repair-gate` (router) | `agents` (the triage scouts; default one agent on the default engine), `implementer` (`engine`, `model`), `reviewers`, `humanGate`, `maxRepairs` (default 3), `contract`                |
-| `council` | `council`, then `__verify` when a contract is declared                                                                                                                   | `agents`, `maxRounds` (default 15), `contract`                                                                                                                                          |
-| `fanout`  | `fanout`, then `__verify` when a contract is declared                                                                                                                    | `agents`, `contract`                                                                                                                                                                    |
-| `goal`    | `goal` → `verify` → `repair-gate` (router); `task` is the objective. See [below](#goal)                                                                                  | `engine` (`claude`, `codex`, `agy`, `grok`, `opencode` or `acp`; omitted, the configured default), `acpAgent`, `model`, `tokenBudget`, `launcher`, `maxRepairs` (default 1), `contract` |
+| Template  | Nodes                                                                                                                                                                    | Arguments                                                                                                                                                                                         |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `solve`   | `triage` (fan-out) → `approve` (human gate, only with `humanGate`) → `implement` (agent) → `review` (fan-out, only with `reviewers`) → `verify` → `repair-gate` (router) | `agents` (the triage scouts; default one agent on the default engine), `implementer` (`engine`, `model`), `reviewers`, `humanGate`, `maxRepairs` (default 3), `contract`                          |
+| `council` | `council`, then `__verify` when a contract is declared                                                                                                                   | `agents`, `maxRounds` (default 15), `contract`                                                                                                                                                    |
+| `fanout`  | `fanout`, then `__verify` when a contract is declared                                                                                                                    | `agents`, `contract`                                                                                                                                                                              |
+| `goal`    | `goal` → `verify` → `repair-gate` (router); `task` is the objective. See [below](#goal)                                                                                  | `engine` (`claude`, `codex`, `agy`, `grok`, `cursor`, `opencode` or `acp`; omitted, the configured default), `acpAgent`, `model`, `tokenBudget`, `launcher`, `maxRepairs` (default 1), `contract` |
 
 `solve` is the shape above: the triage and review fan-outs add a synthesis pass
 when they have two or more agents, `implement` and `review` continue on failure so
@@ -390,7 +390,7 @@ somewhere to deploy to), which only UltraApp starts.
 
 A `goal` node runs one goal on one thread: a Claude Code session
 (`"engine": "claude"`, see [On Claude Code](#on-claude-code)), a Codex
-`codex-app` thread (`"engine": "codex"`), or a conversation on `agy`, `grok`,
+`codex-app` thread (`"engine": "codex"`), or a conversation on `agy`, `grok`, `cursor`,
 `opencode` or `acp`, where clawo runs the loop turn by turn (see
 [On other engines](#on-other-engines)). A goal with no engine takes the
 configured default engine when the run starts (Claude Code out of the box), and
@@ -535,7 +535,7 @@ stream-json mode:
 
 ### On other engines
 
-Antigravity (`agy`), Grok Build (`grok`), OpenCode (`opencode`) and ACP agents
+Antigravity (`agy`), Grok Build (`grok`), Cursor (`cursor`), OpenCode (`opencode`) and ACP agents
 (`acp`, with `acpAgent` naming the preset) have no goal loop of their own: each
 send is one turn, and the turn ends when the model stops. On them the node's
 session goes through `TurnGoalSession`, which runs the loop itself on one
@@ -689,7 +689,7 @@ after the forum in _Test-Time Compute Scales Better with Parallel Agent Teams_
   `"none"`: nothing; agents read for themselves, as in the paper, whose forum
   pushes nothing. A push reaches the turn in flight: a goal through its steers,
   within a second; a Claude Code or `codex-app` session at its next tool round.
-  Every other engine — one process per turn (Codex, Antigravity, Grok, OpenCode),
+  Every other engine — one process per turn (Codex, Antigravity, Grok, Cursor, OpenCode),
   an ACP agent, a custom CLI — gets the same posts, in full and once, at the top of
   its next `clawo forum` command, which its brief has it run before each step; the
   hub then does not push them again. Pushed text is wrapped as a teammate's post,

@@ -143,11 +143,11 @@ Failures are ignored (no retries) and never affect the completion: a request the
 When the request carries `tools`, the schemas have to reach the CLI somehow. Which
 mechanism is used depends on whether the engine keeps the conversation itself.
 
-| Engine                                       | Turn 1                                                        | Later turns                                                                                                                                           |
-| -------------------------------------------- | ------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `claude`                                     | Schemas go into the session system prompt (`--system-prompt`) | Nothing injected — the system prompt persists                                                                                                         |
-| `codex`, `agy`, `grok` (and legacy `cursor`) | Full schema block prepended to the message                    | A short reminder of the calling convention, no schemas — but only once the conversation id has been captured; until then the full block is sent again |
-| legacy `gemini`                              | Full schema block prepended to the message                    | Full schema block again — it has no resume surface, so nothing persists between sends                                                                 |
+| Engine                           | Turn 1                                                        | Later turns                                                                                                                                           |
+| -------------------------------- | ------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `claude`                         | Schemas go into the session system prompt (`--system-prompt`) | Nothing injected — the system prompt persists                                                                                                         |
+| `codex`, `agy`, `grok`, `cursor` | Full schema block prepended to the message                    | A short reminder of the calling convention, no schemas — but only once the conversation id has been captured; until then the full block is sent again |
+| legacy `gemini`                  | Full schema block prepended to the message                    | Full schema block again — it has no resume surface, so nothing persists between sends                                                                 |
 
 The engines in the middle row resume a conversation by id, so everything injected
 stays in the transcript. Re-sending the full block each turn would grow the prompt
@@ -272,7 +272,7 @@ With no block in front of it there is nothing to forge, so those turns go out un
   The most recent `user` turn in the block always keeps at least its first 200 characters, so the
   block is never left with only `assistant` turns.
 
-  The cap exists because `agy` and `grok` (and the legacy `gemini` and `cursor` engines) receive the
+  The cap exists because `agy`, `grok` and `cursor` (and the legacy `gemini` engine) receive the
   prompt as a single command-line argument, and Linux limits one argument to 128 KiB
   (`MAX_ARG_STRLEN`). Going over fails the request with a 500. The 5 MiB request body limit does not
   protect against this. `claude` and `codex` write the prompt over stdin instead. The cap bounds only
@@ -537,7 +537,7 @@ Errors from the bridge itself use the OpenAI error envelope:
 | Status | `type`                  | When                                                                                          |
 | ------ | ----------------------- | --------------------------------------------------------------------------------------------- |
 | 400    | `invalid_request_error` | `messages` empty/missing, no user message, invalid `max_tokens`                               |
-| 409    | `invalid_request_error` | Tool results that no single session asked for (`code: "tool_call_mismatch"`)                 |
+| 409    | `invalid_request_error` | Tool results that no single session asked for (`code: "tool_call_mismatch"`)                  |
 | 404    | `invalid_request_error` | Unknown `/v1/*` path                                                                          |
 | 503    | `server_error`          | Failed to start a new session (session limit reached, model unavailable, CLI crashed at boot) |
 | 502    | `upstream_error`        | The CLI finished the turn with an error                                                       |

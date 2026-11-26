@@ -2315,8 +2315,7 @@ export class SessionManager {
     const resolvedModel = this._resolveModel(model, managed.config.modelOverrides);
     // agy names its models its own way (an effort suffix, orchestrators, other vendors' models it serves),
     // mostly not in the registry: `agy models` knows them, and agy refuses at the next turn a name it doesn't
-    const looksValid =
-      managed.config.engine === 'agy' || !!lookupModel(resolvedModel) || resolvedModel.includes('/');
+    const looksValid = managed.config.engine === 'agy' || !!lookupModel(resolvedModel) || resolvedModel.includes('/');
     if (!looksValid) {
       throw new Error(
         `Unknown model '${model}' (resolved: '${resolvedModel}'). Use a known alias (opus, sonnet, haiku, gemini-pro, etc.) or a full provider/model string.`,
@@ -3954,13 +3953,18 @@ export class SessionManager {
     const resumeSessionId = this._managedResumeId(managed);
     if (resumeSessionId) managed.claudeSessionId = resumeSessionId;
     const costUsd = this._spentUsd(managed);
+    // What the engine says it runs, when that is a model and not a placeholder label.
+    const configured = managed.config.resolvedModel || managed.config.model;
+    const said = this._reportedModel(managed);
+    const reported = said && said !== configured && !/-default$/.test(said) ? said : undefined;
     const info: SessionInfo = {
       name,
       engine: (managed.config.engine || 'claude') as EngineType,
       claudeSessionId: resumeSessionId,
       created: managed.created,
       cwd: managed.cwd,
-      model: managed.config.resolvedModel || managed.config.model,
+      model: configured,
+      ...(reported ? { reportedModel: reported } : {}),
       paused: false,
       stats,
       costUsd: Math.round(costUsd * 10000) / 10000,

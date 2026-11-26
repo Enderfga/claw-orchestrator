@@ -87,7 +87,7 @@ export const SESSION_START_PROPERTIES: Record<string, Record<string, unknown>> =
     type: 'string',
     enum: ENGINE_TYPES,
     description:
-      'Engine to use (default: the configured default engine — `clawo config set defaults.engine <engine>`; claude out of the box). codex = `codex exec` per send (no /goal). codex-app = long-running `codex app-server` with /goal support. agy = Google Antigravity CLI (stream-json output with reported token usage; the conversation is resumed by its id on each send). grok = xAI Grok Build CLI (reports its own per-turn cost). opencode = sst/opencode CLI (provider-agnostic; pass model as `provider/model`). acp = any Agent Client Protocol agent, chosen with acpAgent. Use "custom" with customEngine config for any CLI. gemini and cursor are legacy, kept for existing callers: use agy and grok instead.',
+      'Engine to use (default: the configured default engine — `clawo config set defaults.engine <engine>`; claude out of the box). codex = `codex exec` per send (no /goal). codex-app = long-running `codex app-server` with /goal support. agy = Google Antigravity CLI (stream-json output with reported token usage; the conversation is resumed by its id on each send). grok = xAI Grok Build CLI (reports its own per-turn cost). cursor = Cursor Agent CLI (`cursor-agent -p`; the models of a Cursor subscription — Composer, Claude, GPT, Grok, Gemini — by the model ids Cursor lists, `auto` by default). opencode = sst/opencode CLI (provider-agnostic; pass model as `provider/model`). acp = any Agent Client Protocol agent, chosen with acpAgent. Use "custom" with customEngine config for any CLI. gemini is legacy, kept for existing callers: use agy instead.',
   },
   model: { type: 'string', description: 'Model to use (opus, sonnet, haiku, gpt-5.5, agy-pro, etc.)' },
   claudeAccount: {
@@ -212,7 +212,8 @@ export const SESSION_START_PROPERTIES: Record<string, Record<string, unknown>> =
   pluginDir: {
     type: ['string', 'array'],
     items: { type: 'string' },
-    description: 'Claude engine only (`--plugin-dir`): local plugin directories or .zip files for this session only.',
+    description:
+      'Claude Code and Cursor (`--plugin-dir`): local plugin directories (Claude Code also takes .zip files) for this session only, in the format of the engine they are for.',
   },
   autoCompactWindow: {
     type: ['string', 'number'],

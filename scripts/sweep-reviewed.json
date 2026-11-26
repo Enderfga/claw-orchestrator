@@ -266,5 +266,43 @@
       "upgrade": "skip: upgrades OpenCode; done through its own channel in the weekly check",
       "machine": "skip: registers and removes remote machines for the user's own setup; runs use --standalone locally"
     }
+  },
+  "cursor": {
+    "flags": {
+      "--api-key": "skip: a key on argv shows in the process list; CURSOR_API_KEY in the environment reaches the CLI",
+      "--header": "skip: custom request headers are deployment setup, not a session option",
+      "--endpoint": "skip: CURSOR_API_ENDPOINT in the environment does the same",
+      "--print": "covered: -p",
+      "--plan": "covered: --mode plan (read-only)",
+      "--continue": "skip: the most recent chat collides between concurrent sessions; the wrapper resumes by id",
+      "--list-models": "covered: the sweep reads `models`",
+      "--yolo": "covered: alias of --force",
+      "--approve-mcps": "skip: MCP servers come from the user's ~/.cursor/mcp.json and their own approvals; clawo does not approve them on the user's behalf",
+      "--worktree": "skip: clawo isolates a run in its own worktree (isolation: worktree)",
+      "--worktree-base": "skip: see --worktree",
+      "--skip-worktree-setup": "skip: see --worktree",
+      "--pool": "skip: an option of the `worker` subcommand, named in its description; a worker is not a session"
+    },
+    "commands": {
+      "persist": "skip: a terminal session that survives disconnects; headless turns are one process each",
+      "install-shell-integration": "skip: edits the user's shell rc",
+      "uninstall-shell-integration": "skip: edits the user's shell rc",
+      "login": "skip: interactive authentication, the user's setup",
+      "logout": "skip: clears credentials, the user's setup",
+      "mcp": "skip: MCP server configuration, the user's setup",
+      "plugin": "skip: plugin marketplace management; a session takes local plugins through pluginDir (--plugin-dir)",
+      "worker": "skip: a self-hosted Cloud Agent worker, not a session",
+      "status": "skip: authentication status, the user's setup",
+      "models": "covered: read by the sweep",
+      "team": "skip: switches the account's active team, the user's setup",
+      "bedrock": "skip: AWS Bedrock configuration, the user's setup",
+      "about": "skip: version and account information; --version is read",
+      "update": "skip: the patrol upgrades in place",
+      "create-chat": "covered: the first turn creates the chat and the wrapper resumes it by id",
+      "generate-rule": "skip: interactive rule generator",
+      "agent": "covered: the default command the wrapper runs",
+      "ls": "skip: interactive chat picker",
+      "resume": "skip: resumes the latest chat interactively; the wrapper resumes by id"
+    }
   }
 }

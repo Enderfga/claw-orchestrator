@@ -19,7 +19,8 @@ vi.mock('../engine-spawn.js', async (importOriginal) => ({
 }));
 
 // Import after mocking
-const { PersistentCursorSession } = await import('../persistent-cursor-session.js');
+const { PersistentCursorSession, cursorPricingModel } = await import('../persistent-cursor-session.js');
+const { getModelPricing, getContextWindow } = await import('../models.js');
 
 // ─── Mock Process Helper ────────────────────────────────────────────────────
 
@@ -417,7 +418,7 @@ describe('PersistentCursorSession', () => {
       expect(result.text).toContain('does not support compaction');
     });
 
-    it('getCost() uses cursor-default model label', async () => {
+    it("getCost() names auto, Cursor's default, before a turn has reported a model", async () => {
       const session = new PersistentCursorSession({
         name: 'test',
         cwd: '/tmp',
@@ -426,7 +427,7 @@ describe('PersistentCursorSession', () => {
       await session.start();
 
       const cost = session.getCost();
-      expect(cost.model).toBe('cursor-default');
+      expect(cost.model).toBe('auto');
     });
   });
 
@@ -475,6 +476,145 @@ describe('PersistentCursorSession', () => {
       const stats = session.getStats();
       expect(stats.turns).toBe(2);
       expect(stats.turnsSucceeded).toBe(1);
+    });
+  });
+
+  // ─── Restored as an engine (2026.11.22) ─────────────────────────────────
+
+  describe('sandbox, permissions and directories', () => {
+    async function argsFor(config: Record<string, unknown>): Promise<string[]> {
+      const session = new PersistentCursorSession({ name: 't', cwd: '/tmp', ...config } as never);
+      await session.start();
+      const sent = session.send('hi', { waitForComplete: true });
+      setTimeout(() => closeProc(mockProc, 0), 10);
+      await sent;
+      return mockSpawn.mock.calls.at(-1)![1] as string[];
+    }
+
+    it("workspace-write runs in Cursor's sandbox and never with --force, which would run commands outside it", async () => {
+      const args = await argsFor({ permissionMode: 'bypassPermissions', sandboxMode: 'workspace-write' });
+      expect(args.join(' ')).toContain('--sandbox enabled');
+      expect(args).not.toContain('--force');
+    });
+
+    it('auto takes Auto-review instead of --force; read-only stays in plan mode with neither', async () => {
+      const auto = await argsFor({ permissionMode: 'auto' });
+      expect(auto).toContain('--auto-review');
+      expect(auto).not.toContain('--force');
+      const ro = await argsFor({ permissionMode: 'auto', sandboxMode: 'read-only' });
+      expect(ro.join(' ')).toContain('--mode plan');
+      expect(ro).not.toContain('--auto-review');
+      expect(ro).not.toContain('--sandbox');
+      expect(await argsFor({ permissionMode: 'bypassPermissions' })).toContain('--force');
+    });
+
+    it('adds every addDir and streams partial output', async () => {
+      const args = await argsFor({ permissionMode: 'bypassPermissions', addDir: ['/a', '/b'] });
+      expect(args.join(' ')).toContain('--add-dir /a --add-dir /b');
+      const one = await argsFor({ permissionMode: 'bypassPermissions', pluginDir: '/plugins/mine' });
+      expect(one.join(' ')).toContain('--plugin-dir /plugins/mine');
+      expect(one.filter((a) => a === '--plugin-dir')).toHaveLength(1);
+      expect(args).toContain('--stream-partial-output');
+    });
+  });
+
+  describe('streamed text and the model that ran', () => {
+    it('takes the deltas once, not again from the complete message that follows them', async () => {
+      const session = new PersistentCursorSession({ name: 't', cwd: '/tmp', permissionMode: 'bypassPermissions' });
+      await session.start();
+      const seen: string[] = [];
+      const sent = session.send('hi', { waitForComplete: true, callbacks: { onText: (t: string) => seen.push(t) } });
+      const msg = (text: string, delta: boolean) =>
+        JSON.stringify({
+          type: 'assistant',
+          message: { role: 'assistant', content: [{ type: 'text', text }] },
+          session_id: 's',
+          ...(delta ? { timestamp_ms: 1 } : {}),
+        });
+      setTimeout(() => {
+        feedLines(mockProc, [
+          JSON.stringify({ type: 'system', subtype: 'init', session_id: 's', model: 'Auto' }),
+          msg('1', true),
+          msg('\n2', true),
+          // complete, before a tool call: it carries a timestamp too, and a model call id
+          JSON.stringify({
+            type: 'assistant',
+            message: { role: 'assistant', content: [{ type: 'text', text: '1\n2' }] },
+            session_id: 's',
+            timestamp_ms: 2,
+            model_call_id: 'm1',
+          }),
+          // a second message of the same turn, after a tool call
+          msg('done', true),
+          msg('done', false),
+          JSON.stringify({ type: 'result', result: '1\n2done' }),
+        ]);
+        closeProc(mockProc, 0);
+      }, 10);
+      const result = await sent;
+      expect('text' in result && result.text).toBe('1\n2done');
+      expect(seen).toEqual(['1', '\n2', 'done']);
+    });
+
+    it('bills the model Cursor reports: a registry model at its price, auto as Composer 2.5', async () => {
+      const session = new PersistentCursorSession({ name: 't', cwd: '/tmp', permissionMode: 'bypassPermissions' });
+      await session.start();
+      const sent = session.send('hi', { waitForComplete: true });
+      setTimeout(() => {
+        feedLines(mockProc, [
+          JSON.stringify({ type: 'system', subtype: 'init', session_id: 's', model: 'claude-opus-5-5-high-fast' }),
+          JSON.stringify({ type: 'result', result: 'ok', usage: { inputTokens: 1_000_000, outputTokens: 0 } }),
+        ]);
+        closeProc(mockProc, 0);
+      }, 10);
+      await sent;
+      const cost = session.getCost();
+      expect(cost.model).toBe('claude-opus-5-5-high-fast');
+      expect(cost.totalUsd).toBeCloseTo(getModelPricing('claude-opus-5-5').input, 6);
+    });
+
+    it('bills cache reads on top of the input, which Cursor reports without them', async () => {
+      const session = new PersistentCursorSession({ name: 't', cwd: '/tmp', permissionMode: 'bypassPermissions' });
+      await session.start();
+      const sent = session.send('hi', { waitForComplete: true });
+      setTimeout(() => {
+        feedLines(mockProc, [
+          JSON.stringify({ type: 'system', subtype: 'init', session_id: 's', model: 'Auto' }),
+          JSON.stringify({
+            type: 'result',
+            result: 'ok',
+            usage: { inputTokens: 1000, outputTokens: 0, cacheReadTokens: 100_000, cacheWriteTokens: 0 },
+          }),
+        ]);
+        closeProc(mockProc, 0);
+      }, 10);
+      await sent;
+      // Composer 2.5: $0.5 input, $0.2 cache read, per 1M.
+      expect(session.getCost().totalUsd).toBeCloseTo(0.0005 + 0.02, 8);
+    });
+
+    it('measures the context against the window of the model it is priced as, suffixes and all', () => {
+      const window = (model?: string) =>
+        (
+          new PersistentCursorSession({ name: 't', cwd: '/tmp', model } as never) as unknown as {
+            _effectiveContextWindow(): number;
+          }
+        )._effectiveContextWindow();
+      expect(window('claude-opus-5-5-high-fast')).toBe(getContextWindow('claude-opus-5-5'));
+      expect(window(undefined)).toBe(getContextWindow('composer-2.5'));
+    });
+
+    it("maps Cursor's model ids to the registry", () => {
+      expect(cursorPricingModel('auto')).toBe('composer-2.5');
+      expect(cursorPricingModel('Auto')).toBe('composer-2.5');
+      expect(cursorPricingModel('composer-2.5-fast')).toBe('composer-2.5-fast');
+      expect(cursorPricingModel('claude-opus-5-5-xhigh-fast')).toBe('claude-opus-5-5');
+      expect(cursorPricingModel('claude-sonnet-5-thinking-high')).toBe('claude-sonnet-5');
+      expect(cursorPricingModel('claude-4.5-opus-high')).toBe('claude-opus-4-5');
+      expect(cursorPricingModel('gpt-5.6-sol-none')).toBe('gpt-5.6-sol');
+      expect(cursorPricingModel('cursor-grok-4.6-medium-fast')).toBe('grok-4.6');
+      expect(cursorPricingModel('grok-4.7-low')).toBe('grok-4.7');
+      expect(cursorPricingModel(undefined)).toBeUndefined();
     });
   });
 });

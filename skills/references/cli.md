@@ -58,7 +58,7 @@ An `X-Session-Reset: 1` (or `true`) header answers the request from a fresh sess
 - `gpt*`, `o3*`, `o4*`, `codex*` → Codex engine
 - `grok*` → Grok engine
 - any other name containing `gemini` → the legacy `gemini` engine (Gemini CLI is sunset; prefer `agy/<model>` or a registered Antigravity model)
-- `composer*`, `cursor*`, `auto` → the legacy `cursor` engine
+- `composer*`, `cursor*`, `auto` → the `cursor` engine (Cursor Agent)
 - anything else → Claude engine
 
 **CORS:** `localhost` origins are allowed on every path. With auth on, `/v1/` paths also allow any origin, and `OPENCLAW_CORS_ORIGINS=*` allows all origins on all paths; with auth disabled only loopback origins are allowed, and only loopback `Host` names are served (see [Security model](./getting-started.md#security-model)).
@@ -78,7 +78,7 @@ Run as an Agent Client Protocol agent over stdio (same as the `clawo-acp` binary
 ### session-start
 
 ```bash
-clawo session-start [name] [--claude | --codex | --codex-app | --agy | --grok | --opencode | --acp <preset> | --custom <preset> | -e <engine>] [options]
+clawo session-start [name] [--claude | --codex | --codex-app | --agy | --grok | --cursor | --opencode | --acp <preset> | --custom <preset> | -e <engine>] [options]
 ```
 
 `name` defaults to `session-<timestamp>`. Starting a name that is already live returns that session unchanged; a name in the resume registry resumes its conversation (see [sessions.md](./sessions.md#session-persistence)).
@@ -297,7 +297,7 @@ know fails that agent within seconds with the engine's error.
 ## `clawo goal`
 
 Run a goal on one thread — a Claude Code session (`--claude`), a Codex
-`codex-app` thread (`--codex`), or a conversation on `--agy`, `--grok`,
+`codex-app` thread (`--codex`), or a conversation on `--agy`, `--grok`, `--cursor`,
 `--opencode` or `--acp <preset>`, where clawo runs the loop turn by turn — then
 have the runtime check the result: goal → verify → repair on the same thread.
 With none, the configured default engine runs it (Claude Code out of the box); a
@@ -307,7 +307,7 @@ default that runs no goal is refused at start. See
 ```bash
 clawo goal "<objective>" | --objective-file <file>
            [--check "<command>"]... [--contract <file>] [--check-timeout <minutes>]
-           [--claude | --codex | --agy | --grok | --opencode | --acp <preset> | -e <engine>] [--launcher <arg>]... [--model <model>] [--effort <level>] [--sandbox <mode>] [--thread <id>]
+           [--claude | --codex | --agy | --grok | --cursor | --opencode | --acp <preset> | -e <engine>] [--launcher <arg>]... [--model <model>] [--effort <level>] [--sandbox <mode>] [--thread <id>]
            [--token-budget N] [--goal-timeout <minutes>] [--max-repairs N]
            [--cwd <dir>] [--wait] [--json]
 ```

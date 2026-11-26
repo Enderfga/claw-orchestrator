@@ -1140,7 +1140,7 @@ addAgentFlags(
   // -e and the shorthands add up; with neither, the configured default engine and Codex.
   const picks = [
     ...(opts.engines ? [opts.engines as string] : []),
-    ...['claude', 'codex', 'codex-app', 'agy', 'grok', 'opencode'].filter(
+    ...['claude', 'codex', 'codex-app', 'agy', 'grok', 'opencode', 'cursor'].filter(
       (e) => opts[e.replace(/-([a-z])/g, (_: string, c: string) => c.toUpperCase())],
     ),
     ...(opts.acp as string[]).map((p) => `acp:${p}`),
@@ -1246,7 +1246,7 @@ addEngineFlags(program.command('goal'), 'Run the goal on')
     // With none given the goal carries no engine, and the server gives it the
     // configured default when the run starts (refused there if no goal runs on it).
     if (engine === 'codex-app') engine = 'codex';
-    const goalEngines = ['claude', 'codex', 'agy', 'grok', 'opencode', 'acp'];
+    const goalEngines = ['claude', 'codex', 'agy', 'grok', 'opencode', 'cursor', 'acp'];
     if (engine !== undefined && !goalEngines.includes(engine)) {
       console.error(`Error: a goal runs on ${goalEngines.join(', ')}, not ${engine}`);
       process.exitCode = 1;

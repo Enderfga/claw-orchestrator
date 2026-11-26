@@ -18,7 +18,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 import type { SessionConfig, SessionSendOptions, StreamEvent, TurnResult } from './types.js';
-import { estimateTokens } from './models.js';
+import { estimateTokens, getContextWindow, getModelPricing, hasOwnPricing } from './models.js';
 import { sanitizeSecrets } from './sanitize.js';
 import { SESSION_EVENT } from './constants.js';
 import { BaseOneShotSession } from './base-oneshot-session.js';
@@ -44,6 +44,31 @@ const READ_ONLY_CLI_CONFIG = JSON.stringify({
   permissions: { allow: [], deny: ['Write(**)', 'Edit(**)', 'Shell(**)'] },
 });
 
+/**
+ * The registry model a Cursor model id is priced as.
+ *
+ * Cursor names a model with its effort and speed in the id
+ * (`claude-opus-5-5-high-fast`, `gpt-5.6-sol-xhigh`, `cursor-grok-4.6-medium`),
+ * and bills a third-party model at its provider's list price, so the provider's
+ * entry is the price. `auto` has no per-token price of its own: on individual
+ * plans it bills as a Cursor-model request, priced here as Composer 2.5. A fast
+ * variant's surcharge (2x on GPT and Grok, unpublished on Claude) is not
+ * modelled: it is priced at the base rate.
+ */
+export function cursorPricingModel(id: string | undefined): string | undefined {
+  if (!id) return undefined;
+  let m = id.toLowerCase().trim();
+  if (m === 'auto') return 'composer-2.5';
+  if (hasOwnPricing(m)) return m;
+  m = m.replace(/^cursor-/, '').replace(/-fast$/, '');
+  m = m.replace(/-thinking(?:-(?:low|medium|high|xhigh|max))?$/, '');
+  m = m.replace(/-(?:none|minimal|low|medium|high|xhigh|max|extra)$/, '');
+  // Older Claude ids put the version first: claude-4.5-opus is claude-opus-4-5.
+  const older = m.match(/^claude-(\d+)(?:\.(\d+))?-(opus|sonnet|haiku)$/);
+  if (older) m = `claude-${older[3]}-${older[1]}${older[2] ? `-${older[2]}` : ''}`;
+  return m;
+}
+
 // ─── PersistentCursorSession ────────────────────────────────────────────────
 
 export class PersistentCursorSession extends BaseOneShotSession {
@@ -60,6 +85,28 @@ export class PersistentCursorSession extends BaseOneShotSession {
    */
   private cursorChatId?: string;
 
+  /** The model Cursor said it runs (`auto`, or the id given), from the turn's `system` init event. */
+  private _reportedModel?: string;
+
+  /**
+   * Text of the assistant message now streaming as deltas (`--stream-partial-output`);
+   * the complete message that follows them repeats it and is not added again.
+   */
+  private _deltaText = '';
+
+  protected override _billedModel(): string | undefined {
+    return this._reportedModel ?? this.options.model;
+  }
+
+  protected override _getModelPricing() {
+    return getModelPricing(cursorPricingModel(this._billedModel()), 'composer-2.5');
+  }
+
+  /** The window of the model it is priced as: `claude-opus-5-5-high-fast` has claude-opus-5-5's. */
+  protected override _effectiveContextWindow(): number {
+    return getContextWindow(cursorPricingModel(this._billedModel()) ?? 'composer-2.5');
+  }
+
   protected override _continuesConversation(): boolean {
     return !!this.cursorChatId;
   }
@@ -72,9 +119,14 @@ export class PersistentCursorSession extends BaseOneShotSession {
     // "unexpected argument". The specific name is the one Cursor owns.
     super(config, cursorBin || process.env.CURSOR_BIN || 'cursor-agent', {
       enginePrefix: 'cursor',
-      defaultModel: 'claude-sonnet-4-6',
-      defaultModelDisplay: 'cursor-default',
+      // `auto`, Cursor's default, bills as a Cursor-model request (Composer 2.5).
+      defaultModel: 'composer-2.5',
+      defaultModelDisplay: 'auto',
       supportsCachedTokens: true,
+      // `inputTokens` is the uncached remainder (2026.11.22, measured: a resumed
+      // turn reported 883 input beside 16,896 cache reads), so cache reads are
+      // billed on top of it, not carved out of it.
+      inputIncludesCachedTokens: false,
       engineDisplayName: 'Cursor',
     });
     // Process-level resume: a persisted id is the raw Cursor chat id, never one
@@ -116,16 +168,34 @@ export class PersistentCursorSession extends BaseOneShotSession {
   }
 
   protected _run(message: string, options: SessionSendOptions): Promise<TurnResult> {
-    // agent -p <prompt> [--force | --mode plan] --trust --output-format stream-json
+    // agent -p <prompt> [--mode plan | --sandbox enabled | --force] [--auto-review] --trust
+    //   --output-format stream-json --stream-partial-output
+    this._deltaText = '';
     const readOnly = this.options.sandboxMode === 'read-only';
+    const workspaceWrite = this.options.sandboxMode === 'workspace-write';
     const args: string[] = ['-p', message];
-    // `--mode plan` steers the model toward read-only behavior; the binding
-    // guarantee comes from the deny config injected via the process cwd below.
-    // Do NOT add `--sandbox` here — it does not restrict in-workspace writes and
-    // was verified to override the mode and re-enable them.
-    if (readOnly) args.push('--mode', 'plan');
-    else args.push('--force');
-    args.push('--trust', '--output-format', 'stream-json');
+    if (readOnly) {
+      // `--mode plan` steers the model toward read-only behavior; the binding
+      // guarantee comes from the deny config injected via the process cwd below.
+      // Do NOT add `--sandbox` here — it does not restrict in-workspace writes and
+      // was verified to override the mode and re-enable them.
+      args.push('--mode', 'plan');
+    } else if (workspaceWrite) {
+      // Cursor's OS sandbox (2026.11.22, measured): edits and commands in the
+      // workspace run, a write outside it and the network are refused. Never with
+      // `--force`, which runs commands outside the sandbox (measured: the same
+      // write outside the workspace succeeded).
+      args.push('--sandbox', 'enabled');
+    } else if (this.options.permissionMode !== 'auto') {
+      args.push('--force');
+    }
+    // Cursor's Auto-review: a server classifier runs safe tool calls and declines
+    // the rest; headless, a declined call is skipped, not waited on (measured).
+    if (!readOnly && this.options.permissionMode === 'auto') args.push('--auto-review');
+    args.push('--trust', '--output-format', 'stream-json', '--stream-partial-output');
+    for (const dir of this.options.addDir ?? []) args.push('--add-dir', dir);
+    const plugins = this.options.pluginDir;
+    for (const dir of typeof plugins === 'string' ? [plugins] : (plugins ?? [])) args.push('--plugin-dir', dir);
 
     // Continue Cursor's own chat rather than opening a new one each send.
     // Verified against 2026.08.11: without it the second turn has no memory of
@@ -270,6 +340,9 @@ export class PersistentCursorSession extends BaseOneShotSession {
         // The raw id is what `--resume` expects; the prefixed one is our
         // display/persistence handle.
         if (event.session_id && !this.cursorChatId) this.cursorChatId = String(event.session_id);
+        // The model that runs the turn: `Auto`, or the id given with --model.
+        if (typeof event.model === 'string' && event.model.trim())
+          this._reportedModel = event.model.trim().toLowerCase();
         if (event.session_id && !this.sessionId?.startsWith('cursor-live-')) {
           this.sessionId = `cursor-live-${event.session_id}`;
         }
@@ -284,8 +357,17 @@ export class PersistentCursorSession extends BaseOneShotSession {
         const msg = event.message as Record<string, unknown> | undefined;
         if (!msg) break;
         const contentArr = msg.content as Array<{ type: string; text?: string }> | undefined;
+        // With --stream-partial-output a message arrives as deltas, each carrying
+        // `timestamp_ms`, and then once more complete: without `timestamp_ms` at
+        // the end of a turn, with a `model_call_id` before a tool call (2026.11.22).
+        const delta = typeof event.timestamp_ms === 'number' && event.model_call_id === undefined;
+        if (!delta && this._deltaText) {
+          this._deltaText = '';
+          break;
+        }
         if (contentArr) {
           for (const block of contentArr) {
+            if (delta && block.type === 'text' && block.text) this._deltaText += block.text;
             if (block.type === 'text' && block.text) {
               resultText.value += block.text;
               try {
@@ -367,10 +449,16 @@ export class PersistentCursorSession extends BaseOneShotSession {
         // Cursor uses camelCase: inputTokens, outputTokens, cacheReadTokens
         const usage = event.usage as Record<string, number> | undefined;
         if (usage) {
-          this._stats.tokensIn += usage.inputTokens || usage.input_tokens || usage.prompt_tokens || 0;
+          const input = usage.inputTokens || usage.input_tokens || usage.prompt_tokens || 0;
+          const cacheRead = usage.cacheReadTokens || usage.cached_tokens || 0;
+          const cacheWrite = usage.cacheWriteTokens || 0;
+          this._stats.tokensIn += input;
+          // Output includes reasoning: `reasoningTokens` is a part of it, not more.
           this._stats.tokensOut += usage.outputTokens || usage.output_tokens || usage.completion_tokens || 0;
-          const cached = usage.cacheReadTokens || usage.cached_tokens || 0;
-          if (cached) this._stats.cachedTokens += cached;
+          this._stats.cachedTokens += cacheRead;
+          this._stats.cacheCreationTokens += cacheWrite;
+          // The context this turn filled is the whole input side.
+          this._reportTurnInputTokens(input + cacheRead + cacheWrite);
           this._updateCost();
           markUsageReceived();
         }

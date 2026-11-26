@@ -229,10 +229,9 @@ const ENGINE_LABELS: Record<string, string> = {
 /**
  * Engines kept out of the picker.
  *
- * `gemini` and `cursor` still work for callers that already name them, but both
- * are legacy engines — the Gemini CLI is sunset and superseded by Antigravity,
- * and Cursor was superseded in this lineup by Grok Build — so offering them in
- * a new user-facing selector would be advertising a dead end.
+ * `gemini` still works for callers that already name it, but it is a legacy
+ * engine — the Gemini CLI is sunset and superseded by Antigravity — so offering
+ * it in a new user-facing selector would be advertising a dead end.
  *
  * `opencode` is absent for a different reason: its models are open-ended
  * `provider/model` strings, so the registry holds none to enumerate, and
@@ -241,7 +240,7 @@ const ENGINE_LABELS: Record<string, string> = {
  * opencode session at all. `acp` is hidden because an ACP agent picks its own
  * model.
  */
-const HIDDEN_ENGINES = new Set<string>(['gemini', 'cursor', 'acp']);
+const HIDDEN_ENGINES = new Set<string>(['gemini', 'acp']);
 
 /**
  * The cross-engine model selector, grouped by engine.

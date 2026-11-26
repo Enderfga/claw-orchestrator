@@ -590,6 +590,22 @@ const MODELS: ModelDef[] = [
   },
 
   // ── Cursor Composer ────────────────────────────────────────────────────
+  // Cursor's own models, priced from cursor.com/docs/models (beyond the weekly
+  // pool). Composer 2.5 is also the rate `auto` is priced at on the cursor engine.
+  {
+    id: 'composer-2.5',
+    engine: 'cursor',
+    provider: 'cursor',
+    pricing: { input: 0.5, output: 2.5, cached: 0.2 },
+    contextWindow: 200_000,
+  },
+  {
+    id: 'composer-2.5-fast',
+    engine: 'cursor',
+    provider: 'cursor',
+    pricing: { input: 3, output: 15, cached: 0.5 },
+    contextWindow: 200_000,
+  },
   {
     id: 'composer-2',
     engine: 'cursor',

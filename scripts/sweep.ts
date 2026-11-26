@@ -63,6 +63,8 @@ interface Engine {
   passBin?: boolean;
   /** Flags the wrapper passes only to another major line of the same CLI, so not expected in this one's help. */
   otherLineFlags?: string[];
+  /** The key of its row in the AGENTS.md table, when the CLI cell is not the engine id (`cursor-agent`). */
+  pinKey?: string;
   /** The wrapper whose `'--flag'` literals define what we pass. */
   wrapper: string;
   /** argv that prints the headless subcommand's help. */
@@ -121,6 +123,19 @@ const ENGINES: Engine[] = [
     // the same day. 90s is enough for a real turn (7–8s measured) and short
     // enough that a hang does not stall the whole sweep.
     liveTimeoutMs: 90_000,
+  },
+  // Cursor Agent — `cursor-agent`, never the bare `agent`, which xAI's installer
+  // also claims. No check-only update command: the official installer names the
+  // build it installs.
+  {
+    id: 'cursor',
+    bin: 'cursor-agent',
+    pinKey: 'cursor-agent',
+    wrapper: 'src/persistent-cursor-session.ts',
+    helpArgv: ['--help'],
+    upstream: cursorLatest,
+    session: { file: 'persistent-cursor-session.js', cls: 'PersistentCursorSession' },
+    liveCwd: 'empty',
   },
   // OpenCode 1.x — npm `opencode-ai`, which stays on that line. Still supported
   // for callers on it, but this machine runs OpenCode 2, so the 1.x binary is
@@ -259,6 +274,17 @@ async function ghLatestStable(repo: string, tagRe: RegExp): Promise<string | nul
 
 // The updater's own check-only mode. A self-report — grok's updater has said
 // "up to date" wrongly before — so the weekly pass still runs `grok update`.
+/** The build Cursor's official installer (cursor.com/install) downloads. */
+async function cursorLatest(): Promise<string | null> {
+  try {
+    const res = await fetch('https://cursor.com/install', { signal: AbortSignal.timeout(30_000) });
+    if (!res.ok) return null;
+    return (await res.text()).match(/lab\/(\d{4}\.\d{2}\.\d{2})-[0-9a-f]+\//)?.[1] ?? null;
+  } catch {
+    return null;
+  }
+}
+
 async function grokLatest(): Promise<string | null> {
   const r = await run('grok', ['update', '--check', '--json'], { timeoutMs: 60_000 });
   const v = safeJson(r.out)?.latestVersion;
@@ -341,7 +367,7 @@ function pins(): Record<string, string> {
   const md = fs.readFileSync(path.join(ROOT, 'AGENTS.md'), 'utf8');
   const out: Record<string, string> = {};
   for (const line of md.split('\n')) {
-    const m = line.match(/^\|[^|]+\|\s*`([a-z]+)`(?:\s+(\d+)\.x)?\s*\|\s*([\d.]+)\s*\|/);
+    const m = line.match(/^\|[^|]+\|\s*`([a-z][a-z-]*)`(?:\s+(\d+)\.x)?\s*\|\s*([\d.]+)\s*\|/);
     if (m) out[`${m[1]}${m[2] ?? ''}`] = m[3];
   }
   return out;
@@ -891,7 +917,7 @@ async function main(): Promise<void> {
 
   const pinned = pins();
   const engines: EngineReport[] = [];
-  for (const e of ENGINES) engines.push(await sweepEngine(e, pinned[e.id] ?? null, live));
+  for (const e of ENGINES) engines.push(await sweepEngine(e, pinned[e.pinKey ?? e.id] ?? null, live));
   const acp = await acpSmoke();
   const mcp = await mcpSmoke();
   const registry = await sweepRegistry(

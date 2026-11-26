@@ -17,7 +17,7 @@
   <a href="./LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
 </p>
 
-**Claw Orchestrator** runs Claude Code, Codex, Antigravity, Grok Build, OpenCode and any
+**Claw Orchestrator** runs Claude Code, Codex, Antigravity, Grok Build, Cursor, OpenCode and any
 [Agent Client Protocol](https://agentclientprotocol.com) agent (Kimi Code, dsh) as persistent sessions behind one API.
 A run counts as done only when checks the agent did not write pass: you declare the checks, the runtime runs them
 and reads the exit codes, and the evidence stays on disk. Runs are checkpointed workflows that survive a crash, and
@@ -55,7 +55,7 @@ https://github.com/user-attachments/assets/5bf9bea8-e5ac-4632-a292-a80a45831dff
   assertions, and metrics measured against the base commit) run by the runtime. A run ends `verified`, `refuted` or
   `unverified`; editing the tests, check configuration or benchmark its contract runs refutes it, and `--isolate` runs
   it in a worktree of its own, saved to a local branch ([guide](./skills/references/verification.md)).
-- 🔀 **Many vendors, one API**: Claude Code, Codex, Antigravity, Grok Build, OpenCode, any ACP agent and custom CLIs,
+- 🔀 **Many vendors, one API**: Claude Code, Codex, Antigravity, Grok Build, Cursor, OpenCode, any ACP agent and custom CLIs,
   behind one set of CLI flags: pick the engine with `--codex`, `--agy`, … and set the default once with `clawo config`.
   `clawo fanout` asks several at once; `session_handoff` moves a live conversation to another engine in the same
   workspace ([guide](./skills/references/multi-engine.md)).
@@ -131,15 +131,16 @@ engine, so one dropdown switches between Claude, Codex, Antigravity and Grok mod
 
 ## Engine compatibility
 
-| Engine      | CLI        | Tested version                  |
-| ----------- | ---------- | ------------------------------- |
-| Claude Code | `claude`   | 2.1.331                         |
-| Codex       | `codex`    | 0.172.0                         |
-| Antigravity | `agy`      | 1.5.16                          |
-| Grok Build  | `grok`     | 1.0.92                          |
-| OpenCode    | `opencode` | 1.19.6, 2.4.1                   |
-| ACP agent   | any        | Kimi Code 2.3.1, dsh 0.2.1-rc.2 |
-| Custom CLI  | any        | —                               |
+| Engine      | CLI            | Tested version                  |
+| ----------- | -------------- | ------------------------------- |
+| Claude Code | `claude`       | 2.1.332                         |
+| Codex       | `codex`        | 0.172.0                         |
+| Antigravity | `agy`          | 1.5.17                          |
+| Grok Build  | `grok`         | 1.0.92                          |
+| Cursor      | `cursor-agent` | 2026.11.22                      |
+| OpenCode    | `opencode`     | 1.19.6, 2.4.2                   |
+| ACP agent   | any            | Kimi Code 2.3.1, dsh 0.2.1-rc.2 |
+| Custom CLI  | any            | —                               |
 
 An agent that serves the Agent Client Protocol on stdio runs as
 [`engine: 'acp'`](./skills/references/multi-engine.md#acp-agents-engine-acp); any other coding CLI that runs as a

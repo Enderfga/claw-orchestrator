@@ -947,7 +947,7 @@ describe('goal node on claude', () => {
       return s;
     });
     const kernel = kernelWith(m);
-    for (const engine of ['custom', 'gemini', 'cursor', 'nope']) {
+    for (const engine of ['custom', 'gemini', 'nope']) {
       await expect(kernel.start(oneGoal({ engine }))).rejects.toThrow(
         new RegExp(`a goal runs on engine .*not '${engine}'`),
       );
@@ -1115,6 +1115,28 @@ describe("a goal's spend in the run's ledger row", () => {
     const row = readRunOutcomes().find((r) => r.runId === run.runId);
     expect(row).toMatchObject({ workflow: 'goal-test', outcome: 'unverified', costUsd: 0.4 });
     expect(row!.agents).toEqual([{ engine: 'codex-app', model: 'gpt-6.1-terra', costUsd: 0.4, turns: 1 }]);
+  });
+});
+
+describe('a goal on Cursor', () => {
+  it('runs turn by turn and is billed to the model Cursor reports, auto when none was named', async () => {
+    const m = fakeManager(() => {
+      const s = new FakeGoalSession('chat-1');
+      s.onSet = (_p, self) => self.move('complete', { tokensUsed: 5, timeUsedSeconds: 1 });
+      return s;
+    });
+    Object.assign(m, {
+      goalSession: (name: string) => m.sessions.get(name),
+      getStatus: () => ({ reportedModel: 'auto', stats: { costUsd: 0.25 } }),
+    });
+    const kernel = kernelWith(m);
+    const run = await kernel.start(oneGoal({ engine: 'cursor' }));
+    const done = await kernel.wait(run.runId);
+    expect(done!.state).toBe('completed');
+    expect(m.starts[0]).toMatchObject({ engine: 'cursor' });
+    const { readRunOutcomes } = await import('../../run-ledger.js');
+    const row = readRunOutcomes().find((r) => r.runId === run.runId);
+    expect(row!.agents).toEqual([{ engine: 'cursor', model: 'auto', costUsd: 0.25, turns: 1 }]);
   });
 });
 

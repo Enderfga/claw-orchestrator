@@ -16,6 +16,8 @@ SessionManager
 │   └── Wraps: agy -p (Google Antigravity CLI, per-message spawning, stream-json output)
 ├── engine: 'grok'      → PersistentGrokSession
 │   └── Wraps: grok -p --output-format streaming-json (xAI Grok Build, per-message spawning)
+├── engine: 'cursor'    → PersistentCursorSession
+│   └── Wraps: cursor-agent -p --output-format stream-json (Cursor Agent, per-message spawning)
 ├── engine: 'opencode'  → PersistentOpencodeSession
 │   └── Wraps: opencode run --format json, message on stdin (per-message spawning)
 ├── engine: 'acp'       → PersistentAcpSession
@@ -24,9 +26,8 @@ SessionManager
     └── Wraps: any CLI via user-provided CustomEngineConfig
 ```
 
-The `gemini` and `cursor` engines are legacy: still wired for existing callers, not documented
-as options (see the notes under [Antigravity](#google-antigravity-engine-agy) and
-[Grok Build](#grok-build-engine-grok)).
+The `gemini` engine is legacy: still wired for existing callers, not documented as an option
+(see the note under [Antigravity](#google-antigravity-engine-agy)).
 
 ### At a glance
 
@@ -37,6 +38,7 @@ as options (see the notes under [Antigravity](#google-antigravity-engine-agy) an
 | `codex-app` | one long-running `codex app-server` | the live thread; `thread/resume` when a session is restarted            | registry price × reported tokens                                       |
 | `agy`       | one `agy -p` per send               | `--conversation <id>`                                                   | registry price × reported tokens                                       |
 | `grok`      | one `grok -p` per send              | `--resume <sessionId>`                                                  | grok's own `total_cost_usd`                                            |
+| `cursor`    | one `cursor-agent -p` per send      | `--resume <chatId>`                                                     | registry price × reported tokens, for the model Cursor reports         |
 | `opencode`  | one `opencode run` per send         | `--session <id>`                                                        | opencode's own `step_finish` cost (registry estimate when none)        |
 | `acp`       | one long-running agent process      | one ACP session; `session/resume` or `session/load` on restart          | what the agent reports (estimated from `pricing` when it reports none) |
 | `custom`    | persistent, or one process per send | persistent: the live process (`args.resume` on restart); one-shot: none | registry price × reported tokens (see `pricing` below)                 |
@@ -45,7 +47,7 @@ as options (see the notes under [Antigravity](#google-antigravity-engine-agy) an
 
 ### Claude Code (`engine: 'claude'`)
 
-Default engine. Long-running subprocess with streaming JSON I/O. Tested with Claude Code CLI **2.1.331**.
+Default engine. Long-running subprocess with streaming JSON I/O. Tested with Claude Code CLI **2.1.332**.
 
 - Persistent multi-turn conversations
 - Real-time streaming (text, tool_use, tool_result, system events)
@@ -250,7 +252,7 @@ await manager.codexGoal('codex-goal-task', { action: 'set', objective: 'build a 
 
 Wraps Google's **Antigravity CLI** (`agy`) — the successor to Gemini CLI (consumer
 Gemini CLI tiers stopped serving 2026-06-18). Each `send()` spawns a new process
-in print mode, with the message as the `-p` argument. Tested with `agy` **1.5.16**.
+in print mode, with the message as the `-p` argument. Tested with `agy` **1.5.17**.
 
 - One-shot execution per message (no persistent subprocess)
 - **Structured output and real usage** — `--output-format stream-json` emits an
@@ -509,17 +511,59 @@ await manager.startSession({
 });
 ```
 
-> **Legacy: `engine: 'cursor'`.** Superseded in this lineup by Grok Build. The `cursor` engine
-> still exists and still works for existing callers — it runs `cursor-agent` (`CURSOR_BIN`
-> overrides it, never the bare `agent` name) and resumes a chat with `--resume <chatId>` — but it
-> is no longer a documented option, is not version-tracked, and gets no new work. It left the
-> tracked set because its stream does not say which model ran, so its cost cannot be attributed
-> to a model. On the OpenAI-compatible endpoint and the ACP agent,
-> `composer-*` and `auto` model names still route to it.
+### Cursor (`engine: 'cursor'`)
+
+Wraps the [Cursor Agent](https://cursor.com/cli) CLI in print mode. Each `send()` spawns
+`cursor-agent -p … --trust --output-format stream-json --stream-partial-output`. Tested with
+`cursor-agent` **2026.11.22**.
+
+- One subscription, many models: `model` takes the ids `cursor-agent models` lists — Composer
+  (`composer-2.5`), Claude (`claude-opus-5-5-high`), GPT (`gpt-5.6-sol-xhigh`), Grok, Gemini. Cursor
+  writes the effort and speed into the id (`-low` … `-max`, `-fast`); a bracketed form such as
+  `model[effort=low]` is refused for these models, so `effort` is not passed. Without a model,
+  Cursor's `auto` chooses.
+- Conversation continuity: the chat id from the `system` init event is passed back as
+  `--resume <chatId>`; `--continue` (the latest chat) is not used, as it collides between
+  concurrent sessions.
+- Cost: real token counts from the `result` event's `usage`. Its `inputTokens` is the uncached
+  remainder, so cache reads (`cacheReadTokens`) and writes are billed on top of it, and
+  `outputTokens` includes `reasoningTokens`. The session is billed as the model the init event
+  names: a third-party model at its provider's price in the registry (Cursor bills those at list
+  price), with the effort and `-fast` suffixes dropped; `auto`, which has no per-token price, as
+  Composer 2.5, the Cursor model it bills as. A fast variant's surcharge (2x on GPT and Grok) is
+  not modelled, and a model the registry does not know is priced as Composer 2.5.
+- Text streams as Cursor writes it (`--stream-partial-output`): the deltas go to `onText`, and the
+  complete message Cursor sends after them is not counted twice.
+- Permissions:
+  - default (`bypassPermissions`): `--force`.
+  - `permissionMode: 'auto'`: `--auto-review` instead — Cursor's server-side classifier runs safe
+    tool calls and declines the rest; headless, a declined call is skipped, not waited on.
+  - `sandboxMode: 'workspace-write'`: Cursor's OS sandbox (`--sandbox enabled`) and never `--force`,
+    which runs commands outside it. Edits and commands inside the workspace run; a write outside
+    it and the network are refused (measured on 2026.11.22; `/tmp` stays writable).
+  - `sandboxMode: 'read-only'`: `--mode plan`, which only steers the model, plus the actual
+    boundary: a `.cursor/cli.json` that denies `Write(**)`, `Edit(**)` and `Shell(**)`, written to a
+    temporary directory that is the process's cwd while `--workspace` names the project. Deny
+    rules hold even under `--force` and against a permissive config in the repository.
+- `addDir` → `--add-dir` (repeated); `pluginDir` → `--plugin-dir` (Cursor plugin directories).
+- Goals run on it turn by turn, as on agy and grok (`clawo goal --cursor`).
+- No images (the print mode takes none), no `disallowedTools`, no compaction.
+- Binary: `cursor-agent` (set `CURSOR_BIN` to override), never the bare `agent`, which xAI's
+  installer links to `grok`. Install with `curl https://cursor.com/install -fsS | bash` and sign in
+  with `cursor-agent login`, or set `CURSOR_API_KEY`.
+
+```typescript
+await manager.startSession({
+  name: 'cursor-task',
+  engine: 'cursor',
+  model: 'claude-opus-5-5-high',
+  cwd: '/project',
+});
+```
 
 ### OpenCode (`engine: 'opencode'`)
 
-Wraps the [OpenCode](https://github.com/anomalyco/opencode) CLI with `run --format json`. Each `send()` spawns a new process. Tested with `opencode` **1.19.6** and OpenCode 2 **2.4.1**; the session reads `opencode --version` once at start and drives either line (see [OpenCode 2](#opencode-2) for what differs).
+Wraps the [OpenCode](https://github.com/anomalyco/opencode) CLI with `run --format json`. Each `send()` spawns a new process. Tested with `opencode` **1.19.6** and OpenCode 2 **2.4.2**; the session reads `opencode --version` once at start and drives either line (see [OpenCode 2](#opencode-2) for what differs).
 
 - Conversation continuity: the session id from the event envelope is captured and passed back as `--session <id>` on later sends, so the model sees prior turns. `--continue` is deliberately not used: it means "the last session on this machine", which collides between concurrent sessions.
 - NDJSON event stream with envelope `{ type, timestamp, sessionID, ... }`

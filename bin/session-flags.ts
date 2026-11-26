@@ -188,7 +188,7 @@ export function sessionBody(opts: Record<string, unknown>): Record<string, unkno
 
 // ─── Engine shorthands ──────────────────────────────────────────────────────
 
-export const ENGINE_SHORTHANDS = ['claude', 'codex', 'codex-app', 'agy', 'grok', 'opencode'] as const;
+export const ENGINE_SHORTHANDS = ['claude', 'codex', 'codex-app', 'agy', 'grok', 'opencode', 'cursor'] as const;
 
 /** `--claude`, `--codex`, … `--acp <preset>`, `--custom <preset>`, beside `-e`. */
 export function addEngineFlags(cmd: Command, what = 'Run on'): Command {

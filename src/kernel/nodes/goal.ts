@@ -229,8 +229,12 @@ export async function executeGoalNode(node: NodeSpec, ctx: NodeContext): Promise
   const readCost = () => {
     if (!sessionName) return;
     try {
-      const cost = manager.getStatus?.(sessionName).stats.costUsd;
+      const status = manager.getStatus?.(sessionName);
+      const cost = status?.stats.costUsd;
       if (typeof cost === 'number' && cost > (data.costUsd ?? 0)) data.costUsd = cost;
+      // The model that ran, once the engine has said (Cursor's `auto` with no model given).
+      const model = status?.model ?? status?.reportedModel;
+      if (model) data.model = model;
     } catch {
       // The session is gone; keep the last figure.
     }

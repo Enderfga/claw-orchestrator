@@ -746,6 +746,8 @@ export interface SessionInfo {
   created: string;
   cwd: string;
   model?: string;
+  /** The model the engine says it runs, when it says (Cursor's `auto`, grok's model); `model` is what was configured. */
+  reportedModel?: string;
   paused: boolean;
   stats: SessionStats;
   /** Cumulative USD spent by this session, as reported by the engine's cost model. */

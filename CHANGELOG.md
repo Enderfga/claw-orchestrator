@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Cursor is a supported engine again** (`engine: 'cursor'`, `--cursor`; Cursor Agent `cursor-agent` 2026.11.22).
+  Its CLI kept shipping, and the reason it was set aside — no way to tell which model a turn ran on — no longer
+  holds: the model Cursor reports (`auto`, or the id given) is what the turn is billed as, a third-party model at
+  its provider's registry price with Cursor's effort and `-fast` suffixes dropped, `auto` as Composer 2.5. The
+  weekly sweep tracks it again, and every flag and subcommand it offers is reviewed. New on the engine:
+  `sandboxMode: 'workspace-write'` runs in Cursor's sandbox (edits and commands in the workspace; writes outside
+  it and the network refused), `permissionMode: 'auto'` uses Cursor's Auto-review, `addDir` and `pluginDir` reach
+  `--add-dir` and `--plugin-dir`, text streams as it is written, and goals run on it turn by turn
+  (`clawo goal --cursor`). The ACP agent's model picker lists Cursor's models.
+- **agy sessions compact** through agy's own `/compact`, run as a turn with slash commands on for it;
+  `compactSession` was a no-op on agy.
+- `POST /session/model` with `"now": true` switches the model at once, keeping the conversation (`switchModel`);
+  without it the model is only stored for the next restart, as before.
+- Session status carries `reportedModel` — the model the engine says it runs, when that differs from the one
+  configured — and a goal's run row in the ledger uses it.
+
+### Fixed
+
+- An agy session's model switch takes the names agy lists (an effort suffix, orchestrators, other vendors' models it
+  serves), which the registry has no entry for; agy refuses an unknown one at the next turn.
+- A model named with an effort suffix (`gemini-4-hydrogen-high`) has its base model's context window, not the
+  200,000 fallback that read a conversation at 19 % of a million as 95 % full.
+- **Cursor turns were under-billed.** Cursor reports input tokens without the cache reads, and the cost
+  subtracted the cache reads from them anyway; cache reads and writes are now billed on top of the input.
+
+### Changed
+
+- Tested engine versions: Claude Code 2.1.332, Antigravity 1.5.17, OpenCode 2 2.4.2, Cursor Agent 2026.11.22.
+
 ## [7.34.0] - 2026-11-24
 
 ### Added

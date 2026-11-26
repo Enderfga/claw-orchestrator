@@ -12,7 +12,7 @@ clawo serve
 
 # Drive sessions from the command line — the same flags on every engine
 clawo session-start myproject -d ~/project            # the default engine (Claude Code out of the box)
-clawo session-start review -d ~/project --codex       # or --agy, --grok, --opencode, --acp kimi-code, …
+clawo session-start review -d ~/project --codex       # or --agy, --grok, --cursor, --opencode, --acp kimi-code, …
 clawo config set defaults.engine codex                # change the default
 clawo session-send myproject "fix the auth bug"
 clawo session-status myproject
@@ -27,7 +27,7 @@ HTTP clients of that server: they read its address from `CLAWO_API_URL` (default
 [Embedded Server Authentication](#embedded-server-authentication), and a request that fails or
 cannot reach the server exits with status 1. `session-start` takes every session option as a flag
 on every engine, and picks the engine with a shorthand (`--claude`, `--codex`, `--codex-app`,
-`--agy`, `--grok`, `--opencode`, `--acp <id>`, `--custom <id>`) or `-e <engine>`; with neither it
+`--agy`, `--grok`, `--cursor`, `--opencode`, `--acp <id>`, `--custom <id>`) or `-e <engine>`; with neither it
 runs the default from `clawo config` (`claude` until set);
 `session-send --message-file <file>` sends a long message, and `--json` on `session-send` and
 `session-status` prints the full result. See [cli.md](./cli.md) for every command.
@@ -43,7 +43,7 @@ openclaw plugins install @enderfga/claw-orchestrator --dangerously-force-unsafe-
 openclaw gateway restart
 ```
 
-> **Why `--dangerously-force-unsafe-install`?** Claw Orchestrator spawns Claude Code / Codex / Antigravity / Grok Build / OpenCode / ACP agent subprocesses via `child_process`, which OpenClaw's security scanner flags by design. The flag is required — there is no way to drive coding CLIs without process spawning.
+> **Why `--dangerously-force-unsafe-install`?** Claw Orchestrator spawns Claude Code / Codex / Antigravity / Grok Build / Cursor / OpenCode / ACP agent subprocesses via `child_process`, which OpenClaw's security scanner flags by design. The flag is required — there is no way to drive coding CLIs without process spawning.
 
 Agents automatically get access to all session, council, and management tools. The plugin starts
 the same embedded HTTP server on the first tool call (set `CLAWO_NO_EMBEDDED_SERVER=1` to skip
@@ -76,6 +76,7 @@ await manager.stopSession('backend-fix');
 - **OpenAI Codex CLI** — `npm install -g @openai/codex` (optional). The `codex` engine needs >= 0.119 for `codex exec resume`, which every send after the first uses. The `codex-app` engine and its goal RPCs are tested with 0.164.0
 - **Antigravity CLI** — `curl -fsSL https://antigravity.google/cli/install.sh | bash` (optional, for the `agy` engine — Google's successor to the sunset Gemini CLI)
 - **Grok Build CLI** — see `x.ai/cli` (optional, for the `grok` engine)
+- **Cursor Agent CLI** — `curl https://cursor.com/install -fsS | bash` (optional, for the `cursor` engine)
 - **OpenCode CLI** — `npm install -g @opencode/cli` for OpenCode 2, or `npm install -g opencode-ai` for OpenCode 1.x (optional, for the `opencode` engine; both are supported). Both install `opencode`, so remove one before installing the other; OpenCode 2 migrates the 1.x session database in place, and V1 plugins do not run on V2
 - **An ACP agent** — optional, for the `acp` engine: any agent that serves the Agent Client Protocol on stdio, such as Kimi Code (`kimi acp`), dsh (`dsh --profile acp`) or `opencode acp`
 
@@ -89,6 +90,7 @@ Each engine requires its own authentication before use:
 - **Codex** — run `codex login` or set `OPENAI_API_KEY`
 - **Antigravity** — run `agy` once and complete the Google OAuth login
 - **Grok** — run `grok` once and sign in (grok.com account or `XAI_API_KEY`)
+- **Cursor** — `cursor-agent login` (Cursor account or `CURSOR_API_KEY`)
 - **OpenCode** — run `opencode auth login`, or set a provider key such as `ANTHROPIC_API_KEY`
 - **ACP agents** — the agent's own login or environment (for example `KIMI_MODEL_*` for Kimi Code, `DEEPSEEK_API_KEY` for dsh); see [Multi-Engine](./multi-engine.md#acp-agents-engine-acp)
 

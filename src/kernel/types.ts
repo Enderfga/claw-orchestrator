@@ -268,7 +268,7 @@ export interface AutoloopNode extends NodeBase {
  * wall-clock budget.
  */
 /** The engines a goal runs on. */
-export const GOAL_ENGINES = ['claude', 'codex', 'codex-app', 'agy', 'grok', 'opencode', 'acp'] as const;
+export const GOAL_ENGINES = ['claude', 'codex', 'codex-app', 'agy', 'grok', 'opencode', 'cursor', 'acp'] as const;
 export type GoalEngine = (typeof GOAL_ENGINES)[number];
 
 export interface GoalNode extends NodeBase {
