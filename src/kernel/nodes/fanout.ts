@@ -19,7 +19,7 @@ import {
   type RunRecord,
 } from '../types.js';
 import type { FanoutAgentResult, FanoutSession } from '../../fanout.js';
-import { forumBrief, forumHub, forumTeamOf, openAsks, resolveForum, unreadFor } from '../forum.js';
+import { ForumReplyRelay, forumBrief, forumHub, forumTeamOf, openAsks, resolveForum, unreadFor } from '../forum.js';
 import type { GoalNodeData } from './goal.js';
 import { loadRun, runDir } from '../store.js';
 import { sanitizeCwd } from '../../validation.js';
@@ -259,6 +259,11 @@ async function runTurnAgents(
   // that ran under `bypassPermissions`.
   const customEngines = (ctx.secrets.agentCustomEngines ?? {}) as Record<string, unknown>;
   const forum = resolveForum(ctx.record);
+  const relays = new Map<string, ForumReplyRelay>();
+  const readOnly = (agent: string): boolean => {
+    const a = agents.find((x) => x.name === agent);
+    return a?.sandboxMode === 'read-only' || a?.permissionMode === 'plan';
+  };
   const { Fanout } = await import('../../fanout.js');
   const fanout = new Fanout(
     {
@@ -300,14 +305,24 @@ async function runTurnAgents(
       // engine allows it.
       ...(forum
         ? {
-            agentPreface: (agent: string) => forumBrief(forum.runId, agent, forumTeamOf(forum.runId), forum.config),
+            agentPreface: (agent: string) =>
+              forumBrief(forum.runId, agent, forumTeamOf(forum.runId), forum.config, { readOnly: readOnly(agent) }),
+            // A read-only agent posts by writing blocks in its reply; any agent may.
+            onAgentText: (agent: string, text: string) => {
+              let relay = relays.get(agent);
+              if (!relay) relays.set(agent, (relay = new ForumReplyRelay(forum.runId, agent, ctx.logger)));
+              relay.take(text);
+            },
             onAgentSession: (agent: string, sessionName: string) => {
               // The directory the Fanout engine runs this agent in, where its score is read.
               const own = agents.find((a) => a.name === agent)?.cwd;
               return forumHub(forum.runId, forum.config).join(
                 agent,
                 (text) => ctx.manager!.deliverMidTurn?.(sessionName, text) ?? false,
-                { cwd: own ? (sanitizeCwd(path.resolve(projectDir, own)) ?? projectDir) : projectDir },
+                {
+                  cwd: own ? (sanitizeCwd(path.resolve(projectDir, own)) ?? projectDir) : projectDir,
+                  readOnly: readOnly(agent),
+                },
               );
             },
           }

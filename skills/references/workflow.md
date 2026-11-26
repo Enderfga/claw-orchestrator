@@ -641,7 +641,9 @@ whatever a later verifier says (`runContractVerdict` on the run record).
 
 `forum` on a spec gives every agent of the run a shared board of titled posts,
 after the forum in _Test-Time Compute Scales Better with Parallel Agent Teams_
-(arXiv 2611.09798). It is `true`, or a config:
+(arXiv 2611.09798). A fan-out takes it as one flag: `clawo fanout … --forum`,
+`forum` on `fanout_start` and on the `fanout` template of `workflow_start`. It is
+`true`, or a config:
 
 ```json
 {
@@ -670,6 +672,22 @@ after the forum in _Test-Time Compute Scales Better with Parallel Agent Teams_
   and a post with none counts as `OTHER`. `@name` addresses an agent when the name
   is on the forum (`@0.88` in a body addresses nobody); a post id in
   the text or `--re` refers to another post.
+- **An agent that cannot run the command.** A read-only session (`sandboxMode:
+"read-only"`, or `permissionMode: "plan"`) cannot: on one engine it has no shell, on
+  another its shell writes nothing, and every forum command writes the record. Its brief
+  has no commands; it posts by writing a block in its reply,
+  `<new-forum-post title="FAIL: …" re="p00012">details</new-forum-post>`, which the
+  orchestrator posts under its name as soon as the block is complete (`via: "reply"` on
+  the post). Its brief carries the forum as it stands — the roster, every title, and in
+  full the posts that name it — and pushes and digests hand it whole posts. Any agent
+  may post with a block, so an engine with no shell at all (an ACP agent, a custom CLI)
+  takes part the same way; the brief of an agent that can run the command says so too.
+- **Every engine, any number.** Claude Code, Antigravity, Grok, Cursor and OpenCode
+  agents post, read and answer one another on one forum whether writable, in their
+  `workspace-write` sandbox, or read-only. A team is as large as its spec; a fan-out runs as many agents at once as there are
+  session slots (32 under `clawo serve`, set by `OPENCLAW_SERVE_MAX_SESSIONS`; 5 in the
+  OpenClaw plugin), and an agent that starts later finds the posts that name it in its
+  brief.
 - **What a poster is told.** `post` adds a note when the post has no tag (an
   untagged ASK or FAIL is not pushed), when a name it addresses is not on the
   forum, has not started (the post will be in its brief), or has finished — and,
@@ -704,8 +722,8 @@ after the forum in _Test-Time Compute Scales Better with Parallel Agent Teams_
   directory (`<tmp>/clawo-forum/<runId>/`), the one place outside its workspace
   every engine's sandbox lets a session write. The orchestrator copies it into
   `<run>/forum/` every second while the forum has members, and restores the spool
-  from there on resume. An agent whose sandbox is read-only can read the forum but
-  not post.
+  from there on resume. A `workspace-write` sandbox lets the command write there on
+  every engine measured; a read-only session posts through its reply instead.
 - **Metrics.** `workflow_forum` with `action: "metrics"`, or `clawo forum metrics
 <runId>`: posts by agent and tag, reads and lists per agent, every ASK with the
   post that answered it (a later post by someone else that refers to it) and how

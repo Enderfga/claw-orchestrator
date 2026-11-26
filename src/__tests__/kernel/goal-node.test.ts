@@ -1118,6 +1118,27 @@ describe("a goal's spend in the run's ledger row", () => {
   });
 });
 
+describe('a goal on a forum', () => {
+  it('posts the blocks it writes in its replies, turn by turn', async () => {
+    const m = fakeManager(() => {
+      const s = new FakeGoalSession('thread-F');
+      s.onSet = (_p, self) => {
+        self.emit('result', { result: 'Done. <new-forum-post title="DONE: parser fixed">all green</new-forum-post>' });
+        self.move('complete', { tokensUsed: 1, timeUsedSeconds: 1 });
+      };
+      return s;
+    });
+    const kernel = kernelWith(m);
+    const run = await kernel.start({ ...oneGoal({ sandboxMode: 'read-only' }), forum: true });
+    const done = await kernel.wait(run.runId);
+    expect(done!.state).toBe('completed');
+    const setGoal = (m.sessions.values().next().value as FakeGoalSession).sets[0];
+    expect(String(setGoal.objective)).toMatch(/This session is read-only, so the forum command is not available/);
+    const { forumSnapshot } = await import('../../kernel/forum.js');
+    expect(forumSnapshot(run.runId).posts).toMatchObject([{ from: 'goal', title: 'DONE: parser fixed', via: 'reply' }]);
+  });
+});
+
 describe('a goal on Cursor', () => {
   it('runs turn by turn and is billed to the model Cursor reports, auto when none was named', async () => {
     const m = fakeManager(() => {

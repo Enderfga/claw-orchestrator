@@ -4251,6 +4251,7 @@ export class SessionManager {
         maxTurnsPerAgent: config.maxTurnsPerAgent,
         maxBudgetUsd: config.maxBudgetUsd,
         timeoutMs: config.agentTimeoutMs,
+        ...(config.forum ? { forum: config.forum } : {}),
       }),
       { runId, cwd: config.projectDir, secrets: { agentCustomEngines: secrets } },
     );

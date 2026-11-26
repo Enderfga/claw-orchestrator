@@ -57,6 +57,8 @@ export interface AgentStepArgs {
    * this name resumes it. For a name the workflow author pinned.
    */
   keepConversation?: boolean;
+  /** The turn's text as it streams. */
+  onChunk?: (text: string) => void;
   logger?: Logger;
 }
 
@@ -115,6 +117,7 @@ export async function runAgentStep(args: AgentStepArgs): Promise<AgentStepResult
     const result = await manager.sendMessage(sessionName, prompt, {
       timeout: args.timeoutMs,
       parentRunId: args.parentRunId,
+      ...(args.onChunk ? { onChunk: args.onChunk } : {}),
     });
     const after = statsOf(manager, sessionName);
 

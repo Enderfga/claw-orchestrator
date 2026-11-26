@@ -71,6 +71,8 @@ export interface FanoutConfig {
   agents: FanoutAgentSpec[];
   /** Run a final synthesis pass over the successful results (>=2 needed). */
   synthesize?: boolean;
+  /** A forum the agents share while they work (`WorkflowSpec.forum`); `fanoutStart` only. */
+  forum?: boolean | import('./kernel/forum.js').ForumConfig;
   synthesisModel?: string;
   synthesisEngine?: EngineType;
   /** The ACP agent preset the synthesis pass starts when `synthesisEngine` is `acp`. */
@@ -103,6 +105,8 @@ export interface FanoutConfig {
    * function is called when the agent finishes. The run forum joins the agent here.
    */
   onAgentSession?: (agent: string, sessionName: string) => (() => void) | undefined;
+  /** An agent's reply so far as it streams, and then its whole reply (the forum posts written in it). */
+  onAgentText?: (agent: string, text: string) => void;
 }
 
 export interface FanoutAgentResult {
@@ -276,9 +280,11 @@ export class Fanout {
           nodeKind: 'fanout',
           onChunk: (text: string) => {
             streamed += text;
+            this.config.onAgentText?.(spec.name, streamed);
           },
         },
       );
+      if (result.output) this.config.onAgentText?.(spec.name, result.output);
       const after = this._stats(sessionName);
       // `ok` used to be an unconditional true in this block, i.e. "the call did
       // not throw" — so an engine that ran, failed, and reported the failure

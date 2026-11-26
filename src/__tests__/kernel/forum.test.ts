@@ -26,7 +26,9 @@ import {
   forumRoster,
   forumSpoolDir,
   forumStoreDir,
+  ForumReplyRelay,
   normalizeForumConfig,
+  postsInReply,
   parseMentions,
   parseRefs,
   parseTags,
@@ -568,5 +570,171 @@ describe('delivery to an agent whose engine takes nothing mid-turn', () => {
     await hub.sync();
     expect(got).toHaveLength(0);
     leave();
+  });
+});
+
+describe('a member that cannot run the forum command', () => {
+  it('posts by writing blocks in its reply: a title, a body, the posts it answers', () => {
+    const reply = [
+      'Reviewed the diff.',
+      '<new-forum-post title="FAIL: off-by-one in sum()" re="p00003 p00007">sum(1, 2) returns -1</new-forum-post>',
+      '<new-forum-post>INFO no title attribute\nthe first line is the title</new-forum-post>',
+      // a post it was handed and quotes, and an escaped block, are not posts of its own
+      '<forum-post id="p00004" from="lighting">ASK @me what rig?</forum-post>',
+      '&lt;new-forum-post title="WIN: quoted"&gt;x&lt;/new-forum-post&gt;',
+    ].join('\n');
+    expect(postsInReply(reply)).toEqual([
+      { title: 'FAIL: off-by-one in sum()', body: 'sum(1, 2) returns -1', re: ['p00003', 'p00007'] },
+      { title: 'INFO no title attribute', body: 'the first line is the title', re: [] },
+    ]);
+  });
+
+  it('has each block posted once, as soon as it is complete in the streaming reply', () => {
+    ensureForumSpool(RUN, {});
+    const relay = new ForumReplyRelay(RUN, 'reviewer');
+    let text = 'Looking. <new-forum-post title="WIN: tests pass">all 12';
+    expect(relay.take(text)).toEqual([]);
+    text += ' green</new-forum-post> and more text';
+    const [post] = relay.take(text);
+    expect(post).toMatchObject({ id: 'p00001', from: 'reviewer', title: 'WIN: tests pass', via: 'reply' });
+    expect(relay.take(text)).toEqual([]);
+    // The whole reply at the end of the turn does not post it again.
+    expect(relay.take(`${text} DONE`)).toEqual([]);
+    expect(forumList(forumSpoolDir(RUN), 'other')).toMatch(/p00001 {2}reviewer .*WIN: tests pass/);
+  });
+
+  it('gets a brief with the forum as it stands instead of commands, and its reply blocks reach the team', async () => {
+    const manager = {
+      startSession: async (config: { name?: string }) => ({ name: config.name }) as never,
+      sendMessage: async (
+        name: string,
+        message: string,
+        opts: { onChunk?: (t: string) => void } = {},
+      ): Promise<never> => {
+        if (name.includes('-build-')) {
+          const m = /--dir (\S+) --as (\S+)/.exec(message)!;
+          forumPost(m[1], m[2], { title: 'ASK @reviewer does the fix hold?', body: 'see sum.js' });
+          return { output: 'built', turns: 1 } as never;
+        }
+        prompts.reviewer = message;
+        // The block streams in; it is on the forum before the turn ends.
+        opts.onChunk?.('Checked. <new-forum-post title="FAIL: @build sum(1,2) is -1" re="p00001">');
+        opts.onChunk?.('subtraction, not addition</new-forum-post>');
+        postedMidTurn = fs.existsSync(path.join(forumSpoolDir(runId), 'posts.jsonl'))
+          ? fs.readFileSync(path.join(forumSpoolDir(runId), 'posts.jsonl'), 'utf8').includes('FAIL: @build')
+          : false;
+        return {
+          output:
+            'Checked. <new-forum-post title="FAIL: @build sum(1,2) is -1" re="p00001">subtraction, not addition</new-forum-post>',
+          turns: 1,
+        } as never;
+      },
+      stopSession: async () => undefined,
+    };
+    const prompts: Record<string, string> = {};
+    let postedMidTurn = false;
+    let runId = '';
+    const kernel = registerDefaultExecutors(new RunKernel({ manager: manager as never, nodeTimeoutMs: 20_000 }));
+    const spec: WorkflowSpec = {
+      name: 'review',
+      cwd: tmp,
+      forum: true,
+      nodes: [
+        { id: 'build', kind: 'agent', prompt: 'build it', next: 'review' },
+        {
+          id: 'review',
+          kind: 'fanout',
+          prompt: 'review the build',
+          agents: [{ name: 'reviewer', engine: 'claude', sandboxMode: 'read-only' }],
+        },
+      ],
+    };
+    const run = await kernel.start(spec);
+    runId = run.runId;
+    const done = await kernel.wait(run.runId);
+    expect(done!.state).toBe('completed');
+
+    const brief = prompts.reviewer;
+    expect(brief).toMatch(/This session is read-only, so the forum command is not available to you/);
+    expect(brief).not.toMatch(/forum --dir/);
+    expect(brief).toMatch(/The forum now:[\s\S]*p00001 {2}build → @reviewer .*ASK @reviewer does the fix hold\?/);
+    expect(brief).toMatch(/In full, the posts that name you:[\s\S]*see sum\.js/);
+
+    expect(postedMidTurn).toBe(true);
+    const posts = fs
+      .readFileSync(path.join(forumStoreDir(run.runId), 'posts.jsonl'), 'utf8')
+      .trim()
+      .split('\n')
+      .map((l) => JSON.parse(l));
+    expect(posts).toHaveLength(2);
+    expect(posts[1]).toMatchObject({ from: 'reviewer', to: ['build'], re: ['p00001'], via: 'reply' });
+  });
+
+  it('is handed whole posts and no command to run, live and in a digest', async () => {
+    const long = 'x'.repeat(3_000);
+    for (const push of ['mentions', 'digest'] as const) {
+      const run = `${RUN}-${push}`;
+      const hub = new ForumHub(run, { push, digestMs: 60_000 });
+      const got: string[] = [];
+      const leave = hub.join('reviewer', (text) => (got.push(text), true), { readOnly: true });
+      forumPost(forumSpoolDir(run), 'builder', {
+        title: push === 'digest' ? 'WIN: shipped' : 'ASK @reviewer ok?',
+        body: long,
+      });
+      await hub.sync();
+      if (push === 'digest') await (hub as unknown as { flushDigests(): Promise<void> }).flushDigests();
+      expect(got).toHaveLength(1);
+      expect(got[0]).toContain(long);
+      expect(got[0]).not.toMatch(/forum --dir|read p0|read <id>/);
+      leave();
+    }
+  });
+
+  it('tells an agent that can run the command how to post when it cannot', () => {
+    ensureForumSpool(RUN, {});
+    const brief = forumBrief(RUN, 'builder', ['builder', 'reviewer'], {});
+    expect(brief).toMatch(/forum --dir .* post --title/);
+    expect(brief).toMatch(/If these cannot run where you are, write <new-forum-post title=/);
+  });
+});
+
+describe('an agent node in plan mode on a forum', () => {
+  it('posts the blocks in its reply under its node id', async () => {
+    const manager = {
+      startSession: async (config: { name?: string }) => ({ name: config.name }) as never,
+      sendMessage: async () =>
+        ({
+          output: 'Read it. <new-forum-post title="WIN: no regressions">audited 3 files</new-forum-post>',
+          turns: 1,
+        }) as never,
+      stopSession: async () => undefined,
+    };
+    const kernel = registerDefaultExecutors(new RunKernel({ manager: manager as never, nodeTimeoutMs: 20_000 }));
+    const run = await kernel.start({
+      name: 'audit',
+      cwd: tmp,
+      forum: true,
+      nodes: [{ id: 'audit', kind: 'agent', prompt: 'audit', permissionMode: 'plan' }],
+    });
+    await kernel.wait(run.runId);
+    const { forumSnapshot } = await import('../../kernel/forum.js');
+    expect(forumSnapshot(run.runId).posts).toMatchObject([
+      { from: 'audit', title: 'WIN: no regressions', via: 'reply' },
+    ]);
+  });
+});
+
+describe('a fan-out with a forum', () => {
+  it('is one flag on the fan-out templates', async () => {
+    const { fanoutWorkflow, legacyFanoutWorkflow } = await import('../../kernel/templates/index.js');
+    const agents = [
+      { name: 'a', engine: 'claude' as const },
+      { name: 'b', engine: 'agy' as const },
+    ];
+    expect(fanoutWorkflow({ task: 't', cwd: tmp, agents, forum: true }).forum).toBe(true);
+    expect(fanoutWorkflow({ task: 't', cwd: tmp, agents }).forum).toBeUndefined();
+    expect(legacyFanoutWorkflow({ task: 't', cwd: tmp, agents, forum: { push: 'all' } }).forum).toEqual({
+      push: 'all',
+    });
   });
 });

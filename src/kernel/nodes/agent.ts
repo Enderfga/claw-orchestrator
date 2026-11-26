@@ -6,7 +6,7 @@ import { runAgentStep } from '../agent-step.js';
 import { nodeDir, readNodeOutput, runDir } from '../store.js';
 import type { AgentNode, NodeSpec } from '../types.js';
 import { evidenceDir, failureLines, readEvidence } from '../../verify/evidence.js';
-import { onForum } from '../forum.js';
+import { onForum, type ForumReplyRelay } from '../forum.js';
 
 /**
  * The run's red verdict as a list of its failing required checks, each with the
@@ -165,8 +165,10 @@ export async function executeAgentNode(node: NodeSpec, ctx: NodeContext): Promis
     ctx.record,
     spec.id,
     (text) => manager.deliverMidTurn?.(sessionName, text) ?? false,
-    (forumBrief) => runAgentNode(spec, ctx, sessionName, forumBrief),
+    (forumBrief, relay) => runAgentNode(spec, ctx, sessionName, forumBrief, relay),
     spec.cwd || ctx.cwd,
+    // A read-only session posts by writing blocks in its reply.
+    { readOnly: spec.sandboxMode === 'read-only' || spec.permissionMode === 'plan', logger: ctx.logger },
   );
 }
 
@@ -175,6 +177,7 @@ async function runAgentNode(
   ctx: NodeContext,
   sessionName: string,
   forumBrief: string | undefined,
+  relay?: ForumReplyRelay,
 ): Promise<NodeResult> {
   const steer = ctx.takeSteer();
   const brief = repairBrief(ctx, spec.id);
@@ -189,9 +192,19 @@ async function runAgentNode(
   ];
   const prompt = preface.length > 0 ? `${preface.join('\n\n')}\n\n---\n\n${spec.prompt}` : spec.prompt;
 
+  // Forum posts written as blocks in the reply go up as they are written.
+  let streamed = '';
   const result = await runAgentStep({
     manager: ctx.manager!,
     sessionName,
+    ...(relay
+      ? {
+          onChunk: (text: string) => {
+            streamed += text;
+            relay.take(streamed);
+          },
+        }
+      : {}),
     // A pinned name is a conversation the author wants kept: a revisit after a
     // red verifier, or another node under the same name, resumes it instead of
     // starting over. The process still stops after the turn.
@@ -218,6 +231,8 @@ async function runAgentNode(
       permissionMode: (spec.permissionMode as never) ?? 'bypassPermissions',
     },
   });
+  // The whole reply too: an engine that streams nothing has written its blocks here.
+  relay?.take(result.output);
 
   return {
     ok: result.ok,

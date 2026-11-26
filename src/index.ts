@@ -1075,7 +1075,7 @@ const plugin = {
           },
           agents: {
             type: 'array',
-            maxItems: 16,
+            maxItems: 64,
             description:
               "Agent specs: { name, engine?, model?, effort?, prompt?, persona?, cwd?, baseUrl?, permissionMode?, sandboxMode?, customEngine?, acpAgent? }. cwd gives an agent its own working directory (absolute, or relative to projectDir); agents that all write code need one each, or they edit the same files. permissionMode uses each engine's own permission handling as in session_start; workers that must not write should set sandboxMode to read-only. sandboxMode uses the same values and per-engine behavior as session_start.",
             items: {
@@ -1148,6 +1148,11 @@ const plugin = {
             type: 'boolean',
             description: 'Run a final synthesis pass over the successful results (>=2 needed).',
           },
+          forum: {
+            type: ['boolean', 'object'],
+            description:
+              "A forum the agents share while they work: each posts findings (WIN/FAIL/ASK @name) and reads the others' — through the clawo forum command, or, in a read-only session, as blocks in its reply. true, or a forum config ({ push, digestMs, score }); see workflow.md.",
+          },
           synthesisModel: { type: 'string', description: 'Model for the synthesis pass.' },
           synthesisEngine: {
             type: 'string',
@@ -1180,6 +1185,7 @@ const plugin = {
           agentTimeoutMs: args.agentTimeoutMs as number | undefined,
           maxTurnsPerAgent: args.maxTurnsPerAgent as number | undefined,
           maxBudgetUsd: args.maxBudgetUsd as number | undefined,
+          ...(args.forum ? { forum: args.forum as FanoutConfig['forum'] } : {}),
         });
         return { ok: true, ...session, note: 'Fan-out running in background. Poll with fanout_status.' };
       },
@@ -1234,7 +1240,7 @@ const plugin = {
           task: { type: 'string', description: 'Task text, when using `template`.' },
           agents: {
             type: 'array',
-            maxItems: 16,
+            maxItems: 64,
             description: 'Agents for the template: { name, engine?, model?, effort?, persona?, acpAgent? }.',
             items: {
               type: 'object',
@@ -1281,6 +1287,11 @@ const plugin = {
             type: 'number',
             description:
               'Template runs: the spend cap for the whole run in USD; each node gets what is left, and reaching it fails the run. A spec sets the same with `maxBudgetUsd` at its top level.',
+          },
+          forum: {
+            type: ['boolean', 'object'],
+            description:
+              '`fanout` template: a forum the agents share while they work (true, or a forum config). A spec sets the same with `forum` at its top level; see workflow.md.',
           },
           isolation: {
             type: 'string',
@@ -1377,6 +1388,7 @@ const plugin = {
               agents,
               synthesize: agents.length >= 2,
               ...(typeof args.maxBudgetUsd === 'number' ? { maxBudgetUsd: args.maxBudgetUsd } : {}),
+              ...(args.forum ? { forum: args.forum as boolean } : {}),
             });
           } else if (template === 'goal') {
             spec = goalWorkflow({

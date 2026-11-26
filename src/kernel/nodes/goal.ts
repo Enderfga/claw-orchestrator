@@ -35,7 +35,7 @@ import type { NodeContext, NodeResult } from '../engine.js';
 import type { GoalNode, NodeSpec } from '../types.js';
 import type { EngineType } from '../../types.js';
 import { goalRepairBrief, interruptedNotice } from './agent.js';
-import { forumBrief, forumHub, forumTeamOf, resolveForum, unreadFor } from '../forum.js';
+import { ForumReplyRelay, forumBrief, forumHub, forumTeamOf, resolveForum, unreadFor } from '../forum.js';
 
 export type GoalStatus = 'active' | 'paused' | 'blocked' | 'usageLimited' | 'budgetLimited' | 'complete';
 
@@ -335,9 +335,14 @@ export async function executeGoalNode(node: NodeSpec, ctx: NodeContext): Promise
     closed = true;
     wake?.();
   };
+  // Forum posts the goal writes as blocks in its replies, posted turn by turn.
+  const relay = forum ? new ForumReplyRelay(forum.runId, self, ctx.logger) : undefined;
   const onResult = (...args: unknown[]) => {
     const text = (args[0] as { result?: unknown } | undefined)?.result;
-    if (typeof text === 'string' && text.trim()) data.lastMessage = text.slice(-4000);
+    if (typeof text === 'string' && text.trim()) {
+      data.lastMessage = text.slice(-4000);
+      relay?.take(text);
+    }
   };
 
   // One session at a time; a new one after the app-server exits, on the same
@@ -435,7 +440,11 @@ export async function executeGoalNode(node: NodeSpec, ctx: NodeContext): Promise
   const steers: string[] = [];
   // On a run with a forum the goal is on it while it works: a post pushed to it
   // joins the steers, which reach the turn in flight within a tick.
-  const forumIntro = forum ? forumBrief(forum.runId, self, forumTeamOf(forum.runId), forum.config) : undefined;
+  const forumIntro = forum
+    ? forumBrief(forum.runId, self, forumTeamOf(forum.runId), forum.config, {
+        readOnly: spec.sandboxMode === 'read-only',
+      })
+    : undefined;
   const leaveForum = forum
     ? forumHub(forum.runId, forum.config).join(
         self,
@@ -444,7 +453,7 @@ export async function executeGoalNode(node: NodeSpec, ctx: NodeContext): Promise
           wake?.();
           return true;
         },
-        { cwd: spec.cwd || ctx.cwd },
+        { cwd: spec.cwd || ctx.cwd, readOnly: spec.sandboxMode === 'read-only' },
       )
     : undefined;
   try {

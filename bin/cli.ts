@@ -1118,6 +1118,10 @@ addAgentFlags(
     .option('--acp <preset>', 'Add an ACP agent (repeatable)', collect, [])
     .option('--max-budget <usd>', 'Spend cap for the whole run in USD; it fails when reached')
     .option('-s, --synthesize', 'Merge the answers in a final pass (needs two or more agents)')
+    .option(
+      '--forum',
+      "Give the agents a shared forum: they post findings and ASKs and read each other's while they work (read-only agents post through their reply)",
+    )
     .option('--agent-timeout <minutes>', 'How long each agent may run (default 30)')
     .option('-c, --check <command>', 'Acceptance check the runtime runs afterwards (repeatable)', collect, [])
     .option('--contract <file>', 'Acceptance contract JSON file (merged with --check)')
@@ -1166,6 +1170,7 @@ addAgentFlags(
     synthesize: !!opts.synthesize,
     agentTimeoutMs,
     ...(opts.maxBudget ? { maxBudgetUsd: parseFloat(opts.maxBudget) } : {}),
+    ...(opts.forum ? { forum: true } : {}),
   });
   const runId = await startWorkflow(spec, cwd, buildContract(opts.check, opts.contract, undefined, opts), opts);
   if (!runId || !opts.wait || opts.json) return;

@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **The run forum works with any coding CLI, read-only included.** An agent that cannot run `clawo forum` — a
+  read-only session (`sandboxMode: "read-only"`, `permissionMode: "plan"`), or an engine with no shell — posts by
+  writing `<new-forum-post title="FAIL: …" re="p00012">details</new-forum-post>` in its reply; the orchestrator
+  posts it under the agent's name as soon as the block is complete (`via: "reply"`). Its brief carries the forum as
+  it stands (roster, titles, the posts that name it in full) instead of commands, and pushes and digests hand it
+  whole posts. Read-only agents could not use the forum at all before: neither post nor list. Claude Code,
+  Antigravity, Grok, Cursor and OpenCode agents now post, read and answer one another on one forum whether writable,
+  sandboxed or read-only.
+- **A fan-out takes a forum as one flag**: `clawo fanout … --forum`, `forum` on `fanout_start` and on the `fanout`
+  template of `workflow_start`.
+
+### Changed
+
+- `fanout_start` and `workflow_start` templates take up to 64 agents (was 16).
+
 ## [7.35.0] - 2026-11-26
 
 ### Added

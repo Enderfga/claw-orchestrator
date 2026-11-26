@@ -135,6 +135,8 @@ export function councilWorkflow(args: CouncilArgs): WorkflowSpec {
 export interface FanoutArgs extends CommonArgs {
   agents: FanoutAgentSpec[];
   synthesize?: boolean;
+  /** A forum for the agents (`WorkflowSpec.forum`): they post to and read one board while they work. */
+  forum?: WorkflowSpec['forum'];
   /** How long each agent's turn may run. Default 30 minutes. */
   agentTimeoutMs?: number;
 }
@@ -143,6 +145,7 @@ export function fanoutWorkflow(args: FanoutArgs): WorkflowSpec {
   return {
     name: 'fanout',
     ...(args.maxBudgetUsd ? { maxBudgetUsd: args.maxBudgetUsd } : {}),
+    ...(args.forum ? { forum: args.forum } : {}),
     cwd: args.cwd,
     contract: args.contract,
     nodes: [
@@ -501,11 +504,13 @@ export interface LegacyFanoutArgs {
   maxBudgetUsd?: number;
   timeoutMs?: number;
   name?: string;
+  forum?: WorkflowSpec['forum'];
 }
 
 export function legacyFanoutWorkflow(args: LegacyFanoutArgs): WorkflowSpec {
   return {
     name: args.name ?? 'fanout',
+    ...(args.forum ? { forum: args.forum } : {}),
     cwd: args.cwd,
     nodes: [
       {
