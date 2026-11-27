@@ -19,18 +19,26 @@ import { forumRuntimePost, forumSnapshot } from '../../kernel/forum.js';
 import type { WorkflowSpec } from '../../kernel/types.js';
 
 let tmp: string;
-const saved = { wf: process.env.CLAWO_WF_DIR, spool: process.env.CLAWO_FORUM_SPOOL_ROOT };
+const saved = {
+  wf: process.env.CLAWO_WF_DIR,
+  spool: process.env.CLAWO_FORUM_SPOOL_ROOT,
+  cli: process.env.CLAWO_FORUM_CLI,
+};
 
 beforeEach(() => {
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'clawo-goalcut-'));
   process.env.CLAWO_WF_DIR = path.join(tmp, 'wf');
   process.env.CLAWO_FORUM_SPOOL_ROOT = path.join(tmp, 'spool');
+  // The brief's command lines name the CLI: fixed here, so where the objective is cut
+  // does not depend on whether a build of the CLI happens to exist.
+  process.env.CLAWO_FORUM_CLI = '/opt/clawo/dist/bin/cli.js';
 });
 
 afterEach(() => {
   for (const [k, v] of [
     ['CLAWO_WF_DIR', saved.wf],
     ['CLAWO_FORUM_SPOOL_ROOT', saved.spool],
+    ['CLAWO_FORUM_CLI', saved.cli],
   ] as const) {
     if (v === undefined) delete process.env[k];
     else process.env[k] = v;
@@ -125,7 +133,8 @@ async function goalWithCutSteer(liveTurn: boolean) {
     forum: true,
     nodes: [
       { id: 'gate', kind: 'human_gate', prompt: 'go?' },
-      { id: 'goal', kind: 'goal', objective: 'O'.repeat(1_600) + ' make it fast', engine: 'codex' },
+      // Long enough that the cut falls inside the brief whatever its paths add up to.
+      { id: 'goal', kind: 'goal', objective: 'O'.repeat(2_600) + ' make it fast', engine: 'codex' },
     ],
   };
   const run = await kernel.start(spec);
@@ -152,6 +161,7 @@ describe('a goal steer the objective cut', () => {
     const { session, objective, deliveries, consumed } = await goalWithCutSteer(false);
     expect(objective).toContain('[cut to fit the goal objective limit]');
     expect(objective).not.toContain('STEER-MARKER');
+    expect(objective).not.toContain('use the LRU cache');
     expect(session.steered).toEqual([]);
     expect(deliveries).not.toContain('goal/turn');
     expect(deliveries).not.toContain('goal/push');
