@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **A run left behind by a reboot can be resumed again.** On the same host a lease was judged only by whether its
+  pid was alive. After a reboot, or once the owner exited, that pid could be reused by an unrelated process, and
+  the run then stayed locked with no owner to release it. On Linux the lease now also records the host's boot id
+  and the owner process's start time: a lease taken under another boot, or whose pid now belongs to a process
+  started at a different time, is stale. Leases written before this change are judged by the pid alone.
+
 ## [7.36.0] - 2026-11-27
 
 ### Added
