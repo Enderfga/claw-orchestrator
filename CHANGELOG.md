@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- A post the runtime wrote — a steer, a council injection, a gate question or answer, a verdict, a round report, an
+  autoloop message, a message between sessions — that an agent removes from the forum's spool, or rewrites there, is
+  still read, listed and handed over as the runtime wrote it: readers take it from the run's durable copy, which the
+  forum's ledger names. Its id is not given out again.
+
 ## [7.37.0] - 2026-11-27
 
 ### Added

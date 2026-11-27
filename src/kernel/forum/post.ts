@@ -27,6 +27,7 @@ import {
   readSpoolConfig,
   validForumName,
   withForumLock,
+  withVouchedPosts,
   type SpoolConfig,
 } from './store.js';
 import {
@@ -147,7 +148,8 @@ export function forumPost(
   const score = readScore(config.score, joinedCwd(dir, as) ?? input.cwd ?? process.cwd());
   const text = `${title}\n${body}`;
   return withForumLock(dir, () => {
-    const posts = readPosts(path.join(dir, POSTS));
+    // The runtime's posts count even where the spool lost them, so no id is given out twice.
+    const posts = withVouchedPosts(config.runId, readPosts(path.join(dir, POSTS)));
     const id = nextPostId(posts);
     const re = [...new Set([...(input.re ?? []), ...parseRefs(text)])].filter((r) => r !== id);
     const named = addressees(text, as, config.team);
@@ -290,7 +292,7 @@ export function forumRuntimeAppend(id: string, input: ForumRuntimePostInput): Fo
   const to = checkedRecipients(input.to, config).filter((n) => n !== input.from);
   const text = `${title}\n${body}`;
   const post = withForumLock(dir, () => {
-    const posts = readPosts(path.join(dir, POSTS));
+    const posts = withVouchedPosts(id, readPosts(path.join(dir, POSTS)));
     const postId = nextPostId(posts);
     const re = [...new Set([...(input.re ?? []), ...parseRefs(text)])].filter((r) => r !== postId);
     // As every reader will read it (a reference that is not a post id dropped),

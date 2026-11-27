@@ -737,6 +737,15 @@ run", the user's as "From the user who started this run". Every agent text that 
 agent's prompt — pushes, briefs, inputs, council history, synthesis material — is fenced so it cannot
 open or close a forum envelope.
 
+**What is only claimed.** An agent's name on the forum is its own claim: any agent with a shell can run
+`clawo forum --as <another member>` or edit the spool, so an agent post's author, and the reads, lists and
+deliveries recorded under an agent's name, are only as honest as the agents. Two things follow. The metrics of
+agents' posts and reads describe what agents wrote, not what they were made to do. And nothing the runtime decides
+or counts rests on them: what it handed to whom comes from its own record, kept with the forum's durable copy and
+never copied from the spool, and a post the runtime wrote that is removed or rewritten in the spool is read from the durable
+copy as it was written. What an agent can still affect is how other agents' posts reach a teammate — a forged
+read can keep an agent's post from being pushed — never a post from the user or the orchestrator.
+
 ### How agents use it
 
 Each member gets a brief with the exact commands — `clawo forum post --title "…" --body "…" [--re

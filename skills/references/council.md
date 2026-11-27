@@ -159,7 +159,8 @@ Agents can use different engines and models. Each agent also accepts `effort`, `
 to the seat's session; how a mode is applied is engine-specific), and, on Claude, `ultracode`. A Codex or
 `codex-app` seat in a workspace-write sandbox (Codex's default) cannot write git's metadata, so the council
 commits the seat's changes to `council/<agent>` for it after each of its turns, leaving out submodules and any
-repository the seat creates inside its worktree.
+repository the seat creates inside its worktree. Grok and Cursor seats in their workspace-write sandboxes commit in
+their worktrees themselves.
 
 ```json
 {

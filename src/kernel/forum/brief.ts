@@ -15,6 +15,7 @@ import {
   POSTS,
   readJsonl,
   readPosts,
+  withVouchedPosts,
   recordRuntimeEvents,
   spoolReady,
   tryReadSpoolConfig,
@@ -292,7 +293,7 @@ export function forumTurnInboxParts(
     return { text: '', ids: [] };
   }
   const config = tryReadSpoolConfig(dir);
-  const posts = readPosts(path.join(dir, POSTS));
+  const posts = withVouchedPosts(id, readPosts(path.join(dir, POSTS)));
   const events = readJsonl<ForumEvent>(path.join(dir, EVENTS));
   const hub = liveHubs.get(id);
   const info = hub?.memberInfo(as);

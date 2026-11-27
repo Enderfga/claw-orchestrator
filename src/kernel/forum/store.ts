@@ -1021,7 +1021,42 @@ export function viewOf(id: string): ForumView {
     const dLen = fs.existsSync(d) ? fs.statSync(d).size : -1;
     return sLen >= dLen ? s : d;
   };
-  return { posts: readPosts(pick(POSTS)), events: readJsonl<ForumEvent>(pick(EVENTS)) };
+  return { posts: withVouchedPosts(id, readPosts(pick(POSTS))), events: readJsonl<ForumEvent>(pick(EVENTS)) };
+}
+
+/**
+ * `posts` as read from the spool, with every post the runtime wrote put back as
+ * it wrote it. The spool is anyone's to edit: a line the runtime wrote can be
+ * removed or rewritten there. The runtime's posts are in the durable copy
+ * before the call that made them returns, and the ledger says which they are,
+ * so one missing from the spool, or changed in it, is taken from the store.
+ */
+export function withVouchedPosts(id: string, posts: ForumPost[]): ForumPost[] {
+  let store: string;
+  try {
+    store = forumLocation(id).store;
+  } catch {
+    return posts;
+  }
+  const ledger = authoredLedger(store);
+  if (ledger.size === 0) return posts;
+  const byId = new Map(posts.map((p) => [p.id, p]));
+  const holds = (p: ForumPost | undefined, entry: { from: string; hash: string }): boolean =>
+    !!p && p.from === entry.from && postHash(p) === entry.hash;
+  let intact = true;
+  for (const [pid, entry] of ledger) {
+    if (!holds(byId.get(pid), entry)) {
+      intact = false;
+      break;
+    }
+  }
+  if (intact) return posts;
+  for (const p of readPosts(path.join(store, POSTS))) {
+    const entry = ledger.get(p.id);
+    if (entry && holds(p, entry) && !holds(byId.get(p.id), entry)) byId.set(p.id, p);
+  }
+  const n = (pid: string): number => Number(pid.slice(1));
+  return [...byId.values()].sort((a, b) => n(a.id) - n(b.id));
 }
 
 /**

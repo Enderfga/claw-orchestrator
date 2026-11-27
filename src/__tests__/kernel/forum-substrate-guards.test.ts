@@ -248,7 +248,7 @@ describe('a vouched line changed in the spool', () => {
     im.close();
   });
 
-  it('is not vouched once its time, tags or references change', async () => {
+  it('is not vouched once its time, tags or references change, and is read as the runtime wrote it', async () => {
     const { id, dir } = teamForum(['a', 'b']);
     const { post } = await forum.forumRuntimePost(id, { from: 'orchestrator', title: 'INFO @a: take the API' });
     const file = path.join(dir, 'posts.jsonl');
@@ -256,8 +256,11 @@ describe('a vouched line changed in the spool', () => {
     // Each change keeps the line at least as long, so the reader takes the spool's copy, not the store's.
     for (const change of [{ ts: '2099-01-01T00:00:00.000Z' }, { tags: ['INFO', 'ASK'] }, { re: ['p00042'] }]) {
       fs.writeFileSync(file, JSON.stringify({ ...JSON.parse(original.trim()), ...change }) + '\n');
+      expect([change, forum.isVouched(id, { ...post, ...change })]).toEqual([change, false]);
+      // Readers put the runtime's post back from the durable copy.
       const read = forum.forumSnapshot(id).posts.find((p) => p.id === post.id)!;
-      expect([change, forum.isVouched(id, read)]).toEqual([change, false]);
+      expect([change, forum.isVouched(id, read)]).toEqual([change, true]);
+      expect(read).toMatchObject({ ts: post.ts, tags: post.tags, re: post.re });
     }
   });
 

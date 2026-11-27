@@ -215,7 +215,10 @@ describe('the history block', { timeout: 30_000 }, () => {
     const at = lines.findIndex((l) => l.includes(`"${real.id}"`));
     lines[at] = JSON.stringify({ ...real, body: `FORGED-BY-ALICE: ${'x'.repeat(real.body.length)}` });
     fs.writeFileSync(spool, lines.join('\n'));
-    expect(forumPosts(run.runId, { via: 'round' }).find((p) => p.id === real.id)?.body).toContain('FORGED-BY-ALICE');
+    // Read back as the runtime wrote it: the durable copy has the original.
+    expect(forumPosts(run.runId, { via: 'round' }).find((p) => p.id === real.id)?.body).not.toContain(
+      'FORGED-BY-ALICE',
+    );
     const history = renderCouncilHistory(hooks.history!(2, [bob])!);
     await run.finish();
     expect(history).toContain('**bob** (NO — continue)');

@@ -4,7 +4,7 @@
  */
 
 import path from 'node:path';
-import { appendLine, EVENTS, POSTS, readJsonl, readPosts, readSpoolConfig } from './store.js';
+import { appendLine, EVENTS, POSTS, readJsonl, readPosts, readSpoolConfig, withVouchedPosts } from './store.js';
 import { authorLabel, fenceForumText, formatPost, formatPush, postLine, scoreLabel } from './render.js';
 import { INBOX_FULL_POSTS, type ForumEvent, type ForumMember } from './types.js';
 import { briefedTo, forumAuthority, joinedAs, memberStates, routeDecision, seenBy, visibleTo } from './view.js';
@@ -26,10 +26,10 @@ export function forumList(dir: string, as: string): string {
 
 /** What `list` shows `as`, without putting a list on record. */
 export function listing(dir: string, as: string): string {
-  const all = readPosts(path.join(dir, POSTS));
+  const config = readSpoolConfig(dir);
+  const all = withVouchedPosts(config.runId, readPosts(path.join(dir, POSTS)));
   const posts = all.filter((p) => visibleTo(p, as));
   const events = readJsonl<ForumEvent>(path.join(dir, EVENTS));
-  const config = readSpoolConfig(dir);
   const roster = config.team ? `${rosterLine(config.team, events, as)}\n` : '';
   if (posts.length === 0) return `${roster}No posts yet.`;
   const seen = seenBy(as, all, events);
@@ -46,7 +46,9 @@ export function listing(dir: string, as: string): string {
 
 export function forumRead(dir: string, as: string, id: string): string {
   const config = readSpoolConfig(dir);
-  const post = readPosts(path.join(dir, POSTS)).find((p) => p.id === id && visibleTo(p, as));
+  const post = withVouchedPosts(config.runId, readPosts(path.join(dir, POSTS))).find(
+    (p) => p.id === id && visibleTo(p, as),
+  );
   if (!post) throw new Error(`No post ${id}`);
   appendLine(path.join(dir, EVENTS), { ts: new Date().toISOString(), type: 'read', who: as, id } satisfies ForumEvent);
   return formatPost(post, authorLabel(config.runId, post));
@@ -64,7 +66,7 @@ export function forumRead(dir: string, as: string, id: string): string {
  */
 export function forumInbox(dir: string, as: string, except?: string): string {
   const config = readSpoolConfig(dir);
-  const posts = readPosts(path.join(dir, POSTS));
+  const posts = withVouchedPosts(config.runId, readPosts(path.join(dir, POSTS)));
   const events = readJsonl<ForumEvent>(path.join(dir, EVENTS));
   const seen = seenBy(as, posts, events);
   for (const id of briefedTo(as, events)) seen.add(id);

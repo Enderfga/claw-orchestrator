@@ -22,7 +22,7 @@ import {
   type ForumPost,
   type RunForum,
 } from '../kernel/forum.js';
-import { POSTS, readPosts } from '../kernel/forum/store.js';
+import { POSTS, readPosts, withVouchedPosts } from '../kernel/forum/store.js';
 import type { RunRecord } from '../kernel/types.js';
 
 /** What a list row and a `forum_post` event carry. */
@@ -114,7 +114,7 @@ function postsFile(id: string): { file: string; signature: string } {
 /** Every post on a forum, in the order written; none when it has no posts or its id is not valid. */
 export function readForumPosts(id: string): ForumPost[] {
   try {
-    return readPosts(postsFile(id).file);
+    return withVouchedPosts(id, readPosts(postsFile(id).file));
   } catch {
     return [];
   }
@@ -233,7 +233,7 @@ export function tailForum(
     signature = current.signature;
     let posts: ForumPost[];
     try {
-      posts = readPosts(current.file);
+      posts = withVouchedPosts(forumId, readPosts(current.file));
     } catch {
       return;
     }
