@@ -26,16 +26,30 @@
  *    checks with the original objective, so the agent keeps its context. A
  *    fresh thread after a red verdict gets the same findings.
  *  - **Steer live.** Text from `workflow_steer` goes into the running turn via
- *    `turn/steer`; with no turn running it waits for the next one.
+ *    `turn/steer`; with no turn running it waits for the next one. A steer is
+ *    handed over once even when it arrives twice, queued by the kernel and
+ *    pushed as the user's forum post; one the node took and never handed over
+ *    goes back to the run's queue when the node ends, for the next node.
  */
 
 import { randomUUID } from 'node:crypto';
 import { SESSION_EVENT } from '../../constants.js';
-import type { NodeContext, NodeResult } from '../engine.js';
+import type { NodeContext, NodeResult, SteerEntry } from '../engine.js';
 import type { GoalNode, NodeSpec } from '../types.js';
 import type { EngineType } from '../../types.js';
-import { goalRepairBrief, interruptedNotice } from './agent.js';
-import { ForumReplyRelay, forumBrief, forumHub, forumTeamOf, resolveForum, unreadFor } from '../forum.js';
+import { goalRepairBrief, interruptedNotice, steerEndInBrief } from './agent.js';
+import {
+  ForumReplyRelay,
+  forumBrief,
+  forumHub,
+  forumMarkDelivered,
+  forumTeamOf,
+  memberNameFor,
+  resolveForum,
+  unreadFor,
+  type ForumDeliveryVia,
+} from '../forum.js';
+import { openAsksNote, type OpenAsk } from '../handover.js';
 
 export type GoalStatus = 'active' | 'paused' | 'blocked' | 'usageLimited' | 'budgetLimited' | 'complete';
 
@@ -106,6 +120,8 @@ export interface GoalNodeData {
    * verdict other than this one.
    */
   repairOf?: string;
+  /** In a completed goal's result, on a run with a forum: the ASKs it left open, or that name it. */
+  forum?: { openAsks: OpenAsk[] };
 }
 
 const TERMINAL: ReadonlySet<string> = new Set(['complete', 'budgetLimited', 'blocked']);
@@ -133,15 +149,27 @@ const chars = (s: string) => [...s].length;
  * full check output stays in the run's evidence.
  */
 export function composeObjective(preface: string[], objective: string): string {
-  if (preface.length === 0) return objective;
+  return composeObjectiveKept(preface, objective).objective;
+}
+
+/**
+ * `composeObjective`, and how much of the preface (`preface.join('\n\n')`, in
+ * UTF-16 code units) the objective carries: all of it, the start of it, or none.
+ * What lies past `kept` never reached the agent.
+ */
+export function composeObjectiveKept(preface: string[], objective: string): { objective: string; kept: number } {
+  if (preface.length === 0) return { objective, kept: 0 };
   const sep = '\n\n---\n\n';
   const cut = '\n[cut to fit the goal objective limit]';
   const head = preface.join('\n\n');
   const room = GOAL_OBJECTIVE_MAX_CHARS - chars(objective) - chars(sep);
-  if (chars(head) <= room) return `${head}${sep}${objective}`;
-  if (room <= chars(cut)) return objective;
-  return `${[...head].slice(0, room - chars(cut)).join('')}${cut}${sep}${objective}`;
+  if (chars(head) <= room) return { objective: `${head}${sep}${objective}`, kept: head.length };
+  if (room <= chars(cut)) return { objective, kept: 0 };
+  const start = [...head].slice(0, room - chars(cut)).join('');
+  return { objective: `${start}${cut}${sep}${objective}`, kept: start.length };
 }
+/** The first words of a forum digest, which hands over titles rather than posts. */
+const DIGEST_HEAD = 'New on the team forum since the last digest';
 const MAX_BACKOFF_MS = 15 * 60_000;
 const DEFAULT_STALL_MS = 5 * 60_000;
 const TICK_MS = 1_000;
@@ -192,15 +220,66 @@ export async function executeGoalNode(node: NodeSpec, ctx: NodeContext): Promise
   const capacityBlock =
     codex && prior?.status === 'blocked' && TRANSIENT_ERRORS.has(prior?.lastError?.code ?? '') && !newRed;
   const finished = !!priorThread && TERMINAL.has(prior?.status ?? '') && !capacityBlock;
+  const forum = resolveForum(ctx.record);
+  const self = memberNameFor(forum ?? {}, spec.forumName ?? spec.id);
+
+  // ── Steers and forum posts on their way into the turn ──────────────────
+  // Kernel steers this node took, in the order taken. A steer counts as consumed
+  // by the node that took it, so one it never handed over goes back to the run's
+  // queue when the node ends (`giveBack`): the next node gets it, or a restart
+  // replays it. The run's accounting is by count over the log's order, so they
+  // are handed over in the order taken, and what goes back is always the tail.
+  const taken: Array<{ entry: SteerEntry; handed: boolean }> = [];
+  // What waits for the turn: one item per forum post (a push, the queued steer
+  // it was also written as, or both), or per steer that has no post.
+  const pending: Array<{ text: string; ids: string[]; held: number[]; digest?: boolean }> = [];
+  // Forum posts already in a turn: a steer pushed and handed over is not handed over again when the queue gives it.
+  const handed = new Set<string>();
+  let gaveBack = false;
+  const takeSteers = () => {
+    if (gaveBack) return;
+    for (const entry of ctx.takeSteerEntries()) {
+      const index = taken.push({ entry, handed: false }) - 1;
+      if (entry.postId && handed.has(entry.postId)) {
+        taken[index].handed = true;
+        continue;
+      }
+      const same = entry.postId ? pending.find((p) => p.ids.includes(entry.postId!)) : undefined;
+      if (same) same.held.push(index);
+      else pending.push({ text: entry.text, ids: entry.postId ? [entry.postId] : [], held: [index] });
+    }
+    // The items that hold steers, put back in their own places in the order the steers were taken.
+    const slots = pending.flatMap((p, i) => (p.held.length ? [i] : []));
+    const ordered = slots.map((i) => pending[i]).sort((a, b) => Math.min(...a.held) - Math.min(...b.held));
+    slots.forEach((slot, k) => (pending[slot] = ordered[k]));
+  };
+  const handOver = (item: (typeof pending)[number], via: ForumDeliveryVia) => {
+    for (const i of item.held) taken[i].handed = true;
+    const ids = item.ids.filter((id) => !handed.has(id));
+    for (const id of ids) handed.add(id);
+    if (forum && ids.length) {
+      try {
+        forumMarkDelivered(forum.runId, self, ids, via);
+      } catch (err) {
+        ctx.logger.warn?.(
+          `[goal ${ctx.runId}/${spec.id}] could not record a forum delivery: ${(err as Error).message}`,
+        );
+      }
+    }
+  };
+  const giveBack = () => {
+    if (gaveBack) return;
+    gaveBack = true;
+    const back = taken.filter((t) => !t.handed).map((t) => t.entry.text);
+    if (back.length) ctx.untakeSteer(back);
+  };
+
   // A finished goal also goes back to work, on the same thread, for word that
   // reached it after it ended: a steer, or a forum post that names it. Without
   // either, a revisit is the process dying after the goal ended but before this
   // node's result was committed, and the goal's own ending stands.
-  const forum = resolveForum(ctx.record);
-  const self = forum?.agent ?? spec.id;
-  const pendingSteer = finished && !newRed ? ctx.takeSteer() : [];
-  const reopening =
-    finished && !newRed && (pendingSteer.length > 0 || (!!forum && unreadFor(forum.runId, self).length > 0));
+  if (finished && !newRed) takeSteers();
+  const reopening = finished && !newRed && (taken.length > 0 || (!!forum && unreadFor(forum.runId, self).length > 0));
   const repairing = finished && (newRed || reopening);
   const resuming = !!priorThread && !finished;
   // The first visit may start on a thread the caller names; after that the
@@ -276,10 +355,12 @@ export async function executeGoalNode(node: NodeSpec, ctx: NodeContext): Promise
     if (data.status === 'complete') {
       const costUsd = spent();
       publish(true);
+      // The ASKs it left open, or that name it, said in its result for a later node and whoever reads the run.
+      const asks = forum ? openAsksNote(forum.runId, [self]) : undefined;
       return {
         ok: true,
-        output: `goal complete: ${data.tokensUsed} tokens, ${data.timeUsedSeconds}s`,
-        data: { ...data },
+        output: `goal complete: ${data.tokensUsed} tokens, ${data.timeUsedSeconds}s${asks?.note ?? ''}`,
+        data: { ...data, ...(asks?.openAsks.length ? { forum: { openAsks: asks.openAsks } } : {}) },
         costUsd,
       };
     }
@@ -386,6 +467,8 @@ export async function executeGoalNode(node: NodeSpec, ctx: NodeContext): Promise
         ...(engineName === 'acp' && spec.acpAgent ? { acpAgent: spec.acpAgent } : {}),
         launcher: spec.launcher,
         permissionMode: 'bypassPermissions',
+        // The run's session: its messages go through the run's forum.
+        ownerRunId: ctx.runId,
         // The node checkpoints the thread id itself; a registry entry would only
         // let a later session of the same name pick the thread up behind its back.
         // Registry only: `noSessionPersistence` also stops the engine writing the
@@ -436,22 +519,32 @@ export async function executeGoalNode(node: NodeSpec, ctx: NodeContext): Promise
     return undefined;
   };
 
-  ctx.setHandle({ abort: () => undefined });
-  const steers: string[] = [];
+  // A cancel or this attempt's timeout gives back the steers not handed over
+  // now: the kernel records what the node consumed as soon as it stops waiting.
+  ctx.setHandle({ abort: giveBack });
   // On a run with a forum the goal is on it while it works: a post pushed to it
-  // joins the steers, which reach the turn in flight within a tick.
+  // waits with the steers and reaches the turn in flight within a tick. It is
+  // recorded as delivered only once it is in the turn. A Codex objective holds
+  // 4,000 characters, so a Codex goal gets the short brief.
   const forumIntro = forum
     ? forumBrief(forum.runId, self, forumTeamOf(forum.runId), forum.config, {
         readOnly: spec.sandboxMode === 'read-only',
+        ...(codex ? { compact: true } : {}),
       })
     : undefined;
   const leaveForum = forum
     ? forumHub(forum.runId, forum.config).join(
         self,
-        (text) => {
-          steers.push(text);
+        (text, ids) => {
+          if (ids.length > 0 && ids.every((id) => handed.has(id))) return 'queued';
+          const same = pending.find((p) => p.ids.some((id) => ids.includes(id)));
+          if (same) {
+            for (const id of ids) if (!same.ids.includes(id)) same.ids.push(id);
+          } else {
+            pending.push({ text, ids: [...ids], held: [], ...(text.startsWith(DIGEST_HEAD) ? { digest: true } : {}) });
+          }
           wake?.();
-          return true;
+          return 'queued';
         },
         { cwd: spec.cwd || ctx.cwd, readOnly: spec.sandboxMode === 'read-only' },
       )
@@ -483,27 +576,43 @@ export async function executeGoalNode(node: NodeSpec, ctx: NodeContext): Promise
       // A goal that picks its thread back up (above) has the conversation of what
       // it did; one starting a new thread after an interruption does not.
       const interrupted = interruptedNotice(ctx, node.id);
-      const preface = [
-        ...(interrupted ? [interrupted] : []),
-        ...(forumIntro ? [forumIntro] : []),
-        ...pendingSteer,
-        ...ctx.takeSteer(),
-        ...(brief ? [brief] : []),
-      ];
+      // Every steer waiting goes in ahead of the goal; one the forum brief shows whole is not repeated.
+      takeSteers();
+      const prefaced = pending.filter((p) => p.held.length > 0);
+      for (const item of prefaced) pending.splice(pending.indexOf(item), 1);
+      const preface = [...(interrupted ? [interrupted] : []), ...(forumIntro ? [forumIntro] : [])];
+      // Where each steer's text ends in the preface: in its post, when the forum
+      // brief shows it whole, or as a part of its own after the brief.
+      const introAt = interrupted ? interrupted.length + 2 : 0;
+      const textEnd = new Map<number, number>();
+      for (const i of prefaced.flatMap((p) => p.held)) {
+        const inBrief = steerEndInBrief(taken[i].entry, forumIntro);
+        if (inBrief !== undefined) textEnd.set(i, introAt + inBrief);
+        else textEnd.set(i, (preface.push(taken[i].entry.text), preface.join('\n\n').length));
+      }
+      if (brief) preface.push(brief);
       if (startThread) await session!.clearGoal();
       // On Claude the condition is the caller's objective, word for word; steers
-      // and the failing checks go in ahead of it as context (see setGoal there).
-      const goal = claude
-        ? await session!.setGoal({
+      // and the failing checks go in ahead of it as context (see setGoal there),
+      // never cut. Elsewhere they share the objective's 4,000 characters.
+      const composed = claude ? undefined : composeObjectiveKept(preface, spec.objective);
+      const goal = composed
+        ? await session!.setGoal({ objective: composed.objective, tokenBudget: spec.tokenBudget ?? null })
+        : await session!.setGoal({
             objective: spec.objective,
             tokenBudget: spec.tokenBudget ?? null,
             ...(preface.length ? { context: preface.join('\n\n') } : {}),
-          })
-        : await session!.setGoal({
-            objective: composeObjective(preface, spec.objective),
-            tokenBudget: spec.tokenBudget ?? null,
           });
       data.repairOf = red;
+      // Handed over with the objective: the steers whose text it kept, in the
+      // order taken, up to the first one the cut dropped. That one and those
+      // after it wait for the live turn, or go back to the run's queue when the
+      // goal ends, so what goes back stays the tail.
+      const kept = composed?.kept ?? Number.POSITIVE_INFINITY;
+      const cutAt = prefaced.findIndex((item) => item.held.some((i) => (textEnd.get(i) ?? 0) > kept));
+      const sent = cutAt < 0 ? prefaced : prefaced.slice(0, cutAt);
+      for (const item of sent) handOver(item, 'turn');
+      pending.unshift(...prefaced.slice(sent.length));
       absorb(goal);
     }
     publish(true);
@@ -563,11 +672,17 @@ export async function executeGoalNode(node: NodeSpec, ctx: NodeContext): Promise
       }
       const live = session!;
 
-      steers.push(...ctx.takeSteer());
-      while (steers.length > 0 && live.turnActive) {
-        const r = await live.steer(steers[0]).catch(() => ({ steered: false }));
+      // Steers and pushes into the turn in flight, oldest first. The queue is
+      // read before each one: a steer pushed during the last hand-over is placed
+      // by when it was queued, not after whatever came by push meanwhile.
+      for (;;) {
+        takeSteers();
+        const item = pending[0];
+        if (!item || !live.turnActive) break;
+        const r = await live.steer(item.text).catch(() => ({ steered: false }));
         if (!r.steered) break;
-        steers.shift();
+        pending.splice(pending.indexOf(item), 1);
+        handOver(item, item.digest ? 'digest' : 'push');
       }
 
       if (Date.now() - lastPoll >= POLL_EVERY_MS) {
@@ -635,6 +750,7 @@ export async function executeGoalNode(node: NodeSpec, ctx: NodeContext): Promise
     return fail(`goal node failed: ${(err as Error).message}`);
   } finally {
     leaveForum?.();
+    giveBack();
     await release();
   }
 }

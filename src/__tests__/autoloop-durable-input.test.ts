@@ -185,6 +185,7 @@ vi.mock('node:fs', async () => {
 const { SessionManager } = await import('../session-manager.js');
 const { EmbeddedServer } = await import('../embedded-server.js');
 const { leaseIsStale, readLease } = await import('../kernel/store.js');
+const { FORUM_APPENDIX_SEPARATOR } = await import('../autoloop/forum-bridge.js');
 
 function createManager(logger?: Logger): InstanceType<typeof SessionManager> {
   const mgr = new SessionManager(
@@ -204,8 +205,9 @@ function createManager(logger?: Logger): InstanceType<typeof SessionManager> {
 const fence = (tool: string, args: Record<string, unknown>): string =>
   `\`\`\`autoloop\n${JSON.stringify({ tool, args })}\n\`\`\``;
 
+/** What a role was sent, without what the run forum adds after it (its brief, posts for it). */
 const messageText = (message: string | unknown[]): string =>
-  typeof message === 'string' ? message : JSON.stringify(message);
+  (typeof message === 'string' ? message : JSON.stringify(message)).split(FORUM_APPENDIX_SEPARATOR)[0];
 
 /** Exact parked-chat label match: U1 must not match U10. */
 const textsExactChat = (planner: MockSession, needle: string): string[] =>

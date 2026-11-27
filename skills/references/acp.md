@@ -121,8 +121,12 @@ Either command with no council parked is refused with `invalid params`.
 ### Ultraplan and ultrareview
 
 Neither emits events — they are started and then polled — so progress is reported as
-`agent_thought_chunk` heartbeats. The agent does not stop either run on a cancel:
-cancelling one abandons the poll, and the run carries on.
+`agent_thought_chunk` updates: each poll that finds new posts on the run's forum sends their
+titles, one `<author>: <title>` line each (the planner's questions, each reviewer's findings; a
+`user` or `orchestrator` author the forum does not vouch for is marked `(unverified)`),
+and a poll that finds none sends a `.` heartbeat. A run without a forum sends only the heartbeat.
+The agent does not stop either run on a cancel: cancelling one abandons the poll, and the run
+carries on.
 
 ## Cross-engine model selector
 

@@ -27,6 +27,7 @@ import type {
 import { type Logger } from './logger.js';
 import { mapBounded } from './concurrency.js';
 import { sanitizeCwd } from './validation.js';
+import { fenceForumText } from './kernel/forum/render.js';
 import * as path from 'node:path';
 
 /** Minimal SessionManager surface used by Fanout (avoids a circular import). */
@@ -78,10 +79,10 @@ export interface FanoutConfig {
   /** The ACP agent preset the synthesis pass starts when `synthesisEngine` is `acp`. */
   synthesisAcpAgent?: string;
   /**
-   * Permission mode for the synthesis pass. Defaults to `bypassPermissions`
-   * like the agents do, but a read-only fan-out has to pass `plan` here too:
-   * synthesis shares the project directory, so a writable synthesiser can edit
-   * the code the read-only agents were only allowed to look at.
+   * Kept for callers that set it. The synthesis pass reads the agents' answers
+   * and writes one of its own, so it always runs read-only: `permissionMode:
+   * 'plan'` and `sandboxMode: 'read-only'` (an ACP agent, which cannot be held
+   * to a sandbox, gets `plan` alone).
    */
   synthesisPermissionMode?: PermissionMode;
   agentTimeoutMs?: number;
@@ -100,6 +101,8 @@ export interface FanoutConfig {
   signal?: { aborted: boolean };
   /** Text put in front of an agent's message, such as the run forum's brief for it. */
   agentPreface?: (agent: string) => string | undefined;
+  /** Put `agentPreface` after the agent's message instead, so the message's first line stays first. */
+  agentPrefaceAfter?: boolean;
   /**
    * Called once an agent's session is up, with the session's name; the returned
    * function is called when the agent finishes. The run forum joins the agent here.
@@ -107,6 +110,12 @@ export interface FanoutConfig {
   onAgentSession?: (agent: string, sessionName: string) => (() => void) | undefined;
   /** An agent's reply so far as it streams, and then its whole reply (the forum posts written in it). */
   onAgentText?: (agent: string, text: string) => void;
+  /**
+   * The name the synthesis pass goes by with `agentPreface`, `onAgentSession`
+   * and `onAgentText` (its forum member name); without it those hooks are for
+   * the agents alone.
+   */
+  synthesisName?: string;
 }
 
 export interface FanoutAgentResult {
@@ -266,24 +275,21 @@ export class Fanout {
         maxBudgetUsd: this.config.maxBudgetUsd,
         customEngine: spec.customEngine,
         ...(spec.acpAgent === undefined ? {} : { acpAgent: spec.acpAgent }),
+        ...this._owner(),
       });
       leave = this.config.onAgentSession?.(spec.name, sessionName);
       const preface = this.config.agentPreface?.(spec.name);
       const message = agentMessage(spec, this.config.task);
       const before = this._stats(sessionName);
-      const result = await this.manager.sendMessage(
-        sessionName,
-        preface ? `${preface}\n\n---\n\n${message}` : message,
-        {
-          timeout: timeoutMs,
-          parentRunId: this.session.id,
-          nodeKind: 'fanout',
-          onChunk: (text: string) => {
-            streamed += text;
-            this.config.onAgentText?.(spec.name, streamed);
-          },
+      const result = await this.manager.sendMessage(sessionName, this._withPreface(message, preface), {
+        timeout: timeoutMs,
+        parentRunId: this.session.id,
+        nodeKind: 'fanout',
+        onChunk: (text: string) => {
+          streamed += text;
+          this.config.onAgentText?.(spec.name, streamed);
         },
-      );
+      });
       if (result.output) this.config.onAgentText?.(spec.name, result.output);
       const after = this._stats(sessionName);
       // `ok` used to be an unconditional true in this block, i.e. "the call did
@@ -324,6 +330,17 @@ export class Fanout {
     }
   }
 
+  /** The run whose sessions these are: their messages go through its forum. */
+  private _owner(): { ownerRunId?: string } {
+    return this.config.runId ? { ownerRunId: this.config.runId } : {};
+  }
+
+  /** `text` with `preface` before it, or after it when the config asks for that. */
+  private _withPreface(text: string, preface: string | undefined): string {
+    if (!preface) return text;
+    return this.config.agentPrefaceAfter ? `${text}\n\n---\n\n${preface}` : `${preface}\n\n---\n\n${text}`;
+  }
+
   /** A failed turn's error, said plainly when the cause was the timeout. */
   private _failure(message: string, timeoutMs: number): { error: string; timedOut?: true } {
     if (!isTurnTimeout(message)) return { error: message };
@@ -360,28 +377,55 @@ export class Fanout {
 
   private async _synthesize(results: FanoutAgentResult[]): Promise<string | undefined> {
     const sessionName = `${this.session.id}-synthesis`;
+    // The agents' answers are its material, and the forum posts written as
+    // blocks in them were posted already: fenced, a synthesis that quotes one
+    // does not post it again.
     const combined = results
-      .map((r, i) => `### Response ${i + 1} — ${r.agent} (${r.engine}${r.model ? `/${r.model}` : ''})\n\n${r.output}`)
+      .map(
+        (r, i) =>
+          `### Response ${i + 1} — ${r.agent} (${r.engine}${r.model ? `/${r.model}` : ''})\n\n${fenceForumText(r.output)}`,
+      )
       .join('\n\n---\n\n');
-    const prompt =
+    const task =
       `You are synthesizing ${results.length} independent responses to the same task. Produce one ` +
       `consolidated best answer: reconcile agreements, note meaningful disagreements, and keep the ` +
       `strongest ideas from each.\n\nTask:\n${this.config.task}\n\nResponses:\n\n${combined}`;
+    const engine = this.config.synthesisEngine || defaultEngine();
+    const name = this.config.synthesisName;
+    const onText = name ? this.config.onAgentText : undefined;
+    let leave: (() => void) | undefined;
+    let streamed = '';
     try {
+      // Read-only on every engine: it shares the project directory, and its
+      // work is text. An ACP agent cannot be held to a sandbox; `plan` refuses
+      // the permission requests it sends.
       await this.manager.startSession({
         name: sessionName,
         cwd: this.config.projectDir,
-        engine: this.config.synthesisEngine || defaultEngine(),
+        engine,
         model: this.config.synthesisModel,
         ...(this.config.synthesisAcpAgent === undefined ? {} : { acpAgent: this.config.synthesisAcpAgent }),
-        permissionMode: this.config.synthesisPermissionMode ?? 'bypassPermissions',
+        permissionMode: 'plan',
+        ...(engine === 'acp' ? {} : { sandboxMode: 'read-only' as const }),
         maxTurns: this.config.maxTurnsPerAgent ?? DEFAULT_MAX_TURNS,
         maxBudgetUsd: this.config.maxBudgetUsd,
+        ...this._owner(),
       });
-      const result = await this.manager.sendMessage(sessionName, prompt, {
+      leave = name ? this.config.onAgentSession?.(name, sessionName) : undefined;
+      const preface = name ? this.config.agentPreface?.(name) : undefined;
+      const result = await this.manager.sendMessage(sessionName, this._withPreface(task, preface), {
         timeout: this.config.agentTimeoutMs ?? DEFAULT_AGENT_TIMEOUT_MS,
         parentRunId: this.session.id,
+        ...(name && onText
+          ? {
+              onChunk: (text: string) => {
+                streamed += text;
+                onText(name, streamed);
+              },
+            }
+          : {}),
       });
+      if (name && onText && result.output) onText(name, result.output);
       if (result.usage) this._charge(result.usage.costUsd);
       // `sendMessage` reports a turn-level failure (auth loss mid-turn, invalid
       // model, rate-limit exhaustion) by RETURNING `{error}`, not by throwing —
@@ -401,6 +445,7 @@ export class Fanout {
       this.logger?.error?.(`Fanout synthesis failed: ${msg}`);
       return undefined;
     } finally {
+      leave?.();
       await this.manager.stopSession(sessionName).catch(() => {
         // Best-effort cleanup.
       });

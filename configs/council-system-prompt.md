@@ -84,8 +84,7 @@ Do not rely on conversation history. **History gets stale, but Git state is alwa
 When `plan.md` enters the Review phase:
 
 * **Review others' work, not just your own output.** Switch to the `main` branch and read code/docs submitted by other Agents.
-* **Structured feedback**: Write review comments to a separate file `reviews/{{name}}-on-<target>.md` — do not mix them into your own feedback file.
-* **Review criteria**: Give a clear `[APPROVE]` or `[REQUEST_CHANGES]` with specific reasons.
+{{reviewRules}}
 * **Merge threshold**: At least 2/3 of Agents must give `[APPROVE]` for content to pass.
 
 ### 6. Autonomous Conflict Resolution

@@ -847,6 +847,13 @@ describe('EmbeddedServer', () => {
         expect(res.status).toBe(200);
         expect(workflowApprove).toHaveBeenLastCalledWith('r1', approved);
       }
+      // A comment goes with the answer.
+      const res = await request(port, '/workflow/r1/approve', {
+        method: 'POST',
+        body: { approved: true, comment: 'use pnpm' },
+      });
+      expect(res.status).toBe(200);
+      expect(workflowApprove).toHaveBeenLastCalledWith('r1', true, 'use pnpm');
     });
 
     it('returns 404 for unknown routes', async () => {

@@ -7,6 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The run forum carries every mode's messages.** Every message between a run's agents, the orchestrator and the
+  user is a post on the run's forum, which every run now has. `forum` decides only whether the agents are on it
+  (briefed, able to run `clawo forum`, pushed what is addressed to them). Decisions never come from it: council
+  votes, verifier verdicts, gate approvals, autoloop controls and acceptance are still read from an agent's own reply
+  or from the kernel; a post only mirrors them.
+  - Two reserved names, `user` and `orchestrator`, speak for the person who started the run and for clawo. A post
+    under either counts only when the forum's authored ledger, which only the runtime writes, holds it; any other line
+    under those names is shown as `user (unverified)` and treated as an agent's. Pushed posts are framed by who wrote
+    them, and agent text that reaches another agent's prompt is fenced.
+  - **Workflows.** `workflow_steer` posts the steer as the user's `FIX: …`, so running agents that take input
+    mid-turn have it at once; the queue and its restart accounting are unchanged. A node's output is posted as
+    `DONE: <member> output` when the node ends. A `human_gate` asks `ASK @user: …`, and `workflow_approve`,
+    `POST /workflow/<id>/approve` and `clawo workflow approve --comment` take a comment, posted with the answer and
+    handed to the next agent. The verifier mirrors its verdict. A verifier's fixer, a fan-out's synthesis and a
+    subflow's agents are members. `workflow_start` takes `forum` for every template; `clawo solve --forum`,
+    `clawo goal --forum`.
+  - **Council.** Seats are members for their rounds (on by default; `forum: false` turns it off). Each round report
+    is posted for its seat, and the next round's history is built from those posts. Seats ask and answer each other
+    mid-round and post their reviews (`council_review` returns them as `forumReviews`). `council_inject` posts the
+    user's message: it works from any process, adds to earlier messages instead of replacing them, reaches running
+    seats mid-turn and every seat's next round. `workflow_steer` reaches a council's next round. UltraApp's build
+    council runs on its build run's forum, and each round is a build event the narrator reports.
+  - **Autoloop.** The Planner, Coder and Reviewer are members (on by default; `forum: false` on `autoloop_start`
+    turns it off); the Reviewer posts and reads nothing of the others. The loop's messages are posted — directives,
+    acknowledgements, iteration summaries, verdicts with audit notes, errors, the user's chat — and the Planner's and
+    Coder's turns carry the posts addressed to them. `workflow_steer` reaches a running autoloop.
+  - **Ultraplan and ultrareview** run on a forum by default. Each reviewer posts its findings as it finds them and
+    sees no other reviewer's posts; `ultrareview_status` reports `forum: { posts, failTitles, openAsks }` while the
+    review runs. The planner asks the user with `ASK @user: …`; `ultraplan_status` lists those as `openAsks`, and a
+    `workflow_forum post` answers it during the planner's turn. ACP's ultraplan and ultrareview modes stream new post
+    titles as thoughts.
+  - **Sessions.** Cross-session messages (`session_send_to`, `team_send`, broadcasts) are posts on a session forum
+    (`fm-sessions-…`, one per server process), delivered as before. A session answers a message with a
+    `<new-forum-post re="p…">` block in its reply, and the answer goes back to the sender. Handoffs are recorded there.
+  - `workflow_forum` takes `author` (`orchestrator`, `user`), `re` and `to`, returns a post's notes and each listed
+    post's `authority`, and lists any run's forum or a session forum (`fm-…`).
+  - The dashboard shows each run's forum live in the Runs, Council and Autoloop views, with who each post speaks for,
+    and posts to a run as the user. `/workflow/<id>/events` and `/autoloop/<id>/events` send `forum_post` events.
+
+### Changed
+
+- A fan-out's synthesis pass always runs read-only (`permissionMode: "plan"` and `sandboxMode: "read-only"`; plan
+  alone on ACP); `synthesisPermissionMode` no longer has an effect.
+- Sessions a run started (a council, an autoloop, a fan-out, a workflow node) are left out of broadcasts and
+  `team_list`, and `session_send_to` to or from one is refused with a pointer to `workflow_forum post` on its run.
+  Claude Code sessions a mode starts refuse native peer messages unless the mode sets `crossSessionInbound`. A
+  session cannot message itself.
+- `session_inbox` shows the newest 200 messages, read or not, and counts a message read once it was handed over.
+- The forum's spool is created owner-only (`0700`/`0600`), removed when its run ends and put back from the run
+  directory when it is needed again; spools of finished or deleted runs are removed when a server starts. Deleting a
+  run removes its spool, so a run that reuses the id starts on an empty forum.
+
 ### Fixed
 
 - **A run left behind by a reboot can be resumed again.** On the same host a lease was judged only by whether its
@@ -14,6 +68,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the run then stayed locked with no owner to release it. On Linux the lease now also records the host's boot id
   and the owner process's start time: a lease taken under another boot, or whose pid now belongs to a process
   started at a different time, is stale. Leases written before this change are judged by the pid alone.
+- A steer that a running goal took but never handed over was lost and still counted as consumed; it now goes back to
+  the run's queue for the next node.
+- `council_inject`, `council_status`, `council_abort` and `council_review` work on councils started from the
+  `council` template or a custom spec (they assumed node id `main`), and a council resumed after a stop goes on from
+  the last round every seat finished instead of starting over.
+- A Codex council seat in its `workspace-write` sandbox could not commit in its worktree, since git's metadata lies
+  outside the sandbox; the council now commits the seat's changes to its `council/<name>` branch after each of its
+  turns, running nothing the seat wrote (no hooks, no fsmonitor, no submodules).
+- `ultraplan_status`'s `sessionName` names the planner's actual session.
 
 ## [7.36.0] - 2026-11-27
 

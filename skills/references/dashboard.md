@@ -34,6 +34,42 @@ body and drops you into an interview (the spec is built conversationally).
 The header shows the spend recorded in the run ledger over the last 24 hours,
 across every engine, refreshed every 30 seconds.
 
+Every run opened in the Autoloop, Council or Runs tab also shows its forum in a
+[Forum pane](#forum-pane).
+
+## Forum pane
+
+The pane lists the posts on the run's forum, oldest first, and follows new ones
+live. Each row shows:
+
+- **Who wrote it.** `user` and `orchestrator` badges mark posts the forum's
+  authored ledger vouches for: the user's words, or clawo and the tool caller
+  acting for it. Any other author is an agent, shown by name. A post that carries
+  `user` or `orchestrator` as its author without the ledger's backing was written
+  by an agent; it is shown as `user (unverified)` (or `orchestrator (unverified)`)
+  on an amber badge.
+- **Its tags** (`ASK`, `FAIL`, `WIN`, `DONE`, `FIX`, `INFO`), its recipients
+  (`→ @name`), and when present how it got there (`via reply`, `via round`,
+  `via envelope`, `via output`), `private` for a post only its author and
+  recipients see, and the posts it answers (`re p00012`).
+- **Its id and time.**
+
+Clicking a row opens the post in full: its body, its score, the recipients it was
+sent to directly, and its machine payload (`data`, collapsed). **Reply** marks the
+post the next message answers.
+
+The box under the list posts to the run as the user, through `workflow_forum
+post`, so the post reaches the run's members by the same rules as any user post.
+The first line is the title (start it with a tag and name a member with `@name`
+to address it); the rest is the body. Cmd/Ctrl+Enter sends. A refusal or a note
+from the forum is shown above the box.
+
+When the run's agents are not on its forum (no `forum` on its spec), the header
+says so: the pane then holds the runtime's own posts only, as a log of the run.
+
+The pane reads `/workflow/<id>/forum` and follows `/workflow/<id>/events`, so it
+works for any run that is a durable workflow run, whichever process runs it.
+
 ## Standalone deployment
 
 The recommended way to run the dashboard 24/7 is a separate `clawo serve`
@@ -205,6 +241,31 @@ as one of three things:
 
 Opening a run shows per-node state (kind, attempts, visit count for loops, and
 any error), the consensus votes when a council node ran — labelled advisory,
-because they are recorded rather than used to decide completion — and the
+because they are recorded rather than used to decide completion — the
 evidence bundle: per-check pass/fail with the failing detail, the fix rounds
-consumed, and how many files changed since the base commit.
+consumed, and how many files changed since the base commit — and the run's
+[Forum pane](#forum-pane).
+
+## HTTP routes of the forum pane
+
+| Route                             | Method    | What it does                                                                                                                                                                              |
+| --------------------------------- | --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/workflow/<id>/forum`            | GET, POST | The newest posts of the run's forum (500 by default, `limit` up to 5000), with `total`, the highest post id (`last`) and whether the run's agents are on it (`exposed`). Records no read. |
+| `/workflow/<id>/forum?post=<pid>` | GET       | One post in full (`postId` in a POST body does the same). 404 when there is no such post.                                                                                                 |
+| `/workflow/<id>/forum/post`       | POST only | Posts as the user through `workflow_forum post`. Body: `{ title, body?, re? }` (`re`: a post id or a list of them). Returns the post as listed, and `notes` when the forum gave any.      |
+| `/workflow/<id>/events`           | GET (SSE) | Besides `snapshot` and `workflow-event`, sends one `forum_post` event per post written while it is open.                                                                                  |
+
+A listed post and the data of a `forum_post` event have the same fields: `id`,
+`ts`, `from`, `authority` (`user`, `orchestrator` or `agent`, from the forum's
+authored ledger, never from the post's own `from`), `tags`, `to`, `title`, and
+when present `re`, `via` and `visibility`. A post in full adds `body`, and when
+present `score`, `direct` and `data`.
+
+Each `forum_post` event carries the post id as its SSE `id`, so a reconnecting
+`EventSource` resumes after the last post it received (`Last-Event-ID`). On a
+first connection, `?forumSince=<pid>` sends the posts after that one before the
+new ones; without it, only posts written from then on are sent. The forum of a
+run bound to another run's forum (a fan-out goal agent's or a subflow's child run)
+is that run's forum. New posts are found by polling the forum's files every
+second, so they arrive within about a second of being written, whichever
+process wrote them.

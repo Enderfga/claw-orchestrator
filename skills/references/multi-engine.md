@@ -753,9 +753,11 @@ is not the answer on every engine. See [Stats & Monitoring](./sessions.md#stats-
 
 ## Team Tools Across Engines
 
-Team tools (`team_list`, `team_send`) operate on the same virtual-team layer for **every** engine: the "team" is the set of all active sessions managed by SessionManager, whatever engine each one runs. `team_list` lists the other active sessions with their engine and status; `team_send` routes a message through the cross-session inbox.
+Team tools (`team_list`, `team_send`) operate on the same virtual-team layer for **every** engine: the "team" is the set of active plain sessions managed by SessionManager, whatever engine each one runs. `team_list` lists the other active sessions with their engine and status; `team_send` sends a message the way `session_send_to` does, as a post on the session forum.
 
-Messages are delivered via the inbox system — idle sessions receive immediately, busy sessions queue for later delivery.
+Delivery is the inbox's (see [inbox.md](./inbox.md)): an idle session gets the message as a new turn, a busy Claude Code or `codex-app` session in the turn in flight, and any other session keeps it unread until `session_deliver_inbox`. A teammate answers with a `<new-forum-post re="…">` block in its reply, which comes back to the sender.
+
+Sessions that a council, an autoloop, a fan-out or a workflow node started belong to their run: `team_list` leaves them out, and `team_send` to one fails with the way to reach it (`workflow_forum` `post` on that run). A Claude Code session started this way also refuses Claude Code's own peer messages (`crossSessionInbound: 'refuse'`) unless its mode set a policy.
 
 > **Note:** Claude Code does have a native experimental "Agent Teams" feature (v2.1.32+, `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`), but it is an in-process TUI mechanism with no slash command or stdin-driven messaging — a subprocess wrapper cannot access its mailbox. Plugin team tools therefore use the engine-agnostic virtual team across the board.
 

@@ -130,7 +130,7 @@ const LEASE_RENEWING_ACTIVITY_SET = new Set<string>(LEASE_RENEWING_ACTIVITY_KIND
  * Events emitted by the runner (string keys, documented payloads):
  * - 'message'    : (env: AnyAutoloopMessage) — every routed message
  * - 'state'      : (state: AutoloopState) — status / iter changes
- * - 'push'       : ({ level, summary, detail?, channel }) — fired before notifyUser
+ * - 'push'       : ({ level, summary, detail?, channel }, env) — fired before notifyUser
  * - 'iter_done'  : ({ iter, verdict, metric }) — Reviewer verdict committed
  * - 'send_timeout': (payload: SendTimeoutPayload) — recoverable agent deadline
  * - 'timeout'    : (event: AutoloopTimeoutEvent) — lease or hard deadline expired
@@ -175,6 +175,8 @@ export class AutoloopRunner extends EventEmitter {
   private restorePhase: 'none' | 'loaded' | 'reconciled' = 'none';
   /** Restored pending chat ids, released in this order once the run is ready. */
   private restoredChatIds: string[] = [];
+  /** Envelopes a role's turn produced (the dispatcher's replies), as opposed to the runner's or an operator's. */
+  private readonly agentMessages = new WeakSet<AnyAutoloopMessage>();
 
   constructor(config: AutoloopConfig) {
     super();
@@ -393,6 +395,11 @@ export class AutoloopRunner extends EventEmitter {
     this.recordActivity('queue_message_accepted');
     this.queue.push(env);
     await this.drain();
+  }
+
+  /** Whether `env` came out of a role's turn, rather than from the runner or an operator. */
+  emittedByAgent(env: AnyAutoloopMessage): boolean {
+    return this.agentMessages.has(env);
   }
 
   /** External entry: user typed something to Planner. */
@@ -670,6 +677,7 @@ export class AutoloopRunner extends EventEmitter {
       // progress. Letting it renew the lease would make a timeout extend the
       // run whose lack of progress caused it.
       if (r.type !== 'send_timeout') this.recordActivity('agent_progress');
+      this.agentMessages.add(r);
       this.queue.push(r);
     }
   }
@@ -940,7 +948,7 @@ export class AutoloopRunner extends EventEmitter {
     this.recentPushes.push({ key, ts: now });
 
     this.state.push_log_count++;
-    this.emit('push', { level: p.level, summary: p.summary, detail: p.detail, channel: p.channel });
+    this.emit('push', { level: p.level, summary: p.summary, detail: p.detail, channel: p.channel }, env);
     await this.config.notifyUser(p.level, p.summary, p.detail, p.channel);
   }
 

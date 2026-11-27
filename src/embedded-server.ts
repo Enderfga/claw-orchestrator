@@ -16,8 +16,20 @@ import { SessionManager } from './session-manager.js';
 import { sanitizeCwd, validateRegex } from './validation.js';
 import { resolveSecretRefs } from './kernel/secrets.js';
 import { summarize, type RunSummary } from './kernel/store.js';
+import type { RunRecord } from './kernel/types.js';
+import {
+  asForumPost,
+  forumListing,
+  forumOfRun,
+  isForumPostId,
+  postDetail,
+  readForumPosts,
+  summarizePost,
+  tailForum,
+} from './dashboard/forum-feed.js';
 import { validateAutoloopTimeoutConfig } from './autoloop/types.js';
 import { isUnconfirmedChatNotice } from './autoloop/dispatcher.js';
+import { followForumPosts } from './autoloop/forum-bridge.js';
 import { boundedErrorReason } from './sanitize.js';
 import type { EffortLevel, EngineType } from './types.js';
 import { handleChatCompletion } from './openai-compat.js';
@@ -124,7 +136,7 @@ const READ_ROUTES = new Set([
   '/tool',
 ]);
 const READ_ROUTE_PATTERN =
-  /^\/(?:council\/[^/]+\/(?:state|events)|workflow\/[^/]+\/(?:state|evidence|events)|autoloop\/[^/]+\/(?:state|push_log|chat_history|events|resume-requirements)|ultraapp\/(?!new$)[^/]+(?:\/(?:artifacts|events))?)$/;
+  /^\/(?:council\/[^/]+\/(?:state|events)|workflow\/[^/]+\/(?:state|evidence|events|forum)|autoloop\/[^/]+\/(?:state|push_log|chat_history|events|resume-requirements)|ultraapp\/(?!new$)[^/]+(?:\/(?:artifacts|events))?)$/;
 
 function isReadRoute(path: string): boolean {
   return READ_ROUTES.has(path) || READ_ROUTE_PATTERN.test(path);
@@ -224,7 +236,7 @@ export const __rejectCustomEngineOverHttpForTest = rejectCustomEngineOverHttp;
  */
 const SSE_HEARTBEAT_MS = 25_000;
 
-function sseSender(res: http.ServerResponse): (event: string, data: unknown) => void {
+function sseSender(res: http.ServerResponse): (event: string, data: unknown, id?: string) => void {
   let closed = false;
   const heartbeat = setInterval(() => {
     if (closed || res.writableEnded || !res.writable) return;
@@ -239,10 +251,12 @@ function sseSender(res: http.ServerResponse): (event: string, data: unknown) => 
     closed = true;
     clearInterval(heartbeat);
   });
-  return (event: string, data: unknown): void => {
+  return (event: string, data: unknown, id?: string): void => {
     if (closed || res.writableEnded || !res.writable) return;
     try {
       res.write(`event: ${event}\n`);
+      // An id lets a reconnecting EventSource say where it was (`Last-Event-ID`).
+      if (id !== undefined && !/[\r\n]/.test(id)) res.write(`id: ${id}\n`);
       res.write(`data: ${JSON.stringify(data)}\n\n`);
     } catch {
       // Connection broke mid-write; stop sending. The route's own `close`
@@ -1202,6 +1216,81 @@ export class EmbeddedServer {
         return;
       }
 
+      // ─── Workflow run forum — read, and post as the user (dashboard Forum pane) ─
+      //
+      // `/forum` reads (GET or POST): the newest posts with who each speaks for,
+      // or one post in full with `post` / `postId`. It is the orchestrator's view
+      // and records no read. `/forum/post` answers only POST: it posts as the user
+      // through `workflow_forum post`, so the post is vouched for and reaches the
+      // run's members by the same rules as any other.
+      const forumMatch = path.match(/^\/workflow\/([^/]+)\/forum(\/post)?$/);
+      if (forumMatch) {
+        const [, runId, posting] = forumMatch;
+        let record: RunRecord;
+        try {
+          record = this.manager.workflowStatus(runId);
+        } catch (err) {
+          json(404, { ok: false, error: (err as Error).message });
+          return;
+        }
+        const forum = forumOfRun(record);
+        if (!forum) {
+          json(404, { ok: false, error: `Workflow run '${runId}' has no forum` });
+          return;
+        }
+        if (posting) {
+          const title = typeof body.title === 'string' ? body.title.trim() : '';
+          if (!title) {
+            json(400, { ok: false, error: 'A post needs a `title`' });
+            return;
+          }
+          if (body.body !== undefined && typeof body.body !== 'string') {
+            json(400, { ok: false, error: '`body` must be a string' });
+            return;
+          }
+          const re = (Array.isArray(body.re) ? body.re : body.re === undefined ? [] : [body.re]).filter(isForumPostId);
+          // Not a literal at the call: `re` rides along for a workflow_forum that takes it.
+          const args = {
+            runId,
+            action: 'post' as const,
+            as: 'user',
+            title,
+            ...(typeof body.body === 'string' && body.body.trim() ? { body: body.body } : {}),
+            ...(re.length ? { re } : {}),
+          };
+          let result: unknown;
+          try {
+            result = await this.manager.workflowForum(args);
+          } catch (err) {
+            const message = (err as Error).message;
+            json(/\bnot found\b/.test(message) ? 404 : 400, { ok: false, error: message });
+            return;
+          }
+          const out = (result ?? {}) as { post?: unknown; notes?: unknown };
+          const post = asForumPost(out.post) ?? asForumPost(result);
+          const notes = Array.isArray(out.notes) ? out.notes.filter((n): n is string => typeof n === 'string') : [];
+          json(200, {
+            ok: true,
+            ...(post ? { post: summarizePost(forum.id, post) } : {}),
+            ...(notes.length ? { notes } : {}),
+          });
+          return;
+        }
+        const postId = (typeof body.postId === 'string' ? body.postId : undefined) ?? query.get('post') ?? undefined;
+        if (postId !== undefined) {
+          const post = readForumPosts(forum.id).find((p) => p.id === postId);
+          if (!post) {
+            json(404, { ok: false, error: `No post ${postId} on the forum of run '${runId}'` });
+            return;
+          }
+          json(200, { ok: true, post: postDetail(forum.id, post) });
+          return;
+        }
+        const limit = Number((body.limit as string | number | undefined) ?? query.get('limit') ?? undefined);
+        json(200, { ok: true, forum: forumListing(forum, Number.isFinite(limit) ? limit : undefined) });
+        return;
+      }
+
       const wfMatch = path.match(/^\/workflow\/([^/]+)\/(state|cancel|resume|steer|approve|evidence|events)$/);
       if (wfMatch) {
         const [, runId, verb] = wfMatch;
@@ -1214,9 +1303,11 @@ export class EmbeddedServer {
           const send = sseSender(res);
           // Read the named run itself: a listing is capped and newest first, so
           // an older run would open with no snapshot.
+          let record: RunRecord | undefined;
           let snapshot: RunSummary | undefined;
           try {
-            snapshot = summarize(this.manager.workflowStatus(runId));
+            record = this.manager.workflowStatus(runId);
+            snapshot = summarize(record);
           } catch {
             // Unknown or unreadable run — the stream opens without a snapshot.
           }
@@ -1224,8 +1315,24 @@ export class EmbeddedServer {
           const unsubscribe = this.manager.onWorkflowEvent((e) => {
             if (e.runId === runId) send('workflow-event', e.event);
           });
+          // The run forum's posts as they are written, each a `forum_post` whose
+          // SSE id is the post id. A reconnecting client resumes after the last
+          // post it got (`Last-Event-ID`); `forumSince` starts after a post on the
+          // first connection; without either, only posts written from now on.
+          const forum = record ? forumOfRun(record) : undefined;
+          const lastEventId = headers['last-event-id'];
+          const since =
+            (typeof lastEventId === 'string' && isForumPostId(lastEventId) ? lastEventId : undefined) ??
+            query.get('forumSince') ??
+            undefined;
+          const stopForum = forum
+            ? tailForum(forum.id, (post) => send('forum_post', post, isForumPostId(post.id) ? post.id : undefined), {
+                since,
+              })
+            : () => {};
           res.on('close', () => {
             unsubscribe();
+            stopForum();
             try {
               res.end();
             } catch {
@@ -1268,7 +1375,13 @@ export class EmbeddedServer {
                 json(400, { ok: false, error: 'approve requires `approved`: true or false' });
                 return;
               }
-              json(200, { ok: true, ...(await this.manager.workflowApprove(runId, body.approved)) });
+              // `comment`: posted with the answer on the run's forum, and handed to the next agent.
+              json(200, {
+                ok: true,
+                ...(await (typeof body.comment === 'string'
+                  ? this.manager.workflowApprove(runId, body.approved, body.comment)
+                  : this.manager.workflowApprove(runId, body.approved))),
+              });
               return;
             case 'evidence': {
               const bundle = this.manager.workflowEvidence(
@@ -1353,6 +1466,7 @@ export class EmbeddedServer {
           activity_lease_ms?: unknown;
           autoloop_hard_timeout_ms?: unknown;
           contract?: unknown;
+          forum?: unknown;
         };
         const workspace = input.workspace;
         if (typeof workspace !== 'string' || !workspace.trim()) {
@@ -1389,6 +1503,9 @@ export class EmbeddedServer {
             reviewerModel: input.reviewer_model,
             reviewerEffort: input.reviewer_effort,
             ...(input.contract !== undefined ? { contract: input.contract } : {}),
+            ...(input.forum !== undefined
+              ? { forum: input.forum as NonNullable<Parameters<SessionManager['autoloopStart']>[0]['forum']> }
+              : {}),
             ...timeoutConfig,
           });
           json(200, {
@@ -1543,10 +1660,22 @@ export class EmbeddedServer {
         const onCoderReply = (text: unknown): void => send('coder_reply', { text });
         const onReviewerReply = (text: unknown): void => send('reviewer_reply', { text });
         const onCompact = (e: unknown): void => send('compact', e);
+        // Posts on the run's forum from now on, the agents' own included.
+        const forumId = ctx.dispatcher.config.forum?.id;
+        let stopForum: (() => void) | undefined;
+        if (forumId) {
+          try {
+            stopForum = followForumPosts(forumId, (p) => send('forum_post', p));
+          } catch {
+            // No forum to follow: the stream carries the loop's own events only.
+          }
+        }
         const cleanup = (): void => {
           // sseSender stops writing on its own `close` listener; this just
           // detaches the emitters so a long-lived run stops feeding a dead
           // response.
+          stopForum?.();
+          stopForum = undefined;
           ctx.runner.off('message', onMessage);
           ctx.runner.off('state', onState);
           ctx.runner.off('push', onPush);

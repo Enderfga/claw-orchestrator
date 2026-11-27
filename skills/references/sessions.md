@@ -140,6 +140,10 @@ source's record, so handing it off again carries the whole conversation rather t
 part. The history is cleared only after a first send succeeds, so a first turn that fails on the
 new engine does not strand the conversation it was carrying.
 
+**Messages after a handoff.** The new session takes cross-session messages under its own name, like
+any session (see [inbox.md](./inbox.md)); messages already sent to the source stay the source's.
+The session forum records the handoff with an `INFO` post that is delivered to nobody.
+
 ### ultracode (Claude dynamic workflows)
 
 Set `ultracode: true` on a Claude `session_start` to have Claude orchestrate a JS workflow per substantive task and fan out to subagents. It is injected as the `ultracode: true` settings key merged into `--settings`:

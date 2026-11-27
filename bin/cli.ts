@@ -651,6 +651,7 @@ program
     '--contract <file>',
     'resume: the run contract as you hold it now; a difference is recorded as drift, never applied',
   )
+  .option('--comment <text>', 'approve: posted with the answer on the run forum, and handed to the next agent')
   .option('--json', 'Raw JSON output')
   .action(async (action: string, runId: string | undefined, text: string | undefined, opts) => {
     if (action === 'list') {
@@ -738,7 +739,10 @@ program
 
     if (action === 'approve') {
       const approved = text !== 'reject' && text !== 'false' && text !== 'no';
-      const r = await api(`/workflow/${encodeURIComponent(runId)}/approve`, 'POST', { approved });
+      const r = await api(`/workflow/${encodeURIComponent(runId)}/approve`, 'POST', {
+        approved,
+        ...(opts.comment ? { comment: String(opts.comment) } : {}),
+      });
       if (!r.ok) return fail(r);
       console.log(r.answered ? `Gate ${approved ? 'approved' : 'rejected'}.` : 'No gate is waiting on this run.');
       return;
@@ -1056,6 +1060,10 @@ addAgentFlags(
     )
     .option('--max-budget <usd>', 'Spend cap for the whole run in USD; it fails when reached')
     .option('--human-gate', 'Wait for `clawo workflow approve` before writing anything')
+    .option(
+      '--forum',
+      "Put the run's agents on a shared forum: they post findings and ASKs and read each other's while they work (read-only agents post through their reply)",
+    )
     .option('--cwd <dir>', 'Project directory', process.cwd())
     .option('-w, --wait', 'Follow the run until it ends; exit 1 unless it completes')
     .option('--json', 'Machine-readable output'),
@@ -1096,6 +1104,7 @@ addAgentFlags(
     maxRepairs: Math.max(0, parseInt(opts.maxRepairs, 10) || 0),
     ...(opts.isolate ? { isolation: 'worktree' as const } : {}),
     ...(opts.maxBudget ? { maxBudgetUsd: parseFloat(opts.maxBudget) } : {}),
+    ...(opts.forum ? { forum: true } : {}),
   });
   await startWorkflow(spec, cwd, buildContract(opts.check, opts.contract, undefined, opts), opts);
 });
@@ -1234,6 +1243,10 @@ addEngineFlags(program.command('goal'), 'Run the goal on')
   )
   .option('--max-budget <usd>', 'Spend cap for the whole run in USD; it fails when reached')
   .option('--max-repairs <n>', 'Times a red verdict sends the goal back to the same thread', '1')
+  .option(
+    '--forum',
+    "Put the goal on the run's forum: it reads the posts for it and posts its findings and ASKs while it works",
+  )
   .option('--cwd <dir>', 'Project directory', process.cwd())
   .option('-w, --wait', 'Follow the run until it ends; exit 1 unless it completes')
   .option('--json', 'Machine-readable output')
@@ -1292,7 +1305,7 @@ addEngineFlags(program.command('goal'), 'Run the goal on')
       ...(opts.isolate ? { isolation: 'worktree' as const } : {}),
       ...(opts.maxBudget ? { maxBudgetUsd: parseFloat(opts.maxBudget) } : {}),
     });
-    await startWorkflow(spec, cwd, contract, opts);
+    await startWorkflow(opts.forum ? { ...spec, forum: true } : spec, cwd, contract, opts);
   });
 
 program
@@ -1347,7 +1360,7 @@ program
   .command('forum')
   .description('Post to and read a workflow run forum (agents), or show one and its metrics')
   .argument('<action>', 'post | list | read | show | metrics')
-  .argument('[id]', 'Post id for `read`; run id for `show` and `metrics`')
+  .argument('[id]', 'Post id for `read`; run id (or fm-… forum id) for `show` and `metrics`')
   .option('--dir <dir>', 'The forum spool (given to each agent in its brief)')
   .option('--as <name>', 'Your name on the forum')
   .option('--title <title>', 'Post title, starting with a tag: WIN, FAIL, ASK, FIX, DONE or INFO')
@@ -1364,9 +1377,12 @@ program
         const { posts, events } = forum.forumSnapshot(id);
         if (opts.json) return console.log(JSON.stringify({ posts, events }, null, 2));
         if (posts.length === 0) return console.log('No posts.');
-        return console.log(posts.map((p) => forum.formatPost(p)).join('\n\n────────\n\n'));
+        // A reserved name the forum's ledger does not vouch for is shown as unverified.
+        return console.log(posts.map((p) => forum.formatPost(p, forum.authorLabel(id, p))).join('\n\n────────\n\n'));
       }
       if (!opts.dir || !opts.as) return usage('--dir and --as are required (they are in your forum brief)');
+      if (forum.isReservedForumName(opts.as))
+        return fail(`--as ${opts.as}: that name is reserved for the orchestrator`);
       // What a push would have carried, for an engine that takes nothing mid-turn:
       // shown ahead of whatever the agent asked for, once.
       if (action === 'post' || action === 'list' || action === 'read') {

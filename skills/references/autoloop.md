@@ -90,6 +90,86 @@ other session. The next message to a role starts it again under the same name,
 which resumes the persisted conversation where the engine supports it, instead of
 failing with "Session not found".
 
+## Run forum
+
+An autoloop run has a forum, the board of titled posts described in
+[workflow.md](./workflow.md): its three roles post to it and are handed what is
+addressed to them, and the loop's own messages are recorded there. It is on by
+default; `forum: false` on `autoloop_start` or `POST /autoloop/new` keeps the
+roles off it, and a forum config (`{ push, digestMs, score }`) sets how posts
+reach them. Read it and post to it with `workflow_forum` (the run id is the
+forum id). In a workflow of your own, an `autoloop` node puts its roles on the
+workflow's forum when the spec sets `forum`, unless its `config.forum` is
+`false`; the roles are then named `<nodeId>.planner` and so on when the spec has
+more than one autoloop node or another member already has the role's name.
+
+What the forum carries does not replace the loop's controls. The runner still
+decides whose turn it is, and every decision is read from the roles' own
+replies and the ledger: the Planner's control blocks, `iter_complete`,
+`review_complete` and the acceptance contract. Nothing is ever read back from a
+post.
+
+**Members.** Each role is a member while its session lives; a reset, a rebind or
+a stop takes it off, and its next session joins again.
+
+| Role     | On the forum                                                                                                                              |
+| -------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| Planner  | Read-only: posts by writing `<new-forum-post title="…">…</new-forum-post>` blocks in its reply; gets posts in full.                       |
+| Coder    | Writable: posts with the `clawo forum` command its brief names, or by reply block.                                                        |
+| Reviewer | Write-only, by reply block. It reads nothing from the forum and is handed only what the user or the orchestrator addresses to it by name. |
+
+A role is briefed in the first message after its session starts, after the
+message itself, never in its system prompt. A session that continues an earlier
+conversation (a rebind on the same engine, a session restarted after idle
+eviction, a resumed run on an engine that resumes its conversation) is not
+briefed again; a reset or a move to another engine starts a new conversation and
+is.
+
+**Turns.** A turn's message is unchanged at the top (`[directive iter=N]`,
+`[review_request iter=N]`, the user's chat, the in-band role instructions and
+replayed history for engines that need them); what the forum adds follows a
+`---` line. A Planner or Coder turn carries the posts for that role it has not
+had: an ASK or FAIL that names it, a post that names it explicitly, and the
+user's or the orchestrator's posts to it or to the whole run. A user's post the
+brief shows cut is not counted as handed over by it, so the same message carries
+it again as one of these posts (whole for the read-only Planner). The Reviewer's
+turns carry nothing from the forum. A turn that could not be sent leaves its
+brief and its posts for the role's next turn. A post reaches a role in the middle
+of a turn only while that role's own turn is in flight and does not already
+carry it, and only on an engine that takes messages mid-turn (Claude Code,
+`codex-app`); otherwise it comes with the role's next turn.
+
+**What the loop posts.** Each envelope is posted once, under the role that sent
+it, or as `orchestrator` when the runner or an operator sent it:
+
+| Envelope                       | Post                                                                                                                     |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------ |
+| user chat                      | The user's post `INFO @planner: …` to the Planner alone (its @names address no other role), handed over as its turn.     |
+| `directive`                    | `INFO @coder: iter N directive — <goal>`, with constraints and criteria; the Coder's turn.                               |
+| `directive_ack`                | `ASK @planner: iter N — <question>` when the Coder needs a clarification; the Planner's turn.                            |
+| `iter_artifacts`               | `DONE: iter N — <summary>`: files changed, the evaluation, paths to `diff.patch` and `eval_output.json`; never the diff. |
+| `review_verdict`               | `WIN: iter N advance` or `FAIL: iter N hold/rollback`, with the audit notes and the acceptance result, for the Planner.  |
+| `phase_error`, `send_timeout`  | `FAIL @planner: …` with the error.                                                                                       |
+| `pause`, `resume`, `terminate` | `INFO: loop paused / resumed / terminated — <reason>`, for the user.                                                     |
+| `push_user`                    | `INFO`, `FAIL` or `ASK` for the user, as the push goes out (a repeat the push dedup drops is not posted).                |
+
+`review_request` and `iter_done` are not posted. A Planner turn whose controls
+were refused also posts `FAIL @planner: control rejected (iter N)` with the
+diagnostic, so the Planner sees it with its next turn. Each `coder_log` entry is
+also an `INFO` post by the Coder (`coder_log.jsonl` is still written). Reply blocks
+are posted under the role's name and removed from `planner_reply`,
+`coder_reply`, `reviewer_reply` and `chat.jsonl`.
+
+With `forum: false` the loop is still recorded there, but no role is briefed,
+handed posts or relayed.
+
+**Steering.** `workflow_steer` on a running autoloop is the user's post to the
+whole run; the Planner and the Coder get it mid-turn or with their next turn.
+The loop takes the steer off the kernel's queue as it runs. When it ends it gives
+back every steer from the first one it did not hand to a role, with a turn or
+mid-turn; a role that only read it with its forum command does not count. A run
+whose roles are not on its forum takes no steers.
+
 ## UX flow
 
 ```
@@ -275,16 +355,16 @@ only while the run is live.
 
 ## Plugin tools
 
-| Tool                   | Args                                                                                                                                                            | What                                                                                                                                |
-| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| `autoloop_start`       | `run_id`, `workspace`, per-role `*_engine?`, `*_model?`, `*_effort?`, `*_custom_engine?`, `send_timeout_ms?`, `activity_lease_ms?`, `autoloop_hard_timeout_ms?` | Start a run; launches Planner and stores fixed role bindings and timeout controls. Each `custom` role requires its matching config. |
-| `autoloop_chat`        | `run_id`, `text`                                                                                                                                                | Send a chat message to the Planner; returns the Planner's reply.                                                                    |
-| `autoloop_status`      | `run_id`                                                                                                                                                        | Current state (status, iter, push count, subagents_spawned).                                                                        |
-| `autoloop_list`        | —                                                                                                                                                               | All autoloop runs in the run store, live or not.                                                                                    |
-| `autoloop_resume`      | `run_id`, `send_timeout_ms?`, `pending_dispatch_id?`, `plannerCustomEngineRef?`, `coderCustomEngineRef?`, `reviewerCustomEngineRef?`                            | Resume via `SessionManager.autoloopResume` once; same semantics as `POST /autoloop/<id>/resume`.                                    |
-| `autoloop_stop`        | `run_id`, `reason?`                                                                                                                                             | Terminate; stops Planner / Coder / Reviewer.                                                                                        |
-| `autoloop_reset_agent` | `run_id`, `agent` ('planner' / 'coder' / 'reviewer'), `force?`, `eager_restart?`                                                                                | Reset one subagent. Planner reset requires `force: true`.                                                                           |
-| `autoloop_rebind_role` | `run_id`, `agent`, `engine?`, `model?`, `effort?`, `force?`                                                                                                     | Change one role's engine, model or effort, applied before its next message.                                                         |
+| Tool                   | Args                                                                                                                                                                                   | What                                                                                                                                                                                   |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `autoloop_start`       | `run_id`, `workspace`, per-role `*_engine?`, `*_model?`, `*_effort?`, `*_custom_engine?`, `send_timeout_ms?`, `activity_lease_ms?`, `autoloop_hard_timeout_ms?`, `contract?`, `forum?` | Start a run; launches Planner and stores fixed role bindings and timeout controls. Each `custom` role requires its matching config. `forum` (default on): see [Run forum](#run-forum). |
+| `autoloop_chat`        | `run_id`, `text`                                                                                                                                                                       | Send a chat message to the Planner; returns the Planner's reply.                                                                                                                       |
+| `autoloop_status`      | `run_id`                                                                                                                                                                               | Current state (status, iter, push count, subagents_spawned).                                                                                                                           |
+| `autoloop_list`        | —                                                                                                                                                                                      | All autoloop runs in the run store, live or not.                                                                                                                                       |
+| `autoloop_resume`      | `run_id`, `send_timeout_ms?`, `pending_dispatch_id?`, `plannerCustomEngineRef?`, `coderCustomEngineRef?`, `reviewerCustomEngineRef?`                                                   | Resume via `SessionManager.autoloopResume` once; same semantics as `POST /autoloop/<id>/resume`.                                                                                       |
+| `autoloop_stop`        | `run_id`, `reason?`                                                                                                                                                                    | Terminate; stops Planner / Coder / Reviewer.                                                                                                                                           |
+| `autoloop_reset_agent` | `run_id`, `agent` ('planner' / 'coder' / 'reviewer'), `force?`, `eager_restart?`                                                                                                       | Reset one subagent. Planner reset requires `force: true`.                                                                                                                              |
+| `autoloop_rebind_role` | `run_id`, `agent`, `engine?`, `model?`, `effort?`, `force?`                                                                                                                            | Change one role's engine, model or effort, applied before its next message.                                                                                                            |
 
 ## Planner-emitted control tools
 
@@ -506,7 +586,8 @@ Every JSON artifact in the ledger carries a `schema_version` field (currently
 `POST /autoloop/new` takes `{ workspace, run_id?, planner_engine?, planner_model?,
 planner_effort?, coder_engine?, coder_model?, coder_effort?, reviewer_engine?,
 reviewer_model?, reviewer_effort?, send_timeout_ms?, activity_lease_ms?,
-autoloop_hard_timeout_ms? }`. A `run_id` that is missing or does not match
+autoloop_hard_timeout_ms?, contract?, forum? }`. `forum` is `true` (the default), a forum
+config, or `false`; see [Run forum](#run-forum). A `run_id` that is missing or does not match
 `^[a-zA-Z0-9_-]{1,64}$` is replaced by a generated `auto-<timestamp>-<hex>`.
 Timeout fields use the defaults and inclusive bounds documented above; malformed
 or out-of-range values return 400 before a run starts. Custom-engine configs are
@@ -516,7 +597,13 @@ not accepted over HTTP, so a `custom` role can only be started by a local caller
 
 `GET /autoloop/<id>/events` emits `snapshot` / `message` / `state` / `push` /
 `iter_done` / `planner_reply` / `planner_error` / `coder_reply` /
-`reviewer_reply` / `compact` / `terminated`.
+`reviewer_reply` / `compact` / `forum_post` / `terminated`.
+
+`forum_post` is each post the run's forum gains while the stream is open, the
+roles' own included: `{ id, ts, from, authority, tags, to, title }`, where
+`authority` is `user`, `orchestrator` or `agent` as the forum verifies it (a post
+under a reserved name that the runtime did not write counts as `agent`). The body
+is a `workflow_forum` `read` away.
 
 For a run that is NOT in this process's memory (terminated, or live in another
 process), the endpoint emits a single-shot `snapshot` + `terminated` then closes —
@@ -679,7 +766,8 @@ retries it.
   level, so `channel: 'webchat'` always returns `channel_used: 'none'`. Use
   `auto` / `wechat` / `email`.
 - **One-way push.** Replies to a push are not routed back to the Planner;
-  answer with `autoloop_chat`.
+  answer with `autoloop_chat`, or post to the Planner on the run forum, which it
+  gets with its next turn.
 - **No fork / population mode.** Single linear iter trajectory per run.
 - **Cross-run knowledge isolated.** Each run's `reviewer_memory.md` lives in
   that run's ledger; there is no shared store.

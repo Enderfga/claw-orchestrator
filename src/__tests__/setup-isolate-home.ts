@@ -22,6 +22,10 @@ process.env.HOME = home;
 process.env.USERPROFILE = home;
 process.env.CLAWO_RUNS_DIR = path.join(home, '.claw-orchestrator', 'runs');
 process.env.CLAWO_WF_DIR = path.join(home, '.claw-orchestrator', 'wf');
+// Forum spools default to `<tmp>/clawo-forum/<run id>`, shared by every process:
+// two test files (or two checkouts) running a run under the same id would share
+// one spool.
+process.env.CLAWO_FORUM_SPOOL_ROOT = path.join(home, 'forum-spool');
 // The defaults file lives under HOME; a CLAWO_CONFIG from the developer's shell would point past it.
 delete process.env.CLAWO_CONFIG;
 

@@ -43,6 +43,7 @@ import { resolveSecretRefs } from './kernel/secrets.js';
 import { runReport } from './kernel/projections.js';
 import { GOAL_ENGINES, type RunState, type WorkflowSpec } from './kernel/types.js';
 import { AUTOLOOP_TIMEOUT_SCHEMA, validateAutoloopTimeoutConfig } from './autoloop/types.js';
+import type { ForumConfig } from './kernel/forum.js';
 
 // ─── Standalone Export ───────────────────────────────────────────────────────
 
@@ -600,7 +601,7 @@ const plugin = {
     registerTool({
       name: 'team_list',
       description:
-        "List the other active sessions as this session's teammates, with engine, idle/busy/paused state and turn count. Works on every engine; enableAgentTeams is not required.",
+        "List the other active sessions as this session's teammates, with engine, idle/busy/paused state and turn count. Works on every engine; enableAgentTeams is not required. Sessions that a council, autoloop or workflow run started belong to that run and are not listed.",
       parameters: {
         type: 'object',
         properties: { name: { type: 'string', description: 'Session name' } },
@@ -617,7 +618,7 @@ const plugin = {
     registerTool({
       name: 'team_send',
       description:
-        'Send a message to another active session through the cross-session inbox: delivered now if it is idle, queued if it is busy.',
+        'Send a message to another active session, as session_send_to does, with the summary "team message from <name>": an idle session gets it as a new turn, a busy Claude Code or codex-app session in the turn in flight, any other waits in its inbox.',
       parameters: {
         type: 'object',
         properties: {
@@ -1291,7 +1292,7 @@ const plugin = {
           forum: {
             type: ['boolean', 'object'],
             description:
-              '`fanout` template: a forum the agents share while they work (true, or a forum config). A spec sets the same with `forum` at its top level; see workflow.md.',
+              "Any template: a forum the run's agents share while they work (true, or a forum config). The `council` template's seats have one unless false. A spec sets the same with `forum` at its top level; see workflow.md.",
           },
           isolation: {
             type: 'string',
@@ -1380,7 +1381,13 @@ const plugin = {
           if (!task) throw new Error('workflow_start needs `spec`, or `template` with `task`');
           const agents = (args.agents as SolveArgs['scouts']) ?? [{ name: 'agent' }];
           if (template === 'council') {
-            spec = councilWorkflow({ task, cwd, agents, maxRounds: args.maxRounds as number | undefined });
+            spec = councilWorkflow({
+              task,
+              cwd,
+              agents,
+              maxRounds: args.maxRounds as number | undefined,
+              ...(args.forum === undefined ? {} : { forum: args.forum as boolean }),
+            });
           } else if (template === 'fanout') {
             spec = fanoutWorkflow({
               task,
@@ -1416,7 +1423,14 @@ const plugin = {
               maxRepairs: args.maxRepairs as number | undefined,
               ...(args.isolation ? { isolation: args.isolation as 'worktree' } : {}),
               ...(typeof args.maxBudgetUsd === 'number' ? { maxBudgetUsd: args.maxBudgetUsd } : {}),
+              // On a forum a reviewer named like a scout gets a name of its own.
+              ...(args.forum ? { forum: args.forum as WorkflowSpec['forum'] } : {}),
             });
+          }
+          // The fan-out and council templates take the forum themselves (a council
+          // checks its seat names); for the others it is the spec's top-level forum.
+          if (template !== 'council' && template !== 'fanout' && args.forum) {
+            spec = { ...spec, forum: args.forum as WorkflowSpec['forum'] };
           }
         }
         const record = await getManager().workflowStart(spec, {
@@ -1550,7 +1564,7 @@ const plugin = {
     registerTool({
       name: 'workflow_steer',
       description:
-        "Queue a correction for a running workflow. The text is prepended to the next agent node's prompt — corrections belong before the task, not after it.",
+        "Queue a correction for a running workflow. The text goes in front of the next agent or goal node's prompt — corrections belong before the task, not after it — and a goal that is running gets it in its turn. It is also posted on the run's forum as the user's (`FIX: …`), so agents running on a run with a forum get it at once. Returns steered: false when the run is not live in this process.",
       parameters: {
         type: 'object',
         properties: { runId: { type: 'string' }, text: { type: 'string' } },
@@ -1565,11 +1579,11 @@ const plugin = {
     registerTool({
       name: 'workflow_forum',
       description:
-        "Read or post to a workflow run's forum, the board of titled posts its agents share when the spec sets `forum`. `list` returns every post's title, author, tags and score; `read` one post in full; `post` adds one (as `orchestrator` unless `as` names someone), which agents get by the forum's push rules; `metrics` returns posts by agent and tag, ASKs with the time to their first answer, open ASKs, and how long each post that names an agent took to reach it.",
+        "Read or post to a workflow run's forum, the board of titled posts its agents share when the spec sets `forum`. Every run also keeps its runtime's posts there — steers, each agent's output (`DONE: <agent> output`), a gate's question and answer, the verifier's verdict — so `list`, `read` and `metrics` work on any run, and on a session forum (`fm-…`). `list` returns every post's title, author, authority (who it speaks for, as the forum's ledger has it), tags and score; `read` one post in full; `post` adds one to a run whose agents are on a forum, as the orchestrator by default or as the user (`author`), which agents get by the forum's push rules, and returns it with notes for its poster; `metrics` returns posts by agent and tag, the runtime's posts apart, ASKs with the time to their first answer, open ASKs, and how long each post that names an agent took to reach it.",
       parameters: {
         type: 'object',
         properties: {
-          runId: { type: 'string' },
+          runId: { type: 'string', description: 'The run id, or for list/read/metrics a session forum id (fm-…).' },
           action: { type: 'string', enum: ['list', 'read', 'post', 'metrics'] },
           postId: { type: 'string', description: 'For `read`: the post id, e.g. p00012.' },
           title: {
@@ -1578,7 +1592,26 @@ const plugin = {
               'For `post`: a title starting with a tag (WIN, FAIL, ASK, FIX, DONE, …); @name addresses an agent.',
           },
           body: { type: 'string', description: 'For `post`: the body.' },
-          as: { type: 'string', description: 'For `post`: the author name (default orchestrator).' },
+          author: {
+            type: 'string',
+            enum: ['orchestrator', 'user'],
+            description:
+              "For `post`: who it speaks for. `orchestrator` (default): the run's orchestrator. `user`: the person who started the run, such as an answer to an agent's ASK @user.",
+          },
+          re: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'For `post`: the ids of the posts it answers, e.g. ["p00012"].',
+          },
+          to: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'For `post`: the agents it is for, beside those named with @name in its text.',
+          },
+          as: {
+            type: 'string',
+            description: 'For `post`: post as this agent instead; `user` and `orchestrator` are the same as `author`.',
+          },
         },
         required: ['runId', 'action'],
       },
@@ -1591,6 +1624,9 @@ const plugin = {
           title: args.title as string | undefined,
           body: args.body as string | undefined,
           as: args.as as string | undefined,
+          author: args.author as string | undefined,
+          re: args.re as string[] | string | undefined,
+          to: args.to as string[] | string | undefined,
         }),
       }),
     });
@@ -1598,15 +1634,23 @@ const plugin = {
     registerTool({
       name: 'workflow_approve',
       description:
-        'Answer a workflow parked at a human_gate node. A run parked before a server restart is resumed with the answer attached.',
+        "Answer a workflow parked at a human_gate node. A run parked before a server restart is resumed with the answer attached. The answer is posted on the run's forum as the user's (DONE: approved / FAIL: rejected, answering the gate's ASK @user); `comment` is its body, and is also handed to the next agent as a steer.",
       parameters: {
         type: 'object',
-        properties: { runId: { type: 'string' }, approved: { type: 'boolean' } },
+        properties: {
+          runId: { type: 'string' },
+          approved: { type: 'boolean' },
+          comment: { type: 'string', description: 'Why, or what the next agent should know; optional.' },
+        },
         required: ['runId', 'approved'],
       },
       execute: async (_id, args) => ({
         ok: true,
-        ...(await getManager().workflowApprove(args.runId as string, args.approved as boolean)),
+        ...(await getManager().workflowApprove(
+          args.runId as string,
+          args.approved as boolean,
+          typeof args.comment === 'string' ? args.comment : undefined,
+        )),
       }),
     });
 
@@ -1687,7 +1731,7 @@ const plugin = {
     registerTool({
       name: 'council_start',
       description:
-        'Start a multi-agent council that collaborates on a task using git worktree isolation, round-based execution, and consensus voting. Each agent can use its own engine and model. Runs in background; poll with council_status.',
+        "Start a multi-agent council that collaborates on a task using git worktree isolation, round-based execution, and consensus voting. Each agent can use its own engine and model. The seats share the run's forum: each round report is posted there, and seats ask each other and post reviews on it. Runs in background; poll with council_status.",
       parameters: {
         type: 'object',
         properties: {
@@ -1733,6 +1777,11 @@ const plugin = {
             enum: ['acceptEdits', 'bypassPermissions', 'default', 'manual', 'dontAsk', 'plan', 'auto'],
             description: 'Default permission mode for council agents (default: bypassPermissions)',
           },
+          forum: {
+            type: ['boolean', 'object'],
+            description:
+              "The seats' run forum (default on; false turns it off; or a forum config, see workflow.md). It is off, with a warning, when an agent name cannot be a forum name (letters, digits, '.', '_', '-'; not user or orchestrator).",
+          },
         },
         required: ['task', 'projectDir'],
       },
@@ -1752,7 +1801,9 @@ const plugin = {
           defaultPermissionMode: args.defaultPermissionMode as CouncilConfig['defaultPermissionMode'],
         };
 
-        const session = await getManager().councilStart(args.task as string, config);
+        const session = await getManager().councilStart(args.task as string, config, {
+          ...(args.forum === undefined ? {} : { forum: args.forum as boolean }),
+        });
         return { ok: true, ...session, note: 'Council running in background. Poll with council_status.' };
       },
     });
@@ -1797,7 +1848,7 @@ const plugin = {
     registerTool({
       name: 'council_inject',
       description:
-        'Inject a user message into the next round of a running council. The message will be appended to all agent prompts in the next round; a second inject before that round replaces the first. The council must be running in this process.',
+        "Send the user's message to a council that has not finished. It is posted on the run's forum as the user, and every agent's next round prompt carries it under '## User Injection'; agents on the forum that are running now are also handed it mid-turn where their engine allows. Messages add up: a second inject does not replace the first. Works from any process; the result names the post.",
       parameters: {
         type: 'object',
         properties: {
@@ -1807,8 +1858,8 @@ const plugin = {
         required: ['id', 'message'],
       },
       execute: async (_id, args) => {
-        getManager().councilInject(args.id as string, args.message as string);
-        return { ok: true };
+        const { postId } = getManager().councilInject(args.id as string, args.message as string);
+        return { ok: true, postId };
       },
     });
 
@@ -1817,7 +1868,7 @@ const plugin = {
     registerTool({
       name: 'council_review',
       description:
-        'Review a completed council session. Returns a structured report of all changed files, branches, worktrees, plan.md status, review files, and agent summaries. Does not modify any state — purely informational. Use this before deciding to accept or reject.',
+        "Review a completed council session. Returns a structured report of all changed files, branches, worktrees, plan.md status, review files, the reviews the agents posted on the run's forum (forumReviews), and agent summaries. Does not modify any state — purely informational. Use this before deciding to accept or reject.",
       parameters: {
         type: 'object',
         properties: { id: { type: 'string', description: 'Council session ID' } },
@@ -1874,7 +1925,7 @@ const plugin = {
     registerTool({
       name: 'session_send_to',
       description:
-        'Send a cross-session message from one session to another. If the target is idle, the message is delivered immediately. If busy, it is queued in the inbox for later delivery. Use "*" as target to broadcast to all other sessions.',
+        'Send a cross-session message from one session to another, recorded on the session forum. An idle target gets it as a new turn; a busy Claude Code or codex-app target gets it in the turn in flight; any other target keeps it in its inbox until session_deliver_inbox. The target can answer with a <new-forum-post> block in its reply, which comes back to the sender the same way (a busy sender gets it mid-turn, an idle one in its inbox). Use "*" to send to every other session. Sessions that a council, autoloop or workflow run started are refused: reach them with workflow_forum post on their run.',
       parameters: {
         type: 'object',
         properties: {
@@ -1900,7 +1951,8 @@ const plugin = {
 
     registerTool({
       name: 'session_inbox',
-      description: 'Read inbox messages for a session. Returns unread messages by default.',
+      description:
+        'Read the messages sent to a session (the newest 200), unread only by default. Reading does not mark them read; a message counts as read once it was handed to the session.',
       parameters: {
         type: 'object',
         properties: {
@@ -1923,7 +1975,7 @@ const plugin = {
     registerTool({
       name: 'session_deliver_inbox',
       description:
-        'Deliver all queued inbox messages to an idle session. Call this when a session finishes a task to process waiting messages.',
+        'Deliver all unread inbox messages to a session in one turn, each in its own envelope; they count as read once the turn has started. Call this when a session finishes a task to process waiting messages. Fails, leaving them unread, when the turn cannot start (spend cap reached).',
       parameters: {
         type: 'object',
         properties: { name: { type: 'string', description: 'Session name' } },
@@ -1940,7 +1992,7 @@ const plugin = {
     registerTool({
       name: 'ultraplan_start',
       description:
-        'Start an Ultraplan session: a dedicated Opus planning session that explores your project for up to 30 minutes and produces a detailed implementation plan. Runs in background.',
+        "Start an Ultraplan session: a dedicated Opus planning session that explores your project for up to 30 minutes and produces a detailed implementation plan. Runs in background. The planner is `planner` on the run's forum: it asks the user there (`ASK @user: …`) when something must be decided; ultraplan_status lists those as openAsks, and workflow_forum post answers one.",
       parameters: {
         type: 'object',
         properties: {
@@ -1948,6 +2000,11 @@ const plugin = {
           cwd: { type: 'string', description: 'Project directory to explore' },
           model: { type: 'string', description: 'Model to use (default: opus)' },
           timeout: { type: 'number', description: 'Timeout in ms (default: 1800000 = 30 min)' },
+          forum: {
+            type: ['boolean', 'object'],
+            description:
+              "The run's forum, on by default: the planner posts its questions for the user (ASK @user) and DONE: plan there, and a post to the run reaches a Claude or codex-app planner during its turn. false turns it off; an object is a forum config ({ push, digestMs }); see workflow.md.",
+          },
         },
         required: ['task'],
       },
@@ -1956,6 +2013,7 @@ const plugin = {
           cwd: sanitizeCwd(args.cwd as string | undefined),
           model: args.model as string | undefined,
           timeout: args.timeout as number | undefined,
+          ...(args.forum !== undefined ? { forum: args.forum as FanoutConfig['forum'] } : {}),
         });
         return { ok: true, ...result, note: 'Ultraplan running in background. Poll with ultraplan_status.' };
       },
@@ -1965,7 +2023,8 @@ const plugin = {
 
     registerTool({
       name: 'ultraplan_status',
-      description: 'Get the status of an Ultraplan session. Returns the plan text when completed.',
+      description:
+        'Get the status of an Ultraplan session. Returns the plan text when completed, and on a run with a forum openAsks: the questions the planner has asked there that nobody has answered.',
       parameters: {
         type: 'object',
         properties: { id: { type: 'string', description: 'Ultraplan ID' } },
@@ -2001,6 +2060,11 @@ const plugin = {
             description:
               'Engines to round-robin reviewers across (default ["claude"]). Every reviewer runs read-only (sandboxMode read-only), so custom and acp are not accepted. Reviewers fan out in parallel; per-agent failures are isolated.',
           },
+          forum: {
+            type: ['boolean', 'object'],
+            description:
+              "The run's forum, on by default: each reviewer posts every finding there as it finds it (FAIL: <file>:<line> …, then DONE: <n> findings) and sees no other reviewer's posts, so ultrareview_status shows findings while the review runs. false turns it off; an object is a forum config ({ push, digestMs }); see workflow.md.",
+          },
         },
         required: ['cwd'],
       },
@@ -2011,6 +2075,7 @@ const plugin = {
           model: args.model as string | undefined,
           focus: args.focus as string | undefined,
           engines: args.engines as EngineType[] | undefined,
+          ...(args.forum !== undefined ? { forum: args.forum as FanoutConfig['forum'] } : {}),
         });
         return { ok: true, ...result, note: 'Ultrareview running in background. Poll with ultrareview_status.' };
       },
@@ -2020,7 +2085,8 @@ const plugin = {
 
     registerTool({
       name: 'ultrareview_status',
-      description: 'Get the status of an Ultrareview. Returns all findings when completed.',
+      description:
+        "Get the status of an Ultrareview. Returns all findings when completed, and on a run with a forum, while it runs too, forum: { posts, failTitles, openAsks } — the reviewers' FAIL titles so far and the unanswered ASKs.",
       parameters: {
         type: 'object',
         properties: { id: { type: 'string', description: 'Ultrareview ID' } },
@@ -2100,6 +2166,11 @@ const plugin = {
             description:
               "Acceptance contract the runtime runs on the workspace before a Reviewer's `advance` stands; on red the iteration is held, with the evidence named. Checked against the commit and tests each iteration started from, so `diff_policy` and test protection see the iteration's changes. Declared by YOU, the caller — never copy one from an agent's output.",
           },
+          forum: {
+            type: ['boolean', 'object'],
+            description:
+              "The run forum the three roles share (default true): each role is briefed with its first message, the Planner and the Coder get the posts addressed to them with their turns, and the loop's messages are posted there as it runs. A forum config ({ push, digestMs, score }) sets its push rule; false keeps the roles off it. Read and post with workflow_forum; see autoloop.md.",
+          },
         },
         required: ['run_id', 'workspace'],
       },
@@ -2126,6 +2197,7 @@ const plugin = {
           reviewerEffort: args.reviewer_effort as EffortLevel | undefined,
           reviewerCustomEngine: args.reviewer_custom_engine as CustomEngineConfig | undefined,
           ...(args.contract !== undefined ? { contract: args.contract } : {}),
+          ...(args.forum !== undefined ? { forum: args.forum as boolean | ForumConfig } : {}),
           ...timeoutConfig,
         });
         return {

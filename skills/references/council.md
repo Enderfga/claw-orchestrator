@@ -64,7 +64,48 @@ Every agent must include `[CONSENSUS: YES]` or `[CONSENSUS: NO]` at the end of e
 - **Aborted** — user intervention; status `error`
 
 An agent that fails or errors in a round counts as a NO for that round. A loosely formatted vote (for example
-`CONSENSUS=YES`) is still read, and a missing vote counts as NO.
+`CONSENSUS=YES`) is still read, and a missing vote counts as NO. Votes are read from each agent's own reply only;
+a vote shown in a forum post is a copy for readers and is never counted.
+
+### The run forum
+
+A council's agents (its seats) share their run's forum, the board of posts described in
+[workflow.md](./workflow.md#the-run-forum). It is on by default for `council_start` and the `council` workflow
+template; `forum: false` turns it off, and an object sets its config (`push`, `digestMs`, `score`). It is off,
+with a warning in the log, when an agent name cannot be a forum name: forum names are letters, digits, `.`, `_`
+and `-`, at most 64 characters, start with a letter or digit, and are not `user` or `orchestrator`. In a
+workflow spec of your own with a forum, such a council is left off the forum and runs as with the forum off.
+
+- **Round reports.** When a round ends, each seat's reply, without its consensus tag, is posted for it as
+  `DONE: R<n> report — vote YES|NO`. A reply longer than 60,000 characters keeps its end, where the report and
+  the vote are. A seat whose round failed gets an orchestrator post `FAIL: R<n> @<seat> errored: <message>`.
+  These posts are written to the run's forum whether or not the forum is on, so the run keeps them either way.
+- **History.** The `## Previous Collaboration History` block of each round prompt is built from the round
+  reports: the last 1,500 characters of each report, grouped by round. Which replies appear and the vote shown
+  for each come from the replies themselves. Forum envelopes quoted in a report are escaped, so an agent that
+  repeats one does not post it again.
+- **Seats as members.** With the forum on, each seat is a member for its round. Its round prompt starts with the
+  forum brief (how to post, who else is on the forum, open ASKs and FAIL posts, posts that name it, and the
+  user's posts), followed by the council's norms: the round report is posted for it, the vote stays the
+  `[CONSENSUS: …]` tag, task claims stay in `plan.md`, and `ASK @seat` / `FAIL @seat` are for coordinating
+  inside a round. A post that names a seat reaches it mid-turn where its engine allows; `<new-forum-post>`
+  blocks in its reply are posted under its name.
+- **Reviews.** With the forum on, charter §5 asks for reviews as posts that answer the reviewed round report:
+  `WIN: approve @<seat> …` or `FAIL @<seat>: request changes …`. `council_review` returns them as
+  `forumReviews`, alongside any `reviews/` files.
+- **The user's messages.** `council_inject` posts the message on the forum as the user. Every seat's next round
+  prompt carries the user's posts it has not been given yet, under `## User Injection`; messages add up in the
+  order they came. A seat that is running when the post arrives is also handed it mid-turn where its engine
+  allows. Steers (`workflow_steer`) reach the next round the same way. User posts made before the run reached
+  the council node are left to the nodes they were for.
+- **Sessions.** The seats' sessions belong to the run: they are marked with the run id, so the cross-session
+  tools leave them to the run's forum.
+
+### Resume
+
+A council whose process stopped part-way carries on when its run is resumed (`workflow_resume`): the rounds
+every seat finished are on the run record, and the council starts again at the round after them, with the
+history built from the forum. A round some seats had not finished runs again in full.
 
 ## Quick Start
 
@@ -115,7 +156,10 @@ returning); direct TypeScript callers need `await`.
 ### Mixed Engines
 
 Agents can use different engines and models. Each agent also accepts `effort`, `sandboxMode` (forwarded
-to the seat's session; how a mode is applied is engine-specific), and, on Claude, `ultracode`:
+to the seat's session; how a mode is applied is engine-specific), and, on Claude, `ultracode`. A Codex or
+`codex-app` seat in a workspace-write sandbox (Codex's default) cannot write git's metadata, so the council
+commits the seat's changes to `council/<agent>` for it after each of its turns, leaving out submodules and any
+repository the seat creates inside its worktree.
 
 ```json
 {
@@ -129,15 +173,15 @@ to the seat's session; how a mode is applied is engine-specific), and, on Claude
 
 ## Council Tools
 
-| Tool             | Description                                                                                                             |
-| ---------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| `council_start`  | Start a council. Runs in background, returns session ID immediately.                                                    |
-| `council_status` | Status (`running`, `awaiting_user`, `max_rounds`, `error`, `accepted`, `rejected`) and each response with its vote.     |
-| `council_abort`  | Stop all agent sessions, terminate a council running in this process, and remove the worktrees it created.              |
-| `council_inject` | Inject a user message into all agents' prompts in the next round. A second inject before that round replaces the first. |
-| `council_review` | Review completed council output: changed files, branches, plan status, agent summaries.                                 |
-| `council_accept` | Accept work and clean up: remove worktrees, branches, plan.md, reviews/.                                                |
-| `council_reject` | Reject work: rewrite plan.md with feedback for the council to retry.                                                    |
+| Tool             | Description                                                                                                         |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `council_start`  | Start a council. Runs in background, returns session ID immediately.                                                |
+| `council_status` | Status (`running`, `awaiting_user`, `max_rounds`, `error`, `accepted`, `rejected`) and each response with its vote. |
+| `council_abort`  | Stop all agent sessions, terminate a council running in this process, and remove the worktrees it created.          |
+| `council_inject` | Post the user's message on the run's forum; every agent's next round prompt carries it. Messages add up.            |
+| `council_review` | Review completed council output: changed files, branches, plan status, reviews (files and forum posts), summaries.  |
+| `council_accept` | Accept work and clean up: remove worktrees, branches, plan.md, reviews/.                                            |
+| `council_reject` | Reject work: rewrite plan.md with feedback for the council to retry.                                                |
 
 ## Post-Processing Lifecycle
 
@@ -219,12 +263,15 @@ The council system prompt is loaded from `configs/council-system-prompt.md` and 
 | §2 Parallel Coordination          | Claim/done protocol for concurrent work        |
 | §3 Truth in Git                   | Git state over conversation memory             |
 | §4 Integration Is Completion      | Local only, never push                         |
-| §5 Cross-Review                   | Structured APPROVE/REQUEST_CHANGES             |
+| §5 Cross-Review                   | Approve or request changes, with reasons       |
 | §6 Autonomous Conflict Resolution | Never stop on merge conflicts                  |
 | §7 Action Over Words              | Never ask permission, just work                |
 | §8 Efficient Tool Use             | Minimum necessary principle                    |
 
-Placeholders: `{{emoji}}`, `{{name}}`, `{{persona}}`, `{{workDir}}`, `{{projectDir}}`, `{{otherBranches}}`
+Placeholders: `{{emoji}}`, `{{name}}`, `{{persona}}`, `{{workDir}}`, `{{projectDir}}`, `{{otherBranches}}`,
+`{{reviewRules}}`. `{{reviewRules}}` is filled by the council: with the run forum on, reviews are posts
+(`WIN: approve @<seat> …`, `FAIL @<seat>: request changes …`) that answer the reviewed round report; without it,
+they are files `reviews/<name>-on-<target>.md` with `[APPROVE]` or `[REQUEST_CHANGES]`.
 
 The charter is each seat's only instruction channel, and it reaches every engine through `appendSystemPrompt`:
 natively on Claude Code and Grok, as the top of the seat's first message on Codex, Antigravity and OpenCode.
@@ -281,9 +328,16 @@ returns real records from disk, across processes.
 `council_review` / `council_accept` / `council_reject` work after a restart:
 they act on the git state the council left behind, not on live agents, and the
 accept / reject decision is written to the run record.
-`council_inject` and `council_abort` need the live run and say so plainly when
-there is none: `council_abort` then returns `ok: false` with the run's state and
-leaves the run and its worktrees as they are.
+`council_abort` needs the live run and says so plainly when there is none: it
+then returns `ok: false` with the run's state and leaves the run and its
+worktrees as they are. `council_inject` does not: it posts to the run's forum,
+which any process can write, and the council reads it at its next round; it
+refuses a council whose run has finished or has moved past the council node,
+where no further round would read it.
+
+The council tools find a run's council node by its kind, so they work on a
+`council_start` run (node `main`), a `council` template run (node `council`),
+and a spec of your own.
 
 ## Changed-file reporting
 

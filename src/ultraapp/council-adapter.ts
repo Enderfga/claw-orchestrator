@@ -46,7 +46,15 @@ export interface CouncilSynthArgs {
   signal?: { aborted: boolean };
   /** Injectable for tests. In production, defaults to running the real Council. */
   councilRun?: (cfg: CouncilConfig, sm: SessionManagerLike, task: string) => Promise<CouncilSession>;
+  /**
+   * The kernel run's side of the council: its run id and the run-forum hooks
+   * (`councilForumHooks`), merged over the build's own council config.
+   */
+  council?: Partial<CouncilConfig>;
 }
+
+/** The seats of the build council, by name: their branches, and their member names on the run forum. */
+export const ULTRAAPP_COUNCIL_SEATS = ['agent-A', 'agent-B', 'agent-C'] as const;
 
 export interface CouncilSynthResult {
   ok: boolean;
@@ -91,7 +99,11 @@ export async function runCouncilSynth(args: CouncilSynthArgs): Promise<CouncilSy
   const projectDir = path.join(args.runDir, 'council-project');
   await initFreshGitRepo(projectDir);
 
-  const cfg = { ...buildCouncilConfig(projectDir, args.spec.meta.name), signal: args.signal };
+  const cfg: CouncilConfig = {
+    ...buildCouncilConfig(projectDir, args.spec.meta.name),
+    ...args.council,
+    signal: args.signal,
+  };
   const task = composeCouncilPrompt(args.spec);
   const runner = args.councilRun ?? defaultCouncilRun;
 
@@ -135,21 +147,21 @@ function buildCouncilConfig(projectDir: string, slug: string): CouncilConfig {
     maxRounds: 8,
     agents: [
       {
-        name: 'agent-A',
+        name: ULTRAAPP_COUNCIL_SEATS[0],
         emoji: '🔵',
         persona: `${personaIntro} You lead with architecture and the framework choice; scaffold the project, define folder layout, set up basic /health and BYOK handling. Bias to forward progress.`,
         engine: 'claude',
         model: 'opus',
       },
       {
-        name: 'agent-B',
+        name: ULTRAAPP_COUNCIL_SEATS[1],
         emoji: '🟠',
         persona: `${personaIntro} You implement the pipeline DAG: input ingestion, step execution, output assembly, persistence under /data. You make sure /run, /status, /result wire to real work.`,
         engine: 'claude',
         model: 'opus',
       },
       {
-        name: 'agent-C',
+        name: ULTRAAPP_COUNCIL_SEATS[2],
         emoji: '🟢',
         persona: `${personaIntro} You verify and harden: smoke test, Dockerfile multi-stage, base path correctness, ESLint rule for no-server-keys, AND the §7g frontend gate. The §7g gate is binding: you MUST capture Chrome headless screenshots at 1440×900 AND 375×812, open the PNGs, and verify by eye that the rendering matches §7a–§7f at BOTH viewports — particularly that mobile has no horizontal overflow and h1 wraps at word (not letter) boundaries. Reading source code or meta tags is insufficient evidence; only the screenshots count. You vote NO until "npm run build && npm test && docker build . && npm run smoke" all pass green AND your screenshots are publishable. A working but ugly app, or one that overflows on mobile, is a NO vote.`,
         engine: 'claude',

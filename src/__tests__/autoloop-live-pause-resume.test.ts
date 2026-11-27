@@ -183,6 +183,7 @@ vi.mock('node:fs', async () => {
 });
 
 const { SessionManager } = await import('../session-manager.js');
+const { FORUM_APPENDIX_SEPARATOR } = await import('../autoloop/forum-bridge.js');
 
 function createManager(logger?: Logger): InstanceType<typeof SessionManager> {
   const mgr = new SessionManager(
@@ -202,8 +203,9 @@ function createManager(logger?: Logger): InstanceType<typeof SessionManager> {
 const fence = (tool: string, args: Record<string, unknown>): string =>
   `\`\`\`autoloop\n${JSON.stringify({ tool, args })}\n\`\`\``;
 
+/** What a role was sent, without what the run forum adds after it (its brief, posts for it). */
 const messageText = (message: string | unknown[]): string =>
-  typeof message === 'string' ? message : JSON.stringify(message);
+  (typeof message === 'string' ? message : JSON.stringify(message)).split(FORUM_APPENDIX_SEPARATOR)[0];
 
 const textsIncluding = (planner: MockSession, needle: string): string[] =>
   planner.sendCalls.map((call) => messageText(call.message)).filter((text) => text.includes(needle));
@@ -255,8 +257,10 @@ describe('Autoloop live pause resume regressions', () => {
     if (delta > 0) await vi.advanceTimersByTimeAsync(delta);
   };
 
+  // Microtasks only: a turn waits for the post of the envelope it delivers (the
+  // forum's routing) before it is built, so allow for that chain.
   const flushUntil = async (ready: () => boolean): Promise<void> => {
-    for (let i = 0; i < 30; i++) {
+    for (let i = 0; i < 60; i++) {
       if (ready()) return;
       await Promise.resolve();
     }

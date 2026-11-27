@@ -66,6 +66,15 @@ Three consequences worth knowing:
   state machine. `interview` and `queued` are the exception — nothing is running
   yet, so there is no run to project from.
 
+The council in `synth` runs on the run's forum, as a `council` node does (see
+[council.md](./council.md#the-run-forum)). The workflow sets `forum`, and the
+`synth` node names its seats (`seats: ['agent-A', 'agent-B', 'agent-C']`), so they
+are the forum's members: each is briefed for its round, can ask the others with
+`ASK @agent-B`, and has its round report posted for it. The council's sessions
+carry the build run's id. Each round report becomes a `council-round` build
+event (`{ round, agentName, vote }`, the vote read from the seat's reply), which
+the narrator turns into chat between `build-start` and `council-consensus`.
+
 The interview and the done-mode conversation are deliberately not workflows.
 They are user-driven and open-ended, with no predetermined sequence of steps;
 a workflow expressing them would be a router self-loop or a single node with a

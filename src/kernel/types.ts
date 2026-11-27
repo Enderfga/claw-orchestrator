@@ -97,6 +97,13 @@ export interface AgentNode extends NodeBase, AgentBinding {
   appendSystemPrompt?: string;
   /** Tools the session may not use (`--disallowed-tools`). Engines `claude` and `grok`; refused on the others. */
   disallowedTools?: string[];
+  /** The name this node's agent is on the run forum as. Default: the node id. */
+  forumName?: string;
+  /**
+   * On a run with a forum: what the brief asks of this agent when it posts, in
+   * place of the default sentences after the tag list (a mode's own rules).
+   */
+  forumNorms?: string;
 }
 
 /**
@@ -167,6 +174,24 @@ export interface FanoutNode extends NodeBase {
    * falls back to `timeoutMs`, which is what the field meant before.
    */
   agentTimeoutMs?: number;
+  /**
+   * On a run with a forum, put each agent's forum brief after its prompt rather
+   * than in front of it, so the prompt's first line stays the agent's role.
+   */
+  forumBriefAfter?: boolean;
+  /**
+   * On a run with a forum: what each agent's brief asks of it when it posts, in
+   * place of the default sentences after the tag list (a mode's own rules).
+   */
+  forumNorms?: string;
+  /**
+   * On a run with a forum, `false`: the agents post to it and do not read it.
+   * Their brief lists no posts and names no command to read, and a teammate's
+   * post reaches them only when it names them as an explicit recipient; the
+   * user's and the orchestrator's posts to them, or to the whole run, still do.
+   * For agents that must work independently of each other, such as reviewers.
+   */
+  forumCanRead?: boolean;
 }
 
 /** One council seat: a fan-out agent plus the emoji its charter and transcript show. */
@@ -318,6 +343,8 @@ export interface GoalNode extends NodeBase {
    * as on the other engines.
    */
   disallowedTools?: string[];
+  /** The name this goal is on the run forum as. Default: the node id. */
+  forumName?: string;
 }
 
 /**
@@ -342,6 +369,8 @@ export interface UltraappSynthNode extends NodeBase {
   slug: string;
   /** Where to put the consensus codebase. Absent on runs recorded before builds were versioned: `versions/v1/codebase`. */
   codebasePath?: string;
+  /** The council seats of the build, by name: its members on the run forum. */
+  seats?: string[];
 }
 
 export interface UltraappDeployNode extends NodeBase {
@@ -591,7 +620,8 @@ export type KernelEvent =
   | { ts: string; type: 'run_state'; state: RunState; outcome?: RunOutcome; error?: string }
   | { ts: string; type: 'node_state'; node: string; state: NodeState; attempt?: number; error?: string }
   | { ts: string; type: 'node_output'; node: string; text: string }
-  | { ts: string; type: 'steer'; node: string; text: string }
+  /** `postId`: the forum post the steer was also written as, when there is one. */
+  | { ts: string; type: 'steer'; node: string; text: string; postId?: string }
   /** A node finished holding `count` steers, taken in the order they were logged. */
   | { ts: string; type: 'steer_consumed'; node: string; count: number }
   | { ts: string; type: 'evidence'; node: string; evidenceId: string; passed: boolean }

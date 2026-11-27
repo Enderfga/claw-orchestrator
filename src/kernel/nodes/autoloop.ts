@@ -15,7 +15,9 @@
 
 import type { NodeContext, NodeResult } from '../engine.js';
 import type { AutoloopNode, NodeSpec, RunRecord } from '../types.js';
-import type { AutoloopRoleBindings, AutoloopState } from '../../autoloop/types.js';
+import type { AutoloopRoleBindings, AutoloopRoleName, AutoloopState } from '../../autoloop/types.js';
+import type { AutoloopForumTarget } from '../../autoloop/forum-bridge.js';
+import { AUTOLOOP_FORUM_ROLES, autoloopForumName, runForum } from '../forum.js';
 import { EFFORT_LEVELS, ENGINE_TYPES, type EffortLevel, type EngineType } from '../../types.js';
 import {
   MAX_PENDING_CHAT,
@@ -52,6 +54,11 @@ export interface AutoloopHandle {
   /** Called synchronously by `RunKernel.cancel`. */
   abort?(): void;
   /**
+   * The loop on its run's forum; closed when the node ends. `handedOver`: whether
+   * this process handed a post to a role, in a turn it sent or mid-turn.
+   */
+  forum?: { close(): void; flush?(): Promise<void>; handedOver?(postId: string): boolean };
+  /**
    * After the initial publish and notice reconciliation, before `ready`.
    * SessionManager uses this for committed-iteration recovery so it cannot
    * send before the publisher gate. Failure rejects the start the same way
@@ -65,7 +72,15 @@ export interface AutoloopNodeDeps {
   boot(
     config: Record<string, unknown>,
     secrets: Record<string, unknown>,
-    opts: { freshStart: boolean; restoredInput?: AutoloopInputSnapshot; roleBindings?: AutoloopRoleBindings },
+    opts: {
+      freshStart: boolean;
+      restoredInput?: AutoloopInputSnapshot;
+      roleBindings?: AutoloopRoleBindings;
+      /** The run's forum and the roles' names on it. */
+      forum?: AutoloopForumTarget;
+      /** The kernel run the role sessions belong to. */
+      ownerRunId?: string;
+    },
   ): Promise<AutoloopHandle>;
   /**
    * Resolve/reject the deferred the caller is waiting on.
@@ -225,13 +240,88 @@ function nodePayload(handle: AutoloopHandle, extra: Record<string, unknown>): Au
   };
 }
 
+/**
+ * Where a loop's roles are on its run's forum. Every run has a forum log the
+ * loop's envelopes are mirrored to; the roles are members only when the run
+ * exposes its forum and the node does not opt out with `config.forum: false`.
+ */
+export function autoloopForumTarget(ctx: NodeContext, node: AutoloopNode): AutoloopForumTarget {
+  // A subflow's child run puts its prefix in front of the names, as the roster does.
+  const prefix = runForum(ctx.record).prefix ?? '';
+  const names = Object.fromEntries(
+    AUTOLOOP_FORUM_ROLES.map((role) => [role, `${prefix}${autoloopForumName(ctx.record.spec, node.id, role)}`]),
+  ) as Record<AutoloopRoleName, string>;
+  return {
+    id: ctx.forum.id,
+    config: ctx.forum.config,
+    exposed: ctx.forum.exposed && node.config?.forum !== false,
+    names,
+    post: (input) => ctx.forumPost(input),
+  };
+}
+
+function firstLine(text: string, max: number): string {
+  const line = (text.split('\n').find((l) => l.trim()) ?? '').replace(/\s+/g, ' ').trim();
+  return line.length > max ? `${line.slice(0, max - 1)}…` : line;
+}
+
+/**
+ * The steers a running loop takes. A steer is the user's post on the run forum,
+ * which reaches the Planner and the Coder mid-turn or with their next turn, so
+ * the node only takes it off the kernel's queue. One that reached no role by
+ * the time the node ends goes back, for whatever runs next. A run whose roles
+ * are on no forum takes none: nothing would hand them over.
+ *
+ * Whether a role had a steer's post is what the bridge handed over in this
+ * process (`handedOver`), never the forum's delivery records, which agents can
+ * write. The kernel counts consumption over the log's order, so what goes back
+ * is the tail of what was taken, from the first steer no role had.
+ */
+function steerTaker(
+  ctx: NodeContext,
+  forum: AutoloopForumTarget,
+  handedOver: (postId: string) => boolean,
+): { take(): void; giveBack(): void } {
+  const taken: Array<{ text: string; postId?: string }> = [];
+  return {
+    take() {
+      if (!forum.exposed) return;
+      for (const e of ctx.takeSteerEntries()) {
+        const entry: { text: string; postId?: string } = { text: e.text, ...(e.postId ? { postId: e.postId } : {}) };
+        taken.push(entry);
+        if (entry.postId) continue;
+        // A steer written with no post of its own: post it as the user's now.
+        void ctx
+          .forumPost({
+            from: 'user',
+            title: `FIX: ${firstLine(e.text, 110) || 'steer'}`,
+            body: e.text,
+            data: { kind: 'steer' },
+          })
+          .then((post) => {
+            if (post) entry.postId = post.id;
+          });
+      }
+    },
+    giveBack() {
+      if (taken.length === 0) return;
+      const first = taken.findIndex((e) => !e.postId || !handedOver(e.postId));
+      const back = first < 0 ? [] : taken.slice(first).map((e) => e.text);
+      taken.length = 0;
+      if (back.length) ctx.untakeSteer(back);
+    },
+  };
+}
+
 export function makeAutoloopExecutor(deps: AutoloopNodeDeps) {
   return async function executeAutoloopNode(node: NodeSpec, ctx: NodeContext): Promise<NodeResult> {
     const spec = node as AutoloopNode;
     const readyKey = ctx.tag ?? ctx.runId;
     let handle: AutoloopHandle;
     let restoredInput: AutoloopInputSnapshot | undefined;
+    let forum: AutoloopForumTarget;
     try {
+      forum = autoloopForumTarget(ctx, spec);
       // Kernel commits visits += 1 before execute; first visit in the run is fresh.
       const freshStart = ctx.record.nodes[node.id]?.visits === 1;
       let roleBindings: AutoloopRoleBindings | undefined;
@@ -239,7 +329,13 @@ export function makeAutoloopExecutor(deps: AutoloopNodeDeps) {
         restoredInput = validateStoredInput(ctx.record.nodes[node.id]?.data);
         roleBindings = validateStoredRoleBindings(ctx.record.nodes[node.id]?.data);
       }
-      handle = await deps.boot(spec.config, ctx.secrets, { freshStart, restoredInput, roleBindings });
+      handle = await deps.boot(spec.config, ctx.secrets, {
+        freshStart,
+        restoredInput,
+        roleBindings,
+        forum,
+        ownerRunId: ctx.runId,
+      });
     } catch (err) {
       deps.ready(readyKey, err as Error);
       deps.release?.(ctx.runId);
@@ -254,6 +350,7 @@ export function makeAutoloopExecutor(deps: AutoloopNodeDeps) {
       deps.unregisterPublisher(ctx.runId);
       handle.runner.stop();
       await handle.dispatcher.shutdown('start-failed').catch(() => undefined);
+      handle.forum?.close();
       deps.ready(readyKey, new Error(AUTOLOOP_RESTORE_UNPERSISTED));
       deps.release?.(ctx.runId);
       return { ok: false, error: AUTOLOOP_RESTORE_UNPERSISTED };
@@ -270,6 +367,7 @@ export function makeAutoloopExecutor(deps: AutoloopNodeDeps) {
       deps.unregisterPublisher(ctx.runId);
       handle.runner.stop();
       await handle.dispatcher.shutdown('start-failed').catch(() => undefined);
+      handle.forum?.close();
       deps.ready(readyKey, err as Error);
       deps.release?.(ctx.runId);
       return { ok: false, error: (err as Error).message };
@@ -280,14 +378,34 @@ export function makeAutoloopExecutor(deps: AutoloopNodeDeps) {
     });
     handle.runner.releaseRestoredInput?.();
 
+    // Steers are taken as the loop runs; the user's posts they were written as
+    // reach the roles by themselves.
+    const steers = steerTaker(ctx, forum, (postId) => handle.forum?.handedOver?.(postId) ?? false);
+    const takeSteers = (): void => {
+      try {
+        steers.take();
+      } catch (err) {
+        ctx.logger.warn?.(`[autoloop ${ctx.runId}] could not take steers: ${(err as Error).message}`);
+      }
+    };
+    takeSteers();
+    const steerPoll = setInterval(takeSteers, 1_000);
+    steerPoll.unref?.();
+    handle.runner.on('state', takeSteers);
+
     try {
       await deps.waitForExit(handle, ctx.signal);
     } catch (err) {
       deps.release?.(ctx.runId);
       throw err;
     } finally {
+      clearInterval(steerPoll);
+      handle.runner.off('state', takeSteers);
       handle.runner.off('state', publish);
       deps.unregisterPublisher(ctx.runId);
+      await handle.forum?.flush?.().catch(() => undefined);
+      handle.forum?.close();
+      steers.giveBack();
     }
     publish();
 

@@ -437,8 +437,9 @@ describe('after the first full run', () => {
     expect(s.notes.join('\n')).toMatch(/@tester has finished and does not run again in this run/);
     expect(s.list).toMatch(/^Team: tester \(finished\), fix \(you, running\), ship \(not started\)/);
     // Each member joined with the directory it works in, which is where its score is read.
+    // The run has ended, so its spool is retired and the store holds the forum.
     const joins = fs
-      .readFileSync(path.join(forumSpoolDir(run.runId), 'events.jsonl'), 'utf8')
+      .readFileSync(path.join(forumStoreDir(run.runId), 'events.jsonl'), 'utf8')
       .trim()
       .split('\n')
       .map((l) => JSON.parse(l))
@@ -517,7 +518,7 @@ describe('after the runs on 7.28.0', () => {
       to: ['0.88'],
       re: [],
     };
-    fs.appendFileSync(path.join(forumSpoolDir(run.runId), 'posts.jsonl'), JSON.stringify(old) + '\n');
+    fs.appendFileSync(path.join(forumStoreDir(run.runId), 'posts.jsonl'), JSON.stringify(old) + '\n');
     expect(forumMetrics(run.runId).mentions.map((x) => x.to)).toEqual(['feel', 'feel']);
   });
 });
@@ -666,8 +667,14 @@ describe('a member that cannot run the forum command', () => {
       .trim()
       .split('\n')
       .map((l) => JSON.parse(l));
-    expect(posts).toHaveLength(2);
-    expect(posts[1]).toMatchObject({ from: 'reviewer', to: ['build'], re: ['p00001'], via: 'reply' });
+    // The agents' own posts, and each node's output handed over when it finished.
+    const own = posts.filter((p) => p.via !== 'output');
+    expect(own).toHaveLength(2);
+    expect(own[1]).toMatchObject({ from: 'reviewer', to: ['build'], re: ['p00001'], via: 'reply' });
+    expect(posts.filter((p) => p.via === 'output').map((p) => p.title)).toEqual([
+      'DONE: build output',
+      'DONE: reviewer output',
+    ]);
   });
 
   it('is handed whole posts and no command to run, live and in a digest', async () => {
@@ -720,6 +727,7 @@ describe('an agent node in plan mode on a forum', () => {
     const { forumSnapshot } = await import('../../kernel/forum.js');
     expect(forumSnapshot(run.runId).posts).toMatchObject([
       { from: 'audit', title: 'WIN: no regressions', via: 'reply' },
+      { from: 'audit', title: 'DONE: audit output', via: 'output' },
     ]);
   });
 });

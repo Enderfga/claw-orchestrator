@@ -191,6 +191,8 @@ export class UltraappManager {
   // race afterEach's tmp-dir cleanup and surface as an unhandled ENOENT
   // rejection that vitest treats as failure.
   private readonly inflightWork = new Set<Promise<unknown>>();
+  /** The build-event emitter of each build in flight, so the council's rounds reach the narrator. */
+  private readonly buildEmits = new Map<string, (e: BuildEvent) => void>();
 
   constructor(private readonly opts: UltraappManagerOptions) {
     this.skillContent = loadSkill(opts.skillPath);
@@ -217,7 +219,7 @@ export class UltraappManager {
 
   private ultraappNodeDeps(): UltraappNodeDeps {
     return {
-      synth: async ({ appRunId, runDir, codebasePath, signal }) =>
+      synth: async ({ appRunId, runDir, codebasePath, signal, council }) =>
         runCouncilSynth({
           spec: await this.opts.store.readSpec(appRunId),
           runId: appRunId,
@@ -225,6 +227,22 @@ export class UltraappManager {
           codebaseDir: codebasePath,
           sessionManager: this.opts.sessionManager,
           signal,
+          // Each seat's round report on the run forum becomes a `council-round`
+          // build event; its vote is the one read from the seat's reply.
+          ...(council
+            ? {
+                council: council({
+                  onRoundReport: (r) =>
+                    this.buildEmits.get(appRunId)?.({
+                      type: 'council-round',
+                      runId: appRunId,
+                      round: r.round,
+                      agentName: r.agent,
+                      ...(r.vote === undefined ? {} : { vote: r.vote ? 'YES' : 'NO' }),
+                    }),
+                }),
+              }
+            : {}),
         }),
       deploy: async ({ appRunId, version, codebasePath, slug }) =>
         this.deployStage({ runId: appRunId, version, worktreePath: codebasePath, slug }),
@@ -398,6 +416,7 @@ export class UltraappManager {
     });
 
     const off = this.subscribeKernel(kernelRunId, runId, emit, { version, codebasePath });
+    this.buildEmits.set(runId, emit);
     try {
       if (resumable) {
         // The durable queue re-enqueues an in-flight build after a process dies.
@@ -427,6 +446,7 @@ export class UltraappManager {
       await this.opts.store.setMode(runId, 'failed', reason);
     } finally {
       off();
+      if (this.buildEmits.get(runId) === emit) this.buildEmits.delete(runId);
     }
   }
 

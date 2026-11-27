@@ -28,6 +28,8 @@ import {
   type AgentResponse,
   type AgentPersona,
   type CouncilEvent,
+  type CouncilHistoryEntry,
+  type CouncilRoundResult,
   type CouncilReviewResult,
   type CouncilAcceptResult,
   type CouncilRejectResult,
@@ -60,6 +62,7 @@ import {
 } from './constants.js';
 import { type Logger, createConsoleLogger } from './logger.js';
 import { mapBounded } from './concurrency.js';
+import { fenceForumText } from './kernel/forum.js';
 
 // Forward-declare SessionManager to avoid circular imports at the type level.
 // The actual instance is injected via constructor.
@@ -152,6 +155,109 @@ function spawnAsync(
 
 const VALID_AGENT_NAME = /^[a-zA-Z0-9_-]+$/;
 
+/**
+ * Whether the council commits a seat's changes for it (`commitSeatWork`).
+ *
+ * A worktree keeps its git metadata outside itself: the repository's common
+ * directory and the worktree's own (`<common>/worktrees/<name>`). Codex's
+ * workspace-write sandbox (its default) lets a session write only under its
+ * writable roots, so a Codex seat's `git commit` fails there (measured with
+ * Codex 0.172.0's macOS sandbox).
+ *
+ * The seat is not given those directories instead, as extra writable roots:
+ * git trusts what is in them, and the council's git commands, and the user's,
+ * run outside the sandbox. With the common directory a seat plants a hook or a
+ * `core.fsmonitor` in its config. With its worktree's own directory, which
+ * every commit writes (the index, `COMMIT_EDITMSG`), it repoints `commondir` at
+ * a config of its own, removes it so that directory becomes a repository with
+ * its own config, or writes a `config.worktree` when the repository has
+ * `extensions.worktreeConfig`; the next git command in the worktree runs what it
+ * wrote (each measured). No narrower set of directories lets a seat commit.
+ *
+ * Seats on the other engines commit themselves: Claude Code, OpenCode, ACP and
+ * custom engines run under no sandbox clawo sets; grok, Cursor and agy are
+ * sandboxed only when asked, and how each treats git metadata there is not
+ * measured.
+ */
+function councilCommitsForSeat(engine: EngineType, sandboxMode: AgentPersona['sandboxMode']): boolean {
+  return (
+    (engine === 'codex' || engine === 'codex-app') &&
+    sandboxMode !== 'read-only' &&
+    sandboxMode !== 'danger-full-access'
+  );
+}
+
+/** How long the council's `git add` / `git commit` of a seat's worktree may take. */
+const SEAT_COMMIT_TIMEOUT_MS = 60_000;
+
+/**
+ * Git, as the council runs it in a seat's worktree: not inside a submodule (git
+ * there runs under the submodule's own config, which the seat can write), with
+ * no fsmonitor and no hooks.
+ */
+function seatGit(wtDir: string, args: string[], timeout = GIT_CMD_TIMEOUT_MS): Promise<{ stdout: string }> {
+  return spawnAsync(
+    'git',
+    [
+      '-C',
+      wtDir,
+      '-c',
+      'core.fsmonitor=false',
+      '-c',
+      'core.hooksPath=/dev/null',
+      '-c',
+      'diff.ignoreSubmodules=all',
+      '-c',
+      'submodule.recurse=false',
+      ...args,
+    ],
+    { timeout },
+  );
+}
+
+/** The paths of a worktree's index entries that are gitlinks (submodules). */
+async function indexGitlinks(wtDir: string): Promise<Set<string>> {
+  const out = await seatGit(wtDir, ['ls-files', '-s', '-z']);
+  const links = new Set<string>();
+  for (const entry of out.stdout.split('\0')) {
+    const tab = entry.indexOf('\t');
+    if (tab > 0 && entry.startsWith('160000 ')) links.add(entry.slice(tab + 1));
+  }
+  return links;
+}
+
+/**
+ * Commit everything a seat changed in its worktree to its branch. True when
+ * there was something to commit.
+ *
+ * `git add` looks inside each submodule by running `git status` there, which
+ * `diff.ignoreSubmodules` does not stop, so the gitlinks already in the index
+ * are kept out of it; and a repository the seat made inside its worktree, which
+ * `git add` stages as a new gitlink, is taken out of the index again.
+ */
+async function commitSeatWork(wtDir: string, agentName: string, round: number): Promise<boolean> {
+  const links = await indexGitlinks(wtDir);
+  // --ignore-errors: a file git cannot index (a socket, say) does not stop the rest.
+  await seatGit(
+    wtDir,
+    ['add', '-A', '--ignore-errors', '--', '.', ...[...links].map((p) => `:(exclude,literal)${p}`)],
+    SEAT_COMMIT_TIMEOUT_MS,
+  ).catch(() => undefined);
+  const made = [...(await indexGitlinks(wtDir))].filter((p) => !links.has(p));
+  if (made.length) await seatGit(wtDir, ['update-index', '--force-remove', '--', ...made]);
+  const staged = await seatGit(wtDir, ['diff', '--cached', '--quiet']).then(
+    () => false,
+    () => true,
+  );
+  if (!staged) return false;
+  await seatGit(
+    wtDir,
+    ['commit', '--no-verify', '--no-gpg-sign', '-q', '-m', `council(${agentName}): round ${round}`],
+    SEAT_COMMIT_TIMEOUT_MS,
+  );
+  return true;
+}
+
 /** Best-effort cleanup of already-created worktrees when a batch creation fails */
 async function cleanupCreatedWorktrees(
   worktreeMap: Map<string, string>,
@@ -235,20 +341,21 @@ async function setupWorktrees(
     const branch = `council/${agent.name}`;
 
     if (fs.existsSync(wtDir)) {
-      const isValid = await spawnAsync('git', ['-C', wtDir, 'rev-parse', '--git-dir'], { timeout: GIT_CMD_TIMEOUT_MS })
+      // A seat of an earlier council wrote this worktree: git runs here as in a seat's (`seatGit`).
+      const isValid = await seatGit(wtDir, ['rev-parse', '--git-dir'])
         .then(() => true)
         .catch(() => false);
       if (isValid) {
         // Warn: hard reset discards uncommitted changes from any previous run
-        const dirty = await spawnAsync('git', ['-C', wtDir, 'status', '--porcelain'], { timeout: GIT_CMD_TIMEOUT_MS })
+        const dirty = await seatGit(wtDir, ['status', '--porcelain'])
           .then((r) => r.stdout.trim().length > 0)
           .catch(() => false);
         if (dirty) {
           log.warn(`Worktree ${wtDir} has uncommitted changes — discarding via hard reset`);
         }
         try {
-          await spawnAsync('git', ['-C', wtDir, 'checkout', branch], { timeout: GIT_CMD_TIMEOUT_MS });
-          await spawnAsync('git', ['-C', wtDir, 'reset', '--hard', 'HEAD'], { timeout: GIT_CMD_TIMEOUT_MS });
+          await seatGit(wtDir, ['checkout', branch]);
+          await seatGit(wtDir, ['reset', '--hard', 'HEAD']);
           worktreeMap.set(agent.name, wtDir);
           continue;
         } catch (err) {
@@ -289,36 +396,58 @@ async function setupWorktrees(
 
 // ─── Prompt Building ────────────────────────────────────────────────────────
 
+/** A reply that says something: not empty, and not only the engine's "[Agent completed …]" stand-in. */
+function isSubstantive(content: string): boolean {
+  return content.replace(/^\[Agent completed[^\]]*\]\s*/i, '').trim().length > 0;
+}
+
+/**
+ * The entries of a round prompt's history block, from the responses so far:
+ * each substantive reply, its consensus tag removed, with the seat's vote.
+ */
+export function councilHistoryEntries(responses: AgentResponse[]): CouncilHistoryEntry[] {
+  // Filter out empty responses so they don't pollute the collaboration history
+  return responses
+    .filter((resp) => isSubstantive(resp.content))
+    .map((resp) => ({
+      agent: resp.agent,
+      round: resp.round,
+      report: stripConsensusTags(resp.content),
+      consensus: resp.consensus,
+    }));
+}
+
+/**
+ * The history block of a round prompt: each report's tail (the report and the
+ * vote are at the end), grouped by round. The envelopes agents are handed forum
+ * posts in are fenced, so a seat that quotes another's reply does not post its
+ * blocks again.
+ */
+export function renderCouncilHistory(entries: CouncilHistoryEntry[]): string {
+  if (entries.length === 0) return '';
+  // Build history with tail-first truncation (preserve reports and votes)
+  let history = '\n\n## Previous Collaboration History\n\n';
+  let currentRound = 0;
+  for (const entry of entries) {
+    if (entry.round !== currentRound) {
+      currentRound = entry.round;
+      history += `### Round ${currentRound}\n\n`;
+    }
+    const clean = entry.report;
+    const preview = clean.length > HISTORY_PREVIEW_CHARS ? '...' + clean.slice(-HISTORY_PREVIEW_CHARS) : clean;
+    history += `**${entry.agent}** (${entry.consensus ? 'YES — agree to finish' : 'NO — continue'}):\n${fenceForumText(preview)}\n\n`;
+  }
+  return history;
+}
+
 function buildAgentPrompt(
   agent: AgentPersona,
   task: string,
   round: number,
-  previousResponses: AgentResponse[],
+  history: string,
   allAgents: AgentPersona[],
 ): string {
   const otherAgents = allAgents.filter((a) => a.name !== agent.name);
-
-  // Build history with tail-first truncation (preserve reports and votes)
-  let history = '';
-  // Filter out empty responses so they don't pollute the collaboration history
-  const substantiveResponses = previousResponses.filter((resp) => {
-    const stripped = resp.content.replace(/^\[Agent completed[^\]]*\]\s*/i, '').trim();
-    return stripped.length > 0;
-  });
-
-  if (substantiveResponses.length > 0) {
-    history = '\n\n## Previous Collaboration History\n\n';
-    let currentRound = 0;
-    for (const resp of substantiveResponses) {
-      if (resp.round !== currentRound) {
-        currentRound = resp.round;
-        history += `### Round ${currentRound}\n\n`;
-      }
-      const clean = stripConsensusTags(resp.content);
-      const preview = clean.length > HISTORY_PREVIEW_CHARS ? '...' + clean.slice(-HISTORY_PREVIEW_CHARS) : clean;
-      history += `**${resp.agent}** (${resp.consensus ? 'YES — agree to finish' : 'NO — continue'}):\n${preview}\n\n`;
-    }
-  }
 
   if (round === 1) {
     return `# Round 1 — Planning Round
@@ -424,6 +553,8 @@ function buildSystemPrompt(
   allAgents: AgentPersona[],
   worktreePath: string,
   projectDir: string,
+  forum = false,
+  committedForSeat = false,
 ): string {
   const otherAgents = allAgents.filter((a) => a.name !== agent.name);
   const otherBranches = otherAgents.map((a) => `\`council/${a.name}\``).join(', ');
@@ -431,7 +562,21 @@ function buildSystemPrompt(
   const templatePath = resolveConfigPath('council-system-prompt.md');
   const template = fs.readFileSync(templatePath, 'utf-8');
 
-  return template
+  // Seats on a run forum post their reviews there, where the reviewed seat is
+  // told of them; without one, reviews are files in the project.
+  const reviewRules = forum
+    ? '* **Structured feedback**: Post each review on the team forum (its commands are at the top of your round prompt), answering the round report you reviewed: `WIN: approve @<name> — <what you checked>` or `FAIL @<name>: request changes — <what must change>`. Do not write review files.\n' +
+      '* **Review criteria**: Give a clear approve (`WIN`) or request changes (`FAIL`) with specific reasons; an approve counts as `[APPROVE]` below.'
+    : '* **Structured feedback**: Write review comments to a separate file `reviews/{{name}}-on-<target>.md` — do not mix them into your own feedback file.\n' +
+      '* **Review criteria**: Give a clear `[APPROVE]` or `[REQUEST_CHANGES]` with specific reasons.';
+
+  // A seat whose sandbox keeps git's metadata out of reach (`councilCommitsForSeat`).
+  const commits = committedForSeat
+    ? "\n\n# Commits\n\nYour sandbox keeps git's metadata read-only, so `git commit` fails for you. Leave your changes in `{{workDir}}`: when your turn ends they are committed to `council/{{name}}` for you, where the other members can merge them."
+    : '';
+
+  return (template + commits)
+    .replace(/\{\{reviewRules\}\}/g, reviewRules)
     .replace(/\{\{emoji\}\}/g, agent.emoji)
     .replace(/\{\{name\}\}/g, agent.name)
     .replace(/\{\{persona\}\}/g, agent.persona)
@@ -453,10 +598,13 @@ export class Council extends EventEmitter {
   }
   private _activeSessions = new Set<string>();
   private _session: CouncilSession | null = null;
-  private _pendingInjection: string | null = null;
+  /** Messages for every seat's next round prompt, in the order they came. */
+  private _pendingInjections: string[] = [];
   /** Worktrees created for the current run — used to clean up on abort/error
    *  (a successful run keeps them on disk for the user to review/accept). */
   private _worktreeMap = new Map<string, string>();
+  /** The worktree of each seat whose changes the council commits for it (`councilCommitsForSeat`). */
+  private _seatCommits = new Map<string, string>();
   private logger: Logger;
 
   constructor(config: CouncilConfig, manager: SessionManagerLike, logger?: Logger) {
@@ -488,8 +636,9 @@ export class Council extends EventEmitter {
     return this._session ?? undefined;
   }
 
+  /** Add a message to every seat's next round prompt. Messages are kept in order; none replaces another. */
   injectMessage(message: string): void {
-    this._pendingInjection = message;
+    this._pendingInjections.push(message);
   }
 
   abort(): void {
@@ -520,6 +669,30 @@ export class Council extends EventEmitter {
     this.emit('council-event', full);
   }
 
+  /** The history entries the config's hook gives for this round; undefined without one, or when it fails. */
+  private _historyEntries(round: number, responses: AgentResponse[]): CouncilHistoryEntry[] | undefined {
+    if (!this.config.history) return undefined;
+    try {
+      return this.config.history(round, responses);
+    } catch (err) {
+      this.logger.warn?.(`[council] round ${round}: history from the forum failed: ${(err as Error).message}`);
+      return undefined;
+    }
+  }
+
+  /** The messages the config's hook has for one seat this round. */
+  private _takeInjections(round: number, agent: string): string[] {
+    if (!this.config.takeInjections) return [];
+    try {
+      return this.config.takeInjections(round, agent).filter((m) => m.trim().length > 0);
+    } catch (err) {
+      this.logger.warn?.(
+        `[council] ${agent} round ${round}: the user's messages were not read: ${(err as Error).message}`,
+      );
+      return [];
+    }
+  }
+
   // ─── Single Agent Execution ───────────────────────────────────────────
 
   private async runSingleAgent(
@@ -537,6 +710,16 @@ export class Council extends EventEmitter {
     this._activeSessions.add(sessionName);
 
     let content = '';
+    // The message the seat is sent: its round prompt, after the preface (its forum brief).
+    let message: string | undefined;
+    let leave: (() => void) | undefined;
+    const relay = (text: string): void => {
+      try {
+        this.config.onAgentText?.(agent.name, text, round);
+      } catch (err) {
+        this.logger.warn?.(`[council] ${agent.name} round ${round}: ${(err as Error).message}`);
+      }
+    };
     try {
       for (let attempt = 0; attempt <= EMPTY_RESPONSE_MAX_RETRIES; attempt++) {
         if (this._stopped()) throw new Error('Council aborted');
@@ -568,17 +751,30 @@ export class Council extends EventEmitter {
           ...(agent.acpAgent === undefined ? {} : { acpAgent: agent.acpAgent }),
           effort: agent.effort,
           ultracode: agent.ultracode,
+          // The run's own session: its messages go through the run's forum.
+          ...(this.config.runId ? { ownerRunId: this.config.runId } : {}),
         });
 
+        if (message === undefined) {
+          // On the forum for the length of its round; the brief is read once it is on.
+          leave = this.config.onAgentSession?.(agent.name, sessionName, round, workDir);
+          const preface = this.config.agentPreface?.(agent.name, round);
+          message = preface ? `${preface}\n\n---\n\n${prompt}` : prompt;
+        }
+
         // Send the prompt and wait for completion
-        const result = await this.manager.sendMessage(sessionName, prompt, {
+        let streamed = '';
+        const result = await this.manager.sendMessage(sessionName, message, {
           timeout: this.agentTimeoutMs,
           parentRunId: sessionId,
           onChunk: (chunk: string) => {
             this.emitEvent({ type: 'agent-chunk', sessionId, round, agent: agent.name, content: chunk });
+            streamed += chunk;
+            relay(streamed);
           },
         });
         this._charge(result);
+        if (result.output) relay(result.output);
 
         content = result.output;
 
@@ -603,6 +799,7 @@ export class Council extends EventEmitter {
               { timeout: FOLLOWUP_TIMEOUT_MS, parentRunId: sessionId },
             );
             this._charge(followup);
+            if (followup.output) relay(followup.output);
             if (followup.output.trim().length > 0) {
               content = followup.output;
               if (hasConsensusMarker(content) || content.length >= MIN_COMPLETE_RESPONSE_LENGTH) break;
@@ -614,9 +811,20 @@ export class Council extends EventEmitter {
         }
       }
     } finally {
+      try {
+        leave?.();
+      } catch {
+        // Leaving the forum is bookkeeping; the round's result stands.
+      }
       // Stop session — fire-and-forget
       this.manager.stopSession(sessionName).catch(() => {});
       this._activeSessions.delete(sessionName);
+      const wt = this._seatCommits.get(agent.name);
+      if (wt && !this._stopped()) {
+        await commitSeatWork(wt, agent.name, round).catch((err: Error) =>
+          this.logger.warn?.(`[council] ${agent.name} round ${round}: its changes were not committed: ${err.message}`),
+        );
+      }
     }
 
     const { vote: consensus, source: consensusSource } = parseConsensusWithSource(content);
@@ -651,7 +859,8 @@ export class Council extends EventEmitter {
       id: this.config.runId ?? randomUUID(),
       task: task.trim(),
       config: this.config,
-      responses: [],
+      // A resumed council keeps the rounds it already ran.
+      responses: [...(this.config.previousResponses ?? [])],
       status: 'running',
       startTime: new Date().toISOString(),
     };
@@ -703,26 +912,54 @@ export class Council extends EventEmitter {
     for (const [name, wtPath] of worktreeMap) {
       this.logger.info(`  ${name}: ${wtPath}`);
     }
+    this._seatCommits.clear();
+    for (const agent of this.config.agents) {
+      const wtPath = worktreeMap.get(agent.name);
+      if (wtPath && councilCommitsForSeat(agent.engine || defaultEngine(), agent.sandboxMode)) {
+        this._seatCommits.set(agent.name, wtPath);
+      }
+    }
+
+    // A resumed council carries on after the last round it finished; one whose
+    // last round was all YES has nothing left to run.
+    const ranRounds = session.responses.length > 0 ? Math.max(...session.responses.map((r) => r.round)) : 0;
+    if (ranRounds > 0) {
+      const last = session.responses.filter((r) => r.round === ranRounds);
+      const agreed = last.length === this.config.agents.length && last.every((r) => r.consensus);
+      this.logger.info(`Resuming after round ${ranRounds}${agreed ? ' (consensus already reached)' : ''}`);
+      if (agreed) session.status = 'awaiting_user';
+    }
 
     try {
-      for (let round = 1; round <= this.config.maxRounds; round++) {
-        if (this._stopped()) break;
+      for (let round = ranRounds + 1; round <= this.config.maxRounds; round++) {
+        if (this._stopped() || session.status !== 'running') break;
 
         this.logger.info(`Round ${round} (${this.config.agents.length} agents parallel)`);
         this.emitEvent({ type: 'round-start', sessionId: session.id, round });
 
-        // Check for user injection
-        const injection = this._pendingInjection;
-        this._pendingInjection = null;
+        // The user's messages since the last round: the ones injected here, and
+        // the ones the run hands this seat (its forum's user posts and steers).
+        const injected = this._pendingInjections.splice(0);
+        const history = renderCouncilHistory(
+          this._historyEntries(round, session.responses) ?? councilHistoryEntries(session.responses),
+        );
 
         // Build prompts for all agents
         const agentTasks = this.config.agents.map((agent) => {
           const workDir = worktreeMap.get(agent.name) || this.config.projectDir;
-          let prompt = buildAgentPrompt(agent, trimmedTask, round, session.responses, this.config.agents);
+          let prompt = buildAgentPrompt(agent, trimmedTask, round, history, this.config.agents);
+          const injection = [...injected, ...this._takeInjections(round, agent.name)].join('\n\n');
           if (injection) {
             prompt += `\n\n## User Injection\n\n${injection}`;
           }
-          const systemPrompt = buildSystemPrompt(agent, this.config.agents, workDir, this.config.projectDir);
+          const systemPrompt = buildSystemPrompt(
+            agent,
+            this.config.agents,
+            workDir,
+            this.config.projectDir,
+            this.config.forum === true,
+            this._seatCommits.has(agent.name),
+          );
           return { agent, prompt, systemPrompt, workDir };
         });
 
@@ -739,12 +976,14 @@ export class Council extends EventEmitter {
 
         // Collect results
         const roundVotes: boolean[] = [];
+        const roundResults: CouncilRoundResult[] = [];
         for (let i = 0; i < results.length; i++) {
           const result = results[i];
           const agent = this.config.agents[i];
           if (result.status === 'fulfilled') {
             roundVotes.push(result.value.consensus);
             session.responses.push(result.value);
+            roundResults.push({ agent: agent.name, response: result.value });
           } else {
             const errMsg = (result.reason as Error)?.message || 'Unknown error';
             this.logger.error(`${agent.name} failed: ${errMsg}`);
@@ -758,6 +997,19 @@ export class Council extends EventEmitter {
               sessionKey: '',
               timestamp: new Date().toISOString(),
             });
+            roundResults.push({ agent: agent.name, error: errMsg });
+          }
+        }
+
+        // The round's reports go out (on the run forum, for a kernel run). The
+        // votes are counted from the replies above, never from what was posted.
+        if (this.config.onRoundEnd) {
+          try {
+            await this.config.onRoundEnd(round, roundResults);
+          } catch (err) {
+            this.logger.warn?.(
+              `[council] round ${round}: the round reports were not posted: ${(err as Error).message}`,
+            );
           }
         }
 

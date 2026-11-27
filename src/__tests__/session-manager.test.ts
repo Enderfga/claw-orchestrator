@@ -1096,7 +1096,7 @@ describe('SessionManager', () => {
       expect(delivered).toBe(0);
     });
 
-    it('MAX_INBOX_SIZE eviction drops oldest read first, then oldest unread', async () => {
+    it('the inbox shows the newest MAX_INBOX_SIZE messages, read or not', async () => {
       await mgr.startSession({ name: 's1', cwd: '/tmp' });
       await mgr.startSession({ name: 's2', cwd: '/tmp' });
       mockSessions[1].setBusy(true);
@@ -1109,17 +1109,15 @@ describe('SessionManager', () => {
       let inbox = mgr.sessionInbox('s2', false);
       expect(inbox.length).toBe(200);
 
-      // Mark some as read
+      // The inbox is a view of the session forum: changing an entry changes nothing there.
       inbox[0].read = true;
-      inbox[1].read = true;
+      expect(mgr.sessionInbox('s2')).toHaveLength(200);
 
-      // Send one more — should evict the first read message
+      // One more: the oldest drops out of the view
       await mgr.sessionSendTo('s1', 's2', 'overflow-msg');
       inbox = mgr.sessionInbox('s2', false);
       expect(inbox.length).toBe(200);
-      // The evicted one should have been the first read message (msg-0)
       expect(inbox.find((m) => m.text === 'msg-0')).toBeUndefined();
-      // msg-1 (also read) should still be there
       expect(inbox.find((m) => m.text === 'msg-1')).toBeDefined();
       // overflow should be the last
       expect(inbox[inbox.length - 1].text).toBe('overflow-msg');
@@ -4733,8 +4731,9 @@ describe('SessionManager', () => {
       return workspace;
     };
 
+    /** What the Planner was sent, without what the run forum adds after it (FORUM_APPENDIX_SEPARATOR). */
     const messageText = (message: string | unknown[]): string =>
-      typeof message === 'string' ? message : JSON.stringify(message);
+      (typeof message === 'string' ? message : JSON.stringify(message)).split('\n\n---\n\n')[0];
 
     const advanceTo = async (absoluteMs: number): Promise<void> => {
       const delta = absoluteMs - Date.now();

@@ -64,7 +64,9 @@ consumed when the node that took them finishes, so on resume every steer no
 finished node consumed is queued again — including one a node was holding when
 it died, which goes to that node's retry. A `goal` node delivers steers into
 the running turn as they arrive, so one delivered before a crash is delivered
-again after the resume.
+again after the resume; one it took and never handed over (the goal ended with
+no turn running) goes back to the queue when the node ends, for the next node,
+and is not counted as consumed by the goal.
 
 **This makes node execution at-least-once, not exactly-once.** There is no
 idempotency key and no side-effect commit marker, so a node that wrote files and
@@ -184,7 +186,7 @@ is unrecoverable and reads back as "not found".
 | `fanout`                            | N agents in parallel on a shared prompt, optional synthesis pass. Succeeds when at least one agent does                                                                                                                                                             |
 | `council`                           | The council engine; its votes are recorded as advisory. Fails only when the council itself errors                                                                                                                                                                   |
 | `verifier`                          | Runs an acceptance contract, writes evidence — see [`verification.md`](./verification.md). `"contract": "run"` with no run-level contract passes through and verifies nothing; an inline contract with no recognised check is refused at start                      |
-| `human_gate`                        | Parks the run until a person answers; a rejection fails the run                                                                                                                                                                                                     |
+| `human_gate`                        | Parks the run until a person answers; a rejection fails the run. It asks as the orchestrator's `ASK @user` on the run's forum ([Control](#control))                                                                                                                 |
 | `router`                            | Picks the next node from declarative conditions; a backwards route is the loop                                                                                                                                                                                      |
 | `subflow`                           | Runs another workflow as a child run and adopts its verdict, with the tree digest the verdict was taken against; a child that ends `unverified` hands up no verdict                                                                                                 |
 | `autoloop`                          | A long-lived Planner / Coder / Reviewer loop; its executor is injected. On the node's first visit (`visits === 1`) the shared fresh-start boundary applies (dirty-worktree refusal + run-local `tasks/<config.runId>/.gitignore`); resume and later visits skip it. |
@@ -226,8 +228,8 @@ The kind-specific fields:
 
 | Kind                                | Fields                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `agent`                             | `prompt` (required); `engine`, `model`, `effort`, `acpAgent` (a bundled ACP preset id, for `engine: "acp"`); `cwd` (default: the run's); `inputs`, nodes whose output it reads before its prompt (framed as data, at most 12,000 characters each with the path of the whole; a node that has not run is left out); `continueConversation`, to keep one conversation across this node's visits without naming it; `sessionName`, to keep one conversation across visits and nodes (each turn's process stops, and the next start under the name resumes the conversation; the name outlives the run, so make it unique to the run); `permissionMode` (default `bypassPermissions`); `appendSystemPrompt`, standing instructions for the session; `disallowedTools`, tools the session may not use (engines `claude` and `grok`; refused at start on the others)                                                                                                                                                                                                                                                                                                |
-| `fanout`                            | `prompt` (required, the shared task) and `agents` (required); `synthesize`, `synthesisEngine` (default: the configured default engine), `synthesisModel`, `synthesisAcpAgent`, `synthesisPermissionMode` (default `bypassPermissions`); `maxTurnsPerAgent` and `maxBudgetUsd`, per agent; `cwd`; `agentTimeoutMs`. An agent's own `cwd` (absolute, or relative to the node's) starts it in a directory of its own, so agents that each write code do not edit the same files; every result records the `cwd` it ran in. An agent with an `objective` runs as a goal instead of one turn (on any goal engine, `acp` with `acpAgent`; omitted, the configured default if it runs goals; `tokenBudget`, `timeoutMs`, `stallMs`, `capacityRetry` as on a goal node): each goal runs in a child run of one `goal` node, checkpointed in `data.goalRuns`, so a resumed parent reattaches to it instead of starting it again, and its result carries `goal: { runId, status, tokensUsed, threadId }`. Goal agents run beside the turn agents; `synthesize` is refused with them, and the node's `timeoutMs` must cover the longest goal (`fanout_start` sizes it so) |
+| `agent`                             | `prompt` (required); `engine`, `model`, `effort`, `acpAgent` (a bundled ACP preset id, for `engine: "acp"`); `cwd` (default: the run's); `inputs`, nodes whose output it reads before its prompt (framed as data, at most 12,000 characters each with the path of the whole; a node that has not run is left out; an agent or goal node's output is read from the handover it posted on the run's forum); `continueConversation`, to keep one conversation across this node's visits without naming it; `sessionName`, to keep one conversation across visits and nodes (each turn's process stops, and the next start under the name resumes the conversation; the name outlives the run, so make it unique to the run); `permissionMode` (default `bypassPermissions`); `appendSystemPrompt`, standing instructions for the session; `disallowedTools`, tools the session may not use (engines `claude` and `grok`; refused at start on the others)                                                                                                                                                                                                         |
+| `fanout`                            | `prompt` (required, the shared task) and `agents` (required); `synthesize`, `synthesisEngine` (default: the configured default engine), `synthesisModel`, `synthesisAcpAgent`, `synthesisPermissionMode` (ignored — it runs read-only); `maxTurnsPerAgent` and `maxBudgetUsd`, per agent; `cwd`; `agentTimeoutMs`. An agent's own `cwd` (absolute, or relative to the node's) starts it in a directory of its own, so agents that each write code do not edit the same files; every result records the `cwd` it ran in. An agent with an `objective` runs as a goal instead of one turn (on any goal engine, `acp` with `acpAgent`; omitted, the configured default if it runs goals; `tokenBudget`, `timeoutMs`, `stallMs`, `capacityRetry` as on a goal node): each goal runs in a child run of one `goal` node, checkpointed in `data.goalRuns`, so a resumed parent reattaches to it instead of starting it again, and its result carries `goal: { runId, status, tokensUsed, threadId }`. Goal agents run beside the turn agents; `synthesize` is refused with them, and the node's `timeoutMs` must cover the longest goal (`fanout_start` sizes it so) |
 | `council`                           | `task` (required) and `agents` (required); `projectDir` (default: the run's cwd); `maxRounds` (default 15, as for `council_start`); `maxTurnsPerAgent` and `maxBudgetUsd`, per agent; `defaultPermissionMode`; `agentTimeoutMs`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `verifier`                          | `contract` (required): an inline contract, or `"run"` for the run-level one; `cwd` (default: the run's); `fixer`, the engine, model, permissions and sandbox of a fix-on-red session (default: the default engine, `bypassPermissions`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `human_gate`                        | `prompt` (required)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
@@ -248,6 +250,11 @@ omitting any of them preserves the session default. `customEngine` is not a spec
 field — a spec is written to disk and a custom-engine config can carry
 credentials — so custom engines reach a run in memory, through `fanout_start` or
 `council_start`, and are re-supplied on resume as described above.
+
+A fan-out's synthesis pass always runs read-only — `permissionMode: "plan"` and
+`sandboxMode: "read-only"` (`plan` alone on `acp`, which cannot be held to a
+sandbox) — whatever `synthesisPermissionMode` says: it reads the agents' answers
+and writes one of its own, in the directory the agents shared.
 
 A council agent's `persona` is its role; one with no `persona` uses its `prompt`
 instead. Fan-out agents may also set `persona` for role instructions. When no non-empty
@@ -478,7 +485,15 @@ what an unattended run needs around that loop.
   verdict on its own first visit.
 - **Steering is live.** `workflow_steer` text goes into the running turn through
   `turn/steer`; with no turn running it waits for the next one. Text queued
-  before the goal is set is put in front of the objective.
+  before the goal is set is put in front of the objective. On a run with a
+  forum the steer also arrives as the user's post, pushed to the goal; it is
+  handed over once, and a post pushed to the goal is recorded as delivered
+  only once it is in a turn. A steer the goal took and could not hand over
+  before it ended goes back to the run's queue, for the next node. On Codex
+  the forum brief in front of the objective is the short one (at most five
+  posts a section, no listing of every title), to leave room in the
+  4,000-character objective; a steer that the objective's cut leaves out is
+  steered into the running turn instead, or goes back to the run's queue.
 - **A finished goal takes news.** A revisit of a goal that ended, with no new red
   verdict, normally returns its result without starting it again. When something
   reached it after it ended — a steer, or a forum post that names it and that it
@@ -645,11 +660,19 @@ whatever a later verifier says (`runContractVerdict` on the run record).
 
 ## The run forum
 
-`forum` on a spec gives every agent of the run a shared board of titled posts,
-after the forum in _Test-Time Compute Scales Better with Parallel Agent Teams_
-(arXiv 2611.09798). A fan-out takes it as one flag: `clawo fanout … --forum`,
-`forum` on `fanout_start` and on the `fanout` template of `workflow_start`. It is
-`true`, or a config:
+Every run has a forum: a board of titled posts, after the forum in _Test-Time Compute Scales Better
+with Parallel Agent Teams_ (arXiv 2611.09798). It carries every message between the run's
+participants — its agents, the orchestrator and the user — and it is the run's record of them.
+Each mode decides who is on it, who sees what and when, and what it posts. Decisions never come
+from it: council votes, verifier verdicts, gate approvals, autoloop controls and acceptance, and
+router conditions are read from an agent's own reply or from the kernel. A post may mirror any of
+them, and nothing reads one back, because agents can write the forum.
+
+### Log and exposure
+
+The forum of a run exists whether or not its agents are told about it; the runtime posts its
+messages there either way (the list below). `forum` decides whether the agents are on it: briefed,
+able to run `clawo forum`, and pushed what is addressed to them. It is `true`, `false`, or a config:
 
 ```json
 {
@@ -661,88 +684,155 @@ after the forum in _Test-Time Compute Scales Better with Parallel Agent Teams_
 }
 ```
 
-- **Who is on it.** Every fan-out agent (by its `name`), and every `agent` and
-  `goal` node (by its `id`), while it works. A fan-out goal agent's child run
-  carries the forum and its name, so a resume puts it back on.
-- **How agents use it.** Each one gets a brief in front of its prompt with the
-  exact commands — `clawo forum post --title "…" --body "…" [--re p00012]`,
-  `list` (who is on the forum and whether each is running, finished or not
-  started, then the titles, with NEW on the unread ones) and `read <id>` — with the Node
-  binary, CLI path, forum directory and its own name filled in, so any engine that
-  can run a shell command uses it and no `clawo` on the `PATH` is needed. The
-  brief sets the norms: post a clear WIN or FAIL with the exact change and what
-  was measured, `ASK @name` for something a teammate has to answer, answer with
-  `--re`, `DONE` when finished, and `list` before each new step. A title starts
-  with its tags (`FAIL: …`, `[ASK] …`), one of `WIN`, `FAIL`, `ASK`, `FIX`, `DONE`
-  and `INFO`; other leading capitals (a room code in `R1 FAIL: …`) are passed over,
-  and a post with none counts as `OTHER`. `@name` addresses an agent when the name
-  is on the forum (`@0.88` in a body addresses nobody); a post id in
-  the text or `--re` refers to another post.
-- **An agent that cannot run the command.** A read-only session (`sandboxMode:
-"read-only"`, or `permissionMode: "plan"`) cannot: on one engine it has no shell, on
-  another its shell writes nothing, and every forum command writes the record. Its brief
-  has no commands; it posts by writing a block in its reply,
-  `<new-forum-post title="FAIL: …" re="p00012">details</new-forum-post>`, which the
-  orchestrator posts under its name as soon as the block is complete (`via: "reply"` on
-  the post). Its brief carries the forum as it stands — the roster, every title, and in
-  full the posts that name it — and pushes and digests hand it whole posts. Any agent
-  may post with a block, so an engine with no shell at all (an ACP agent, a custom CLI)
-  takes part the same way; the brief of an agent that can run the command says so too.
-- **Every engine, any number.** Claude Code, Antigravity, Grok, Cursor and OpenCode
-  agents post, read and answer one another on one forum whether writable, in their
-  `workspace-write` sandbox, or read-only. A team is as large as its spec; a fan-out runs as many agents at once as there are
-  session slots (32 under `clawo serve`, set by `OPENCLAW_SERVE_MAX_SESSIONS`; 5 in the
-  OpenClaw plugin), and an agent that starts later finds the posts that name it in its
-  brief.
-- **What a poster is told.** `post` adds a note when the post has no tag (an
-  untagged ASK or FAIL is not pushed), when a name it addresses is not on the
-  forum, has not started (the post will be in its brief), or has finished — and,
-  when its node is on no loop of the workflow, that it does not run again and
-  nobody will answer as it. Whether a node is on a loop is read from the spec:
-  its `next`, a router's routes and default, and node order.
-- **Score.** With `score.file` (relative to the directory the posting agent works
-  in — its node's `cwd`, not wherever its shell is) or `score.command` (an argv
-  run there, 30 s bound by default), each post carries the agent's current score,
-  parsed as JSON when it is JSON. `score.pick` keeps only the named fields
-  (`"ok"`, `"summary.passed"`). A post keeps at most 2,000 characters of score;
-  `read` shows it as one line of at most 300 after the body, and `list` and a push
-  show 60.
-- **What reaches an agent without reading.** `push: "mentions"` (default): an ASK
-  or FAIL that names it. `"all"`: every post by someone else. `"digest"`: those
-  mentions at once, and the titles of the rest every `digestMs` (default 60 s).
-  `"none"`: nothing; agents read for themselves, as in the paper, whose forum
-  pushes nothing. A push reaches the turn in flight: a goal through its steers,
-  within a second; a Claude Code or `codex-app` session at its next tool round.
-  Every other engine — one process per turn (Codex, Antigravity, Grok, Cursor, OpenCode),
-  an ACP agent, a custom CLI — gets the same posts, in full and once, at the top of
-  its next `clawo forum` command, which its brief has it run before each step; the
-  hub then does not push them again. Pushed text is wrapped as a teammate's post,
-  not an instruction from the user.
-- **Later nodes.** The forum belongs to the run, so the nodes after a fan-out read
-  the same one. An agent that joins is told, in its brief, about the posts that
-  name it and that it has not seen, the ASKs nobody has answered, and the FAILs so
-  far — this is how a FAIL addressed to a fan-out agent that has already finished
-  reaches the node that comes after it. A fan-out node's result lists the ASKs its
-  agents leave unanswered (`data.forum.openAsks`, and a line in its output).
-- **Where it lives.** The agents' CLI reads and writes a spool in the temp
-  directory (`<tmp>/clawo-forum/<runId>/`), the one place outside its workspace
-  every engine's sandbox lets a session write. The orchestrator copies it into
-  `<run>/forum/` every second while the forum has members, and restores the spool
-  from there on resume. A `workspace-write` sandbox lets the command write there on
-  every engine measured; a read-only session posts through its reply instead.
-- **Metrics.** `workflow_forum` with `action: "metrics"`, or `clawo forum metrics
-<runId>`: posts by agent and tag, reads and lists per agent, every ASK with the
-  post that answered it (a later post by someone else that refers to it) and how
-  long that took, the open ASKs, and for every post that names an agent when that
-  agent first had it — pushed into its work, in a digest, in the brief it read when
-  it started (`via: "brief"`, which lists the posts that name it), at the top of its
-  next forum command (`via: "cli"`), or read — and how
-  long after the post. A post the named agent never saw but a later agent did (in
-  its brief, or by reading it) carries `handedTo` — this is how a FAIL addressed to
-  a fan-out agent that had finished reaches the node after it — and is counted in
-  `handedMentions`; `unseenMentions` counts only the posts nobody saw. A push is
-  counted when the post is handed to the turn in flight; the engine takes it in at
-  its next tool round.
+On by default: `council_start` and the `council` template (off, with a warning, when a seat name
+cannot be a forum name), `autoloop_start`, `ultraplan_start`, `ultrareview_start`. Off by default,
+on with `forum`: `fanout_start` (`clawo fanout --forum`), `workflow_start` with any template, a
+spec's top-level `forum`.
+
+### Who is on it
+
+| Member                                 | Name                                                                  |
+| -------------------------------------- | --------------------------------------------------------------------- |
+| An `agent` or `goal` node              | its `forumName`, else its id                                          |
+| A fan-out agent                        | its `name`; a fan-out goal agent's child run carries the forum and it |
+| A fan-out's synthesis pass (read-only) | `synthesis`, or `<node>.synthesis` with more than one                 |
+| A verifier's fixer                     | `<verifier>.fix` (`verify.fix` for the implicit verifier)             |
+| A council seat, for its round          | its name                                                              |
+| An autoloop role                       | `planner`, `coder`, `reviewer`, or `<node>.<role>` beside another one |
+| An ultraplan planner                   | `planner`                                                             |
+| An ultrareview reviewer                | its angle's name; write-only (below)                                  |
+| An UltraApp build seat                 | its name                                                              |
+| A subflow's agents                     | `<subflow>.<member>`, on the parent's forum                           |
+
+Two names are reserved and belong to no agent: `user` (the person or caller who started the run)
+and `orchestrator` (clawo's runtime and the tool caller). An agent cannot post under them, and a
+post can address them (`ASK @user: …`).
+
+### What the runtime posts
+
+| When                                     | Post                                                                | From                      |
+| ---------------------------------------- | ------------------------------------------------------------------- | ------------------------- |
+| `workflow_steer`                         | `FIX: <first line>`, the whole text as the body                     | `user`                    |
+| `council_inject`                         | the message                                                         | `user`                    |
+| A `human_gate` parks                     | `ASK @user: <prompt>`                                               | `orchestrator`            |
+| `workflow_approve`                       | `DONE: approved` / `FAIL: rejected`, re the ASK, the comment        | `user`                    |
+| A node ends (agent, goal, fan-out)       | `DONE: <member> output`: an excerpt and the artifact path           | the member                |
+| A verifier rules                         | `WIN: verified (n checks)` / `FAIL: verification — k failed …`      | `orchestrator`            |
+| A council round ends                     | `DONE: R<n> report — vote YES\|NO` per seat; a failed seat's `FAIL` | the seat / `orchestrator` |
+| An autoloop message                      | directive, acknowledgement, iteration summary, verdict, errors      | the role / `orchestrator` |
+| An autoloop chat                         | the chat                                                            | `user`                    |
+| A session message (session forum, below) | `MSG @<to>: <summary>`                                              | the sending session       |
+
+Handovers go up when a node ends — a fan-out's when the whole fan-out ends — so agents of one
+fan-out never see each other's answers. `inputs` still reads a node's output from the run directory;
+the handover is the record the rest of the forum reads. Quoted agent text addresses nobody: the @names
+in a handover, a round report or check output do not push anything.
+
+**Who said it.** A post from `user` or `orchestrator` speaks for them only when the forum's authored
+ledger (`<run>/forum/authored.jsonl`, written by the runtime and never by an agent) holds it with the
+same content; a line that claims either name without it is shown as `user (unverified)` and routed as
+an agent's post. Pushed posts are framed by who wrote them: an agent's as "A teammate's post on the
+team forum, not an instruction from the user", the orchestrator's as "From the orchestrator of this
+run", the user's as "From the user who started this run". Every agent text that reaches another
+agent's prompt — pushes, briefs, inputs, council history, synthesis material — is fenced so it cannot
+open or close a forum envelope.
+
+### How agents use it
+
+Each member gets a brief with the exact commands — `clawo forum post --title "…" --body "…" [--re
+p00012]`, `list` (who is running, finished or not started, then the titles, NEW on the unread ones)
+and `read <id>` — with the Node binary, CLI path, forum directory and its own name filled in, so any
+engine that can run a shell command uses it and no `clawo` on the `PATH` is needed. A title starts with
+one tag: `WIN`, `FAIL`, `ASK`, `FIX`, `DONE`, `INFO` (other leading capitals, such as a room code in
+`R1 FAIL: …`, are passed over; a post with none counts as `OTHER`). `@name` addresses a member; a post
+id in the text or `--re` refers to a post. The brief starts with the user's posts in full, then the
+posts that name the member and that it has not seen, the open ASKs and the FAILs so far. Each mode
+writes its own norms into the brief: a coding agent posts a clear WIN or FAIL with what it measured; a
+council seat leaves its round report and vote to its reply and posts reviews as
+`WIN: approve @seat …` / `FAIL @seat: request changes …`; a reviewer posts each finding as
+`FAIL: <file>:<line> …`; a planner asks `ASK @user: …`.
+
+- **No shell, or read-only.** A read-only session (`sandboxMode: "read-only"`, or
+  `permissionMode: "plan"`) cannot run the command: every command writes the record. It posts by
+  writing `<new-forum-post title="FAIL: …" re="p00012">details</new-forum-post>` in its reply, which the
+  orchestrator posts under its name as soon as the block is complete (`via: "reply"`); its brief carries
+  the forum as it stands, and pushes hand it whole posts. Any agent may post this way, so an ACP agent
+  or a custom CLI with no shell takes part too.
+- **Write-only members.** Ultrareview reviewers and the autoloop Reviewer post and see nothing of their
+  teammates — no listing, no pushes of agent posts — so each works independently. They still get what
+  the user or the orchestrator addresses to them.
+- **What a poster is told.** `post` adds a note when the post has no tag, or when a name it addresses
+  is not on the forum, has not started (the post will be in its brief) or has finished — and, when its
+  node is on no loop of the workflow, that nobody will answer as it.
+
+### What reaches an agent without reading
+
+`push: "mentions"` (default): an ASK or FAIL that names it. `"all"`: every post by someone else.
+`"digest"`: those mentions at once, and the titles of the rest every `digestMs` (default 60 s).
+`"none"`: nothing; agents read for themselves, as in the paper. Whatever the setting, a post from the
+user or the orchestrator reaches the members it names, or every member when it names none, and a post
+addressed to a member explicitly reaches it.
+
+A push reaches the turn in flight: a Claude Code or `codex-app` session at its next tool round, a goal
+through its steers. Every other engine — one process per turn (Codex, Antigravity, Grok, Cursor,
+OpenCode), an ACP agent, a custom CLI — gets the same posts, in full and once, at the top of its next
+`clawo forum` command; the hub then does not push them again. Autoloop roles and council seats also
+get what was addressed to them with their next turn's prompt. A post counts as delivered only once it
+is in a turn.
+
+**Steers.** A steer is the user's post, so every running member that can take it mid-turn has it at
+once. The kernel's queue keeps its own rule and its restart accounting: the next agent or goal node to
+start takes the unconsumed steers, a council's next round and a running autoloop's roles take them, and
+a node that took steers it could not hand over gives them back for the next one.
+
+### Visibility and direct messages
+
+A post can be addressed to its recipients only (`visibility: "to"`): nobody else sees it in a listing,
+a read, a brief or an inbox. Plain sessions use this: each server process has one forum with no run,
+`fm-sessions-<pid>-<start>`, made by the first `session_send_to`, whose members are its plain sessions.
+A message is a post addressed to its recipient, delivered as before — an idle session gets a new turn,
+a busy Claude Code or `codex-app` session gets it mid-turn, any other waits unread for
+`session_deliver_inbox` — in the `<cross-session-message>` envelope, which says how to answer: a
+`<new-forum-post re="p…">` block in the reply goes back to the sender as a message. Sessions a run
+started belong to that run: broadcasts and `team_list` leave them out, `session_send_to` refuses them
+(post to the run's forum instead), and Claude Code sessions a mode started refuse native peer messages
+unless the mode says otherwise.
+
+### Where it lives
+
+The agents' CLI reads and writes a spool in the temp directory (`<tmp>/clawo-forum/<runId>/`, mode
+0700, files 0600; `<tmp>/clawo-forum-<uid>/` when the shared root is not this user's), the one place
+outside its workspace every engine's sandbox lets a session write. The runtime's own posts are in
+`<run>/forum/` before the call that made them returns; agents' posts are copied there within a second while the
+forum has members. When a run ends its spool is copied in and removed; a resume or a later post puts it
+back from the store. Spools of finished or deleted runs, and session forums untouched for a week, are
+removed when a server starts. Session forums are stored under `~/.claw-orchestrator/forums/<id>/`. Deleting a run
+removes its spool, so a run that reuses the id starts on an empty forum. A post or a join waits at most a second
+for the forum's lock: a lock no live process holds is broken, and one a live process keeps holding makes the call
+fail with `The forum is busy`.
+
+**Score.** With `score.file` (relative to the directory the posting agent works in — its node's `cwd`)
+or `score.command` (an argv run there, 30 s bound by default), each agent post carries the agent's
+current score, parsed as JSON when it is JSON; `score.pick` keeps only the named fields
+(`"ok"`, `"summary.passed"`). A post keeps at most 2,000 characters of score; `read` shows one line of
+at most 300, `list` and a push show 60.
+
+### Reading it from outside
+
+- `workflow_forum` — `list`, `read`, `metrics` on any run or session forum (`fm-…`), and `post` to a
+  run (`author`: `orchestrator` by default, or `user`; `re`, `to`). A post returns its notes; a listed
+  post carries its `authority`.
+- `clawo forum show <id>` and `clawo forum metrics <id>`.
+- The dashboard's Forum pane on the Runs, Council and Autoloop views: posts live, with who each speaks
+  for, and a box to post as the user. `/workflow/<id>/events` sends each new post as `forum_post`
+  (`/autoloop/<id>/events` too).
+
+**Metrics** count the agents' own posts (by agent and tag), their reads and lists, every ASK with the
+post that answered it and how long that took, the open ASKs, and for every post that names an agent
+when it first had it — pushed, in a digest, in its brief, at the top of its next forum command, with a
+turn, or read — and how long after the post. A post the named agent never saw but a later agent did
+carries `handedTo` and counts in `handedMentions`; `unseenMentions` counts the posts nobody saw. The
+runtime's posts are counted apart, under `runtime` (by `via` and by author).
 
 ## Isolation and spend
 
@@ -794,13 +884,34 @@ run's `workflow_list` entry), then sends each kernel event as a `workflow-event`
 Cancel and steer reach a run only while it executes in this process. Answering a
 gate does not need that: a run parked by a process that has since exited is
 resumed with the answer attached. `POST /workflow/<id>/approve` takes
-`{ approved: true | false }`; a body without a boolean `approved` gets 400. On the CLI, `reject`, `false` or `no`
-as the last argument of `clawo workflow approve` rejects; anything else approves.
+`{ approved: true | false, comment? }`; a body without a boolean `approved` gets 400. On the CLI, `reject`, `false` or `no`
+as the last argument of `clawo workflow approve` rejects; anything else approves, and `--comment <text>` adds a comment.
 
-In a running `goal` node, steer text goes into the current turn (`turn/steer`).
-Otherwise, steer text is **prepended** to the next agent node's prompt: an instruction that
-arrives while the previous node was running is a correction, and corrections
-belong before the task.
+A gate asks on the run's forum: the orchestrator posts `ASK @user: <first line of
+the prompt>`, with the whole prompt as its body (once; a gate run again while its
+question is open does not ask twice). The answer is posted there as the user's —
+`DONE: approved` or `FAIL: rejected`, answering that ASK — with the comment as its
+body, and a comment is queued as a steer as well, so the next agent hears it
+whether or not the run's agents are on a forum. Only `workflow_approve` answers a
+gate; nothing reads an answer from a post.
+
+Steer text is posted on the run's forum as the user's (`FIX: <first line>`, the
+whole text as its body): agents running on a run with a forum get it pushed at
+once, framed as the user's. It is also queued: in a running `goal` node it goes
+into the current turn (`turn/steer`); otherwise it is **prepended** to the next
+agent or goal node's prompt — an instruction that arrives while the previous node
+was running is a correction, and corrections belong before the task. A node whose
+forum brief already shows the steer's post whole does not get it a second time.
+A fan-out does not take steers; they wait for the node after it.
+
+The runtime writes to every run's forum, whether or not its agents are told about
+it: the steers, each agent and goal node's output when the node succeeds and each
+fan-out answer and synthesis when the fan-out ends (`DONE: <agent> output`, the
+excerpt `inputs` reads), the gate's question and answer, and the verifier's
+verdict (`WIN: verified (<n> checks)`, or `FAIL: verification — <k> required
+checks failed (<ids>)` with the failing checks). `workflow_forum` lists, reads and
+measures it for any run. The verdict post is a mirror: the outcome comes from the
+verifier node alone.
 
 ## Limits worth knowing
 

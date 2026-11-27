@@ -23,6 +23,9 @@ import type {
   WorkflowSpec,
 } from '../types.js';
 import { DEFAULT_AGENT_TIMEOUT_MS as FANOUT_AGENT_TIMEOUT_MS } from '../../fanout.js';
+import { isForumName, isReservedForumName, normalizeForumConfig, type ForumConfig } from '../forum.js';
+import { createConsoleLogger } from '../../logger.js';
+import { ULTRAAPP_COUNCIL_SEATS } from '../../ultraapp/council-adapter.js';
 import { FIXER_TURN_TIMEOUT_MS } from '../nodes/verifier.js';
 import { DEFAULT_NODE_TIMEOUT_MS } from '../engine.js';
 import {
@@ -101,6 +104,35 @@ export interface CouncilArgs extends CommonArgs {
   agents: CouncilAgentSpec[];
   /** Default `DEFAULT_MAX_ROUNDS`, as for `council_start`. */
   maxRounds?: number;
+  /** The seats' run forum (`WorkflowSpec.forum`): on unless `false`; see `councilForum`. */
+  forum?: WorkflowSpec['forum'];
+  /** Where the warning goes when the forum is turned off for a seat name. Default: the console. */
+  logger?: { warn?(msg: string): void };
+}
+
+/**
+ * The forum a council's seats share. On (`{}`, or the config given) unless
+ * `forum` is `false`. A seat name that cannot be a forum name (letters, digits,
+ * `.`, `_`, `-`, at most 64, starting with a letter or digit), or that is
+ * `user` or `orchestrator`, turns it off with a warning: the kernel refuses a
+ * forum with such a member, and the council still runs without one.
+ */
+export function councilForum(
+  agents: Array<{ name: string }>,
+  forum: WorkflowSpec['forum'] | undefined,
+  logger?: { warn?(msg: string): void },
+): ForumConfig | undefined {
+  if (forum === false) return undefined;
+  const config = normalizeForumConfig(forum ?? true, 'forum') ?? {};
+  const bad = agents.map((a) => a.name).filter((n) => !isForumName(n) || isReservedForumName(n));
+  if (bad.length > 0) {
+    (logger ?? createConsoleLogger('Council')).warn?.(
+      `The council's run forum is off: ${bad.map((n) => JSON.stringify(n)).join(', ')} cannot be a forum name ` +
+        `(letters, digits, '.', '_' or '-', at most 64, starting with a letter or digit, and not user or orchestrator).`,
+    );
+    return undefined;
+  }
+  return config;
 }
 
 /**
@@ -113,8 +145,10 @@ export interface CouncilArgs extends CommonArgs {
  */
 export function councilWorkflow(args: CouncilArgs): WorkflowSpec {
   const maxRounds = args.maxRounds ?? DEFAULT_MAX_ROUNDS;
+  const forum = councilForum(args.agents, args.forum, args.logger);
   return {
     name: 'council',
+    ...(forum ? { forum } : {}),
     cwd: args.cwd,
     contract: args.contract,
     nodes: [
@@ -182,6 +216,25 @@ export interface SolveArgs extends CommonArgs {
   humanGate?: boolean;
   /** How many repair attempts the router allows. Default 3. */
   maxRepairs?: number;
+  /** The run's forum (`WorkflowSpec.forum`). On it, a reviewer that has a scout's name gets one of its own. */
+  forum?: WorkflowSpec['forum'];
+}
+
+/**
+ * The reviewers, each under a name no scout has. A forum knows an agent by its
+ * name, so a scout and a reviewer of one name were one member: the scout's,
+ * which is not on the repair loop, so a post naming the reviewer was told it
+ * does not run again. A reviewer whose name is taken gets `<name>-review`
+ * (`-review2`, … when that is taken too).
+ */
+function reviewersApartFromScouts(scouts: FanoutAgentSpec[], reviewers: FanoutAgentSpec[]): FanoutAgentSpec[] {
+  const taken = new Set(scouts.map((s) => s.name));
+  return reviewers.map((r) => {
+    let name = r.name;
+    for (let i = 1; taken.has(name); i++) name = `${r.name}-review${i === 1 ? '' : i}`;
+    taken.add(name);
+    return name === r.name ? r : { ...r, name };
+  });
 }
 
 /**
@@ -194,6 +247,9 @@ export interface SolveArgs extends CommonArgs {
  */
 export function solveWorkflow(args: SolveArgs): WorkflowSpec {
   const maxRepairs = args.maxRepairs ?? 3;
+  // Off a forum the names stay as given: they name each agent's output.
+  const reviewers =
+    args.forum && args.reviewers ? reviewersApartFromScouts(args.scouts, args.reviewers) : args.reviewers;
   const nodes: WorkflowSpec['nodes'] = [
     {
       id: 'triage',
@@ -244,16 +300,16 @@ export function solveWorkflow(args: SolveArgs): WorkflowSpec {
   // only read" was a sentence in a prompt, not something the runtime could
   // enforce. Ordering it before the gate makes the question moot — anything the
   // reviewers change is checked, and their findings feed the repair loop.
-  if (args.reviewers?.length) {
+  if (reviewers?.length) {
     nodes.push({
       id: 'review',
       kind: 'fanout',
       prompt: `Review the change that was just made for this task. Report problems only.\n\n${args.task}`,
-      agents: args.reviewers,
-      synthesize: args.reviewers.length >= 2,
+      agents: reviewers,
+      synthesize: reviewers.length >= 2,
       cwd: args.cwd,
       agentTimeoutMs: FANOUT_AGENT_TIMEOUT_MS,
-      timeoutMs: fanoutNodeBudget(args.reviewers.length, args.reviewers.length >= 2),
+      timeoutMs: fanoutNodeBudget(reviewers.length, reviewers.length >= 2),
       onFailure: 'continue',
     });
   }
@@ -318,6 +374,7 @@ export function solveWorkflow(args: SolveArgs): WorkflowSpec {
     name: 'solve',
     ...(args.isolation ? { isolation: args.isolation } : {}),
     ...(args.maxBudgetUsd ? { maxBudgetUsd: args.maxBudgetUsd } : {}),
+    ...(args.forum ? { forum: args.forum } : {}),
     cwd: args.cwd,
     contract: args.contract,
     // Each repair pass revisits implement / verify / the router once. The
@@ -464,11 +521,17 @@ export interface LegacyCouncilArgs {
   maxTurnsPerAgent?: number;
   maxBudgetUsd?: number;
   defaultPermissionMode?: string;
+  /** The seats' run forum: on unless `false`; see `councilForum`. */
+  forum?: WorkflowSpec['forum'];
+  /** Where the warning goes when the forum is turned off for a seat name. Default: the console. */
+  logger?: { warn?(msg: string): void };
 }
 
 export function legacyCouncilWorkflow(args: LegacyCouncilArgs): WorkflowSpec {
+  const forum = councilForum(args.agents, args.forum, args.logger);
   return {
     name: 'council',
+    ...(forum ? { forum } : {}),
     cwd: args.cwd,
     nodes: [
       {
@@ -505,6 +568,12 @@ export interface LegacyFanoutArgs {
   timeoutMs?: number;
   name?: string;
   forum?: WorkflowSpec['forum'];
+  /** On a forum: the brief after each agent's prompt, so its first line stays the agent's role. */
+  forumBriefAfter?: boolean;
+  /** On a forum: the mode's posting rules, in place of the brief's default ones. */
+  forumNorms?: string;
+  /** On a forum, `false`: the agents post and do not read (see `FanoutNode.forumCanRead`). */
+  forumCanRead?: boolean;
 }
 
 export function legacyFanoutWorkflow(args: LegacyFanoutArgs): WorkflowSpec {
@@ -529,6 +598,9 @@ export function legacyFanoutWorkflow(args: LegacyFanoutArgs): WorkflowSpec {
         // `||`: a zero timeout reaches the send as "use the default", so budget for that.
         agentTimeoutMs: args.timeoutMs || FANOUT_AGENT_TIMEOUT_MS,
         timeoutMs: fanoutAgentsBudget(args.agents, args.synthesize, args.timeoutMs || FANOUT_AGENT_TIMEOUT_MS),
+        ...(args.forumBriefAfter ? { forumBriefAfter: true } : {}),
+        ...(args.forumNorms ? { forumNorms: args.forumNorms } : {}),
+        ...(args.forumCanRead === false ? { forumCanRead: false } : {}),
       },
     ],
   };
@@ -557,17 +629,40 @@ export const ULTRAPLAN_SYSTEM_PROMPT =
   'You are in ultraplan mode. Explore the project thoroughly, analyze feasibility, and produce a detailed, ' +
   'actionable plan. Do NOT write code — plan only. Output your final plan in a clear markdown format.';
 
+/** The planner's name on an ultraplan's forum (its node id is `main`, which the projections read). */
+export const ULTRAPLAN_FORUM_NAME = 'planner';
+
+/** What the planner's forum brief asks of it, in place of the default rules for an agent that writes code. */
+export const ULTRAPLAN_FORUM_NORMS =
+  'When something must be decided by the user before the plan can be settled, post `ASK @user: <the question>` ' +
+  'with the options and the one you recommend in the body, then go on with the parts it does not hold up; the ' +
+  'answer can reach you during this turn. When the plan is finished, post `DONE: plan` with a summary of a few ' +
+  'lines in the body. The whole plan is your final reply, not a post.';
+
+/**
+ * What a reviewer's forum brief asks of it. Reviewers post and do not read: each
+ * reviews on its own, and no finding of one steers another.
+ */
+export const ULTRAREVIEW_FORUM_NORMS =
+  'Post every finding as a block of its own, titled `FAIL: <file>:<line> <the problem in one line>`, with the ' +
+  'evidence in the body: the code, why it is wrong, and how to fix it. When your review is finished, post one ' +
+  'block titled `DONE: <n> findings`, where <n> is the number of FAIL blocks you posted. The other reviewers do ' +
+  'not see your posts, and you do not see theirs.';
+
 export interface LegacyUltraplanArgs {
   task: string;
   cwd: string;
   model?: string;
   engine?: EngineType;
   timeoutMs: number;
+  /** The run's forum; omitted, the planner has none. */
+  forum?: WorkflowSpec['forum'];
 }
 
 export function legacyUltraplanWorkflow(args: LegacyUltraplanArgs): WorkflowSpec {
   return {
     name: 'ultraplan',
+    ...(args.forum ? { forum: args.forum } : {}),
     cwd: args.cwd,
     nodes: [
       {
@@ -580,6 +675,8 @@ export function legacyUltraplanWorkflow(args: LegacyUltraplanArgs): WorkflowSpec
         effort: 'max' as EffortLevel,
         appendSystemPrompt: ULTRAPLAN_SYSTEM_PROMPT,
         timeoutMs: args.timeoutMs,
+        forumName: ULTRAPLAN_FORUM_NAME,
+        forumNorms: ULTRAPLAN_FORUM_NORMS,
         prompt:
           `# Ultraplan Task\n\n${args.task}\n\nExplore the project, understand the codebase, analyze ` +
           `feasibility, and produce a comprehensive implementation plan. Take your time (up to 30 minutes). ` +
@@ -634,8 +731,10 @@ export function ultraappWorkflow(args: UltraappArgs): WorkflowSpec {
       runDir: args.runDir,
       slug: args.slug,
       codebasePath: args.codebasePath,
+      // The council's seats, so the run forum knows them as members.
+      seats: [...ULTRAAPP_COUNCIL_SEATS],
       // The synth stage is a three-agent, eight-round council (ultraapp/council-adapter.ts).
-      timeoutMs: councilNodeBudget(3, 8),
+      timeoutMs: councilNodeBudget(ULTRAAPP_COUNCIL_SEATS.length, 8),
     },
     {
       id: 'build',
@@ -655,5 +754,7 @@ export function ultraappWorkflow(args: UltraappArgs): WorkflowSpec {
       codebasePath: args.codebasePath,
     });
   }
-  return { name: 'ultraapp', cwd: args.runDir, nodes };
+  // The council's seats share the run forum: they post their round reports and
+  // talk to each other there, and the narrator hears each round from it.
+  return { name: 'ultraapp', forum: {}, cwd: args.runDir, nodes };
 }

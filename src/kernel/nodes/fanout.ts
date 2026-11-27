@@ -19,7 +19,18 @@ import {
   type RunRecord,
 } from '../types.js';
 import type { FanoutAgentResult, FanoutSession } from '../../fanout.js';
-import { ForumReplyRelay, forumBrief, forumHub, forumTeamOf, openAsks, resolveForum, unreadFor } from '../forum.js';
+import {
+  ForumReplyRelay,
+  forumBrief,
+  forumHub,
+  forumTeamOf,
+  memberNameFor,
+  resolveForum,
+  runForum,
+  synthesisForumName,
+  unreadFor,
+} from '../forum.js';
+import { openAsksNote, postHandover } from '../handover.js';
 import type { GoalNodeData } from './goal.js';
 import { loadRun, runDir } from '../store.js';
 import { sanitizeCwd } from '../../validation.js';
@@ -90,16 +101,50 @@ async function runFanout(node: NodeSpec, ctx: NodeContext, kernel: RunKernel | u
     results.map((r) => `## ${r.agent}${r.ok ? '' : ' (failed)'}\n\n${r.output || r.error || ''}`).join('\n\n');
   const costUsd = (turns?.costUsd ?? 0) + goals.reduce((sum, r) => sum + (r.costUsd ?? 0), 0);
 
+  // Each answer, and the synthesis, handed over on the run's forum now that the
+  // whole node has finished: the agents never saw each other's while they worked.
+  const log = runForum(ctx.record);
+  for (const r of results) {
+    if (!r.ok) continue;
+    postHandover(
+      log.id,
+      {
+        member: memberNameFor(log, r.agent),
+        runId: ctx.runId,
+        node: spec.id,
+        agent: r.agent,
+        ...(r.outputFile ? { path: r.outputFile } : {}),
+        text: r.output,
+      },
+      ctx.logger,
+    );
+  }
+  if (turns?.synthesis) {
+    const name = synthesisForumName(ctx.record.spec, spec.id);
+    postHandover(
+      log.id,
+      {
+        member: memberNameFor(log, name),
+        runId: ctx.runId,
+        node: spec.id,
+        agent: name,
+        ...(synthesisFile ? { path: synthesisFile } : {}),
+        text: turns.synthesis,
+      },
+      ctx.logger,
+    );
+  }
+
   // The ASKs this node's agents leave unanswered on the forum, named in its
   // result so a later node, and whoever reads the run, sees them.
   const forum = resolveForum(ctx.record);
-  const names = new Set(spec.agents.map((a) => a.name));
-  const unanswered = forum
-    ? openAsks(forum.runId).filter((p) => names.has(p.from) || p.to.some((n) => names.has(n)))
-    : [];
-  const forumNote = unanswered.length
-    ? `\n\nOpen ASKs on the forum: ${unanswered.map((p) => `${p.id} ${p.from}: ${p.title}`).join('; ')}`
-    : '';
+  const asks = forum
+    ? openAsksNote(
+        forum.runId,
+        spec.agents.map((a) => memberNameFor(forum, a.name)),
+      )
+    : undefined;
+  const forumNote = asks?.note ?? '';
 
   return {
     ok: turns?.status !== 'error' && failures.length < results.length,
@@ -115,9 +160,7 @@ async function runFanout(node: NodeSpec, ctx: NodeContext, kernel: RunKernel | u
       ...(synthesisFile ? { synthesisFile } : {}),
       synthesisError: turns?.synthesisError,
       ...(goalAgents.length > 0 ? { goalRuns } : {}),
-      ...(forum
-        ? { forum: { openAsks: unanswered.map((p) => ({ id: p.id, from: p.from, to: p.to, title: p.title })) } }
-        : {}),
+      ...(asks ? { forum: { openAsks: asks.openAsks } } : {}),
     },
   };
 }
@@ -182,12 +225,14 @@ async function runGoalAgent(
     let record: RunRecord;
     const existing = goalRuns[a.name];
     const forum = resolveForum(ctx.record);
+    // Its name on the forum: the agent's, after the prefix of a run bound under one (a subflow's).
+    const member = forum ? memberNameFor(forum, a.name) : a.name;
     const prev = existing ? loadRun(existing) : undefined;
     if (existing && prev) {
       // A finished goal run is taken up again, on its thread, when the forum has
       // posts that name its agent and that it has not seen; otherwise its result
       // stands, as a resume of a finished run returns it.
-      const news = !!forum && isTerminalRunState(prev.state) && unreadFor(forum.runId, a.name).length > 0;
+      const news = !!forum && isTerminalRunState(prev.state) && unreadFor(forum.runId, member).length > 0;
       record = await kernel.resume(existing, { secrets: ctx.secrets, ...(news ? { restart: true } : {}) });
     } else {
       const goal: GoalNode = {
@@ -208,7 +253,7 @@ async function runGoalAgent(
       };
       record = await kernel.start(
         { name: `${ctx.record.spec.name}/${spec.id}/${a.name}`, cwd, nodes: [goal] },
-        { cwd, secrets: ctx.secrets, ...(forum ? { forum: { runId: forum.runId, agent: a.name } } : {}) },
+        { cwd, secrets: ctx.secrets, ...(forum ? { forum: { runId: forum.runId, agent: member } } : {}) },
       );
       goalRuns[a.name] = record.runId;
       // Checkpointed at once: a parent that dies from here on must find this run.
@@ -260,10 +305,21 @@ async function runTurnAgents(
   const customEngines = (ctx.secrets.agentCustomEngines ?? {}) as Record<string, unknown>;
   const forum = resolveForum(ctx.record);
   const relays = new Map<string, ForumReplyRelay>();
+  // The synthesis pass is on the forum too, under its own name, read-only like its session.
+  const synthesis =
+    forum && spec.synthesize ? memberNameFor(forum, synthesisForumName(ctx.record.spec, spec.id)) : undefined;
   const readOnly = (agent: string): boolean => {
     const a = agents.find((x) => x.name === agent);
-    return a?.sandboxMode === 'read-only' || a?.permissionMode === 'plan';
+    if (!a) return agent === synthesis;
+    return a.sandboxMode === 'read-only' || a.permissionMode === 'plan';
   };
+  // Each agent's name on the forum; the synthesis is called by its member name already.
+  const nameOf = (agent: string): string =>
+    !forum || (agent === synthesis && !agents.some((x) => x.name === agent)) ? agent : memberNameFor(forum, agent);
+  // The node's own posting rules and, for agents that must not see each other
+  // (reviewers), membership that posts without reading.
+  const writeOnly = spec.forumCanRead === false ? { canRead: false } : {};
+  const norms = spec.forumNorms ? { norms: spec.forumNorms } : {};
   const { Fanout } = await import('../../fanout.js');
   const fanout = new Fanout(
     {
@@ -306,25 +362,32 @@ async function runTurnAgents(
       ...(forum
         ? {
             agentPreface: (agent: string) =>
-              forumBrief(forum.runId, agent, forumTeamOf(forum.runId), forum.config, { readOnly: readOnly(agent) }),
+              forumBrief(forum.runId, nameOf(agent), forumTeamOf(forum.runId), forum.config, {
+                readOnly: readOnly(agent),
+                ...(agent === synthesis ? {} : { ...writeOnly, ...norms }),
+              }),
+            ...(spec.forumBriefAfter ? { agentPrefaceAfter: true } : {}),
             // A read-only agent posts by writing blocks in its reply; any agent may.
             onAgentText: (agent: string, text: string) => {
               let relay = relays.get(agent);
-              if (!relay) relays.set(agent, (relay = new ForumReplyRelay(forum.runId, agent, ctx.logger)));
+              if (!relay) relays.set(agent, (relay = new ForumReplyRelay(forum.runId, nameOf(agent), ctx.logger)));
               relay.take(text);
             },
             onAgentSession: (agent: string, sessionName: string) => {
               // The directory the Fanout engine runs this agent in, where its score is read.
               const own = agents.find((a) => a.name === agent)?.cwd;
               return forumHub(forum.runId, forum.config).join(
-                agent,
+                nameOf(agent),
                 (text) => ctx.manager!.deliverMidTurn?.(sessionName, text) ?? false,
                 {
                   cwd: own ? (sanitizeCwd(path.resolve(projectDir, own)) ?? projectDir) : projectDir,
                   readOnly: readOnly(agent),
+                  // The synthesis reads what the agents posted, even when they may not read each other.
+                  ...(agent === synthesis ? {} : writeOnly),
                 },
               );
             },
+            ...(synthesis ? { synthesisName: synthesis } : {}),
           }
         : {}),
     },

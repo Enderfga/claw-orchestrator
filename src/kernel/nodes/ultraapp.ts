@@ -18,6 +18,9 @@
 
 import type { NodeContext, NodeExecutor, NodeResult } from '../engine.js';
 import type { NodeSpec, UltraappDeployNode, UltraappSynthNode } from '../types.js';
+import type { CouncilConfig } from '../../types.js';
+import { ULTRAAPP_COUNCIL_SEATS } from '../../ultraapp/council-adapter.js';
+import { councilForumHooks, type CouncilRoundReport } from './council.js';
 
 export interface UltraappSynthOutcome {
   ok: boolean;
@@ -48,6 +51,12 @@ export interface UltraappNodeDeps {
     slug: string;
     codebasePath?: string;
     signal: { aborted: boolean };
+    /**
+     * The council's side of the kernel run — its run id and the run-forum hooks —
+     * for the build council's config. `onRoundReport` hears each seat's round
+     * once it is posted.
+     */
+    council?: (opts?: { onRoundReport?: (report: CouncilRoundReport) => void }) => Partial<CouncilConfig>;
   }): Promise<UltraappSynthOutcome>;
   deploy(args: {
     appRunId: string;
@@ -63,12 +72,14 @@ export function makeUltraappSynthExecutor(deps: UltraappNodeDeps): NodeExecutor 
   return async function executeUltraappSynthNode(node: NodeSpec, ctx: NodeContext): Promise<NodeResult> {
     const spec = node as UltraappSynthNode;
     if (ctx.signal.aborted) return { ok: false, error: 'cancelled' };
+    const seats = (spec.seats ?? [...ULTRAAPP_COUNCIL_SEATS]).map((name) => ({ name }));
     const result = await deps.synth({
       appRunId: spec.appRunId,
       runDir: spec.runDir,
       slug: spec.slug,
       codebasePath: spec.codebasePath,
       signal: ctx.signal,
+      council: (opts = {}) => councilForumHooks(ctx, { nodeId: spec.id, seats, ...opts }),
     });
     return {
       ok: result.ok,

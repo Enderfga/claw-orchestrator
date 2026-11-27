@@ -70,6 +70,7 @@ import {
   parseAgentReply,
 } from './agent-tools.js';
 import { sanitizeSecrets } from '../sanitize.js';
+import type { AutoloopForumBridge } from './forum-bridge.js';
 
 /**
  * Character budget for the replayed transcript handed to engines without native
@@ -183,6 +184,13 @@ export interface ClaudeAgentDispatcherConfig {
   onRoleBindingApplied?: (role: AutoloopRoleName, binding: AutoloopRoleBinding) => void;
   /** Roles whose engine/model came from an earlier rebind (restored on resume); see `boundRoles`. */
   boundRoles?: readonly AutoloopRoleName[];
+  /**
+   * The run's forum (`AutoloopForumBridge`), when the loop runs in a kernel
+   * run. Absent: the roles are on no forum and nothing is mirrored.
+   */
+  forum?: AutoloopForumBridge;
+  /** The kernel run that started the role sessions (`SessionConfig.ownerRunId`). Default: `runId`. */
+  ownerRunId?: string;
   /** Persist the effective non-secret role selection after a successful spawn. */
   onRoleSelectionChanged?: (selection: {
     coder: { engine: EngineType; model?: string; effort?: EffortLevel };
@@ -388,6 +396,8 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
    */
   private logicalDispatches = new Map<string, Promise<AnyAutoloopMessage[]>>();
   private readonly settledDispatches = new Set<string>();
+  /** Roles whose session was stopped without its conversation: the next one starts a new conversation. */
+  private readonly newConversation = new Set<AutoloopRoleName>();
 
   constructor(config: ClaudeAgentDispatcherConfig) {
     super();
@@ -459,6 +469,7 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
         this.logger.warn?.(`[autoloop] failed to stop ${name}: ${(err as Error).message}`);
       }
     }
+    this.config.forum?.leaveAll();
   }
 
   async deliver(env: AnyAutoloopMessage): Promise<AnyAutoloopMessage[]> {
@@ -633,6 +644,8 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
     }
     this.pendingRebinds.delete(role);
     this.boundRoles.add(role);
+    this.config.forum?.leave(role);
+    if (!pending.keepConversation) this.newConversation.add(role);
     if (role === 'planner') {
       this.plannerSelection = { ...this.plannerSelection, ...pending.selection };
       this.plannerStarted = false;
@@ -714,6 +727,65 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
    */
   private hasNativeConversation(selection: AutoloopRoleSelection): boolean {
     return engineHasNativeConversation(selection.engine, selection.customEngine);
+  }
+
+  // ─── The run forum ──────────────────────────────────────────────────────
+
+  /** A role's session was stopped without its conversation: off the forum, and the next session is new. */
+  private forgetRoleSession(role: AutoloopRoleName): void {
+    this.config.forum?.leave(role);
+    this.newConversation.add(role);
+  }
+
+  /**
+   * Put a role's session, just started, on the forum. It is briefed with its
+   * next message unless its conversation continues one that already had the
+   * brief: a session restarted under the same conversation, or a resumed run's
+   * role on an engine that resumes its conversation.
+   */
+  private joinForum(role: AutoloopRoleName): void {
+    const forum = this.config.forum;
+    if (!forum) return;
+    const fresh = this.newConversation.delete(role);
+    const continues =
+      !fresh && forum.wasMember(role, { acrossRuns: this.hasNativeConversation(this.selectionOf(role)) });
+    forum.join(role, this.sessionNameOf(role), {
+      brief: !continues,
+      cwd: role === 'reviewer' ? this.reviewerSandboxDir : this.config.workspace,
+    });
+  }
+
+  /** A role's message with what the forum adds for it after it. */
+  private withForum(role: AutoloopRoleName, message: string): string {
+    return this.config.forum?.turnMessage(role, message) ?? message;
+  }
+
+  /**
+   * The runner mirrors an envelope just before it hands it over, and the
+   * envelope's post is the role's turn: it is on record as that before the turn
+   * is built, so the role is not handed it again from the forum. Nothing to wait
+   * for (and no tick spent) when no such post is on its way.
+   */
+  private forumTurnWritten(role: AutoloopRoleName): Promise<unknown> | undefined {
+    return this.config.forum?.turnWritten(role);
+  }
+
+  /** The role's turn was sent: what the forum added to it is on record as handed over. */
+  private forumTurnSent(role: AutoloopRoleName): void {
+    this.config.forum?.turnSent(role);
+  }
+
+  /** Post a role's reply blocks; the reply the user sees goes without them. */
+  private relayReply(role: AutoloopRoleName, reply: string): void {
+    try {
+      this.config.forum?.relay(role, reply);
+    } catch (err) {
+      this.logger.warn?.(`[autoloop] ${role} reply blocks not posted: ${(err as Error).message}`);
+    }
+  }
+
+  private stripForum(text: string): string {
+    return this.config.forum?.strip(text) ?? text;
   }
 
   /**
@@ -837,9 +909,11 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
       // guard exists to prevent.
       if (!coderWasStarted && this.coderStarted) {
         this.coderStarted = !(await this.stopRolledBackSession(this.coderName));
+        if (!this.coderStarted) this.forgetRoleSession('coder');
       }
       if (!reviewerWasStarted && this.reviewerStarted) {
         this.reviewerStarted = !(await this.stopRolledBackSession(this.reviewerName));
+        if (!this.reviewerStarted) this.forgetRoleSession('reviewer');
       }
       this.coderSelection = previousCoder;
       this.reviewerSelection = previousReviewer;
@@ -920,6 +994,8 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
       this.reviewerStarted = false;
       this.reviewerSessionPrompt = null;
     }
+    // Stopped without keeping its conversation: the next session is new.
+    this.forgetRoleSession(agent);
     if (opts.eagerRestart && !this.closed) {
       if (agent === 'planner') await this.ensurePlanner();
       else if (agent === 'coder') await this.ensureCoder();
@@ -951,6 +1027,8 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
 
   /** One physical send attempt with strict timeout classification. */
   private async sendAttempt(name: string, promptText: string, pending: PendingSendTimeout): Promise<SendMessageResult> {
+    // While this turn is in flight, a post for the role is handed to it now.
+    const endTurn = this.config.forum?.beginTurn(pending.agent);
     try {
       const result = (await this.config.manager.sendMessage(name, promptText, {
         timeout: this.config.sendTimeoutMs ?? DEFAULT_SEND_TIMEOUT_MS,
@@ -962,6 +1040,8 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
       const timeoutMessage = genuineSendTimeoutMessage(err);
       if (timeoutMessage) return this.recoverableSendTimeout(pending, timeoutMessage);
       throw err;
+    } finally {
+      endTurn?.();
     }
   }
 
@@ -1190,9 +1270,16 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
       // deliverables directly). Read/Glob/Grep/Bash stay enabled so
       // Planner can still discover, audit, and `git status` the workspace.
       disallowedTools: ['Write', 'Edit', 'MultiEdit', 'NotebookEdit'],
+      ownerRunId: this.ownerRunId,
     });
     if (this.closed) await this.stopRoleStartedAfterShutdown(this.plannerName);
     this.plannerStarted = true;
+    this.joinForum('planner');
+  }
+
+  /** The kernel run the role sessions belong to. */
+  private get ownerRunId(): string {
+    return this.config.ownerRunId ?? this.config.runId;
   }
 
   /**
@@ -1301,12 +1388,19 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
       promptText = `[system] iter ${env.iter} done. verdict=${env.payload.verdict} metric=${env.payload.metric}`;
     }
 
+    // What the forum has for the Planner, then the chat itself on the forum:
+    // the user's post, handed over as this turn.
+    const written = this.forumTurnWritten('planner');
+    if (written) await written;
+    const message = this.withForum('planner', promptText);
+    if (env.type === 'chat') this.config.forum?.mirrorChat(env);
     const pendingTimeout = this.pendingSendTimeout(env, 'planner', dispatchId);
     const result = await this.sendAttempt(
       this.plannerName,
-      this.withRoleInstructions('planner', this.plannerSelection, this.plannerSystemPrompt, promptText),
+      this.withRoleInstructions('planner', this.plannerSelection, this.plannerSystemPrompt, message),
       pendingTimeout,
     );
+    this.forumTurnSent('planner');
 
     if (result.recoverable_timeout) {
       return [Msg.sendTimeout(env.iter, result.recoverable_timeout)];
@@ -1322,12 +1416,14 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
     // Feed the transcript that engines without native conversation replay next
     // turn. Recorded AFTER the send so the current message isn't duplicated in
     // its own history block.
-    this.recordTurn('planner', 'user', promptText);
+    this.recordTurn('planner', 'user', message);
     this.recordTurn('planner', 'agent', replyText);
 
+    this.relayReply('planner', replyText);
     // S3: parse autoloop-fenced tool calls out of the reply, apply effects,
     // and bubble emitted messages back into the runner queue.
     const parsed = parsePlannerReply(replyText);
+    parsed.cleaned_reply = this.stripForum(parsed.cleaned_reply);
     if (parsed.parse_errors.length > 0) {
       this.logger.warn?.(`[autoloop] planner emitted ${parsed.parse_errors.length} malformed autoloop block(s)`);
     }
@@ -1445,6 +1541,8 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
           omitted: projection.omitted,
         },
       });
+      // The Planner hears of it with its next turn.
+      this.config.forum?.controlRejected(nextIter, dispatchId, projection.diagnostic);
       const combined = parsed.cleaned_reply
         ? `${projection.diagnostic}\n\n${parsed.cleaned_reply}`
         : projection.diagnostic;
@@ -1473,9 +1571,11 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
       customEngine: this.coderSelection.engine === 'custom' ? this.coderSelection.customEngine : undefined,
       permissionMode: 'bypassPermissions',
       systemPrompt: this.coderSystemPrompt,
+      ownerRunId: this.ownerRunId,
     });
     if (this.closed) await this.stopRoleStartedAfterShutdown(this.coderName);
     this.coderStarted = true;
+    this.joinForum('coder');
   }
 
   private async deliverToCoder(env: AnyAutoloopMessage, dispatchId: string): Promise<AnyAutoloopMessage[]> {
@@ -1539,16 +1639,20 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
       ts: new Date().toISOString(),
     });
 
+    const written = this.forumTurnWritten('coder');
+    if (written) await written;
+    const message = this.withForum('coder', promptText);
     const result = await this.sendWithRecovery(
       'coder',
       this.coderName,
-      this.withRoleInstructions('coder', this.coderSelection, this.coderSystemPrompt, promptText),
+      this.withRoleInstructions('coder', this.coderSelection, this.coderSystemPrompt, message),
       this.pendingSendTimeout(env, 'coder', dispatchId),
     );
+    if (!result.fatal) this.forumTurnSent('coder');
     if (result.recoverable_timeout) {
       return [Msg.sendTimeout(env.iter, result.recoverable_timeout)];
     }
-    this.recordTurn('coder', 'user', promptText);
+    this.recordTurn('coder', 'user', message);
     this.recordTurn('coder', 'agent', (result.output ?? '').trim());
     // A3: subprocess died (recovery retry exhausted). Surface as phase_error
     // rather than silently masquerading as a "clarification request"; the
@@ -1577,7 +1681,9 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
       });
       return [Msg.phaseError(env.iter, { agent: 'coder', phase: 'send', error })];
     }
+    this.relayReply('coder', replyText);
     const parsed = parseAgentReply(replyText);
+    parsed.cleaned_reply = this.stripForum(parsed.cleaned_reply);
     this.emit('coder_reply', parsed.cleaned_reply);
     if (parsed.cleaned_reply) {
       this.appendChatEntry({
@@ -1586,11 +1692,9 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
         ts: new Date().toISOString(),
       });
     }
-    this.appendRoleLog(
-      path.join(this.ledgerDir, 'coder_log.jsonl'),
-      env.iter,
-      extractLogMessages(parsed.calls, 'coder_log'),
-    );
+    const coderLog = extractLogMessages(parsed.calls, 'coder_log');
+    this.appendRoleLog(path.join(this.ledgerDir, 'coder_log.jsonl'), env.iter, coderLog);
+    this.config.forum?.coderLog(env.iter, coderLog);
 
     const ic = extractIterComplete(parsed.calls);
     if (!ic) {
@@ -1606,7 +1710,7 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
       }
       const body = clarificationQ || parsed.cleaned_reply || replyText;
       if (!parsed.cleaned_reply && !clarificationQ) {
-        this.appendChatEntry({ who: 'coder', text: replyText, ts: new Date().toISOString() });
+        this.appendChatEntry({ who: 'coder', text: this.stripForum(replyText), ts: new Date().toISOString() });
       }
       const replyFile = path.join(iterDir, `coder_reply_${dispatchId}.txt`);
       const rel = path.relative(this.config.workspace, replyFile);
@@ -1738,9 +1842,11 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
         customEngine: this.reviewerSelection.engine === 'custom' ? this.reviewerSelection.customEngine : undefined,
         permissionMode: 'bypassPermissions',
         systemPrompt: sessionPrompt,
+        ownerRunId: this.ownerRunId,
       });
       if (this.closed) await this.stopRoleStartedAfterShutdown(this.reviewerName);
       this.reviewerStarted = true;
+      this.joinForum('reviewer');
     } catch (err) {
       this.reviewerSessionPrompt = null;
       throw err;
@@ -1815,6 +1921,7 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
       ts: new Date().toISOString(),
     });
 
+    const message = this.withForum('reviewer', promptText);
     const result = await this.sendWithRecovery(
       'reviewer',
       this.reviewerName,
@@ -1822,14 +1929,15 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
         'reviewer',
         this.reviewerSelection,
         this.reviewerSessionPrompt ?? this.reviewerSystemPrompt,
-        promptText,
+        message,
       ),
       this.pendingSendTimeout(env, 'reviewer', dispatchId),
     );
+    if (!result.fatal) this.forumTurnSent('reviewer');
     if (result.recoverable_timeout) {
       return [Msg.sendTimeout(env.iter, result.recoverable_timeout)];
     }
-    this.recordTurn('reviewer', 'user', promptText);
+    this.recordTurn('reviewer', 'user', message);
     this.recordTurn('reviewer', 'agent', (result.output ?? '').trim());
     if (result.fatal) {
       this.appendDecisionLog({
@@ -1846,7 +1954,9 @@ export class ClaudeAgentDispatcher extends EventEmitter implements AgentDispatch
       ];
     }
     const replyText = (result.output ?? '').trim();
+    this.relayReply('reviewer', replyText);
     const parsed = parseAgentReply(replyText);
+    parsed.cleaned_reply = this.stripForum(parsed.cleaned_reply);
     this.emit('reviewer_reply', parsed.cleaned_reply);
     if (parsed.cleaned_reply) {
       this.appendChatEntry({

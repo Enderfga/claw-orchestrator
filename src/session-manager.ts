@@ -151,21 +151,38 @@ import {
   toUltraplanResult,
   toUltrareviewResult,
   type FanoutNodeData,
+  type UltraForumView,
 } from './kernel/projections.js';
 import {
   legacyCouncilWorkflow,
   legacyFanoutWorkflow,
   legacyUltraplanWorkflow,
   splitAgentSecrets,
+  ULTRAREVIEW_FORUM_NORMS,
 } from './kernel/templates/index.js';
 import type { KernelEvent, RunRecord, RunState, WorkflowSpec } from './kernel/types.js';
+import { councilInjectPost, councilNodeId, councilReviewsOf } from './kernel/nodes/council.js';
+import { isTerminalRunState } from './kernel/types.js';
 import {
   contractFingerprint,
   contractProblems,
   normalizeContract,
   type AcceptanceContract,
 } from './verify/contract.js';
-import { ensureForumSpool, forumMetrics, forumPost, forumSnapshot, resolveForum } from './kernel/forum.js';
+import {
+  ensureForumSpool,
+  forumAuthority,
+  forumMetrics,
+  forumPost,
+  forumPostNotes,
+  forumRuntimeAppend,
+  forumSnapshot,
+  isReservedForumName,
+  isStandaloneForumId,
+  openAsksOf,
+  resolveForum,
+  runForum,
+} from './kernel/forum.js';
 import { runContract } from './verify/runner.js';
 import { chooseCheckEnv } from './verify/check-env.js';
 import {
@@ -283,6 +300,8 @@ import {
   type SendTimeoutPayload,
 } from './autoloop/messages.js';
 import { appendPushLog, notifyUserFallbackChain } from './autoloop/notify.js';
+import { AutoloopForumBridge, type AutoloopForumTarget } from './autoloop/forum-bridge.js';
+import { normalizeForumConfig, type ForumConfig } from './kernel/forum.js';
 import { UltraappManager } from './ultraapp/manager.js';
 import { UltraappStore, defaultStoreRoot } from './ultraapp/store.js';
 import type { UltraappRouter } from './ultraapp/router.js';
@@ -1158,7 +1177,8 @@ export class SessionManager {
    */
   private _pidCommands = new Map<number, string>();
   private _circuitBreaker = new CircuitBreaker();
-  private _inbox = new InboxManager();
+  /** Messages between plain sessions, on this manager's session forum (made by the first message). */
+  private _inbox: InboxManager;
   /** cwd → detected language, so the manifest probe runs once per directory. */
   private _repoLangCache = new Map<string, string | undefined>();
   private logger: Logger;
@@ -1168,6 +1188,8 @@ export class SessionManager {
 
   constructor(config?: Partial<PluginConfig>, logger?: Logger) {
     this.logger = logger || createConsoleLogger('SessionManager');
+    // The session forum of this manager, `fm-sessions-<pid>-<start>`: its id now, its files with the first message.
+    this._inbox = new InboxManager({ logger: this.logger });
     this.pluginConfig = {
       // CLAUDE_BIN is what PersistentClaudeSession already honours when it gets no
       // explicit binary; the manager always passed one, so the variable was dead.
@@ -1370,6 +1392,12 @@ export class SessionManager {
     // real engine even when it came from the persisted registry.
     fullConfig.engine = engine;
 
+    // A session a run's mode started takes its messages through that run's forum: Claude Code's
+    // own peer messages from other sessions on this machine are refused unless the mode said otherwise.
+    if (config.ownerRunId && engine === 'claude' && config.crossSessionInbound === undefined) {
+      fullConfig.crossSessionInbound = 'refuse';
+    }
+
     // Circuit breaker — reject early if engine is in backoff
     this._circuitBreaker.check(engine);
 
@@ -1428,6 +1456,14 @@ export class SessionManager {
 
     release();
     this.sessions.set(name, managed);
+    // A plain session is on the session forum from start to stop; a run's session is on its run's.
+    if (!fullConfig.ownerRunId) {
+      try {
+        this._inbox.join(name, this._sessionLookup);
+      } catch (err) {
+        this.logger.warn(`[SessionManager] ${name}: not on the session forum: ${(err as Error).message}`);
+      }
+    }
 
     // Persist registry after session is live (skip for ephemeral sessions
     // like the openai-compat bridge that set skipPersistence: true)
@@ -1442,12 +1478,17 @@ export class SessionManager {
     return this._sendTurn(name, message, options);
   }
 
-  /** `onDispatch` fires once the turn has passed every check and is handed to the engine. */
+  /**
+   * `onDispatch` fires once the turn has passed every check and is handed to the engine. `replyTo`:
+   * the session that sent the messages this turn was started with, where an answer the session
+   * writes in it goes back to when the answer names no message.
+   */
   private async _sendTurn(
     name: string,
     message: string,
     options: SendOptions,
     onDispatch?: () => void,
+    replyTo?: string,
   ): Promise<SendResult> {
     const managed = this._getSession(name);
 
@@ -1534,7 +1575,15 @@ export class SessionManager {
         ]);
       }
 
-      if (options.onEvent || options.onChunk) {
+      // A plain session answers a message by writing a `<new-forum-post>` block: it goes back to
+      // the sender, as the block is completed and from the whole reply.
+      const relay = this._inbox.replyRelay(name, {
+        replyTo,
+        canReceive: (to) => this._sessionLookup.exists(to),
+        logger: this.logger,
+      });
+      let streamed = '';
+      if (options.onEvent || options.onChunk || relay) {
         // A throwing user callback must not corrupt the turn or leave the
         // sendChain unreleased — isolate each invocation.
         const safe = (fn: () => void): void => {
@@ -1548,6 +1597,11 @@ export class SessionManager {
           onText: (text: string) => {
             safe(() => options.onChunk?.(text));
             safe(() => options.onEvent?.({ type: 'text', result: text } as StreamEvent));
+            if (relay) {
+              streamed += text;
+              // Only a chunk that can complete a block is worth a scan of the whole text.
+              if (/<\/new-forum-post>/i.test(streamed.slice(-(text.length + 17)))) safe(() => relay.take(streamed));
+            }
           },
           onToolUse: (event: unknown) => {
             safe(() => options.onEvent?.({ type: 'tool_use', ...(event as object) } as StreamEvent));
@@ -1617,6 +1671,8 @@ export class SessionManager {
               `the ${managed.config.engine || 'claude'} process exited` +
               `${typeof code === 'number' ? ` with code ${code}` : ''} before the turn finished`;
           }
+          // The whole reply too: an engine that streams nothing has written its blocks here.
+          if (relay) relay.take(result.text);
           // Surfaced here because this is the one place every caller funnels
           // through. The result event was dropped at this line, and it is the
           // only record of a blocked call: the turn itself still reports success.
@@ -1740,6 +1796,18 @@ export class SessionManager {
     // it carries the whole conversation rather than only the part it has seen.
     target.transcript = cloneTranscript(record);
     target.pendingHandoff = rendered.text;
+    // The target is on the session forum under its own name (it joined as it started); the forum
+    // records where the conversation went.
+    if (!target.config.ownerRunId) {
+      await this._inbox
+        .note(
+          `INFO: ${name} handed off to ${targetName} (${opts.engine})`,
+          `Session ${name} (${fromEngine}) handed its conversation to ${targetName} (${opts.engine}): ` +
+            `${rendered.turns} turns carried, ${rendered.omitted} left out. ${name} keeps running.`,
+          { kind: 'handoff', from: name, to: targetName, engine: opts.engine },
+        )
+        .catch((err: Error) => this.logger.warn(`[SessionManager] handoff of ${name} not recorded: ${err.message}`));
+    }
 
     const out = {
       name: targetName,
@@ -1958,7 +2026,7 @@ export class SessionManager {
       kernel.setExecutor(
         'autoloop',
         makeAutoloopExecutor({
-          boot: (config, secrets, { freshStart, restoredInput, roleBindings }) =>
+          boot: (config, secrets, { freshStart, restoredInput, roleBindings, forum, ownerRunId }) =>
             this._bootAutoloop({
               ...(config as Parameters<SessionManager['_bootAutoloop']>[0]),
               // Rebinds applied earlier in the run replace the start-time choice
@@ -1975,6 +2043,8 @@ export class SessionManager {
               _freshStart: freshStart,
               _restoredInput: restoredInput,
               _roleBindings: roleBindings,
+              _forum: forum,
+              _ownerRunId: ownerRunId,
             }),
           ready: (key, value) => {
             const deferred = this._autoloopReady.get(key);
@@ -2042,11 +2112,22 @@ export class SessionManager {
   }
 
   /**
-   * The run forum from outside the team (`kernel/forum.ts`): list its posts, read
-   * one, post to it, or measure it. A run that is a fan-out goal agent's child
-   * reaches its parent's forum. Reading here is not an agent's read and is not
-   * recorded as one. A post is taken in by the forum's hub while the run is live
-   * in this process, and pushed to its members by the same rules as theirs.
+   * A forum from outside the team (`kernel/forum.ts`): list its posts, read one,
+   * post to it, or measure it. Every run has a forum log — its runtime's posts:
+   * steers, handovers, a gate's question and answer, the verdict — so `list`,
+   * `read` and `metrics` work on any run, and on a forum with no run (`fm-…`).
+   * A run bound to another run's forum (a fan-out's goal agent, a subflow's
+   * child) reaches that one. Reading here is not an agent's read and is not
+   * recorded as one.
+   *
+   * `post` needs a run whose agents are on a forum. The post is the
+   * orchestrator's by default, or the user's (`author`, or `as` naming either);
+   * those go through the runtime's writer, which vouches for them in the
+   * forum's ledger and stores the post at once, live hub or not. Any other `as`
+   * posts as that agent. Members running now get it by the forum's push rules;
+   * `to` names members (or `user`) it is for. The post comes back with `notes`:
+   * what its poster should know (no tag, a name not on the forum, an addressee
+   * that has finished).
    */
   workflowForum(args: {
     runId: string;
@@ -2055,34 +2136,83 @@ export class SessionManager {
     title?: string;
     body?: string;
     as?: string;
+    author?: string;
+    re?: string[] | string;
+    to?: string[] | string;
   }): unknown {
-    const record = this.kernel.get(args.runId);
-    if (!record) throw new Error(`Workflow run '${args.runId}' not found`);
-    const forum = resolveForum(record);
-    if (!forum) throw new Error(`Workflow run '${args.runId}' has no forum (set \`forum\` on its spec)`);
-    const runId = forum.runId;
-    if (args.action === 'metrics') return forumMetrics(runId);
-    const { posts } = forumSnapshot(runId);
-    if (args.action === 'list') {
-      return posts.map((p) => ({
-        id: p.id,
-        ts: p.ts,
-        from: p.from,
-        tags: p.tags,
-        to: p.to,
-        title: p.title,
-        score: p.score,
-      }));
+    const standalone = isStandaloneForumId(args.runId);
+    let forumId = args.runId;
+    let exposed = false;
+    let config = {};
+    let cwd: string | undefined;
+    if (!standalone) {
+      const record = this.kernel.get(args.runId);
+      if (!record) throw new Error(`Workflow run '${args.runId}' not found`);
+      // The log every run has; its agents' forum, when they are on one, is the same forum.
+      forumId = runForum(record).id;
+      const forum = resolveForum(record);
+      exposed = !!forum;
+      config = forum?.config ?? {};
+      cwd = record.cwd;
     }
-    if (args.action === 'read') {
+    if (args.action === 'metrics') return forumMetrics(forumId);
+    if (args.action === 'list' || args.action === 'read') {
+      const { posts } = forumSnapshot(forumId);
+      if (args.action === 'list') {
+        return posts.map((p) => ({
+          id: p.id,
+          ts: p.ts,
+          from: p.from,
+          tags: p.tags,
+          to: p.to,
+          title: p.title,
+          score: p.score,
+          authority: forumAuthority(forumId, p),
+        }));
+      }
       const post = posts.find((p) => p.id === args.postId);
-      if (!post) throw new Error(`No post ${String(args.postId)} on the forum of run '${runId}'`);
-      return post;
+      if (!post) throw new Error(`No post ${String(args.postId)} on the forum of run '${forumId}'`);
+      return { ...post, authority: forumAuthority(forumId, post) };
     }
     if (args.action === 'post') {
+      if (standalone)
+        throw new Error(`Forum '${forumId}' carries messages between sessions: post with session_send_to`);
+      if (!exposed) {
+        throw new Error(
+          `Workflow run '${args.runId}' has no forum (set \`forum\` on its spec); workflow_steer reaches its next agent`,
+        );
+      }
       if (!args.title) throw new Error('A post needs a title');
-      const dir = ensureForumSpool(runId, forum.config);
-      return forumPost(dir, args.as ?? 'orchestrator', { title: args.title, body: args.body, cwd: record.cwd });
+      const list = (v: string[] | string | undefined): string[] =>
+        (Array.isArray(v) ? v : (v ?? '').split(/[\s,]+/)).map((x) => x.trim().replace(/^@/, '')).filter(Boolean);
+      const re = list(args.re);
+      const to = list(args.to);
+      if (args.as !== undefined && args.author !== undefined && args.as !== args.author) {
+        throw new Error('Give `author` (orchestrator or user) or `as` (an agent), not both');
+      }
+      const as = args.as ?? args.author ?? 'orchestrator';
+      // The user and the orchestrator post through the runtime's writer, which
+      // vouches for them in the forum's ledger and stores the post at once.
+      if (isReservedForumName(as)) {
+        const w = forumRuntimeAppend(forumId, {
+          from: as,
+          title: args.title,
+          body: args.body,
+          ...(re.length ? { re } : {}),
+          ...(to.length ? { to } : {}),
+        });
+        return { ...w.post, notes: w.notes };
+      }
+      if (args.as === undefined) throw new Error(`author must be orchestrator or user, not ${JSON.stringify(as)}`);
+      const dir = ensureForumSpool(forumId, config);
+      const post = forumPost(dir, as, {
+        title: args.title,
+        body: args.body,
+        cwd,
+        ...(re.length ? { re } : {}),
+        ...(to.length ? { direct: to } : {}),
+      });
+      return { ...post, notes: forumPostNotes(dir, post) };
     }
     throw new Error(`Unknown forum action '${String(args.action)}'`);
   }
@@ -2126,10 +2256,12 @@ export class SessionManager {
   /**
    * Answer a parked `human_gate`. A run parked by a process that has since
    * restarted is resumed with the answer attached, so a caller does not need to
-   * know whether the server restarted in between.
+   * know whether the server restarted in between. The answer is posted on the
+   * run's forum as the user's, with `comment` as its body; a comment is also
+   * queued as a steer for the next agent.
    */
-  async workflowApprove(runId: string, approved: boolean): Promise<{ answered: boolean }> {
-    return { answered: await this.kernel.approveStored(runId, approved) };
+  async workflowApprove(runId: string, approved: boolean, comment?: string): Promise<{ answered: boolean }> {
+    return { answered: await this.kernel.approveStored(runId, approved, comment) };
   }
 
   workflowDelete(runId: string): void {
@@ -2191,6 +2323,10 @@ export class SessionManager {
   async stopSession(name: string, opts: { keepPersisted?: boolean } = {}): Promise<void> {
     const managed = this._getSession(name);
     managed.session.stop();
+    // Off the session forum. Its unread mail was for this conversation: a stop that ends it ends
+    // the mail too, so a later session that takes the name does not receive it; a stop that keeps
+    // the session resumable leaves the mail waiting for it.
+    this._inbox.leave(name, { expire: !opts.keepPersisted });
     this._removeSession(name);
     // Remove PID tracking
     this._forgetPid(name);
@@ -2202,9 +2338,6 @@ export class SessionManager {
       // Claude conversation) pass keepPersisted: true.
       this._forgetPersisted(name);
       this._savePersisted();
-      // Its unread mail was for this conversation; a later session that takes
-      // the name is a different one and must not receive it.
-      this._inbox.clear(name);
     }
   }
 
@@ -2740,7 +2873,8 @@ export class SessionManager {
 
     const teammates: string[] = [];
     for (const [sessionName, m] of this.sessions) {
-      if (sessionName === name) continue;
+      // A session a run's mode started is the run's, not a teammate of plain sessions.
+      if (sessionName === name || m.config.ownerRunId) continue;
       const eng = m.config.engine || 'claude';
       const stats = m.session.getStats();
       const status = m.session.isBusy ? 'busy' : m.session.isPaused ? 'paused' : 'idle';
@@ -2859,6 +2993,8 @@ export class SessionManager {
       this.logger.info(`Stopped session: ${name}`);
     }
     this.sessions.clear();
+    // Every session off the session forum, and its spool retired; its record stays in the clawo home.
+    this._inbox.close();
     for (const adapter of this._claudeGoals.values()) adapter.detach();
     this._claudeGoals.clear();
     // Clear PID tracking
@@ -3764,6 +3900,8 @@ export class SessionManager {
     this._claudeGoals.get(name)?.detach();
     this._claudeGoals.delete(name);
     this.sessions.delete(name);
+    // Off the session forum; its mail waits for a session under the name (a restart, a resume).
+    this._inbox.leave(name);
   }
 
   private _forgetPid(name: string): void {
@@ -4078,13 +4216,19 @@ export class SessionManager {
   // other processes — is gone. A council is a one-node workflow; its state is
   // the run record, which is durable, cross-process, and does not evaporate.
   //
-  // What still needs a live object is in-flight control: `inject` and `abort`
-  // have to reach the `Council` instance that is running right now. The kernel
-  // publishes it for the duration of the node, and says so honestly — after a
-  // restart the run is readable and resumable, but there is no turn to inject
-  // into.
+  // What still needs a live object is `abort`: it has to reach the `Council`
+  // instance that is running right now, which the kernel publishes for the
+  // duration of the node. `inject` does not: it is a post on the run's forum,
+  // which any process can write and the council reads at its next round.
+  //
+  // A council run's council node is `main` (`council_start`), `council` (the
+  // workflow template) or whatever a spec calls it; `councilNodeId` finds it.
 
-  async councilStart(task: string, config: CouncilConfig): Promise<CouncilSession> {
+  async councilStart(
+    task: string,
+    config: CouncilConfig,
+    opts: { forum?: WorkflowSpec['forum'] } = {},
+  ): Promise<CouncilSession> {
     const runId = `council-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`;
     const { agents, secrets } = splitAgentSecrets(config.agents);
     const record = await this.kernel.start(
@@ -4097,6 +4241,8 @@ export class SessionManager {
         maxTurnsPerAgent: config.maxTurnsPerAgent,
         maxBudgetUsd: config.maxBudgetUsd,
         defaultPermissionMode: config.defaultPermissionMode,
+        forum: opts.forum,
+        logger: this.logger,
       }),
       { runId, cwd: config.projectDir, secrets: { agentCustomEngines: secrets } },
     );
@@ -4105,7 +4251,7 @@ export class SessionManager {
 
   councilStatus(id: string): CouncilSession | undefined {
     const record = loadRun(id);
-    if (!record || record.workflow !== 'council') return undefined;
+    if (!record || !councilNodeId(record)) return undefined;
     return toCouncilSession(record);
   }
 
@@ -4126,18 +4272,13 @@ export class SessionManager {
 
   /** Used by embedded-server to subscribe to a council's event stream. */
   getCouncil(id: string): Council | undefined {
-    return this.kernel.handle<Council>(id, LEGACY_NODE);
+    return this._councilHandle(id);
   }
 
-  /** The live council for a run, or a clear error about why there isn't one. */
-  private _liveCouncil(id: string): Council {
-    const council = this.kernel.handle<Council>(id, LEGACY_NODE);
-    if (council) return council;
-    const record = loadRun(id);
-    if (!record) throw new Error(`Council '${id}' not found`);
-    throw new Error(
-      `Council '${id}' is ${record.state} and not running in this process — its record is readable, but there is no live round to act on`,
-    );
+  /** The `Council` a run's council node published in this process, if it is running here. */
+  private _councilHandle(id: string, record: RunRecord | undefined = loadRun(id)): Council | undefined {
+    const nodeId = record ? councilNodeId(record) : undefined;
+    return nodeId ? this.kernel.handle<Council>(id, nodeId) : undefined;
   }
 
   /**
@@ -4148,8 +4289,9 @@ export class SessionManager {
   councilAbort(id: string): { aborted: boolean; state?: RunState; reason?: string } {
     // Cancel the run first so the kernel stops advancing, then abort the engine
     // so the current round tears down its worktrees.
+    const live = this._councilHandle(id);
     if (this.kernel.cancel(id)) {
-      this.kernel.handle<Council>(id, LEGACY_NODE)?.abort();
+      live?.abort();
       return { aborted: true };
     }
     const record = loadRun(id);
@@ -4161,12 +4303,38 @@ export class SessionManager {
     };
   }
 
-  councilInject(id: string, message: string): void {
-    this._liveCouncil(id).injectMessage(message);
+  /**
+   * Post the user's message on the council's run forum. Every seat's next round
+   * prompt carries it (`## User Injection`), and a seat running now on an exposed
+   * forum is pushed it. It works from any process, is kept with the run, and
+   * adds to earlier messages rather than replacing them.
+   */
+  councilInject(id: string, message: string): { postId: string } {
+    const record = loadRun(id);
+    const nodeId = record ? councilNodeId(record) : undefined;
+    if (!record || !nodeId) throw new Error(`Council '${id}' not found`);
+    if (isTerminalRunState(record.state)) {
+      throw new Error(
+        `Council '${id}' is ${record.state}: it opens no further round, so there is nothing to inject into`,
+      );
+    }
+    // Only the node the run is on reads it: running, or pending for a resume to
+    // carry on (a run that has not started is at its first node). Once the run
+    // has moved on, a later node's start cuts the message off from the council.
+    const at = record.currentNode ?? record.spec.nodes[0]?.id;
+    const state = record.nodes[nodeId]?.state;
+    if (at !== nodeId || (state !== 'running' && state !== 'pending')) {
+      throw new Error(
+        `Council '${id}': its council has finished and the run is at '${at ?? '?'}', so no further round reads this`,
+      );
+    }
+    return { postId: councilInjectPost(record, message).id };
   }
 
   async councilReview(id: string): Promise<CouncilReviewResult> {
-    return this._councilForPostProcessing(id).review();
+    const result = await this._councilForPostProcessing(id).review();
+    const record = loadRun(id);
+    return { ...result, forumReviews: record ? councilReviewsOf(record) : [] };
   }
 
   async councilAccept(id: string): Promise<CouncilAcceptResult> {
@@ -4187,12 +4355,16 @@ export class SessionManager {
    * so its own status would go nowhere.
    */
   private _recordCouncilDecision(id: string, status: 'accepted' | 'rejected'): void {
+    const record = loadRun(id);
     // A council live in this process carries the status on its own session.
-    if (this.kernel.handle<Council>(id, LEGACY_NODE)) return;
+    if (this._councilHandle(id, record)) return;
     let recorded = false;
     let why = 'the run has not finished';
     try {
-      recorded = this.kernel.amendFinishedNode(id, LEGACY_NODE, { councilStatus: status }, `council ${status}`);
+      const nodeId = record ? councilNodeId(record) : undefined;
+      recorded = nodeId
+        ? this.kernel.amendFinishedNode(id, nodeId, { councilStatus: status }, `council ${status}`)
+        : false;
     } catch (err) {
       why = (err as Error).message;
     }
@@ -4209,10 +4381,10 @@ export class SessionManager {
    * impossible.
    */
   private _councilForPostProcessing(id: string): Council {
-    const live = this.kernel.handle<Council>(id, LEGACY_NODE);
-    if (live) return live;
     const record = loadRun(id);
-    if (!record || record.workflow !== 'council') throw new Error(`Council '${id}' not found`);
+    const live = this._councilHandle(id, record);
+    if (live) return live;
+    if (!record || !councilNodeId(record)) throw new Error(`Council '${id}' not found`);
     const session = toCouncilSession(record);
     const council = new Council(session.config, this, this.logger);
     council.adoptSession(session);
@@ -4270,16 +4442,33 @@ export class SessionManager {
     this.kernel.handle<Fanout>(id, LEGACY_NODE)?.abort();
   }
 
-  // ─── Inbox (cross-session messaging) — delegated to InboxManager ────
+  // ─── Inbox (cross-session messaging) — on the session forum, through InboxManager ────
+  //
+  // Only plain sessions take part. A session a run's mode started (`ownerRunId`) belongs to that run:
+  // it is not on the session forum, a broadcast and `team_list` pass it over, and a message to or
+  // from it is refused with the way to reach it, the run's forum.
 
+  /** The plain sessions, as the inbox sees them. */
   private get _sessionLookup(): SessionLookup {
+    const plain = (name: string) => {
+      const managed = this.sessions.get(name);
+      return managed && !managed.config.ownerRunId ? managed : undefined;
+    };
     return {
-      getSession: (name) => this.sessions.get(name),
-      exists: (name) => this.sessions.has(name),
-      allNames: () => this.sessions.keys(),
-      deliver: (name, text) => this._deliverInboxTurn(name, text),
+      getSession: plain,
+      exists: (name) => !!plain(name),
+      allNames: () => [...this.sessions.keys()].filter((name) => !!plain(name)),
+      deliver: (name, text, context) => this._deliverInboxTurn(name, text, context?.replyTo),
       deliverMidTurn: (name, text) => this.deliverMidTurn(name, text),
     };
+  }
+
+  /** A session a run's mode started is reached through the run's forum, not the cross-session tools. */
+  private _refuseRunSession(name: string): void {
+    const runId = this.sessions.get(name)?.config.ownerRunId;
+    if (runId) {
+      throw new Error(`Session '${name}' belongs to run ${runId}: use workflow_forum post on run ${runId} instead`);
+    }
   }
 
   /**
@@ -4303,16 +4492,22 @@ export class SessionManager {
    * An inbox delivery is a turn like any other — capped, written to the run
    * ledger and kept in the handoff record — that its sender does not wait on.
    * Resolves once the turn reaches the engine; a refusal before that (spend cap,
-   * session stopped) rejects so the inbox queues the message instead. A failure
-   * after it belongs to the turn and is recorded with it.
+   * session stopped) rejects, and the message stays unread. A failure after it
+   * belongs to the turn and is recorded with it. `replyTo`: see `_sendTurn`.
    */
-  private _deliverInboxTurn(name: string, text: string): Promise<void> {
+  private _deliverInboxTurn(name: string, text: string, replyTo?: string): Promise<void> {
     return new Promise((resolve, reject) => {
       let dispatched = false;
-      this._sendTurn(name, text, {}, () => {
-        dispatched = true;
-        resolve();
-      }).then(
+      this._sendTurn(
+        name,
+        text,
+        {},
+        () => {
+          dispatched = true;
+          resolve();
+        },
+        replyTo,
+      ).then(
         () => resolve(),
         (err: Error) => {
           if (!dispatched) reject(err);
@@ -4322,22 +4517,35 @@ export class SessionManager {
     });
   }
 
+  /**
+   * A message from one plain session to another (`*`: to every other plain session), posted on the
+   * session forum. `delivered`: a recipient got it now; `queued`: a recipient's copy waits unread.
+   */
   async sessionSendTo(
     from: string,
     to: string,
     message: string,
     summary?: string,
   ): Promise<{ delivered: boolean; queued: boolean }> {
+    if (!this.sessions.has(from)) throw new Error(`Sender session '${from}' not found`);
+    this._refuseRunSession(from);
+    if (to !== '*') {
+      if (!this.sessions.has(to)) throw new Error(`Target session '${to}' not found`);
+      this._refuseRunSession(to);
+    }
     return this._inbox.sendTo(from, to, message, this._sessionLookup, summary, (name, err) => {
       this.logger.error(`Broadcast delivery to '${name}' failed:`, err.message);
     });
   }
 
+  /** The messages sent to a session, unread only by default. Writes nothing. */
   sessionInbox(name: string, unreadOnly = true): InboxMessage[] {
     return this._inbox.inbox(name, unreadOnly);
   }
 
+  /** Hand a session its unread messages in one turn; a run's session has none. */
   async sessionDeliverInbox(name: string): Promise<number> {
+    if (this.sessions.get(name)?.config.ownerRunId) return 0;
     return this._inbox.deliverInbox(name, this._sessionLookup);
   }
 
@@ -4381,22 +4589,31 @@ export class SessionManager {
   /** Per-run checkpoint refreshers, registered by the autoloop node executor. */
   private _autoloopPublishers = new Map<string, () => boolean>();
 
+  /**
+   * `forum` (default on): the planner is `planner` on the run's forum. It asks
+   * the user there (`ASK @user: …`) when something must be decided, and the
+   * caller answers with `workflow_forum` `post`, which reaches a planner whose
+   * engine takes input mid-turn (Claude, codex-app) in the turn it is in.
+   * `false` turns it off.
+   */
   async ultraplanStart(
     task: string,
-    opts?: { model?: string; cwd?: string; timeout?: number },
+    opts?: { model?: string; cwd?: string; timeout?: number; forum?: boolean | ForumConfig },
   ): Promise<UltraplanResult> {
     const runId = `ultraplan-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`;
     const cwd = opts?.cwd || process.cwd();
+    const forum = this._ultraForumConfig(opts?.forum);
     const record = await this.kernel.start(
       legacyUltraplanWorkflow({
         task,
         cwd,
         model: opts?.model || 'opus',
         timeoutMs: opts?.timeout || ULTRAPLAN_TIMEOUT_MS,
+        ...(forum ? { forum } : {}),
       }),
       { runId, cwd },
     );
-    return toUltraplanResult(record, undefined);
+    return toUltraplanResult(record, undefined, forum ? { openAsks: [] } : undefined);
   }
 
   ultraplanStatus(id: string): UltraplanResult | undefined {
@@ -4405,7 +4622,7 @@ export class SessionManager {
     // Read the plan from the node artifact, not the record's preview: a plan is
     // routinely longer than the inline cap, and returning a truncated one would
     // quietly hand back a broken deliverable.
-    return toUltraplanResult(record, readNodeOutput(id, LEGACY_NODE));
+    return toUltraplanResult(record, readNodeOutput(id, LEGACY_NODE), this._ultraForumView(record));
   }
 
   // ─── Ultrareview ──────────────────────────────────────────────────────
@@ -4424,6 +4641,8 @@ export class SessionManager {
       model?: string;
       focus?: string;
       engines?: EngineType[];
+      /** The reviewers' forum: on by default (`{}`), `false` off, or a forum config. */
+      forum?: boolean | ForumConfig;
     },
   ): Promise<UltrareviewResult> {
     // Every reviewer runs read-only (see below). A custom reviewer has no config
@@ -4601,11 +4820,16 @@ export class SessionManager {
     }));
 
     const runId = id;
+    // On the forum each reviewer posts its findings as it finds them and reads
+    // nothing: write-only membership keeps the reviews independent, and the
+    // brief goes after the prompt so the persona stays its first line.
+    const forum = this._ultraForumConfig(opts?.forum);
     await this.kernel.start(
       legacyFanoutWorkflow({
         name: 'ultrareview',
         task: reviewInstruction,
         cwd,
+        ...(forum ? { forum, forumBriefAfter: true, forumNorms: ULTRAREVIEW_FORUM_NORMS, forumCanRead: false } : {}),
         // Each reviewer's own prompt and `permissionMode: 'plan'` travel with it.
         // They were being dropped, so every reviewer got the shared task under
         // `bypassPermissions` — a read-only review that could edit the code.
@@ -4631,7 +4855,28 @@ export class SessionManager {
     const record = loadRun(id);
     if (!record || record.workflow !== 'ultrareview') return undefined;
     const data = record.nodes[LEGACY_NODE]?.data as FanoutNodeData | undefined;
-    return toUltrareviewResult(record, joinFindings(data));
+    return toUltrareviewResult(record, joinFindings(data), this._ultraForumView(record));
+  }
+
+  /** An ultra mode's `forum` option: on (`{}`) unless it is `false`; a config object as given. */
+  private _ultraForumConfig(forum: boolean | ForumConfig | undefined): ForumConfig | undefined {
+    if (forum === false) return undefined;
+    return forum === undefined || forum === true ? {} : forum;
+  }
+
+  /**
+   * What an ultra status reports of the run's forum: every post (the
+   * orchestrator's view) and the ASKs nobody has answered. Undefined for a run
+   * whose agents are not on one. Reads only, so the status tools stay read-only.
+   */
+  private _ultraForumView(record: RunRecord): UltraForumView | undefined {
+    const forum = resolveForum(record);
+    if (!forum) return undefined;
+    try {
+      return { posts: forumSnapshot(forum.runId).posts, openAsks: openAsksOf(forum.runId) };
+    } catch {
+      return { posts: [], openAsks: [] };
+    }
   }
 
   // ─── Autoloop (three-agent architecture) ───────────────────────────
@@ -4728,6 +4973,10 @@ export class SessionManager {
     _restoredInput?: AutoloopInputSnapshot;
     /** Role rebinds restored from the checkpoint; already merged into the role fields above. */
     _roleBindings?: AutoloopRoleBindings;
+    /** The run's forum and the roles' names on it, from the kernel node. Never stored as config. */
+    _forum?: AutoloopForumTarget;
+    /** The kernel run the role sessions belong to. Never stored as config. */
+    _ownerRunId?: string;
   }): Promise<{
     runner: AutoloopRunner;
     dispatcher: ClaudeAgentDispatcher;
@@ -4735,6 +4984,7 @@ export class SessionManager {
     pushPolicy: PushPolicy;
     abort: () => void;
     afterPublishReconcile: () => Promise<void>;
+    forum?: AutoloopForumBridge;
   }> {
     const plannerEngine = validateAutoloopRole('planner', opts.plannerEngine, opts.plannerCustomEngine);
     const coderEngine = validateAutoloopRole('coder', opts.coderEngine, opts.coderCustomEngine);
@@ -4773,10 +5023,20 @@ export class SessionManager {
     const runId = opts.runId;
     let runnerRef: AutoloopRunner | null = null;
     let dispatcherRef: ClaudeAgentDispatcher | null = null;
+    // The loop on its run's forum: envelopes mirrored, roles members while it is exposed.
+    const forum = opts._forum
+      ? new AutoloopForumBridge(opts._forum, {
+          ledgerDir,
+          deliverMidTurn: (session, text) => this.deliverMidTurn(session, text),
+          logger: this.logger,
+        })
+      : undefined;
     const dispatcherConfig: ClaudeAgentDispatcherConfig = {
       manager: this,
       runId: opts.runId,
       workspace: opts.workspace,
+      ...(forum ? { forum } : {}),
+      ...(opts._ownerRunId ? { ownerRunId: opts._ownerRunId } : {}),
       plannerPromptPath: opts.plannerPromptPath,
       plannerEngine,
       plannerModel: opts.plannerModel,
@@ -4861,6 +5121,7 @@ export class SessionManager {
       this.logger.error?.(`[autoloop/${runId}] background runner task failed: ${boundedErrorReason(err)}`);
     });
     runnerRef = runner;
+    forum?.attach(runner);
     if (closedLedgerRestore) {
       runner.state.iter = closedLedgerRestore.iter;
       runner.state.metric_history = closedLedgerRestore.metric_history.slice();
@@ -4882,6 +5143,7 @@ export class SessionManager {
         this.logger.warn?.(`[autoloop/${runId}] cleanup after failed start failed: ${(cleanupErr as Error).message}`);
       }
       runner.stop();
+      forum?.close();
       throw err;
     }
     // Committed-iteration recovery runs after publisher registration, the
@@ -4895,6 +5157,7 @@ export class SessionManager {
       abort: () => runner.markCancelledByKernel(),
       afterPublishReconcile: () =>
         this._recoverCommittedCoderIteration(opts.workspace, ledgerDir, runId, runner, dispatcher),
+      ...(forum ? { forum } : {}),
     };
   }
 
@@ -4996,7 +5259,15 @@ export class SessionManager {
      * with the run, so a resume keeps it.
      */
     contract?: unknown;
+    /**
+     * The run forum the three roles share: `true` (the default) or a forum
+     * config; `false` keeps them off it. The loop's envelopes are mirrored to
+     * the run's forum either way.
+     */
+    forum?: boolean | ForumConfig;
   }): Promise<{ runId: string; plannerSession: string; state: AutoloopState }> {
+    // Malformed is refused before the run exists; the default is on.
+    const forum = opts.forum === false ? undefined : normalizeForumConfig(opts.forum ?? true, 'autoloop forum');
     if (opts.contract !== undefined) {
       const contract = normalizeContract(opts.contract);
       if (!contract || contract.checks.length === 0) {
@@ -5034,10 +5305,13 @@ export class SessionManager {
     // they travel in memory. Without this split, `spec.json` contained the token
     // from `CustomEngineConfig.env` in plain text.
     const { plannerCustomEngine, coderCustomEngine, reviewerCustomEngine, ...persistable } = opts;
+    // The forum is the run's, on the spec; the node's config does not repeat it.
+    delete persistable.forum;
     await this.kernel.start(
       {
         name: 'autoloop',
         cwd: opts.workspace,
+        ...(forum ? { forum } : {}),
         nodes: [
           {
             id: LEGACY_NODE,

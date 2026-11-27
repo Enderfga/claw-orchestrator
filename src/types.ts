@@ -385,6 +385,13 @@ export interface SessionConfig {
    * here so the check does not have to read it through a cast.
    */
   skipPersistence?: boolean;
+  /**
+   * Internal, set by the modes that start sessions for a run (council, autoloop,
+   * a workflow's nodes): the run the session belongs to. Not a `session_start`
+   * parameter. Such a session is the run's, and its messages go through the
+   * run's forum rather than the cross-session tools.
+   */
+  ownerRunId?: string;
   betas?: string | string[];
   enableAgentTeams?: boolean;
   // CLI 2.1.111 features
@@ -966,6 +973,12 @@ export interface UltraplanResult {
   error?: string;
   /** Set while the process running it has stopped and the run waits for `workflow_resume`; `status` still reads `running`. */
   suspended?: { at: string; reason: string };
+  /**
+   * On a run with a forum: the ASKs nobody has answered yet, such as the
+   * planner's `ASK @user: …`. Answer one with `workflow_forum` `post` (author
+   * `user`, `re` its id).
+   */
+  openAsks?: Array<{ id: string; from: string; to: string[]; title: string }>;
 }
 
 export interface UltrareviewResult {
@@ -979,6 +992,16 @@ export interface UltrareviewResult {
   error?: string;
   /** Set while the process running it has stopped and the run waits for `workflow_resume`; `status` still reads `running`. */
   suspended?: { at: string; reason: string };
+  /**
+   * On a run with a forum, while it runs and after: how many posts it has, the
+   * reviewers' FAIL titles so far (`<reviewer>: <title>`, at most 200), and the
+   * ASKs nobody has answered.
+   */
+  forum?: {
+    posts: number;
+    failTitles: string[];
+    openAsks: Array<{ id: string; from: string; to: string[]; title: string }>;
+  };
 }
 
 // ─── Council Types ──────────────────────────────────────────────────────────
@@ -1042,6 +1065,46 @@ export interface CouncilConfig {
   defaultPermissionMode?: PermissionMode;
   /** Polled like `abort()`; set by the kernel so a cancelled or timed-out run stops opening sessions. */
   signal?: { aborted: boolean };
+  /**
+   * The seats are on a run forum: the charter tells them to post their reviews
+   * there instead of writing `reviews/` files. Set by the kernel with the forum hooks.
+   */
+  forum?: boolean;
+  /**
+   * Responses of the rounds a previous process ran (a resumed run). The council
+   * carries on with the round after the last of them.
+   */
+  previousResponses?: AgentResponse[];
+  /** Text put in front of a seat's round prompt, such as the run forum's brief for it. */
+  agentPreface?: (agent: string, round: number) => string | undefined;
+  /**
+   * Called once a seat's round session is up; the returned function is called
+   * when the seat's round ends. The run forum joins the seat here.
+   */
+  onAgentSession?: (agent: string, sessionName: string, round: number, cwd: string) => (() => void) | undefined;
+  /** A seat's reply so far as it streams, and then each whole reply of its round (the forum posts written in it). */
+  onAgentText?: (agent: string, text: string, round: number) => void;
+  /** Called once a round's replies are in, before the votes are counted: the round reports are posted here. */
+  onRoundEnd?: (round: number, results: CouncilRoundResult[]) => Promise<void> | void;
+  /** The user's messages for one seat's prompt in this round, rendered as its `## User Injection`. */
+  takeInjections?: (round: number, agent: string) => string[];
+  /**
+   * The entries of the history block of round `round`'s prompt, from the
+   * responses so far; undefined to build them from `responses` alone.
+   */
+  history?: (round: number, responses: AgentResponse[]) => CouncilHistoryEntry[] | undefined;
+}
+
+/** One seat's result in a round: its response, or the error its round ended with. */
+export type CouncilRoundResult = { agent: string; response: AgentResponse } | { agent: string; error: string };
+
+/** One seat's report in the history block of a round prompt. */
+export interface CouncilHistoryEntry {
+  agent: string;
+  round: number;
+  /** The report with its consensus tag removed. */
+  report: string;
+  consensus: boolean;
 }
 
 export interface AgentResponse {
@@ -1114,6 +1177,24 @@ export interface CouncilReviewResult {
   agentSummaries: Array<{ agent: string; consensus: boolean; preview: string }>;
   /** Reviewer guidance loaded from configs/council-reviewer-prompt.md */
   reviewerGuidance: string;
+  /** The reviews the seats posted on the run forum (`WIN: approve @x …`, `FAIL @x: request changes …`). */
+  forumReviews?: CouncilForumReview[];
+}
+
+/** A review one seat posted on the run forum about another seat's work. */
+export interface CouncilForumReview {
+  /** The post id. */
+  id: string;
+  ts: string;
+  /** The seat that reviewed. */
+  from: string;
+  /** The seats it reviewed. */
+  to: string[];
+  verdict: 'approve' | 'request_changes';
+  title: string;
+  body: string;
+  /** The posts it answers, such as the round report it reviewed. */
+  re: string[];
 }
 
 export interface CouncilAcceptResult {

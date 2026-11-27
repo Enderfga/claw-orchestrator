@@ -6,14 +6,7 @@
  */
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import {
-  type AnyAutoloopMessage,
-  AutoloopRoutingError,
-  Msg,
-  deserialise,
-  serialise,
-  validateMessage,
-} from '../autoloop/messages.js';
+import { type AnyAutoloopMessage, AutoloopRoutingError, Msg, validateMessage } from '../autoloop/messages.js';
 import { AutoloopRunner } from '../autoloop/runner.js';
 import type { AgentDispatcher, AutoloopConfig } from '../autoloop/types.js';
 
@@ -52,19 +45,6 @@ describe('autoloop messages', () => {
     expect(e.payload.text).toBe('hello');
     expect(typeof e.msg_id).toBe('string');
     expect(typeof e.ts).toBe('string');
-  });
-
-  it('serialise → deserialise round-trips', () => {
-    const e = Msg.directive(3, {
-      goal: 'fix add_two',
-      constraints: ['no new files'],
-      success_criteria: ['gate A green'],
-      max_attempts: 2,
-    });
-    const { text, summary } = serialise(e);
-    expect(summary).toBe('directive');
-    const back = deserialise(text);
-    expect(back).toEqual(e);
   });
 
   it('validateMessage accepts the canonical 11 routes', () => {

@@ -391,6 +391,127 @@
         color: #c62828;
         font-size: 13px;
       }
+      .wf-detail {
+        flex: 1;
+        min-height: 0;
+        overflow-y: auto;
+        padding: 0 20px 20px;
+      }
+
+      /* ─── Run forum pane (Runs, Council, Autoloop) ───────────── */
+      .panes.with-forum {
+        grid-template-columns: 1fr 1fr 1fr minmax(300px, 1.1fr);
+      }
+      .panes.with-forum .single {
+        grid-column: 1 / 4;
+      }
+      .wf-forum {
+        display: flex;
+        height: 460px;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        overflow: hidden;
+        margin-bottom: 18px;
+      }
+      .wf-forum .pane {
+        flex: 1;
+      }
+      .forum-pane .paneHeader .meta {
+        text-transform: none;
+        letter-spacing: 0;
+        font-weight: 400;
+      }
+      .forum-post {
+        cursor: pointer;
+      }
+      .forum-post .entryHeader {
+        flex-wrap: wrap;
+      }
+      .forum-post .title {
+        font-weight: 600;
+        word-break: break-word;
+      }
+      .forum-post .to,
+      .forum-post .via {
+        color: var(--muted);
+      }
+      .forum-full {
+        margin-top: 6px;
+      }
+      .forum-full .actions {
+        margin-top: 6px;
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        font-size: 11px;
+        color: var(--muted);
+      }
+      .forum-full button {
+        font: inherit;
+        padding: 2px 10px;
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        background: var(--surface);
+        cursor: pointer;
+      }
+      .forum-full details pre {
+        margin: 4px 0 0;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      .badge.author-user {
+        background: #dbeafe;
+        color: #1e40af;
+      }
+      .badge.author-orchestrator {
+        background: #e0e7ff;
+        color: #3730a3;
+      }
+      .badge.author-unverified {
+        background: #fef3c7;
+        color: #92400e;
+      }
+      .tag {
+        font-size: 10px;
+        font-weight: 700;
+        padding: 0 5px;
+        border-radius: 3px;
+        border: 1px solid currentColor;
+        color: var(--muted);
+      }
+      .tag.ASK {
+        color: var(--info);
+      }
+      .tag.FAIL {
+        color: var(--error);
+      }
+      .tag.WIN,
+      .tag.DONE {
+        color: var(--accent);
+      }
+      .tag.FIX {
+        color: var(--warn);
+      }
+      .forum-note {
+        padding: 6px 16px;
+        font-size: 12px;
+        color: var(--muted);
+        background: var(--surface);
+        border-top: 1px solid var(--border);
+        display: flex;
+        gap: 8px;
+        align-items: center;
+      }
+      .forum-note[hidden] {
+        display: none;
+      }
+      .forum-note button {
+        font: inherit;
+        border: none;
+        background: transparent;
+        color: var(--muted);
+        cursor: pointer;
+      }
 
       /* ─── Forge tab ──────────────────────────────────────────── */
       .forge-layout {
@@ -932,6 +1053,19 @@
           currentQuestion: null,
           eventSource: null,
         },
+        // the forum pane of the run on screen (Runs, Council, Autoloop)
+        forum: {
+          runId: null,
+          exposed: true,
+          total: 0,
+          posts: [],
+          full: {},
+          open: new Set(),
+          replyTo: null,
+          eventSource: null,
+          // Bumped on every open and close, so a late answer for a run no longer shown is dropped.
+          seq: 0,
+        },
       };
 
       const $ = (id) => document.getElementById(id);
@@ -983,6 +1117,7 @@
           state.forge.eventSource.close();
           state.forge.eventSource = null;
         }
+        closeForum();
         // Reset caches.
         state.autoloop.state = null;
         state.autoloop.plannerLog = [];
@@ -1234,6 +1369,7 @@
           if (!j.ok) throw new Error(j.error || 'not found');
           run = j.run;
         } catch (err) {
+          if (state.selectedId !== id) return;
           $('main').innerHTML =
             `<div class="empty" style="margin-top:80px">Failed to load: ${escapeHtml(String(err.message || err))}</div>`;
           return;
@@ -1288,7 +1424,10 @@
                .join(' · ')}</p>`
           : '';
 
+        // Another run was opened while this one loaded.
+        if (state.selectedId !== id) return;
         $('main').innerHTML = `
+          <div class="wf-detail">
           <h2>${escapeHtml(run.runId)} <span class="badge ${escapeHtml(run.state)}">${escapeHtml(run.state)}</span>
             <span class="verdict ${verdict}">${verdict}</span></h2>
           <p><small>${escapeHtml(run.workflow)} · ${escapeHtml(run.cwd || '')}${run.costUsd ? ` · $${Number(run.costUsd).toFixed(4)}` : ''}</small></p>
@@ -1310,7 +1449,273 @@
                  <p><small>${evidence.changedFiles.length} file(s) changed${evidence.baseSha ? ` since ${escapeHtml(evidence.baseSha.slice(0, 12))}` : ''}</small></p>`
               : ''
           }
+          <h3>Forum</h3>
+          <div class="wf-forum">${forumPaneHtml()}</div>
+          </div>
         `;
+        openForum(id);
+      }
+
+      // ─── Run forum pane ───────────────────────────────────────────
+      // Shown with every run (Runs, Council, Autoloop): the posts on the run's
+      // forum, oldest first, each with who it speaks for as the forum's ledger
+      // has it. A post under `user` or `orchestrator` that the ledger does not
+      // vouch for was written by an agent, and is marked unverified. New posts
+      // arrive as `forum_post` events on /workflow/<id>/events; the box posts to
+      // the run as the user, through `workflow_forum post`.
+      const FORUM_TAGS = ['WIN', 'FAIL', 'ASK', 'FIX', 'DONE', 'INFO'];
+
+      function forumPaneHtml() {
+        return `
+          <section class="pane forum-pane">
+            <div class="paneHeader">Forum <span class="meta" id="forum-meta"></span></div>
+            <div class="paneBody" id="forum-list"><div class="empty">Loading…</div></div>
+            <div class="forum-note" id="forum-note" hidden></div>
+            <div class="composer">
+              <textarea
+                id="forum-input"
+                placeholder="Post as the user: title on the first line, body below"
+                title="Posts to this run's forum as the user. The first line is the title: start it with a tag (ASK, FIX, INFO…) and address a member with @name. The rest is the body. Cmd/Ctrl+Enter sends."
+              ></textarea>
+              <button id="forum-send">Post</button>
+            </div>
+          </section>`;
+      }
+
+      function closeForum() {
+        const f = state.forum;
+        f.seq++;
+        if (f.eventSource) {
+          f.eventSource.close();
+          f.eventSource = null;
+        }
+        f.runId = null;
+        f.exposed = true;
+        f.total = 0;
+        f.posts = [];
+        f.full = {};
+        f.open = new Set();
+        f.replyTo = null;
+      }
+
+      async function openForum(runId) {
+        closeForum();
+        const f = state.forum;
+        const seq = f.seq;
+        f.runId = runId;
+        $('forum-send')?.addEventListener('click', sendForumPost);
+        $('forum-input')?.addEventListener('keydown', (e) => {
+          if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') sendForumPost();
+        });
+        let listing;
+        try {
+          const r = await fetch(`/workflow/${encodeURIComponent(runId)}/forum`);
+          const j = await r.json();
+          if (!j.ok) throw new Error(j.error || `HTTP ${r.status}`);
+          listing = j.forum;
+        } catch (err) {
+          if (seq !== f.seq) return;
+          const el = $('forum-list');
+          if (el) el.innerHTML = `<div class="empty">No forum: ${escapeHtml(String(err.message || err))}</div>`;
+          return;
+        }
+        if (seq !== f.seq) return;
+        f.exposed = listing.exposed;
+        f.total = listing.total;
+        f.posts = listing.posts || [];
+        paintForum(true);
+        // From the last post listed, so nothing written in between is missed; a
+        // reconnect resumes from the last post received (Last-Event-ID).
+        const since = encodeURIComponent(listing.last || 'p00000');
+        const es = new EventSource(`/workflow/${encodeURIComponent(runId)}/events?forumSince=${since}`);
+        f.eventSource = es;
+        es.addEventListener('forum_post', (e) => {
+          if (seq === f.seq) addForumPost(JSON.parse(e.data));
+        });
+      }
+
+      function addForumPost(p, toEnd) {
+        const f = state.forum;
+        if (!p || !p.id || f.posts.some((x) => x.id === p.id)) return;
+        f.posts.push(p);
+        f.total++;
+        paintForum(toEnd);
+      }
+
+      function forumAuthorHtml(p) {
+        if (p.authority === 'user') {
+          return '<span class="badge author-user" title="The user who started this run">user</span>';
+        }
+        if (p.authority === 'orchestrator') {
+          return '<span class="badge author-orchestrator" title="clawo, or the tool caller acting for it">orchestrator</span>';
+        }
+        if (p.from === 'user' || p.from === 'orchestrator') {
+          return `<span class="badge author-unverified" title="A reserved name the forum's ledger does not vouch for: an agent wrote this line">${escapeHtml(p.from)} (unverified)</span>`;
+        }
+        return `<span class="who">${escapeHtml(p.from)}</span>`;
+      }
+
+      function forumPostHtml(p) {
+        const tags = (p.tags || [])
+          .map((t) => `<span class="tag ${FORUM_TAGS.includes(t) ? t : ''}">${escapeHtml(t)}</span>`)
+          .join(' ');
+        const to = (p.to || []).length
+          ? `<span class="to">→ ${p.to.map((n) => '@' + escapeHtml(n)).join(' ')}</span>`
+          : '';
+        const extra = [
+          // A runtime post by the user or the orchestrator says nothing more with `via runtime`.
+          p.via && p.via !== 'runtime' ? `via ${p.via}` : '',
+          p.visibility === 'to' ? 'private' : '',
+          (p.re || []).length ? `re ${p.re.join(' ')}` : '',
+        ]
+          .filter(Boolean)
+          .join(' · ');
+        return `<div class="entry forum-post" data-id="${escapeHtml(p.id)}">
+          <div class="entryHeader">
+            ${forumAuthorHtml(p)} ${tags} ${to} <span class="via">${escapeHtml(extra)}</span>
+            <span style="margin-left:auto">${escapeHtml(p.id)} · ${fmtTime(p.ts)}</span>
+          </div>
+          <div class="title">${escapeHtml(p.title)}</div>
+          ${state.forum.open.has(p.id) ? forumFullHtml(p.id) : ''}
+        </div>`;
+      }
+
+      function forumFullHtml(id) {
+        const full = state.forum.full[id];
+        if (!full) return '<div class="forum-full"><div class="empty">Loading…</div></div>';
+        if (full.error) return `<div class="forum-full"><div class="wf-error">${escapeHtml(full.error)}</div></div>`;
+        const body = full.body ? `<div class="entryBody">${escapeHtml(full.body)}</div>` : '';
+        const score =
+          full.score !== undefined
+            ? `<div class="actions">score ${escapeHtml(typeof full.score === 'string' ? full.score : JSON.stringify(full.score))}</div>`
+            : '';
+        const direct = (full.direct || []).length
+          ? `<div class="actions">sent directly to ${full.direct.map((n) => '@' + escapeHtml(n)).join(' ')}</div>`
+          : '';
+        const data = full.data
+          ? `<details><summary>data</summary><pre class="entryBody">${escapeHtml(JSON.stringify(full.data, null, 2))}</pre></details>`
+          : '';
+        return `<div class="forum-full">${body}${score}${direct}${data}
+          <div class="actions"><button type="button" data-reply="${escapeHtml(id)}">Reply</button></div>
+        </div>`;
+      }
+
+      function paintForum(toEnd) {
+        const f = state.forum;
+        const el = $('forum-list');
+        if (!el) return;
+        const meta = $('forum-meta');
+        if (meta) {
+          const shown = f.posts.length < f.total ? `, the last ${f.posts.length} shown` : '';
+          meta.textContent =
+            `· ${f.total} post${f.total === 1 ? '' : 's'}${shown}` +
+            (f.exposed ? '' : ' · a log: the agents of this run are not on it');
+        }
+        const atEnd = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+        if (!f.posts.length) {
+          el.innerHTML = '<div class="empty">No posts yet.</div>';
+          return;
+        }
+        el.innerHTML = f.posts.map(forumPostHtml).join('');
+        el.querySelectorAll('.forum-post').forEach((node) => {
+          node.addEventListener('click', (ev) => {
+            // Selecting text or pressing a button in an open post does not close it.
+            if (ev.target.closest('.forum-full')) return;
+            toggleForumPost(node.dataset.id);
+          });
+        });
+        el.querySelectorAll('[data-reply]').forEach((b) => {
+          b.addEventListener('click', () => {
+            state.forum.replyTo = b.dataset.reply;
+            paintForumNote();
+            $('forum-input')?.focus();
+          });
+        });
+        if (toEnd || atEnd) el.scrollTop = el.scrollHeight;
+      }
+
+      async function toggleForumPost(id) {
+        const f = state.forum;
+        if (f.open.has(id)) {
+          f.open.delete(id);
+          paintForum();
+          return;
+        }
+        f.open.add(id);
+        paintForum();
+        if (f.full[id]) return;
+        const seq = f.seq;
+        try {
+          const r = await fetch(`/workflow/${encodeURIComponent(f.runId)}/forum?post=${encodeURIComponent(id)}`);
+          const j = await r.json();
+          if (seq !== f.seq) return;
+          f.full[id] = j.ok ? j.post : { error: j.error || `HTTP ${r.status}` };
+        } catch (err) {
+          if (seq !== f.seq) return;
+          f.full[id] = { error: String(err.message || err) };
+        }
+        paintForum();
+      }
+
+      /** The strip above the box: the post a reply answers, and what the last post attempt said. */
+      function paintForumNote(message, isError) {
+        const f = state.forum;
+        const el = $('forum-note');
+        if (!el) return;
+        const parts = [];
+        if (f.replyTo) {
+          parts.push(
+            `<span>Replying to ${escapeHtml(f.replyTo)}</span><button type="button" data-cancel-reply aria-label="Cancel the reply">×</button>`,
+          );
+        }
+        if (message) parts.push(`<span class="${isError ? 'wf-error' : ''}">${escapeHtml(message)}</span>`);
+        el.hidden = parts.length === 0;
+        el.innerHTML = parts.join('');
+        el.querySelector('[data-cancel-reply]')?.addEventListener('click', () => {
+          f.replyTo = null;
+          paintForumNote();
+        });
+      }
+
+      async function sendForumPost() {
+        const f = state.forum;
+        const runId = f.runId;
+        const ta = $('forum-input');
+        const btn = $('forum-send');
+        if (!runId || !ta || !btn || btn.disabled) return;
+        const text = ta.value.trim();
+        if (!text) return;
+        const nl = text.indexOf('\n');
+        const title = (nl < 0 ? text : text.slice(0, nl)).trim();
+        const body = nl < 0 ? '' : text.slice(nl + 1).trim();
+        const seq = f.seq;
+        btn.disabled = true;
+        ta.disabled = true;
+        try {
+          const r = await fetch(`/workflow/${encodeURIComponent(runId)}/forum/post`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ title, ...(body ? { body } : {}), ...(f.replyTo ? { re: [f.replyTo] } : {}) }),
+          });
+          const j = await r.json().catch(() => ({}));
+          if (seq !== f.seq) return;
+          if (!r.ok || !j.ok) {
+            paintForumNote(`Not posted: ${j.error || `HTTP ${r.status}`}`, true);
+            return;
+          }
+          ta.value = '';
+          f.replyTo = null;
+          if (j.post) addForumPost(j.post, true);
+          paintForumNote((j.notes || []).join(' '));
+        } catch (err) {
+          if (seq === f.seq) paintForumNote(`Not posted: ${String(err.message || err)}`, true);
+        } finally {
+          if (seq === f.seq) {
+            btn.disabled = false;
+            ta.disabled = false;
+            ta.focus();
+          }
+        }
       }
 
       // ─── Forge ────────────────────────────────────────────────────
@@ -1743,7 +2148,7 @@
             <div class="item">subagents <strong id="auto-sub">no</strong></div>
             <div class="item">pushes <strong id="auto-push">0</strong></div>
           </div>
-          <div class="panes">
+          <div class="panes with-forum">
             <section class="pane">
               <div class="paneHeader">Planner ⇄ user</div>
               <div class="paneBody" id="auto-planner"><div class="empty">Waiting…</div></div>
@@ -1760,6 +2165,7 @@
               <div class="paneHeader">Reviewer verdicts</div>
               <div class="paneBody" id="auto-reviewer"><div class="empty">No verdicts yet.</div></div>
             </section>
+            ${forumPaneHtml()}
           </div>
           <div class="pushlog" id="auto-pushlog"><span class="item">No pushes yet.</span></div>
         `;
@@ -1849,6 +2255,7 @@
         renderAutoloopShell();
         state.autoloop.runId = id;
         $('auto-id').textContent = id;
+        openForum(id);
         // Initial state fetch
         try {
           const r = await fetch(`/autoloop/${encodeURIComponent(id)}/state`);
@@ -2210,11 +2617,12 @@
             <div class="item">agents <strong id="c-agents">…</strong></div>
             <div class="item">task <strong id="c-task" style="font-weight:400;color:var(--muted)"></strong></div>
           </div>
-          <div class="panes">
+          <div class="panes with-forum">
             <section class="pane single">
               <div class="paneHeader">Agent responses (live)</div>
               <div class="paneBody" id="c-stream"><div class="empty">Waiting for events…</div></div>
             </section>
+            ${forumPaneHtml()}
           </div>
         `;
       }
@@ -2222,6 +2630,7 @@
       async function openCouncil(id) {
         renderCouncilShell();
         $('c-id').textContent = id;
+        openForum(id);
         try {
           const r = await fetch(`/council/${encodeURIComponent(id)}/state`);
           const j = await r.json();

@@ -234,26 +234,27 @@ green — and let the runtime decide whether it worked.
 clawo solve "<task>" [--claude | --codex | … | --acp <preset> | -e <engine[:model]>] [--check "<command>"]...
             [--contract <file>] [-m <model>] [--effort <level>] [--permission-mode <mode>] [--sandbox <mode>]
             [--append-system-prompt <text>] [--scouts <list>] [--reviewers <list>] [--max-repairs N]
-            [--human-gate] [--cwd <dir>] [--wait] [--json]
+            [--human-gate] [--forum] [--cwd <dir>] [--wait] [--json]
 ```
 
-| Option                                                                       | Default            | Notes                                                                                                                                                                                   |
-| ---------------------------------------------------------------------------- | ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `-e, --engine`                                                               | the default engine | The implementer, `engine` or `engine:model` (`codex:gpt-6.1-sol`), or `acp:<preset>` for an ACP agent (`acp:kimi-code`); or a shorthand, `--codex`, `--agy`, `--acp kimi-code`, …       |
-| `-m`, `--effort`, `--permission-mode`, `--sandbox`, `--append-system-prompt` | —                  | The session flags of the same names, for the implementer (and the scouts when they default to it)                                                                                       |
-| `-c, --check`                                                                | —                  | A command check, repeatable. Split on whitespace and run as argv, never through a shell; anything that needs quoting belongs in `--contract`                                            |
-| `--contract`                                                                 | —                  | A contract JSON file ([verification.md](./verification.md)); `--check` entries are appended to it                                                                                       |
-| `--scouts`                                                                   | the implementer    | Comma-separated triage agents, `engine[:model]` each (`acp:<preset>` for an ACP agent)                                                                                                  |
-| `--reviewers`                                                                | —                  | Comma-separated reviewers of the finished change                                                                                                                                        |
-| `--max-repairs`                                                              | `3`                | Attempts the router allows while the checks are red; `0` keeps only the first attempt                                                                                                   |
-| `--human-gate`                                                               | off                | Park before anything is written until `clawo workflow approve`                                                                                                                          |
-| `--isolate`                                                                  | off                | Work in a git worktree of HEAD; what the run leaves is committed to a local branch `clawo/<runId>`, and your checkout is not written ([workflow.md](./workflow.md#isolation-and-spend)) |
-| `--pass-env`                                                                 | —                  | Let checks see this variable (or `NAME_*`) when they run with a minimal environment; repeatable ([verification.md](./verification.md#the-checks-environment))                           |
-| `--check-env`                                                                | auto               | `minimal` or `inherit`: the environment checks run with; by default minimal when an agent worked in a sandbox (Codex by default)                                                        |
-| `--max-budget`                                                               | —                  | Spend cap for the whole run in USD; reaching it fails the run                                                                                                                           |
-| `--cwd`                                                                      | current directory  | Project directory                                                                                                                                                                       |
-| `-w, --wait`                                                                 | off                | Follow the run, printing each node transition, then the verdict                                                                                                                         |
-| `--json`                                                                     | off                | Print `{ runId, state }`, or with `--wait` the final run record                                                                                                                         |
+| Option                                                                       | Default            | Notes                                                                                                                                                                                                         |
+| ---------------------------------------------------------------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `-e, --engine`                                                               | the default engine | The implementer, `engine` or `engine:model` (`codex:gpt-6.1-sol`), or `acp:<preset>` for an ACP agent (`acp:kimi-code`); or a shorthand, `--codex`, `--agy`, `--acp kimi-code`, …                             |
+| `-m`, `--effort`, `--permission-mode`, `--sandbox`, `--append-system-prompt` | —                  | The session flags of the same names, for the implementer (and the scouts when they default to it)                                                                                                             |
+| `-c, --check`                                                                | —                  | A command check, repeatable. Split on whitespace and run as argv, never through a shell; anything that needs quoting belongs in `--contract`                                                                  |
+| `--contract`                                                                 | —                  | A contract JSON file ([verification.md](./verification.md)); `--check` entries are appended to it                                                                                                             |
+| `--scouts`                                                                   | the implementer    | Comma-separated triage agents, `engine[:model]` each (`acp:<preset>` for an ACP agent)                                                                                                                        |
+| `--reviewers`                                                                | —                  | Comma-separated reviewers of the finished change                                                                                                                                                              |
+| `--max-repairs`                                                              | `3`                | Attempts the router allows while the checks are red; `0` keeps only the first attempt                                                                                                                         |
+| `--human-gate`                                                               | off                | Park before anything is written until `clawo workflow approve`                                                                                                                                                |
+| `--forum`                                                                    | off                | A forum the run's agents share while they work: they post findings and `ASK @name` and read each other's; a reviewer named like a scout is `<name>-review` on it ([workflow.md](./workflow.md#the-run-forum)) |
+| `--isolate`                                                                  | off                | Work in a git worktree of HEAD; what the run leaves is committed to a local branch `clawo/<runId>`, and your checkout is not written ([workflow.md](./workflow.md#isolation-and-spend))                       |
+| `--pass-env`                                                                 | —                  | Let checks see this variable (or `NAME_*`) when they run with a minimal environment; repeatable ([verification.md](./verification.md#the-checks-environment))                                                 |
+| `--check-env`                                                                | auto               | `minimal` or `inherit`: the environment checks run with; by default minimal when an agent worked in a sandbox (Codex by default)                                                                              |
+| `--max-budget`                                                               | —                  | Spend cap for the whole run in USD; reaching it fails the run                                                                                                                                                 |
+| `--cwd`                                                                      | current directory  | Project directory                                                                                                                                                                                             |
+| `-w, --wait`                                                                 | off                | Follow the run, printing each node transition, then the verdict                                                                                                                                               |
+| `--json`                                                                     | off                | Print `{ runId, state }`, or with `--wait` the final run record                                                                                                                                               |
 
 With `--wait` the exit code is the verdict: `0` when the run completed (verified,
 or unverified because no check was given), `1` when it was refuted, failed or
@@ -309,7 +310,7 @@ default that runs no goal is refused at start. See
 clawo goal "<objective>" | --objective-file <file>
            [--check "<command>"]... [--contract <file>] [--check-timeout <minutes>]
            [--claude | --codex | --agy | --grok | --cursor | --opencode | --acp <preset> | -e <engine>] [--launcher <arg>]... [--model <model>] [--effort <level>] [--sandbox <mode>] [--thread <id>]
-           [--token-budget N] [--goal-timeout <minutes>] [--max-repairs N]
+           [--token-budget N] [--goal-timeout <minutes>] [--max-repairs N] [--forum]
            [--cwd <dir>] [--wait] [--json]
 ```
 
@@ -333,6 +334,7 @@ clawo goal "<objective>" | --objective-file <file>
 | `--max-budget`     | —                      | Spend cap for the whole run in USD; the goal stops when it is reached                                                                                         |
 | `--goal-timeout`   | none                   | Wall-clock minutes for one goal pass                                                                                                                          |
 | `--max-repairs`    | `1`                    | Times a red verdict sends the goal back to the same thread                                                                                                    |
+| `--forum`          | off                    | The goal on the run's forum: posts for it reach its turn; it posts findings and `ASK @name` ([workflow.md](./workflow.md#the-run-forum))                      |
 | `--cwd`            | current directory      | Project directory                                                                                                                                             |
 | `-w, --wait`       | off                    | Follow the run; exit `0` only if it completes                                                                                                                 |
 | `--json`           | off                    | Print `{ runId, state }`, or with `--wait` the final run record                                                                                               |
@@ -349,7 +351,7 @@ clawo workflow show <runId> [--json]
 clawo workflow resume <runId> [--contract <file>]   # re-attach to a run whose process died
 clawo workflow cancel <runId>
 clawo workflow steer <runId> "<text>"  # a correction for the next agent node, or into a running goal
-clawo workflow approve <runId> [reject]
+clawo workflow approve <runId> [reject] [--comment "<text>"]
 ```
 
 `list` prints one row per run (default limit 25) with its outcome as `verified` /
@@ -357,7 +359,13 @@ clawo workflow approve <runId> [reject]
 is not a failure.
 
 `approve` answers the gate a run is parked on: it approves unless the last
-argument is `reject`, `false` or `no`.
+argument is `reject`, `false` or `no`. The answer is posted on the run's forum as
+the user's (`DONE: approved` or `FAIL: rejected`, answering the gate's `ASK @user`);
+`--comment` is its body, and is also handed to the next agent as a steer.
+
+`steer` posts the text on the run's forum as the user's (`FIX: <first line>`), so
+agents running on a run with a forum get it at once, and queues it for the next
+agent or goal node.
 
 `resume --contract <file>` declares the run contract as you hold it now. It is
 never applied — the run is verified with the contract it started with — and if
@@ -377,9 +385,9 @@ clawo forum post --dir <spool> --as <name> --title "FAIL @lighting: shadows flic
 clawo forum list --dir <spool> --as <name>       # who is running / finished / not started, then every title; NEW marks the unread
 clawo forum read p00012 --dir <spool> --as <name>
 
-# Anyone, afterwards
-clawo forum show <runId> [--json]
-clawo forum metrics <runId>
+# Anyone, afterwards: a run's forum (every run has one: its runtime's posts), or a session forum (fm-…)
+clawo forum show <runId | fm-id> [--json]
+clawo forum metrics <runId | fm-id>
 ```
 
 The agent commands read and write the forum's files directly, so they need neither the server
@@ -387,7 +395,10 @@ nor a token, and any engine that can run a shell command can use them. The brief
 spells the command out with the Node binary and the CLI path, so it works without `clawo` on the
 `PATH`. `post` prints a `note:` line when the post has no tag, or when an agent it names is not on
 the forum, has not started, or has finished (and, when its node is on no loop, that nobody will
-answer as it). See [workflow.md](./workflow.md#the-run-forum).
+answer as it). `--as user` and `--as orchestrator` are refused for `post`, `list` and `read`: those
+names are the user's and the orchestrator's, who post through `workflow_forum`. `show` marks a post
+under either name that the forum's ledger does not vouch for as `user (unverified)`. See
+[workflow.md](./workflow.md#the-run-forum).
 
 ## `clawo verify`
 

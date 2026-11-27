@@ -497,7 +497,7 @@ describe('goal node after a crash', () => {
     const kernel = kernelWith(m);
     const first = await kernel.start({ ...oneGoal(), forum: true });
     expect((await kernel.wait(first.runId))!.nodes.goal.state).toBe('succeeded');
-    // While it was done, a tester left it a FAIL.
+    // While it was done, a tester left it a FAIL (after the goal's own handover, p00001).
     forumPost(ensureForumSpool(first.runId, {}), 'tester', { title: 'FAIL @goal the boat sinks at the dock' });
     await crashedInGoal(first.runId);
 
@@ -510,7 +510,7 @@ describe('goal node after a crash', () => {
     expect(m2.starts).toHaveLength(1);
     expect(m2.starts[0].resumeSessionId).toBe('thread-F');
     const objective = [...m2.sessions.values()][0].sets[0].objective ?? '';
-    expect(objective).toContain('p00001 tester: FAIL @goal the boat sinks at the dock');
+    expect(objective).toContain('p00002 tester: FAIL @goal the boat sinks at the dock');
     expect(objective).toMatch(/---\n\nmake it faster$/);
   });
 
@@ -1135,7 +1135,10 @@ describe('a goal on a forum', () => {
     const setGoal = (m.sessions.values().next().value as FakeGoalSession).sets[0];
     expect(String(setGoal.objective)).toMatch(/This session is read-only, so the forum command is not available/);
     const { forumSnapshot } = await import('../../kernel/forum.js');
-    expect(forumSnapshot(run.runId).posts).toMatchObject([{ from: 'goal', title: 'DONE: parser fixed', via: 'reply' }]);
+    expect(forumSnapshot(run.runId).posts).toMatchObject([
+      { from: 'goal', title: 'DONE: parser fixed', via: 'reply' },
+      { from: 'goal', title: 'DONE: goal output', via: 'output' },
+    ]);
   });
 });
 

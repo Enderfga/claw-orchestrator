@@ -61,7 +61,25 @@ import {
   normalizeContract,
   type AcceptanceContract,
 } from '../verify/contract.js';
-import { forumTeam, isForumName, normalizeForumConfig, type ForumBinding } from './forum.js';
+import {
+  discardForum,
+  forumRuntimeAppend,
+  forumRuntimePost,
+  forumTeam,
+  isForumName,
+  isReservedForumName,
+  memberNameFor,
+  normalizeForumConfig,
+  pruneForumSpools,
+  retireForumSpool,
+  runForum,
+  type ForumBinding,
+  type ForumConfig,
+  type ForumPost,
+  type ForumRuntimePostInput,
+} from './forum.js';
+import { nodeOutputPath, postHandover } from './handover.js';
+import { gateAsk } from './nodes/human-gate.js';
 import { captureBaseline, treeFingerprint } from '../verify/baseline.js';
 import {
   createRunWorktree,
@@ -112,6 +130,7 @@ import {
   type RunRecord,
   type RunResume,
   type ContractDrift,
+  type SubflowNode,
   type WorkflowSpec,
   GOAL_ENGINES,
   type GoalEngine,
@@ -194,6 +213,26 @@ export interface NodeContext {
   signal: { aborted: boolean };
   /** Text injected by `steer()` since this node last ran. Consumed by the node. */
   takeSteer(): string[];
+  /** The same steers with the forum post each was written as, when there is one. Consumed by the node. */
+  takeSteerEntries(): SteerEntry[];
+  /**
+   * Put steers this node took but could not hand over back at the head of the
+   * queue, and no longer count them as consumed by it. A node hands steers over
+   * in the order it took them, so the ones it gives back are the last it took.
+   */
+  untakeSteer(texts: string[]): void;
+  /**
+   * The run's forum (`runForum`): its own, or the one it is bound to; `exposed`
+   * when its agents are on it. `self` is the name this node's agent is on it as
+   * (agent and goal nodes, or a run bound under one agent name).
+   */
+  forum: { id: string; config: ForumConfig; exposed: boolean; self?: string };
+  /**
+   * A runtime post on the run's forum (`forumRuntimePost`). Undefined, and
+   * nothing written, once this owner has stopped writing (finished or
+   * superseded), or when the post could not be written (logged).
+   */
+  forumPost(input: ForumRuntimePostInput): Promise<ForumPost | undefined>;
   emit(event: KernelEvent): void;
   /** The workflow-level contract, for a `contract: 'run'` verifier node. */
   runContract?: AcceptanceContract;
@@ -342,16 +381,24 @@ class RunTxn {
   }
 }
 
+/** A steer waiting in a run's queue: its text, and the forum post it was also written as. */
+export interface SteerEntry {
+  text: string;
+  postId?: string;
+}
+
 interface RunHandle {
   /** The guard, the record, and the only way to change either. */
   txn: RunTxn;
   signal: { aborted: boolean };
-  steer: string[];
+  steer: SteerEntry[];
   /**
    * Steers the node in flight has taken. Recorded as consumed only when that
    * node finishes, so a crash mid-node leaves them to be delivered to the retry.
    */
   steerTaken?: number;
+  /** The steers behind `steerTaken`, in the order taken, for `untakeSteer`. */
+  steerTakenEntries?: SteerEntry[];
   tag?: string;
   /** Independent of any checkpoint, so a long node cannot look abandoned. */
   heartbeat?: ReturnType<typeof setInterval>;
@@ -362,8 +409,8 @@ interface RunHandle {
   inflight: Set<Promise<unknown>>;
   /** Never written anywhere; dies with the process, as intended. */
   secrets: Record<string, unknown>;
-  /** Resolves when a parked human_gate is answered. */
-  gate?: { resolve: (approved: boolean) => void };
+  /** Resolves when a parked human_gate is answered, with what the user said with the answer. */
+  gate?: { resolve: (approved: boolean, comment?: string) => void };
   done: Promise<RunRecord>;
   /** Live engine objects published by running nodes, keyed by node id. */
   handles: Map<string, unknown>;
@@ -410,6 +457,34 @@ export interface StartOptions {
 }
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * A binding to another run's forum: a valid run, and an agent name on it, or a
+ * prefix for a run whose several agents each take their own name (a subflow).
+ */
+function validBinding(b: ForumBinding): boolean {
+  if (!isValidRunId(b.runId)) return false;
+  if (b.prefix !== undefined && !/^[A-Za-z0-9][\w.-]{0,62}\.$/.test(b.prefix)) return false;
+  if (b.agent) return isForumName(b.agent) && !isReservedForumName(b.agent);
+  return b.prefix !== undefined;
+}
+
+/** How much of a steer's first line its forum title carries. */
+const STEER_TITLE_CHARS = 110;
+
+/** A steer's title on the forum: `FIX:` and its first line, cut to fit. */
+export function steerTitle(text: string): string {
+  const line =
+    text
+      .split('\n')
+      .map((l) => l.replace(/\s+/g, ' ').trim())
+      .find((l) => l) ?? '';
+  const cut = line.length > STEER_TITLE_CHARS ? `${line.slice(0, STEER_TITLE_CHARS - 1)}…` : line;
+  return `FIX: ${cut}`.trimEnd();
+}
+
+/** Spools of finished and vanished runs are removed once per process, when the first kernel starts. */
+let forumSpoolsPruned = false;
 
 /**
  * Put every contract a spec carries through `normalizeContract`: the run-level
@@ -691,7 +766,9 @@ export class RunKernel extends EventEmitter {
   private readonly nodeTimeoutMs: number;
   private readonly live = new Map<string, RunHandle>();
   /** Gate answers given while their run was not live, keyed by run id; see `approveStored`. */
-  private readonly _presetGates = new Map<string, { nodeId: string; approved: boolean }>();
+  private readonly _presetGates = new Map<string, { nodeId: string; approved: boolean; comment?: string }>();
+  /** How a subflow names a workflow it runs, for the forum's roster; set by the subflow executor. */
+  private _subflowResolver?: (name: string) => WorkflowSpec | undefined;
   /**
    * This kernel's identity as a run owner.
    *
@@ -715,6 +792,14 @@ export class RunKernel extends EventEmitter {
     this.logger = opts.logger ?? createConsoleLogger('kernel');
     this.executors = opts.executors ?? {};
     this.nodeTimeoutMs = opts.nodeTimeoutMs ?? DEFAULT_NODE_TIMEOUT_MS;
+    if (!forumSpoolsPruned) {
+      forumSpoolsPruned = true;
+      try {
+        pruneForumSpools();
+      } catch (err) {
+        this.logger.warn?.(`[kernel] could not prune forum spools: ${(err as Error).message}`);
+      }
+    }
   }
 
   /** Stop and await any live run holding this id, so a reuse cannot overlap it. */
@@ -729,6 +814,14 @@ export class RunKernel extends EventEmitter {
   /** Register (or replace) the executor for one node kind. */
   setExecutor(kind: NodeKind, executor: NodeExecutor): void {
     this.executors[kind] = executor;
+  }
+
+  /**
+   * How a subflow node's workflow name resolves, so the members of a named
+   * subflow's child run are checked with the rest of the forum's names at start.
+   */
+  setSubflowResolver(resolve: ((name: string) => WorkflowSpec | undefined) | undefined): void {
+    this._subflowResolver = resolve;
   }
 
   /**
@@ -793,16 +886,18 @@ export class RunKernel extends EventEmitter {
     if (spec.forum !== undefined) {
       const forum = normalizeForumConfig(spec.forum, `Workflow '${spec.name}': forum`);
       if (forum) {
-        const bad = forumTeam(spec).filter((n) => !isForumName(n));
+        const resolveSubflow = (n: SubflowNode): WorkflowSpec | undefined =>
+          typeof n.workflow === 'string' ? this._subflowResolver?.(n.workflow) : undefined;
+        const bad = forumTeam(spec, { resolveSubflow }).filter((n) => !isForumName(n) || isReservedForumName(n));
         if (bad.length) {
           throw new Error(
-            `Workflow '${spec.name}': forum names must be letters, digits, '.', '_' or '-' (at most 64): ${bad.join(', ')}`,
+            `Workflow '${spec.name}': forum names must be letters, digits, '.', '_' or '-' (at most 64), and not user or orchestrator: ${bad.join(', ')}`,
           );
         }
       }
       spec.forum = forum;
     }
-    if (opts.forum && !(isValidRunId(opts.forum.runId) && isForumName(opts.forum.agent))) {
+    if (opts.forum && !validBinding(opts.forum)) {
       throw new Error('StartOptions.forum names an invalid run or agent');
     }
     const runId = opts.runId || `wf-${Date.now().toString(36)}-${crypto.randomBytes(3).toString('hex')}`;
@@ -840,7 +935,15 @@ export class RunKernel extends EventEmitter {
       updatedAt: now,
       nodes,
       costUsd: 0,
-      ...(opts.forum ? { forum: { runId: opts.forum.runId, agent: opts.forum.agent } } : {}),
+      ...(opts.forum
+        ? {
+            forum: {
+              runId: opts.forum.runId,
+              agent: opts.forum.agent,
+              ...(opts.forum.prefix ? { prefix: opts.forum.prefix } : {}),
+            },
+          }
+        : {}),
       ...(isolation ? { isolation } : {}),
     };
     // The rules this run is verified under, named once, here.
@@ -1026,20 +1129,20 @@ export class RunKernel extends EventEmitter {
    * so the unconsumed ones are the tail of the log. A node that died holding some
    * never recorded them, and they go to its retry: at-least-once, like the node.
    */
-  private _unconsumedSteers(runId: string): string[] {
+  private _unconsumedSteers(runId: string): SteerEntry[] {
     let events: ReturnType<typeof readEvents>;
     try {
       events = readEvents(runId);
     } catch {
       return [];
     }
-    const texts: string[] = [];
+    const steers: SteerEntry[] = [];
     let consumed = 0;
     for (const e of events) {
-      if (e.type === 'steer') texts.push(e.text);
+      if (e.type === 'steer') steers.push({ text: e.text, ...(e.postId ? { postId: e.postId } : {}) });
       else if (e.type === 'steer_consumed') consumed += e.count;
     }
-    return texts.slice(consumed);
+    return steers.slice(consumed);
   }
 
   cancel(runId: string): boolean {
@@ -1066,25 +1169,62 @@ export class RunKernel extends EventEmitter {
     return true;
   }
 
-  /** Queue text for the current (or next) agent node. */
+  /**
+   * Queue text for the current (or next) agent node.
+   *
+   * The steer is also the user's post on the run's forum (`FIX: …`), written
+   * first so the queued steer and its `steer` event carry the post's id: agents
+   * running on the forum get it pushed at once, and a node that is handed both
+   * the push and the queued steer (a goal) hands it over once. The queue keeps
+   * its accounting: the next agent or goal node to start takes every steer not
+   * yet consumed, and the log replays them after a restart.
+   */
   steer(runId: string, text: string): boolean {
     const handle = this.live.get(runId);
     if (!handle) return false;
-    handle.steer.push(text);
+    const postId = this._steerPost(handle.txn, text);
+    handle.steer.push({ text, ...(postId ? { postId } : {}) });
     handle.txn.emit({
       ts: new Date().toISOString(),
       type: 'steer',
       node: handle.txn.record.currentNode ?? '',
       text,
+      ...(postId ? { postId } : {}),
     });
     return true;
   }
 
-  /** Answer a parked `human_gate` in a run that is live in this process. */
-  approve(runId: string, approved: boolean): boolean {
+  /** A steer as the user's post on the run's forum; its id, or undefined when it could not be written. */
+  private _steerPost(txn: RunTxn, text: string): string | undefined {
+    if (txn.finished) return undefined;
+    const forum = runForum(txn.record);
+    try {
+      return forumRuntimeAppend(forum.id, {
+        from: 'user',
+        title: steerTitle(text),
+        body: text,
+        // A run on another run's forum under one agent name (a fan-out's goal
+        // agent) is steered as that agent, not the whole forum.
+        ...(forum.agent ? { to: [forum.agent] } : {}),
+        data: { kind: 'steer', runId: txn.guard.runId },
+      }).post.id;
+    } catch (err) {
+      this.logger.warn?.(
+        `[kernel ${txn.guard.runId}] could not post the steer to the forum: ${(err as Error).message}`,
+      );
+      return undefined;
+    }
+  }
+
+  /**
+   * Answer a parked `human_gate` in a run that is live in this process.
+   * `comment` is posted with the answer on the run's forum and queued as a steer
+   * for the next agent.
+   */
+  approve(runId: string, approved: boolean, comment?: string): boolean {
     const handle = this.live.get(runId);
     if (!handle?.gate) return false;
-    handle.gate.resolve(approved);
+    handle.gate.resolve(approved, comment);
     return true;
   }
 
@@ -1096,14 +1236,14 @@ export class RunKernel extends EventEmitter {
    * was waiting at and the run is resumed; when it reaches that gate again, the
    * answer is waiting. Attaching it before resuming leaves nothing to race.
    */
-  async approveStored(runId: string, approved: boolean): Promise<boolean> {
-    if (this.approve(runId, approved)) return true;
+  async approveStored(runId: string, approved: boolean, comment?: string): Promise<boolean> {
+    if (this.approve(runId, approved, comment)) return true;
     if (this.live.has(runId)) return false;
     const record = loadRun(runId);
     const gateId = record?.currentNode;
     if (!record || record.state !== 'awaiting_human' || !gateId) return false;
     if (record.nodes[gateId]?.state !== 'awaiting_human') return false;
-    this._presetGates.set(runId, { nodeId: gateId, approved });
+    this._presetGates.set(runId, { nodeId: gateId, approved, ...(comment ? { comment } : {}) });
     try {
       await this.resume(runId);
     } catch (err) {
@@ -1194,6 +1334,14 @@ export class RunKernel extends EventEmitter {
     this._tags.delete(runId);
     if (!claimed) return false;
     deleteRunDir(runId, this.logger);
+    // Its forum goes with it: the live hub stops and the spool is removed, so a
+    // late forum write cannot bring the run directory back and a run that takes
+    // the id next starts on an empty forum.
+    try {
+      discardForum(runId);
+    } catch (err) {
+      this.logger.warn?.(`[kernel] could not remove the forum of run '${runId}': ${(err as Error).message}`);
+    }
     return true;
   }
 
@@ -1242,7 +1390,7 @@ export class RunKernel extends EventEmitter {
 
   // ─── Execution ────────────────────────────────────────────────────────────
 
-  private _launch(txn: RunTxn, signal: { aborted: boolean }, steer: string[] = []): void {
+  private _launch(txn: RunTxn, signal: { aborted: boolean }, steer: SteerEntry[] = []): void {
     const runId = txn.guard.runId;
     const handle: RunHandle = {
       txn,
@@ -1328,6 +1476,15 @@ export class RunKernel extends EventEmitter {
     );
     if (!ok) return false;
     if (terminal) this._recordOutcome(txn.record);
+    // A run that owns its forum is done with the spool; the store keeps the
+    // forum, and a restart or a later post puts the spool back from it.
+    if (terminal && runForum(txn.record).id === txn.guard.runId) {
+      try {
+        retireForumSpool(txn.guard.runId);
+      } catch (err) {
+        this.logger.warn?.(`[kernel ${txn.guard.runId}] could not retire the forum spool: ${(err as Error).message}`);
+      }
+    }
     // Hand the run back once it is over, so another owner can pick it up
     // without waiting out the lease. After the writes, never before.
     if (terminal) this._scheduleRelease(txn.guard);
@@ -1592,6 +1749,7 @@ export class RunKernel extends EventEmitter {
 
       const result = await this._runWithRetry(handle, spec);
       if (txn.finished) return txn.record;
+      handle.steerTakenEntries = [];
       if (handle.steerTaken) {
         const count = handle.steerTaken;
         handle.steerTaken = 0;
@@ -1650,6 +1808,7 @@ export class RunKernel extends EventEmitter {
         // `continue` — record it and move on.
       } else {
         this._setNodeState(handle, nodeId, 'succeeded');
+        this._handover(txn, spec, result);
       }
 
       if (spec.kind === 'router') {
@@ -1684,6 +1843,22 @@ export class RunKernel extends EventEmitter {
       // A node sees one signal that is the union of "this attempt gave up" and
       // "the whole run was cancelled"; the kernel keeps them apart.
       const attemptSignal = { aborted: false };
+      const takeSteerEntries = (): SteerEntry[] => {
+        const taken = handle.steer.splice(0, handle.steer.length);
+        handle.steerTaken = (handle.steerTaken ?? 0) + taken.length;
+        handle.steerTakenEntries = [...(handle.steerTakenEntries ?? []), ...taken];
+        return taken;
+      };
+      const runForumOf = runForum(txn.record);
+      const forum = {
+        id: runForumOf.id,
+        config: runForumOf.config,
+        exposed: runForumOf.exposed,
+      };
+      const forumSelf =
+        spec.kind === 'agent' || spec.kind === 'goal'
+          ? memberNameFor(runForumOf, spec.forumName ?? spec.id)
+          : runForumOf.agent;
       // What this attempt published to stop it, for its own timeout.
       let attemptHandle: unknown;
       const ctx: NodeContext = {
@@ -1709,10 +1884,37 @@ export class RunKernel extends EventEmitter {
             attemptSignal.aborted = v;
           },
         },
-        takeSteer: () => {
-          const taken = handle.steer.splice(0, handle.steer.length);
-          handle.steerTaken = (handle.steerTaken ?? 0) + taken.length;
-          return taken;
+        takeSteer: () => takeSteerEntries().map((e) => e.text),
+        takeSteerEntries: () => takeSteerEntries(),
+        untakeSteer: (texts) => {
+          const taken = handle.steerTakenEntries ?? [];
+          // The latest taken entry with each text, put back in the order they were taken.
+          const back = new Set<number>();
+          for (const text of texts) {
+            for (let i = taken.length - 1; i >= 0; i--) {
+              if (!back.has(i) && taken[i].text === text) {
+                back.add(i);
+                break;
+              }
+            }
+          }
+          if (back.size === 0) return;
+          const returned = taken.filter((_, i) => back.has(i));
+          handle.steerTakenEntries = taken.filter((_, i) => !back.has(i));
+          handle.steer.unshift(...returned);
+          handle.steerTaken = Math.max(0, (handle.steerTaken ?? 0) - returned.length);
+        },
+        forum: { ...forum, ...(forumSelf ? { self: forumSelf } : {}) },
+        forumPost: async (input) => {
+          if (txn.finished) return undefined;
+          try {
+            return (await forumRuntimePost(forum.id, input)).post;
+          } catch (err) {
+            this.logger.warn?.(
+              `[kernel ${txn.guard.runId}/${spec.id}] could not post to the forum: ${(err as Error).message}`,
+            );
+            return undefined;
+          }
         },
         // Fenced like everything else. It used to be the one context method that
         // wrote unguarded, so a superseded owner's node could still append to the
@@ -1766,15 +1968,83 @@ export class RunKernel extends EventEmitter {
     const runId = handle.txn.guard.runId;
     const preset = this._presetGates.get(runId);
     if (preset) this._presetGates.delete(runId);
-    const approved =
+    const answer =
       preset && preset.nodeId === nodeId
-        ? preset.approved
-        : await new Promise<boolean>((resolve) => {
-            handle.gate = { resolve };
+        ? { approved: preset.approved, comment: preset.comment }
+        : await new Promise<{ approved: boolean; comment?: string }>((resolve) => {
+            handle.gate = { resolve: (approved, comment) => resolve({ approved, comment }) };
           });
     handle.gate = undefined;
-    if (!handle.signal.aborted) this._setRunState(handle, 'running');
-    return approved;
+    // A cancel answers the gate too; it is not the user's answer.
+    if (!handle.signal.aborted) {
+      this._recordGateAnswer(handle, nodeId, answer.approved, answer.comment);
+      this._setRunState(handle, 'running');
+    }
+    return answer.approved;
+  }
+
+  /**
+   * The user's answer at a gate, on the run's forum: `DONE: approved` or
+   * `FAIL: rejected`, answering the gate's ASK, with the comment as its body.
+   * The comment is also queued as a steer, so the next agent hears it whether
+   * or not the run's agents are on the forum. The decision itself is the
+   * gate's resolution, never this post.
+   */
+  private _recordGateAnswer(handle: RunHandle, nodeId: string, approved: boolean, comment: string | undefined): void {
+    const txn = handle.txn;
+    if (txn.finished) return;
+    const runId = txn.guard.runId;
+    const forum = runForum(txn.record);
+    const said = comment?.trim() ? comment : undefined;
+    let postId: string | undefined;
+    try {
+      const ask = gateAsk(forum.id, runId, nodeId);
+      postId = forumRuntimeAppend(forum.id, {
+        from: 'user',
+        title: approved ? 'DONE: approved' : 'FAIL: rejected',
+        body: said ?? '',
+        ...(ask ? { re: [ask.id] } : {}),
+        data: { gate: nodeId, runId, approved },
+      }).post.id;
+    } catch (err) {
+      this.logger.warn?.(`[kernel ${runId}] could not post the answer at gate '${nodeId}': ${(err as Error).message}`);
+    }
+    if (!said) return;
+    handle.steer.push({ text: said, ...(postId ? { postId } : {}) });
+    txn.emit({
+      ts: new Date().toISOString(),
+      type: 'steer',
+      node: nodeId,
+      text: said,
+      ...(postId ? { postId } : {}),
+    });
+  }
+
+  /**
+   * An agent or goal node's output, handed over on the run's forum as
+   * `DONE: <member> output` once the node has succeeded: the record the rest of
+   * the forum reads. A later node that names it in `inputs` reads the output from
+   * the run directory, not from the post. A fan-out's goal agent (a run bound to the
+   * forum under one agent name) is handed over by its fan-out, when that ends.
+   */
+  private _handover(txn: RunTxn, spec: NodeSpec, result: NodeResult): void {
+    if (txn.finished || (spec.kind !== 'agent' && spec.kind !== 'goal') || !result.output?.trim()) return;
+    const forum = runForum(txn.record);
+    if (forum.agent) return;
+    const runId = txn.guard.runId;
+    postHandover(
+      forum.id,
+      {
+        member: memberNameFor(forum, spec.forumName ?? spec.id),
+        runId,
+        node: spec.id,
+        visit: txn.record.nodes[spec.id]?.visits ?? 1,
+        // The whole output is a file of its own only past the record's preview.
+        ...(result.output.length > OUTPUT_PREVIEW_CHARS ? { path: nodeOutputPath(runId, spec.id) } : {}),
+        text: result.output,
+      },
+      this.logger,
+    );
   }
 
   /**

@@ -127,6 +127,8 @@ keeps running untouched.
 Returns `{ ok, name, engine, from: { name, engine }, carried: { turns, omitted, chars }, result? }`.
 `result` is the send result of `message`, when one was given. See [sessions.md](./sessions.md) for
 what carries across, what does not, and what is kept when the conversation is too long to send whole.
+The new session takes messages under its own name, and the session forum records the handoff (an
+`INFO` post that is delivered to nobody).
 
 ### `session_stop`
 
@@ -448,7 +450,8 @@ slot never start, and synthesis is skipped.
 ## Agent Teams (3)
 
 `team_list` and `team_send` work on every engine and do not need `enableAgentTeams`: a session's
-"team" is every other active session in this orchestrator. See
+"team" is every other active session in this orchestrator, except the sessions a council, autoloop
+or workflow run started, which belong to that run. See
 [Multi-Engine: Team Tools Across Engines](./multi-engine.md#team-tools-across-engines).
 
 ### `coding_agents_list`
@@ -461,8 +464,9 @@ List agent definitions from `.claude/agents/` (project + global). (Prefixed to a
 
 ### `team_list`
 
-List the other active sessions, each with its engine, idle/busy/paused state and turn count. Returns
-`{ ok, response }`, where `response` is that list as text.
+List the other active sessions, each with its engine, idle/busy/paused state and turn count.
+Sessions a run started are not listed. Returns `{ ok, response }`, where `response` is that list as
+text (`No other active sessions` when there is none).
 
 | Parameter | Type   | Required |
 | --------- | ------ | -------- |
@@ -470,8 +474,10 @@ List the other active sessions, each with its engine, idle/busy/paused state and
 
 ### `team_send`
 
-Send a message to another active session through the cross-session inbox: delivered now if the
-teammate is idle, queued if it is busy.
+Send a message to another active session, as `session_send_to` does, with the summary
+`team message from <name>`. Returns `{ ok, output, sessionId, events }`, with `output`
+`Message delivered to <teammate>` or `Message queued for <teammate> (session is busy)`. A teammate
+that a run started is refused, as in `session_send_to`.
 
 | Parameter  | Type   | Required |
 | ---------- | ------ | -------- |
@@ -485,7 +491,10 @@ teammate is idle, queued if it is busy.
 
 ### `council_start`
 
-Start a multi-agent council. Runs in background, returns session ID immediately.
+Start a multi-agent council. Runs in background, returns session ID immediately. The seats share the run's
+forum: each seat's round report is posted there for it, the history in the next round's prompt is built from
+those posts, and the seats ask each other (`ASK @seat`, `FAIL @seat`) and post their reviews on it. Votes stay
+the `[CONSENSUS: …]` tag in each seat's own reply.
 
 | Parameter               | Type           | Required | Description                                                                                                                                                               |
 | ----------------------- | -------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -497,10 +506,12 @@ Start a multi-agent council. Runs in background, returns session ID immediately.
 | `maxTurnsPerAgent`      | number         |          | Max tool turns per agent per round (default 50)                                                                                                                           |
 | `maxBudgetUsd`          | number         |          | Max API spend per agent                                                                                                                                                   |
 | `defaultPermissionMode` | string         |          | Default permission mode for agents (`acceptEdits`, `bypassPermissions`, etc.). Overridden by agent-level `permissionMode`. Default: `bypassPermissions`                   |
+| `forum`                 | boolean/object |          | The seats' run forum. Default on; `false` turns it off; an object is a forum config (see workflow.md). Off, with a warning, when an agent name cannot be a forum name     |
 
 ### `council_status`
 
-Get status of a running or recently completed council. `suspended` as for `fanout_status`.
+Get status of a running or recently completed council. `suspended` as for `fanout_status`. Works on any run
+with a council node: `council_start` runs, `workflow_start` runs of the `council` template, and specs of your own.
 
 | Parameter | Type   | Required |
 | --------- | ------ | -------- |
@@ -519,24 +530,31 @@ running in another one — is left alone: `{ ok: false, aborted: false, state, e
 
 ### `council_inject`
 
-Inject a user message into the next round of a running council; it is appended to every agent's
-prompt for that round. A second inject before the round starts replaces the first. The council
-must be running in this process.
+Send the user's message to a council that has not finished. It is posted on the run's forum as the user, kept
+with the run, and every agent's next round prompt carries it under `## User Injection`; agents on the forum that
+are running now are also handed it mid-turn where their engine allows. Messages add up: a second inject does not
+replace the first. It works from any process, so the council need not run in this one. A council that has
+finished is refused. Steers (`workflow_steer`) reach the next round the same way.
 
 | Parameter | Type   | Required |
 | --------- | ------ | -------- |
 | `id`      | string | yes      |
 | `message` | string | yes      |
 
+**Returns**: `{ ok: true, postId }`, the id of the post.
+
 ### `council_review`
 
-Review a completed council session. Returns a structured report of all changed files, branches, worktrees, plan.md status, review files, and agent summaries. Does not modify any state.
+Review a completed council session. Returns a structured report of all changed files, branches, worktrees, plan.md status, review files, the reviews posted on the run's forum, and agent summaries. Does not modify any state.
 
 | Parameter | Type   | Required |
 | --------- | ------ | -------- |
 | `id`      | string | yes      |
 
-**Returns**: `CouncilReviewResult` with `changedFiles`, `branches`, `worktrees`, `reviews`, `planContent`, and `agentSummaries`.
+**Returns**: `CouncilReviewResult` with `changedFiles`, `branches`, `worktrees`, `reviews` (files under
+`reviews/`), `forumReviews`, `planContent`, and `agentSummaries`. Each of `forumReviews` is
+`{ id, ts, from, to, verdict: 'approve' | 'request_changes', title, body, re }`: a seat's `WIN` or `FAIL`
+post that names another seat and answers its round report, or says it approves or requests changes.
 
 ### `council_accept`
 
@@ -565,7 +583,15 @@ Reject council work and provide feedback. Rewrites `plan.md` with rejection feed
 
 ### `session_send_to`
 
-Send a cross-session message. Delivered immediately if target is idle, queued if busy.
+Send a message from one session to another, posted on the session forum (see
+[inbox.md](./inbox.md)). An idle target gets it as a new turn; a busy Claude Code or `codex-app`
+target gets it in the turn in flight; any other target keeps it unread until
+`session_deliver_inbox`. It arrives in a `<cross-session-message>` envelope with a line saying how to
+answer: a `<new-forum-post re="…">` block in the reply, which comes back to the sender as a message
+(mid-turn when the sender is busy, otherwise unread in its inbox; an answer never starts a turn).
+`to: "*"` sends to every other session. Sender and target must be live sessions, and a session cannot
+send to itself. A session that a council, autoloop or workflow run started is refused as sender or
+target: reach it with `workflow_forum` `post` on its run.
 
 | Parameter | Type   | Required | Description                                 |
 | --------- | ------ | -------- | ------------------------------------------- |
@@ -574,9 +600,14 @@ Send a cross-session message. Delivered immediately if target is idle, queued if
 | `message` | string | yes      | Message text                                |
 | `summary` | string |          | Short preview (5-10 words)                  |
 
+Returns `{ ok, delivered, queued }`: `delivered` when a recipient got it at once, `queued` when a
+recipient's copy waits unread. A broadcast can report both.
+
 ### `session_inbox`
 
-Read inbox messages for a session.
+Read the messages sent to a session: the newest 200, unread only by default. Reading writes
+nothing; a message counts as read once it was handed to the session. Returns
+`{ ok, count, messages }`, each message `{ from, text, timestamp, read, summary? }`.
 
 | Parameter    | Type    | Required | Description                |
 | ------------ | ------- | -------- | -------------------------- |
@@ -585,7 +616,9 @@ Read inbox messages for a session.
 
 ### `session_deliver_inbox`
 
-Deliver all queued inbox messages to an idle session.
+Deliver every unread message to a session in one turn, each in its own envelope. They count as read
+once the turn has started; when it cannot start (spend cap reached) the call fails and they stay
+unread. Returns `{ ok, delivered }`, the number of messages handed over.
 
 | Parameter | Type   | Required |
 | --------- | ------ | -------- |
@@ -597,18 +630,25 @@ Deliver all queued inbox messages to an idle session.
 
 ### `ultraplan_start`
 
-Start a dedicated Opus planning session (up to 30 min). Runs in background.
+Start a dedicated Opus planning session (up to 30 min). Runs in background. The planner is `planner` on the
+run's forum: it posts `ASK @user: …` when something must be decided and `DONE: plan` when it has finished.
+Answer a question with `workflow_forum` `post` on the run; the answer reaches a planner on Claude or
+`codex-app` during its turn. See [ultra.md](./ultra.md#the-planners-forum).
 
-| Parameter | Type   | Required | Description                  |
-| --------- | ------ | -------- | ---------------------------- |
-| `task`    | string | yes      | What to plan                 |
-| `cwd`     | string |          | Project directory            |
-| `model`   | string |          | Model (default: opus)        |
-| `timeout` | number |          | Timeout ms (default 1800000) |
+| Parameter | Type              | Required | Description                                                                     |
+| --------- | ----------------- | -------- | ------------------------------------------------------------------------------- |
+| `task`    | string            | yes      | What to plan                                                                    |
+| `cwd`     | string            |          | Project directory                                                               |
+| `model`   | string            |          | Model (default: opus)                                                           |
+| `timeout` | number            |          | Timeout ms (default 1800000)                                                    |
+| `forum`   | boolean \| object |          | The run's forum (default on); `false` turns it off, an object is a forum config |
 
 ### `ultraplan_status`
 
-Get status and plan text when completed. `suspended` as for `fanout_status`.
+Get status and plan text when completed. `suspended` as for `fanout_status`. `sessionName` is the planner's
+session (`<id>-main-v<visit>a<attempt>`). On a run with a forum, `openAsks: [{ id, from, to, title }]` lists
+the questions on it that nobody has answered (read one whole with `workflow_forum` `read`). Forum blocks in
+the plan are shown as plain text.
 
 | Parameter | Type   | Required |
 | --------- | ------ | -------- |
@@ -621,19 +661,25 @@ Get status and plan text when completed. `suspended` as for `fanout_status`.
 ### `ultrareview_start`
 
 Start 1–20 reviewer agents that review the code in parallel, each from a different angle. Runs in background.
+Each reviewer posts every finding to the run's forum as it finds it (`FAIL: <file>:<line> …`, then
+`DONE: <n> findings`) and sees no other reviewer's posts. See [ultra.md](./ultra.md#the-reviewers-forum).
 
-| Parameter            | Type     | Required | Description                                                                                                          |
-| -------------------- | -------- | -------- | -------------------------------------------------------------------------------------------------------------------- |
-| `cwd`                | string   | yes      | Project directory                                                                                                    |
-| `agentCount`         | number   |          | Agents (1-20, default 5)                                                                                             |
-| `maxDurationMinutes` | number   |          | Duration (5-25 min, default 10)                                                                                      |
-| `model`              | string   |          | Model for reviewers                                                                                                  |
-| `focus`              | string   |          | Review focus area                                                                                                    |
-| `engines`            | string[] |          | Engines to spread reviewers across (default `["claude"]`). Every reviewer runs read-only, so `custom` is not allowed |
+| Parameter            | Type              | Required | Description                                                                                                          |
+| -------------------- | ----------------- | -------- | -------------------------------------------------------------------------------------------------------------------- |
+| `cwd`                | string            | yes      | Project directory                                                                                                    |
+| `agentCount`         | number            |          | Agents (1-20, default 5)                                                                                             |
+| `maxDurationMinutes` | number            |          | Duration (5-25 min, default 10)                                                                                      |
+| `model`              | string            |          | Model for reviewers                                                                                                  |
+| `focus`              | string            |          | Review focus area                                                                                                    |
+| `engines`            | string[]          |          | Engines to spread reviewers across (default `["claude"]`). Every reviewer runs read-only, so `custom` is not allowed |
+| `forum`              | boolean \| object |          | The reviewers' forum (default on); `false` turns it off, an object is a forum config                                 |
 
 ### `ultrareview_status`
 
-Get status and findings when completed. `suspended` as for `fanout_status`.
+Get status and findings when completed. `suspended` as for `fanout_status`. On a run with a forum, while it
+runs and after, `forum: { posts, failTitles, openAsks }`: how many posts it has, the reviewers' FAIL titles so
+far (`<reviewer>: <title>`, at most 200), and the ASKs nobody has answered (`{ id, from, to, title }`). Forum
+blocks in `findings` are shown as plain text.
 
 | Parameter | Type   | Required |
 | --------- | ------ | -------- |
@@ -649,26 +695,27 @@ Three-agent autonomous iteration loop (Planner / Coder / Reviewer) over a git wo
 
 Start a chat-mode autoloop. Planner starts immediately; Coder + Reviewer start only after the Planner receives plan approval and emits `spawn_subagents`.
 
-| Parameter                  | Type        | Required | Description                                                                                                                                                                               |
-| -------------------------- | ----------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `run_id`                   | string      | yes      | Stable run identifier                                                                                                                                                                     |
-| `workspace`                | string      | yes      | Git workspace path                                                                                                                                                                        |
-| `planner_engine`           | EngineType  |          | Planner engine (default `claude`)                                                                                                                                                         |
-| `planner_model`            | string      |          | Planner model (Claude default `opus`; other engines use their own default when omitted)                                                                                                   |
-| `planner_effort`           | EffortLevel |          | Fixed Planner reasoning effort; omission keeps the session default                                                                                                                        |
-| `planner_custom_engine`    | object      |          | Trusted `CustomEngineConfig` when Planner engine is `custom`. **Local callers only** — see below                                                                                          |
-| `coder_engine`             | EngineType  |          | Default Coder engine (default `claude`)                                                                                                                                                   |
-| `coder_model`              | string      |          | Default Coder model (Claude default `sonnet`)                                                                                                                                             |
-| `coder_effort`             | EffortLevel |          | Fixed Coder reasoning effort; omission keeps the session default                                                                                                                          |
-| `coder_custom_engine`      | object      |          | Trusted config when Coder may use `custom`. **Local callers only**                                                                                                                        |
-| `reviewer_engine`          | EngineType  |          | Default Reviewer engine (default `claude`)                                                                                                                                                |
-| `reviewer_model`           | string      |          | Default Reviewer model (Claude default `sonnet`)                                                                                                                                          |
-| `reviewer_effort`          | EffortLevel |          | Fixed Reviewer reasoning effort; omission keeps the session default                                                                                                                       |
-| `reviewer_custom_engine`   | object      |          | Trusted config when Reviewer may use `custom`. **Local callers only**                                                                                                                     |
-| `send_timeout_ms`          | number      |          | Per-agent send cap in ms (default 600000; inclusive 5000–7200000)                                                                                                                         |
-| `activity_lease_ms`        | number      |          | Inactivity lease in ms (default 1800000; inclusive 60000–7200000)                                                                                                                         |
-| `autoloop_hard_timeout_ms` | number      |          | Absolute run cap in ms (default 86400000; inclusive 600000–259200000)                                                                                                                     |
-| `contract`                 | object      |          | Acceptance contract the runtime runs before a Reviewer's `advance` stands; on red the iteration is held. Judged against the commit and tests each iteration started from. Caller-authored |
+| Parameter                  | Type              | Required | Description                                                                                                                                                                                                                                                                                                                                                        |
+| -------------------------- | ----------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `run_id`                   | string            | yes      | Stable run identifier                                                                                                                                                                                                                                                                                                                                              |
+| `workspace`                | string            | yes      | Git workspace path                                                                                                                                                                                                                                                                                                                                                 |
+| `planner_engine`           | EngineType        |          | Planner engine (default `claude`)                                                                                                                                                                                                                                                                                                                                  |
+| `planner_model`            | string            |          | Planner model (Claude default `opus`; other engines use their own default when omitted)                                                                                                                                                                                                                                                                            |
+| `planner_effort`           | EffortLevel       |          | Fixed Planner reasoning effort; omission keeps the session default                                                                                                                                                                                                                                                                                                 |
+| `planner_custom_engine`    | object            |          | Trusted `CustomEngineConfig` when Planner engine is `custom`. **Local callers only** — see below                                                                                                                                                                                                                                                                   |
+| `coder_engine`             | EngineType        |          | Default Coder engine (default `claude`)                                                                                                                                                                                                                                                                                                                            |
+| `coder_model`              | string            |          | Default Coder model (Claude default `sonnet`)                                                                                                                                                                                                                                                                                                                      |
+| `coder_effort`             | EffortLevel       |          | Fixed Coder reasoning effort; omission keeps the session default                                                                                                                                                                                                                                                                                                   |
+| `coder_custom_engine`      | object            |          | Trusted config when Coder may use `custom`. **Local callers only**                                                                                                                                                                                                                                                                                                 |
+| `reviewer_engine`          | EngineType        |          | Default Reviewer engine (default `claude`)                                                                                                                                                                                                                                                                                                                         |
+| `reviewer_model`           | string            |          | Default Reviewer model (Claude default `sonnet`)                                                                                                                                                                                                                                                                                                                   |
+| `reviewer_effort`          | EffortLevel       |          | Fixed Reviewer reasoning effort; omission keeps the session default                                                                                                                                                                                                                                                                                                |
+| `reviewer_custom_engine`   | object            |          | Trusted config when Reviewer may use `custom`. **Local callers only**                                                                                                                                                                                                                                                                                              |
+| `send_timeout_ms`          | number            |          | Per-agent send cap in ms (default 600000; inclusive 5000–7200000)                                                                                                                                                                                                                                                                                                  |
+| `activity_lease_ms`        | number            |          | Inactivity lease in ms (default 1800000; inclusive 60000–7200000)                                                                                                                                                                                                                                                                                                  |
+| `autoloop_hard_timeout_ms` | number            |          | Absolute run cap in ms (default 86400000; inclusive 600000–259200000)                                                                                                                                                                                                                                                                                              |
+| `contract`                 | object            |          | Acceptance contract the runtime runs before a Reviewer's `advance` stands; on red the iteration is held. Judged against the commit and tests each iteration started from. Caller-authored                                                                                                                                                                          |
+| `forum`                    | boolean \| object |          | The run forum the three roles share (default `true`): each role is briefed with its first message, the Planner and the Coder get the posts for them with their turns, and the loop's messages are posted there. A forum config (`{ push, digestMs, score }`) sets how posts reach them; `false` keeps the roles off it. See [autoloop.md](./autoloop.md#run-forum) |
 
 > **Custom engines are local-only.** A `CustomEngineConfig` names an executable to
 > spawn plus its argv and env, so it may only be supplied by a caller that already
@@ -764,7 +811,10 @@ A message that was mid-delivery when the run stopped is not resent; it is
 reported through `unconfirmed_chat` in `autoloop_status` and one notice in chat
 history. A rejected control shows a diagnostic in the chat reply and adds a
 best-effort `planner_control_error` row to `decisions.jsonl`; nothing is
-retried automatically.
+retried automatically. On the run forum the message becomes the user's post to
+the Planner as it reaches the Planner, and a rejected control a `FAIL @planner`
+post the Planner gets with its next turn; see
+[autoloop.md](./autoloop.md#run-forum).
 
 ### `autoloop_status`
 
@@ -973,7 +1023,7 @@ survives a process restart and can be resumed.
 | `launcher`      | string[]                                   | `goal` only — argv prefix the engine runs under (e.g. a sandbox wrapper); it runs with your authority                                                                                                                              |
 | `isolation`     | `'worktree'`                               | `solve` / `goal` — run in a git worktree of HEAD; the work is committed to a local branch `clawo/<runId>` when the run ends ([workflow.md](./workflow.md#isolation-and-spend))                                                     |
 | `maxBudgetUsd`  | number                                     | Template runs — spend cap for the whole run in USD                                                                                                                                                                                 |
-| `forum`         | boolean \| object                          | `fanout` template — a forum the agents share while they work ([workflow.md](./workflow.md#the-run-forum)); a spec sets `forum` at its top level                                                                                    |
+| `forum`         | boolean \| object                          | Any template — a forum the run's agents share while they work ([workflow.md](./workflow.md#the-run-forum)); the `council` template's seats have one unless `false`; a spec sets `forum` at its top level                           |
 | `cwd`           | string                                     | Working directory                                                                                                                                                                                                                  |
 | `runId`         | string                                     | Explicit id                                                                                                                                                                                                                        |
 | `contract`      | object                                     | Acceptance contract — see below                                                                                                                                                                                                    |
@@ -1012,28 +1062,53 @@ changed after it or an abandoned attempt was still running, in which case
   [verification.md](./verification.md#which-rules-a-verdict-was-reached-under)).
 - `workflow_cancel({ runId })` → `{ cancelled }`.
 - `workflow_steer({ runId, text })` → `{ steered }` — the text is **prepended** to the next agent
-  node's prompt. Steers not yet consumed are delivered after a restart too.
-- `workflow_approve({ runId, approved })` — answers a `human_gate` node. A run
+  or goal node's prompt, and a goal that is running gets it in its turn. It is also posted on the
+  run's forum as the user's (`FIX: <first line>`, the whole text as its body), so agents running on
+  a run with a forum get it at once and later agents see it in their brief; a node that gets it both
+  ways is handed it once. Steers not yet consumed are delivered after a restart too. `steered` is
+  false when the run is not live in this process.
+- `workflow_approve({ runId, approved, comment? })` — answers a `human_gate` node. A run
   parked before the server restarted is resumed with the answer attached, so it
   needs no separate `workflow_resume`. Returns `{ answered: false }` when the run
-  is not parked at a gate.
+  is not parked at a gate. The gate asked on the run's forum (`ASK @user: <first line of its
+prompt>`, from the orchestrator); the answer is posted there as the user's, `DONE: approved` or
+  `FAIL: rejected`, answering that ASK, with `comment` as its body. A comment is also queued as a
+  steer, so the next agent hears it whether or not the run's agents are on a forum. Only this call
+  answers a gate; nothing reads an answer from a post.
 
 ### `workflow_forum`
 
-The forum of a run whose spec sets `forum` (see [workflow.md](./workflow.md#the-run-forum)), from
-outside the team. `{ runId, action, postId?, title?, body?, as? }` → `{ result }`:
+A run's forum (see [workflow.md](./workflow.md#the-run-forum)), from outside the team.
+`{ runId, action, postId?, title?, body?, author?, re?, to?, as? }` → `{ result }`. Every run
+keeps its runtime's posts on its forum — steers (`FIX: …`, the user's), each agent's output when it
+finishes (`DONE: <agent> output`), a gate's `ASK @user` and its answer, the verifier's `WIN` or
+`FAIL` — whether or not its spec sets `forum`, so `list`, `read` and `metrics` work on any run.
+They also take a session forum's id (`fm-…`).
 
-- `list` — every post's `id`, `ts`, `from`, `tags`, `to`, `title` and `score`.
-- `read` — one post (`postId`) in full.
-- `post` — adds one, as `orchestrator` unless `as` names someone; `title` starts with a tag and
-  `@name` addresses an agent on the forum. Members get it by the forum's push rules while the run is live.
-- `metrics` — posts by agent and tag, every ASK with its first answer and the time to it, the
-  open ASKs, and for each post that names an agent when that agent first had it (pushed, in a
-  digest, in its brief, at the top of its next forum command, or read) or, if it never did, the later agent that had it instead
-  (`handedTo`); `unseenMentions` counts the posts nobody saw, `handedMentions` the handed ones.
+- `list` — every post's `id`, `ts`, `from`, `tags`, `to`, `title`, `score`, and `authority`:
+  who it speaks for — `user` or `orchestrator` only when the forum's ledger, written by the
+  runtime alone, vouches for it, `agent` otherwise.
+- `read` — one post (`postId`) in full, with its `authority`.
+- `post` — adds one to a run whose agents are on a forum (otherwise it is refused; `workflow_steer`
+  reaches the next agent of any run). `author` is who it speaks for: `orchestrator` (default) or
+  `user`, as when answering an agent's `ASK @user`; it is written through the runtime, vouched for,
+  and stored at once. `re` names the posts it answers (`["p00012"]`), `to` the agents it is for,
+  beside those named with `@name` in its text. `as` posts as that agent instead (`user` or
+  `orchestrator` there mean the same as `author`; giving both, different, is refused). A name in
+  `to` that is not on the forum is refused. `title`
+  starts with a tag. Members running now get it by the forum's push rules: the user's and the
+  orchestrator's posts reach the agents they name, or every agent when they name none. The post
+  comes back with `notes`: what its poster should know (no tag, a name not on the forum, an
+  addressee that has finished or not started).
+- `metrics` — posts by agent and tag, the runtime's posts apart (`runtime`: by `via` and author),
+  every ASK with its first answer and the time to it, the open ASKs, and for each post that names an
+  agent when that agent first had it (pushed, in a digest, in its brief, at the top of its next forum
+  command, in a turn, or read) or, if it never did, the later agent that had it instead (`handedTo`);
+  `unseenMentions` counts the posts nobody saw, `handedMentions` the handed ones.
 
-Reading through this tool is not recorded as an agent's read. A fan-out goal agent's child run
-reaches its parent's forum.
+Reading through this tool is not recorded as an agent's read. A run bound to another run's forum —
+a fan-out goal agent's child run, or a subflow's child run when the parent's agents share a forum —
+reaches that forum.
 
 ### `verify_run`
 

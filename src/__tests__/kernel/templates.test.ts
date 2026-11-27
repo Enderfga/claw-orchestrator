@@ -16,6 +16,7 @@ import {
   solveWorkflow,
 } from '../../kernel/templates/index.js';
 import { prepareSpec, IMPLICIT_VERIFIER_ID, RunKernel } from '../../kernel/engine.js';
+import { forumRoster } from '../../kernel/forum.js';
 import { executeCouncilNode } from '../../kernel/nodes/council.js';
 import { DEFAULT_MAX_ROUNDS } from '../../constants.js';
 import { executeRouterNode } from '../../kernel/nodes/router.js';
@@ -246,6 +247,37 @@ describe('solve workflow', () => {
   it('does not add a second verifier when a contract is declared', () => {
     const prepared = prepareSpec(build({ contract }));
     expect(prepared.nodes.filter((n) => n.kind === 'verifier')).toHaveLength(1);
+  });
+
+  // A scout and a reviewer of one name were one forum member: the roster kept
+  // the scout's entry, which is not on the repair loop, so a post naming that
+  // reviewer was told it "does not run again", and the review node had no member.
+  it('on a forum, gives a reviewer whose name a scout has a name of its own; off one, keeps the names', () => {
+    const scouts = [{ name: 'codex', engine: 'codex' as const }];
+    const reviewers = [
+      { name: 'codex', engine: 'codex' as const },
+      { name: 'claude', engine: 'claude' as const },
+    ];
+    const names = (spec: ReturnType<typeof build>, id: string) =>
+      (spec.nodes.find((n) => n.id === id) as { agents: Array<{ name: string }> }).agents.map((a) => a.name);
+
+    const on = build({ scouts, reviewers, forum: true });
+    expect(on.forum).toBe(true);
+    expect(names(on, 'triage')).toEqual(['codex']);
+    expect(names(on, 'review')).toEqual(['codex-review', 'claude']);
+    expect(forumRoster(on).filter((m) => m.node === 'review')).toEqual([
+      { name: 'codex-review', node: 'review', mayReturn: true },
+      { name: 'claude', node: 'review', mayReturn: true },
+      { name: 'synthesis', node: 'review', mayReturn: true },
+    ]);
+    // A name the suffix would take is already a scout's: the next one free.
+    const taken = build({ scouts: [...scouts, { name: 'codex-review' }], reviewers, forum: {} });
+    expect(names(taken, 'review')).toEqual(['codex-review2', 'claude']);
+
+    const off = build({ scouts, reviewers });
+    expect(off.forum).toBeUndefined();
+    expect(names(off, 'review')).toEqual(['codex', 'claude']);
+    expect(names(build({ scouts, reviewers, forum: false }), 'review')).toEqual(['codex', 'claude']);
   });
 });
 

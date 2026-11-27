@@ -188,6 +188,7 @@ const {
   validateStoredRoleBindings,
 } = await import('../kernel/nodes/autoloop.js');
 const { boundedErrorReason } = await import('../sanitize.js');
+const { FORUM_APPENDIX_SEPARATOR } = await import('../autoloop/forum-bridge.js');
 
 type Manager = InstanceType<typeof SessionManager>;
 
@@ -211,8 +212,9 @@ const fence = (tool: string, args: Record<string, unknown>): string =>
 
 const ACK: TurnResult = { text: 'ack', event: { type: 'result', result: 'ok' } };
 
+/** What a role was sent, without what the run forum adds after it (its brief, posts for it). */
 const messageText = (message: string | unknown[]): string =>
-  typeof message === 'string' ? message : JSON.stringify(message);
+  (typeof message === 'string' ? message : JSON.stringify(message)).split(FORUM_APPENDIX_SEPARATOR)[0];
 
 /** Exact chat match: U1 must not match U10. */
 const sent = (planner: MockSession, needle: string): string[] =>

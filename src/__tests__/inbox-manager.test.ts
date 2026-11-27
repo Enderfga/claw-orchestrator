@@ -164,6 +164,20 @@ describe('InboxManager', () => {
     expect(im.inbox('b').length).toBe(1);
   });
 
+  it('clear drops the unread mail, and a message sent right after it is kept', async () => {
+    const a = fakeSession();
+    const b = fakeSession({ busy: true });
+    const map = new Map([
+      ['a', { session: a.session }],
+      ['b', { session: b.session }],
+    ]);
+    const im = new InboxManager();
+    await im.sendTo('a', 'b', 'old', makeLookup(map));
+    im.clear('b');
+    await im.sendTo('a', 'b', 'new', makeLookup(map));
+    expect(im.inbox('b').map((m) => m.text)).toEqual(['new']);
+  });
+
   it('escapes XML metacharacters in the wrapper', () => {
     const im = new InboxManager();
     const wrapped = im.wrapCrossSessionMessage({

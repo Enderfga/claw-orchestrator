@@ -1,13 +1,12 @@
 /**
- * Inbox message envelope + discriminated union of v2 message types.
+ * The autoloop envelope and the discriminated union of its message types.
  *
- * Wire format: serialised as JSON in InboxManager's `text` field, with
- * `summary` set to the message `type` for human-readable inbox listings.
- * Routing addressing convention: session name = `autoloop:<run_id>:<role>`,
- * where role ∈ { planner, coder, reviewer, runner }. The literal `user`
- * is *not* a session — it appears only as the `from` of an external chat
- * injection (`autoloop_chat`) and as the `to` of `push_user` messages
- * (which the runner consumes to invoke notify_user).
+ * Envelopes travel in process, from the runner's queue to the dispatcher and
+ * back; the run forum carries a mirror of them (`forum-bridge.ts`). Roles are
+ * `planner`, `coder`, `reviewer` and `runner`. The literal `user` is not a
+ * session: it appears only as the `from` of an external chat injection
+ * (`autoloop_chat`) and as the `to` of `push_user` messages (which the runner
+ * consumes to invoke notify_user).
  */
 
 export type AutoloopRole = 'planner' | 'coder' | 'reviewer' | 'runner' | 'user';
@@ -256,34 +255,3 @@ export const Msg = {
   sendTimeout: (iter: number, payload: SendTimeoutPayload) =>
     envelope(iter, payload.agent, 'runner', 'send_timeout', payload),
 };
-
-// ─── Wire serialisation (for InboxManager transport) ─────────────────────────
-
-export function serialise(env: AnyAutoloopMessage): { text: string; summary: string } {
-  return {
-    text: JSON.stringify(env),
-    summary: env.type,
-  };
-}
-
-export function deserialise(text: string): AnyAutoloopMessage {
-  let parsed: AnyAutoloopMessage;
-  try {
-    parsed = JSON.parse(text) as AnyAutoloopMessage;
-  } catch (err) {
-    throw new AutoloopRoutingError(`Malformed v2 envelope (invalid JSON: ${(err as Error).message})`);
-  }
-  if (
-    typeof parsed !== 'object' ||
-    parsed === null ||
-    typeof parsed.type !== 'string' ||
-    typeof parsed.from !== 'string' ||
-    typeof parsed.to !== 'string'
-  ) {
-    throw new AutoloopRoutingError('Malformed v2 envelope (not an object or missing type/from/to)');
-  }
-  // Reject envelopes whose from→to→type isn't an allowed route, so a corrupt or
-  // forged message never reaches the dispatcher.
-  validateMessage(parsed);
-  return parsed;
-}

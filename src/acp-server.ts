@@ -92,6 +92,8 @@ interface SessionManagerLike {
   ultraplanStatus?(id: string): OrchestrationSnapshot | undefined;
   ultrareviewStart?(cwd: string, opts?: { focus?: string; agentCount?: number }): Promise<{ id: string }>;
   ultrareviewStatus?(id: string): OrchestrationSnapshot | undefined;
+  /** A run's forum posts (`list`: id, author, title, …); throws for a run with no forum. */
+  workflowForum?(args: { runId: string; action: 'list' }): unknown;
 }
 
 // ─── Modes ──────────────────────────────────────────────────────────────────
@@ -987,12 +989,24 @@ async function runCouncilMode(
 }
 
 /**
+ * A post's author as a forum listing shows it: a reserved name (`user`,
+ * `orchestrator`) that the post does not speak for, by the `authority` the
+ * listing returns, is marked unverified.
+ */
+function authorShown(from: string, authority: unknown): string {
+  const reserved = from === 'user' || from === 'orchestrator';
+  return reserved && typeof authority === 'string' && authority !== from ? `${from} (unverified)` : from;
+}
+
+/**
  * Run one of the poll-only orchestrations (ultraplan, ultrareview).
  *
  * Neither emits events — they return a handle and are polled — so progress is
- * reported as periodic thought chunks and the result arrives as both a `plan`
- * update and text. Ultraplan in particular has no abort path at all, so
- * cancelling here abandons the poll rather than stopping the work.
+ * reported as thought chunks: the title of each new post on the run's forum
+ * (the planner's questions, each reviewer's findings) as it appears, and a dot
+ * for a poll that found none. The result arrives as both a `plan` update and
+ * text. Ultraplan in particular has no abort path at all, so cancelling here
+ * abandons the poll rather than stopping the work.
  */
 async function runPollingMode(
   manager: SessionManagerLike,
@@ -1014,14 +1028,38 @@ async function runPollingMode(
     cancelled = true;
   };
 
+  // The run's forum, read the way `workflow_forum list` returns it. A run with
+  // no forum, or a manager that cannot list one, keeps the plain heartbeat.
+  const shown = new Set<string>();
+  let forumOff = !manager.workflowForum;
+  const newPosts = (): string[] => {
+    if (forumOff) return [];
+    let list: unknown;
+    try {
+      list = manager.workflowForum!({ runId: started.id, action: 'list' });
+    } catch {
+      forumOff = true;
+      return [];
+    }
+    const out: string[] = [];
+    type Row = { id?: unknown; from?: unknown; authority?: unknown; title?: unknown };
+    for (const p of Array.isArray(list) ? (list as Row[]) : []) {
+      if (typeof p?.id !== 'string' || typeof p.title !== 'string' || shown.has(p.id)) continue;
+      shown.add(p.id);
+      out.push(typeof p.from === 'string' ? `${authorShown(p.from, p.authority)}: ${p.title}` : p.title);
+    }
+    return out;
+  };
+
   const deadline = Date.now() + ACP_POLL_TIMEOUT_MS;
   let snapshot = readStatus();
   while (snapshot?.status === 'running' && Date.now() < deadline && !cancelled) {
     await new Promise((r) => setTimeout(r, ACP_POLL_INTERVAL_MS));
     snapshot = readStatus();
+    const posts = newPosts();
     await emit({
       sessionUpdate: 'agent_thought_chunk',
-      content: { type: 'text', text: '.' },
+      content: { type: 'text', text: posts.length ? `\n${posts.join('\n')}\n` : '.' },
     });
   }
   state.cancelInFlight = undefined;
