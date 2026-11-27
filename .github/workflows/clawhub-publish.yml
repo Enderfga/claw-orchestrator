@@ -87,5 +87,6 @@ jobs:
     with:
       package_artifact_name: clawhub-package
       dry_run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+      wait_for_publication: false
     secrets:
       clawhub_token: ${{ secrets.CLAWHUB_TOKEN }}
