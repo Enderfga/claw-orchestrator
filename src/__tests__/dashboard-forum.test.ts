@@ -289,10 +289,15 @@ describe('dashboard forum routes', () => {
     });
   }
 
-  /** The `forum_post` events of a stream: their SSE ids and data. */
+  /**
+   * The complete `forum_post` events of a stream: their SSE ids and data. A
+   * stream read so far can end inside an event (a chunk boundary between its
+   * lines), so only blocks closed by a blank line count.
+   */
   function forumEvents(text: string): Array<{ id?: string; data: ForumPostSummary }> {
-    return text
-      .split('\n\n')
+    const blocks = text.split('\n\n');
+    blocks.pop();
+    return blocks
       .filter((block) => block.startsWith('event: forum_post\n'))
       .map((block) => {
         const id = /^id: (.*)$/m.exec(block)?.[1];
@@ -386,7 +391,7 @@ describe('dashboard forum routes', () => {
       onOpen: () => {
         setTimeout(() => forumRuntimeAppend(id, { from: 'user', title: 'FIX: rename the flag @a' }), 100);
       },
-      until: (t) => t.includes('event: forum_post'),
+      until: (t) => forumEvents(t).length >= 1,
     });
     expect(text).toContain('event: snapshot');
     const events = forumEvents(text);
