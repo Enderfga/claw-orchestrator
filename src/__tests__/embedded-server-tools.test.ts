@@ -116,7 +116,7 @@ describe('toolsFor', () => {
       listPersistedSessions: () => [],
     } as unknown as SessionManager;
     const tools = toolsFor(manager);
-    expect(tools.size).toBe(81);
+    expect(tools.size).toBe(85);
     for (const name of ['ultrareview_start', 'council_start', 'session_handoff', 'autoloop_start', 'fanout_start']) {
       expect(tools.has(name)).toBe(true);
     }

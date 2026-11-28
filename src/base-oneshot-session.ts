@@ -193,7 +193,7 @@ export abstract class BaseOneShotSession extends EventEmitter implements ISessio
    * grow the thread. A user turn binds less firmly than a system prompt; it is
    * the strongest channel these CLIs offer.
    */
-  private _withAppendedInstructions(message: string): string {
+  protected _withAppendedInstructions(message: string): string {
     const instructions = this.options.appendSystemPrompt?.trim();
     if (!instructions || this.engineCfg.appendsSystemPromptNatively || this._continuesConversation()) return message;
     return `${instructions}\n\n---\n\n${message}`;
@@ -363,7 +363,8 @@ export abstract class BaseOneShotSession extends EventEmitter implements ISessio
         `[${this.engineCfg.enginePrefix}] ${message} — context will keep growing until the CLI refuses the request`,
       );
     }
-    const event: StreamEvent = { type: 'result', result: message };
+    // `compacted: false` tells SessionManager nothing was compacted (ISession.compact).
+    const event: StreamEvent = { type: 'result', result: message, compacted: false };
     return { text: message, event };
   }
 

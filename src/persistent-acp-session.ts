@@ -16,6 +16,12 @@
  *   - `session/request_permission` is answered at once from the session's
  *     permission mode. Nothing here can put a question to a person, and an
  *     unanswered request would hold the turn until it times out.
+ *   - An agent's own extensions (`AcpAgentConfig.extension`) can report, by a
+ *     notification, every turn that ends — with its usage, and including a turn
+ *     the agent started itself (a background workflow reporting back, a
+ *     scheduled prompt). Such a turn is delivered as an engine turn
+ *     (`SESSION_EVENT.UNSOLICITED_RESULT`), with the text that arrived while no
+ *     prompt was in flight.
  */
 
 import { ChildProcess } from 'node:child_process';
@@ -44,6 +50,29 @@ import { sanitizeSecrets } from './sanitize.js';
 
 const DEFAULT_TURN_TIMEOUT_MS = 600_000;
 
+/** A turn's end as an agent extension reports it. */
+export interface AcpTurnEnd {
+  sessionId: string;
+  stopReason?: string;
+  /** Why the turn failed, when it did. */
+  error?: string;
+  /** This turn's own usage, not session totals; `inputTokens` includes the cached reads. */
+  usage?: { inputTokens: number; outputTokens: number; cachedReadTokens?: number; costUsd?: number };
+}
+
+/** What the client reads from one agent's protocol extensions. */
+export interface AcpExtension {
+  /** Extension notifications to listen to, each with a reader that returns the turn end it reports, if any. */
+  turnEnds: Record<string, (params: unknown) => AcpTurnEnd | undefined>;
+}
+
+const ACP_EXTENSIONS = new Map<string, AcpExtension>();
+
+/** Register an agent's extensions under `name`, for presets that name it in `extension`. */
+export function registerAcpExtension(name: string, extension: AcpExtension): void {
+  ACP_EXTENSIONS.set(name, extension);
+}
+
 /** Permission modes under which the agent may act without asking. */
 const ALLOWING_MODES = new Set(['bypassPermissions', 'acceptEdits', 'auto', 'dontAsk']);
 
@@ -71,6 +100,11 @@ export class PersistentAcpSession extends EventEmitter implements ISession {
   /** The turn in flight: its text so far and how to fail it if the process dies. */
   private turnText = '';
   private turnFail: ((e: Error) => void) | null = null;
+  /** The turn in flight's usage, as the agent's extension reported it before the prompt answered. */
+  private turnUsage?: AcpTurnEnd['usage'];
+  /** Text that arrived while no prompt was in flight: a turn the agent started itself. */
+  private engineText = '';
+  private readonly extension?: AcpExtension;
 
   public sessionId?: string;
   private _stats = {
@@ -104,6 +138,10 @@ export class PersistentAcpSession extends EventEmitter implements ISession {
     }
     this.agent = agent;
     this.options = { ...config, permissionMode: config.permissionMode || 'bypassPermissions' };
+    if (agent.extension) {
+      this.extension = ACP_EXTENSIONS.get(agent.extension);
+      if (!this.extension) throw new Error(`ACP agent '${agent.name}' names an unknown extension '${agent.extension}'`);
+    }
   }
 
   // ── Property accessors ─────────────────────────────────────────────────
@@ -161,11 +199,18 @@ export class PersistentAcpSession extends EventEmitter implements ISession {
       Writable.toWeb(proc.stdin!) as WritableStream<Uint8Array>,
       Readable.toWeb(proc.stdout!) as ReadableStream<Uint8Array>,
     );
-    this.conn = acp
+    const client = acp
       .client({ name: 'claw-orchestrator' })
       .onRequest(acp.methods.client.session.requestPermission, (ctx) => this._answerPermission(ctx.params))
-      .onNotification(acp.methods.client.session.update, (ctx) => this._onUpdate(ctx.params))
-      .connect(stream);
+      .onNotification(acp.methods.client.session.update, (ctx) => this._onUpdate(ctx.params));
+    for (const [method, read] of Object.entries(this.extension?.turnEnds ?? {})) {
+      client.onNotification(
+        method,
+        (params: unknown) => params,
+        (ctx) => this._onTurnEnd(read(ctx.params)),
+      );
+    }
+    this.conn = client.connect(stream);
     // A closed connection is a dead session, whether or not the exit has been reported yet.
     this.conn.closed.then(
       () => (this._isReady = false),
@@ -276,6 +321,7 @@ export class PersistentAcpSession extends EventEmitter implements ISession {
     const sessionId = this.acpSessionId!;
     this._isBusy = true;
     this.turnText = '';
+    this.turnUsage = undefined;
     const onText = (chunk: string) => {
       try {
         options.callbacks?.onText?.(chunk);
@@ -298,6 +344,8 @@ export class PersistentAcpSession extends EventEmitter implements ISession {
         aborted,
       ]);
       this._absorbUsage(response.usage);
+      // An agent whose extension reports each turn's usage, instead of the standard totals.
+      if (!response.usage && this.turnUsage) this._addTurnUsage(this.turnUsage);
       const ok = response.stopReason === 'end_turn';
       this._stats.turns++;
       if (ok) this._stats.turnsSucceeded++;
@@ -356,7 +404,9 @@ export class PersistentAcpSession extends EventEmitter implements ISession {
     switch (update.sessionUpdate) {
       case 'agent_message_chunk':
         if (update.content.type === 'text') {
-          this.turnText += update.content.text;
+          // With no prompt in flight, the agent is running a turn of its own.
+          if (this._isBusy || !this.extension) this.turnText += update.content.text;
+          else this.engineText += update.content.text;
           this.emit(SESSION_EVENT.TEXT, update.content.text);
         }
         break;
@@ -385,6 +435,54 @@ export class PersistentAcpSession extends EventEmitter implements ISession {
         break;
       default:
         break;
+    }
+  }
+
+  /**
+   * A turn ended, as the agent's extension reports it. The prompt in flight
+   * ends with its response, so its report only carries usage; any other is a
+   * turn the agent started, delivered as an engine turn.
+   */
+  private _onTurnEnd(end: AcpTurnEnd | undefined): void {
+    // Subagents' own sessions report their turns too.
+    if (!end || end.sessionId !== this.acpSessionId) return;
+    if (this._isBusy) {
+      this.turnUsage = end.usage;
+      return;
+    }
+    if (end.usage) this._addTurnUsage(end.usage);
+    const ok = (end.stopReason ?? 'end_turn') === 'end_turn' && !end.error;
+    const text = this.engineText || (ok ? '' : (end.error ?? `the turn stopped: ${end.stopReason}`));
+    this.engineText = '';
+    this._stats.lastActivity = new Date().toISOString();
+    const event: StreamEvent = {
+      type: 'result',
+      subtype: ok ? 'success' : 'error',
+      result: text,
+      is_error: !ok,
+      stop_reason: ok ? 'end_turn' : 'error',
+      session_id: this.sessionId,
+    };
+    this._addHistory({ time: this._stats.lastActivity, type: 'engine_turn', event });
+    this.emit(SESSION_EVENT.UNSOLICITED_RESULT, { text, event });
+  }
+
+  /** One turn's usage, added to the session's: an extension reports turns, not totals. */
+  private _addTurnUsage(usage: NonNullable<AcpTurnEnd['usage']>): void {
+    this._stats.tokensIn += usage.inputTokens;
+    this._stats.tokensOut += usage.outputTokens;
+    this._stats.cachedTokens += usage.cachedReadTokens ?? 0;
+    if (typeof usage.costUsd === 'number') {
+      this._stats.costUsd += usage.costUsd;
+      this._stats.costReported = true;
+    } else if (!this._stats.costReported && this.agent.pricing) {
+      const p = this.agent.pricing;
+      const cached = usage.cachedReadTokens ?? 0;
+      this._stats.costUsd +=
+        (Math.max(0, usage.inputTokens - cached) * p.input +
+          cached * (p.cached ?? p.input) +
+          usage.outputTokens * p.output) /
+        1_000_000;
     }
   }
 
@@ -445,7 +543,7 @@ export class PersistentAcpSession extends EventEmitter implements ISession {
   }
 
   async compact(_summary?: string): Promise<TurnResult> {
-    const event: StreamEvent = { type: 'result', result: 'ACP agents manage their own context' };
+    const event: StreamEvent = { type: 'result', result: 'ACP agents manage their own context', compacted: false };
     return { text: 'ACP agents manage their own context', event };
   }
 

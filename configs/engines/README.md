@@ -16,6 +16,9 @@ The `id` is lower-case kebab-case, 3–40 characters, and the filename must matc
 | `zcode`     | `engine` | `zcode-claw-adapter` |
 | `kimi-code` | `acp`    | `kimi acp`           |
 | `dsh`       | `acp`    | `dsh --profile acp`  |
+| `grok`      | `acp`    | `grok agent stdio`   |
+| `cursor`    | `acp`    | `cursor-agent acp`   |
+| `agy-acp`   | `acp`    | `agy acp`            |
 
 These are **community** entries. This project validates their schema and ships
 them; it does not claim they work. What stands behind a preset is its
@@ -84,6 +87,9 @@ every ACP agent speaks the same protocol: it names the command and its arguments
 ```
 
 `acp.name` and `acp.command` are required; `commandEnv`, `args`, `env`,
-`contextWindow` and `pricing` (per million tokens, used only when the agent
-reports no cost) are optional. `acp.command` follows the same rule as
+`contextWindow`, `pricing` (per million tokens, used only when the agent
+reports no cost) and `extension` are optional. `extension` names protocol
+extensions of the agent's own that the client reads, registered in code
+(`grok`: grok's turn reports, which carry each turn's usage and the turns grok
+starts itself); a preset cannot define one. `acp.command` follows the same rule as
 `engine.bin`: a command name, with `commandEnv` for an install elsewhere.

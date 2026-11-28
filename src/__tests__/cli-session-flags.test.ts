@@ -79,6 +79,8 @@ describe('the session flags', () => {
         '{"r":{"description":"d","prompt":"p"}}',
         '-m',
         'opus',
+        '--turn-command',
+        '/boost',
       ]),
     );
     expect(body).toMatchObject({
@@ -95,6 +97,7 @@ describe('the session flags', () => {
       tools: '',
       agents: { r: { description: 'd', prompt: 'p' } },
       model: 'opus',
+      turnCommand: '/boost',
     });
     expect(() => sessionBody(parse(['--max-turns', 'lots']))).toThrow(/needs a number/);
   });

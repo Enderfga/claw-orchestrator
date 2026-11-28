@@ -795,6 +795,7 @@ export class EmbeddedServer {
           effort: body.effort as EffortLevel | undefined,
           plan: body.plan as boolean | undefined,
           images: body.images as string[] | undefined,
+          model: body.model as string | undefined,
           timeout: body.timeout as number | undefined,
         });
         json(200, { ok: true, ...result });
@@ -813,7 +814,7 @@ export class EmbeddedServer {
       }
 
       if (path === '/session/status') {
-        const status = this.manager.getStatus(body.name as string);
+        const status = await this.manager.getStatusDetailed(body.name as string);
         json(200, { ok: true, ...status });
         return;
       }
@@ -836,8 +837,8 @@ export class EmbeddedServer {
       }
 
       if (path === '/session/compact') {
-        await this.manager.compactSession(body.name as string, body.summary as string | undefined);
-        json(200, { ok: true });
+        const outcome = await this.manager.compactSession(body.name as string, body.summary as string | undefined);
+        json(200, { ...outcome });
         return;
       }
 
@@ -901,8 +902,8 @@ export class EmbeddedServer {
       }
 
       if (path === '/session/effort') {
-        this.manager.setEffort(body.name as string, body.level as EffortLevel);
-        json(200, { ok: true });
+        const r = await this.manager.switchEffort(body.name as string, body.level as EffortLevel);
+        json(200, { ok: true, ...r });
         return;
       }
 

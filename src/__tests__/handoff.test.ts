@@ -20,7 +20,14 @@ import type {
   CostBreakdown,
   EffortLevel,
 } from '../types.js';
-import { MAX_TRANSCRIPT_CHARS, MIN_HANDOFF_CHARS, newTranscript, recordExchange, renderHandoff } from '../handoff.js';
+import {
+  dropLastTurns,
+  MAX_TRANSCRIPT_CHARS,
+  MIN_HANDOFF_CHARS,
+  newTranscript,
+  recordExchange,
+  renderHandoff,
+} from '../handoff.js';
 
 // SessionManager resolves its persisted-session registry from os.homedir() at
 // module load, so HOME has to be redirected BEFORE the import.
@@ -428,5 +435,25 @@ describe('handoffSession', () => {
 
     await startWithHistory();
     await expect(manager.handoffSession('a', { engine: 'codex', maxChars: 100 })).rejects.toThrow(/at least/);
+  });
+});
+
+describe('dropLastTurns', () => {
+  it('drops each turn with its replies, and stops at the start of the record', () => {
+    const t = newTranscript();
+    for (const [role, text] of [
+      ['user', 'one'],
+      ['assistant', 'a1'],
+      ['user', 'two'],
+      ['assistant', 'a2'],
+      ['assistant', 'a2 again'],
+    ] as const)
+      recordExchange(t, role, text);
+    dropLastTurns(t, 1);
+    expect(t.entries.map((e) => e.text)).toEqual(['one', 'a1']);
+    expect(t.chars).toBe('onea1'.length);
+    dropLastTurns(t, 5);
+    expect(t.entries).toEqual([]);
+    expect(t.chars).toBe(0);
   });
 });

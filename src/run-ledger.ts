@@ -59,6 +59,11 @@ export interface RunLedgerRow {
   error?: string;
   /** The model refused and the engine re-ran this turn on another one (Claude's refusal fallback). */
   refusalFallback?: { from: string; to: string; category?: string };
+  /**
+   * `engine`: a turn the engine started itself (a `/loop` tick, a scheduled
+   * wakeup, a background workflow reporting back), not a send. Absent on sends.
+   */
+  origin?: 'engine';
   /** council id / fanout id / autoloop run id / workflow run id, when this turn belongs to one. */
   parent?: string;
 

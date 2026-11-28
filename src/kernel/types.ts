@@ -345,6 +345,12 @@ export interface GoalNode extends NodeBase {
   disallowedTools?: string[];
   /** The name this goal is on the run forum as. Default: the node id. */
   forumName?: string;
+  /**
+   * Run the engine's own goal loop instead of clawo's turn loop, on an engine
+   * whose session has one (`ISession.nativeGoalSession`); refused when the
+   * session has none. Claude Code and Codex run their own loop either way.
+   */
+  nativeGoal?: boolean;
 }
 
 /**

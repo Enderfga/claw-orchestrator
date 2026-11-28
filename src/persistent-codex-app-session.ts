@@ -7,15 +7,25 @@
  *
  * The motivation is the `/goal` long-horizon objective system, which is
  * exclusively available through the app-server protocol — `codex exec` has no
- * access to it. The flag `goals` is feature-flagged in 0.128 (default off);
- * we lift it per-session via `--enable goals` rather than touching global
- * config.
+ * access to it. Goals are stable and on by default since 0.172; `--enable goals`
+ * is still passed for older builds, where the flag was off by default.
  *
  * Protocol notes (verified against codex-cli 0.164.0; thread options, turn
- * inputs, revert and thread listing against 0.171.0):
+ * inputs, revert and thread listing against 0.171.0; sub-agents, compaction,
+ * review, plan mode, side questions and live settings against 0.172.0):
  *   - Frames are line-delimited JSON-RPC 2.0 messages over stdio.
  *   - Lifecycle: `initialize` → `thread/start` (or `thread/resume`) →
- *     `turn/start` (per send).
+ *     `turn/start` (per send). `initialize` declares `experimentalApi`, which
+ *     plan mode, `thread/sample`, `thread/settings/update`, memories and the
+ *     background-terminal RPCs need.
+ *   - One app-server carries the session's thread and the threads of its
+ *     sub-agents (multi-agent is on by default). Every notification names its
+ *     thread; a sub-agent's item, usage and `turn/completed` arrive with the
+ *     sub-agent's thread id, often before the parent's turn ends. Only this
+ *     thread's notifications reach the turn; each thread's usage is summed.
+ *   - A turn ends with `turn/completed` for its own id. A review's reviewer
+ *     runs an inner turn whose `rootTurnId` is the review turn, and only the
+ *     review turn completes.
  *   - Goals are typed RPCs: `thread/goal/set` (objective, status, tokenBudget),
  *     `thread/goal/get`, `thread/goal/clear`. Setting an objective starts the
  *     server's own turn loop, which runs until the goal leaves `active`; each
@@ -24,6 +34,8 @@
  *   - `error` notifications carry `{ error: { message, codexErrorInfo },
  *     willRetry }`; `codexErrorInfo` names the failure (`serverOverloaded`,
  *     `usageLimitExceeded`, …) so callers need not match message text.
+ *   - Slash text is not a command here: `turn/start` hands `/status` to the
+ *     model. Commands are RPCs (`runCommand`, `codex-commands.ts`).
  */
 
 import { ChildProcess } from 'node:child_process';
@@ -43,12 +55,37 @@ import type {
   SessionSendOptions,
   TurnResult,
   CostBreakdown,
+  EngineCommand,
+  CommandOutcome,
+  CompactOutcome,
+  RewindTarget,
+  RewindOutcome,
+  AsideOutcome,
+  ContextBreakdown,
+  StreamCallbacks,
 } from './types.js';
 import { getModelPricing, resolveAlias, getContextWindow } from './models.js';
-import { SESSION_EVENT, MAX_HISTORY_ITEMS, DEFAULT_HISTORY_LIMIT } from './constants.js';
+import { SESSION_EVENT, MAX_HISTORY_ITEMS, DEFAULT_HISTORY_LIMIT, TURN_TIMEOUT_MS } from './constants.js';
 import { sanitizeSecrets } from './sanitize.js';
 import { codexReasoningEffort } from './persistent-codex-session.js';
 import { codexConfigObject, codexFeatureArgs } from './codex-config.js';
+import { codexInitializeParams, type CodexRpc } from './codex-app-client.js';
+import {
+  CODEX_INIT_PROMPT,
+  CODEX_LISTED_SOURCE_KINDS,
+  codexBuiltinCommands,
+  codexSandboxPolicy,
+  codexReviewTarget,
+  codexSkillCommands,
+  codexTurnCommand,
+  latestCodexTurnId,
+  listCodexSkills,
+  revertCodexTurns,
+  runCodexInfoCommand,
+  unknownCodexCommand,
+  type CodexSkill,
+} from './codex-commands.js';
+import { codexSessionsRoot, findCodexRollout, reviewRolloutUsage } from './codex-rollout.js';
 
 // ─── Hand-translated protocol types (subset we use) ────────────────────────
 //
@@ -122,8 +159,18 @@ interface ItemCompletedNotification {
     phase?: string | null;
     /** commandExecution: the command's exit code. */
     exitCode?: number | null;
+    /** commandExecution: `userShell` for `thread/shellCommand`, which is no model tool call. */
+    source?: string | null;
+    aggregatedOutput?: string | null;
     savedPath?: string | null;
     revisedPrompt?: string | null;
+    /** exitedReviewMode: the review's text. */
+    review?: string | null;
+    /** subAgentActivity: `started` or `completed`, the sub-agent's thread, path and model. */
+    kind?: string | null;
+    agentThreadId?: string | null;
+    agentPath?: string | null;
+    model?: string | null;
   };
 }
 
@@ -157,7 +204,7 @@ const NON_TOOL_ITEMS = new Set([
  * `sourceKinds`, `thread/list` returns interactive threads only, leaving out
  * the ones `codex exec` started (0.171.0).
  */
-const LISTED_SOURCE_KINDS = ['cli', 'vscode', 'exec', 'appServer'];
+const LISTED_SOURCE_KINDS = CODEX_LISTED_SOURCE_KINDS;
 
 interface AgentMessageDeltaNotification {
   threadId: string;
@@ -170,11 +217,52 @@ interface TurnCompletedNotification {
   threadId: string;
   turn: {
     id: string;
+    /** The turn a chain of work began with; an inner turn (a review's reviewer) names the turn it serves. */
+    rootTurnId?: string | null;
     status: string;
     /** Set on a failed or interrupted turn: the same shape as an `error` notification's. */
     error?: { message?: string; codexErrorInfo?: unknown } | null;
+    durationMs?: number | null;
   };
 }
+
+/** What a client-started turn waits for, by kind: each is counted and reported its own way. */
+type TurnKind = 'send' | 'detached' | 'compact' | 'review' | 'shell';
+
+/** A root turn of this thread that has ended. */
+interface FinishedTurn {
+  id: string;
+  status: string;
+  failed: boolean;
+  text: string;
+  images: GeneratedImage[];
+  diff?: string;
+  review?: string;
+  shellOutput?: string;
+  shellExitCode?: number | null;
+  durationMs?: number;
+  errorMessage?: string;
+}
+
+interface TurnWaiter {
+  kind: TurnKind;
+  resolve: (turn: FinishedTurn) => void;
+  reject: (error: Error) => void;
+}
+
+/** Token counts a thread reported, `output` with the reasoning tokens. */
+interface UsageTotals {
+  input: number;
+  cached: number;
+  output: number;
+}
+
+const ZERO_USAGE: UsageTotals = { input: 0, cached: 0, output: 0 };
+
+/** How long a compaction may take. */
+const COMPACT_TIMEOUT_MS = 600_000;
+/** How long the skills list is reused. */
+const SKILLS_CACHE_MS = 60_000;
 
 // ─── PersistentCodexAppServerSession ───────────────────────────────────────
 
@@ -185,6 +273,11 @@ interface PendingRequest {
 }
 
 export class PersistentCodexAppServerSession extends EventEmitter implements ISession {
+  /** Commands are app-server RPCs: slash text in a message reaches the model as text. */
+  readonly commandStyle = 'rpc' as const;
+  /** `turn/start` takes a model; the session's own is restored on the next turn. */
+  readonly perSendModel = true;
+
   private options: SessionConfig;
   private codexBin: string;
   private proc: ChildProcess | null = null;
@@ -199,6 +292,7 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
 
   // Per-session state populated by notifications
   private threadId?: string;
+  /** The root turn in flight on this thread: a send's, a goal loop's, a compaction's, a review's. */
   private currentTurnId?: string;
   private currentGoal: ThreadGoal | null = null;
   private _lastError: CodexAppError | null = null;
@@ -209,7 +303,21 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
   /** The sandbox policy the server reported for the thread; `addDir` extends its writable roots. */
   private _threadSandbox?: SandboxPolicy;
 
-  // Per-turn buffers (reset when a turn starts)
+  // Turns this client started, waiting for their end
+  /** By turn id, from the response that started the turn. */
+  private _waiters = new Map<string, TurnWaiter>();
+  /** A request whose turn id only `turn/started` tells (a compaction, a shell command). */
+  private _claim: TurnWaiter | null = null;
+  /** `turn/start` / `review/start` requests sent and not answered yet. */
+  private _turnRequestsInFlight = 0;
+  /** Root turns that ended before the response naming them arrived. */
+  private _early = new Map<string, FinishedTurn>();
+  /** The last root turn of this thread that ended; `thread/sample` samples after it. */
+  private _lastFinishedTurnId?: string;
+  /** The last client turn's diff, for the `diff` command. */
+  private _lastDiff = '';
+
+  // Per-turn buffers (reset when a root turn starts)
   /** Every agent-message delta of the turn, in order — the answer of last resort. */
   private turnAssistantText = '';
   /** The turn's completed agent messages, each with the phase the server gave it. */
@@ -220,8 +328,14 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
   private turnUntaggedDeltas = false;
   /** Images saved by `imageGeneration` items in the current turn. */
   private turnImages: GeneratedImage[] = [];
-  private turnResolve: ((r: TurnResult) => void) | null = null;
-  private turnReject: ((e: Error) => void) | null = null;
+  /** A plan-mode turn's plan: it answers with a `plan` item and no agent message. */
+  private turnPlan = '';
+  /** A review turn's review (`exitedReviewMode`). */
+  private turnReview?: string;
+  /** The turn's working-tree diff (`turn/diff/updated`, the last one). */
+  private turnDiff?: string;
+  /** A `thread/shellCommand` turn's command output and exit code. */
+  private turnShell?: { output: string; exitCode: number | null };
 
   public sessionId?: string;
   private _stats = {
@@ -236,6 +350,15 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
     lastActivity: null as string | null,
   };
 
+  /** Each thread's cumulative usage as it last reported it: this thread and its sub-agents'. */
+  private _threadUsage = new Map<string, UsageTotals>();
+  /** Usage no `thread/tokenUsage/updated` reports: side questions, reviewers. */
+  private _extraUsage: UsageTotals = { ...ZERO_USAGE };
+  /** Spend so far, priced as it was reported: a per-send model is billed at that model. */
+  private _cost = { input: 0, cached: 0, output: 0 };
+  /** Sub-agent threads, by id: the path and model `subAgentActivity` named. */
+  private _subAgents = new Map<string, { path?: string; model?: string }>();
+
   /** This turn's own prompt size, from `tokenUsage.last` — see _estimateContextPercent(). */
   private _lastTurnTokensIn = 0;
   /** The window the app-server is enforcing, from `tokenUsage.modelContextWindow`. */
@@ -247,6 +370,22 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
    * at this wrapper's default misstates its cost.
    */
   private _reportedModel?: string;
+  /** The reasoning effort the thread opened with, restored after a per-send effort. */
+  private _threadEffort?: string;
+  /** The model the server moved this thread to (`model/rerouted`). */
+  private _reroutedModel?: string;
+  /** The model of the turn in flight when it was given per send, or switched to with `/turn`. */
+  private _turnModel?: string;
+  /** The turn `/turn` switched the model of; its end ends the switch. */
+  private _turnSettingsTurnId?: string;
+  /** A per-send model or effort, or plan mode, stays on the thread after its turn; the next turn undoes it. */
+  private _modelOverridden = false;
+  private _effortOverridden = false;
+  private _planMode = false;
+  /** `skills/list`, reused for a minute. */
+  private _skills?: { at: number; skills: CodexSkill[] };
+  /** The thread's rollout file, as `thread/start` / `thread/resume` reported it. */
+  private _rolloutFile?: string;
 
   constructor(config: SessionConfig, codexBin?: string) {
     super();
@@ -294,6 +433,7 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
     }
     const userConfig = codexConfigObject(this.options.codexConfig);
     const featureArgs = codexFeatureArgs(this.options.codexFeatures);
+    codexTurnCommand(this.options.turnCommand);
     if (this.options.jsonSchema) {
       try {
         this._outputSchema = JSON.parse(this.options.jsonSchema);
@@ -333,11 +473,7 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
         pending.reject(new Error(`codex app-server ${reason} before responding`));
       }
       this.pendingRequests.clear();
-      if (this.turnReject) {
-        this.turnReject(new Error(`codex app-server ${reason} mid-turn`));
-        this.turnReject = null;
-        this.turnResolve = null;
-      }
+      this._rejectWaiters(new Error(`codex app-server ${reason} mid-turn`));
       this.emit(SESSION_EVENT.CLOSE, code ?? 0);
     };
     this.proc.on('exit', (code) => end(code, `exited (code=${code})`));
@@ -353,9 +489,7 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
     this._rl.on('error', (err) => this.emit(SESSION_EVENT.LOG, `[codex-app] stdout: ${err.message}`));
 
     // 1. initialize
-    await this._request('initialize', {
-      clientInfo: { name: 'claw-orchestrator', title: null, version: '3.0.0' },
-    });
+    await this._request('initialize', codexInitializeParams());
 
     // 2. thread/start — captures threadId both from the response and the
     //    `thread/started` notification (which arrives before the response per
@@ -382,12 +516,20 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
     // resumed or forked thread already carries the ones it was opened with.
     const developerInstructions = this.options.appendSystemPrompt?.trim();
     const baseInstructions = this.options.systemPrompt?.trim();
+    // `thread/start` with a writable sandbox in a git repository records the
+    // project as trusted in the user's `~/.codex/config.toml` (0.172.0; resume
+    // and fork do not). A new thread is therefore opened read-only and given
+    // its sandbox before any turn (`_applyStartSandbox`), so a session leaves
+    // the user's trust list as it found it, as `codex exec` without `--trust` does.
+    const writable = threadParams.sandbox !== 'read-only';
     const startParams = {
       ...threadParams,
+      ...(writable ? { sandbox: 'read-only' as SandboxMode } : {}),
       ...ephemeral,
       ...(developerInstructions ? { developerInstructions } : {}),
       ...(baseInstructions ? { baseInstructions } : {}),
     };
+    let started = false;
     // When resuming a known thread, use `thread/resume` (loads prior turns)
     // instead of `thread/start` (which opens a fresh thread); with
     // `forkSession`, `thread/fork` opens a new thread holding that one's
@@ -396,7 +538,12 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
     // fresh thread rather than failing the whole session. `excludeTurns`: the
     // session never reads the turns these return.
     const resumeId = this.options.resumeSessionId;
-    type ThreadResponse = { thread?: { id?: string }; model?: unknown; sandbox?: unknown };
+    type ThreadResponse = {
+      thread?: { id?: string; path?: unknown };
+      model?: unknown;
+      sandbox?: unknown;
+      reasoningEffort?: unknown;
+    };
     let threadResp: ThreadResponse;
     if (resumeId) {
       const method = this.options.forkSession ? 'thread/fork' : 'thread/resume';
@@ -408,9 +555,11 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
       } catch (err) {
         this.emit(SESSION_EVENT.LOG, `[codex-app] ${method} failed (${(err as Error).message}); starting fresh`);
         threadResp = (await this._request('thread/start', startParams)) as ThreadResponse;
+        started = true;
       }
     } else {
       threadResp = (await this._request('thread/start', startParams)) as ThreadResponse;
+      started = true;
     }
     if (!this.threadId && threadResp?.thread?.id) {
       this.threadId = threadResp.thread.id;
@@ -419,8 +568,21 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
       throw new Error('codex app-server did not return a thread id from thread/start');
     }
     if (typeof threadResp.model === 'string' && threadResp.model) this._reportedModel = threadResp.model;
+    if (typeof threadResp.thread?.path === 'string' && threadResp.thread.path)
+      this._rolloutFile = threadResp.thread.path;
+    if (typeof threadResp.reasoningEffort === 'string' && threadResp.reasoningEffort) {
+      this._threadEffort = threadResp.reasoningEffort;
+    }
     const sandbox = threadResp.sandbox as SandboxPolicy | undefined;
     if (sandbox && typeof sandbox.type === 'string') this._threadSandbox = sandbox;
+    if (started && writable) await this._applyStartSandbox(threadParams.sandbox, userConfig);
+    // The TUI's /rename. Best effort: a name is a label, not worth a failed start.
+    const title = this.options.sessionName?.trim();
+    if (title) {
+      await this._request('thread/name/set', { threadId: this.threadId, name: title }).catch((err: Error) =>
+        this.emit(SESSION_EVENT.LOG, `[codex-app] thread/name/set failed: ${err.message}`),
+      );
+    }
 
     this.sessionId = `codex-app-${this.threadId.slice(0, 8)}-${Date.now().toString(36)}`;
     this._startTime = new Date().toISOString();
@@ -428,6 +590,53 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
     this.emit(SESSION_EVENT.READY);
     this.emit(SESSION_EVENT.INIT, { type: 'system', subtype: 'init', session_id: this.sessionId });
     return this;
+  }
+
+  /**
+   * Give a thread opened read-only (see start()) the session's sandbox, with
+   * `thread/settings/update`. A workspace-write policy is built as codex builds
+   * it from `[sandbox_workspace_write]`: the user's configuration for the
+   * directory (`config/read`) under the session's `codexConfig` overrides.
+   */
+  private async _applyStartSandbox(
+    mode: SandboxMode,
+    userConfig: Record<string, string | number | boolean>,
+  ): Promise<void> {
+    let policy: SandboxPolicy;
+    if (mode === 'danger-full-access') policy = { type: 'dangerFullAccess' };
+    else {
+      let section: Record<string, unknown> = {};
+      try {
+        const resp = (await this._request(
+          'config/read',
+          this.options.cwd ? { cwd: this.options.cwd } : {},
+          30_000,
+        )) as {
+          config?: { sandbox_workspace_write?: Record<string, unknown> | null };
+        };
+        section = { ...(resp?.config?.sandbox_workspace_write ?? {}) };
+      } catch (err) {
+        this.emit(
+          SESSION_EVENT.LOG,
+          `[codex-app] config/read failed (${(err as Error).message}); default workspace-write policy`,
+        );
+      }
+      for (const [key, value] of Object.entries(userConfig)) {
+        if (key.startsWith('sandbox_workspace_write.')) section[key.slice('sandbox_workspace_write.'.length)] = value;
+      }
+      const roots = Array.isArray(section.writable_roots)
+        ? section.writable_roots.filter((r): r is string => typeof r === 'string')
+        : [];
+      policy = {
+        type: 'workspaceWrite',
+        writableRoots: roots,
+        networkAccess: section.network_access === true,
+        excludeTmpdirEnvVar: section.exclude_tmpdir_env_var === true,
+        excludeSlashTmp: section.exclude_slash_tmp === true,
+      };
+    }
+    await this._request('thread/settings/update', { threadId: this.threadId, sandboxPolicy: policy }, 30_000);
+    this._threadSandbox = policy;
   }
 
   stop(): void {
@@ -473,39 +682,107 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
     if (!this._isReady) throw new Error('Session not ready. Call start() first.');
     if (!this.threadId) throw new Error('Session has no thread id (start() did not complete?)');
     const text = typeof message === 'string' ? message : JSON.stringify(message);
+    const input = await this._turnInput(text, options);
 
     if (!options.waitForComplete) {
-      this._fireAndForgetTurn(text, options).catch((err) => this._emitError(err as Error));
+      this._fireAndForgetTurn(input, options).catch((err) => this._emitError(err as Error));
       return { requestId: this._nextRpcId, sent: true };
     }
 
     this._isBusy = true;
     try {
-      return await this._runTurn(text, options);
+      return await this._runTurn(input, options);
     } finally {
       this._isBusy = false;
     }
   }
 
-  private async _fireAndForgetTurn(text: string, options: SessionSendOptions): Promise<void> {
-    await this._request('turn/start', this._turnStartParams(text, options));
+  /**
+   * Under a `turnCommand`, the message is sent as it is: plan mode and a skill
+   * are turn parameters here, not text (see `_turnInput`, `_turnStartParams`).
+   */
+  applyTurnCommand(_command: string, message: string): string {
+    return message;
   }
 
   /**
-   * `turn/start` params. The effort holds for this turn and the ones after it;
-   * the output schema is for this turn only, so every turn carries it.
+   * The turn's input items: the images first, as `codex exec --image` places
+   * them, then a skill the session's `turnCommand` names, then the text.
    */
-  private _turnStartParams(text: string, options: SessionSendOptions): Record<string, unknown> {
-    const effort = codexReasoningEffort(options.effort ?? this.options.effort);
+  private async _turnInput(text: string, options: SessionSendOptions, skill?: string | false): Promise<unknown[]> {
+    let named: string | undefined;
+    if (skill === undefined) {
+      const tc = codexTurnCommand(this.options.turnCommand);
+      named = tc && 'skill' in tc ? tc.skill : undefined;
+    } else if (skill) named = skill;
+    const skillItem = named ? await this._skillInput(named) : undefined;
+    return [
+      ...(options.images ?? []).map((imagePath) => ({ type: 'localImage', path: imagePath })),
+      ...(skillItem ? [skillItem] : []),
+      // A skill invoked with no message is the skill item alone.
+      ...(text || !skillItem ? [{ type: 'text', text, text_elements: [] }] : []),
+    ];
+  }
+
+  /** The `skill` input item for `name`, from `skills/list`; throws when there is no such skill. */
+  private async _skillInput(name: string): Promise<Record<string, string>> {
+    const skill = (await this._listSkills()).find((s) => s.name === name);
+    if (!skill) throw new Error(`there is no Codex skill named '${name}' for ${this.options.cwd ?? 'this directory'}`);
+    if (!skill.enabled) throw new Error(`the Codex skill '${name}' is disabled`);
+    return { type: 'skill', name: skill.name, path: skill.path };
+  }
+
+  private async _listSkills(): Promise<CodexSkill[]> {
+    if (this._skills && Date.now() - this._skills.at < SKILLS_CACHE_MS) return this._skills.skills;
+    const skills = await listCodexSkills(this._rpc(), this.options.cwd);
+    this._skills = { at: Date.now(), skills };
+    return skills;
+  }
+
+  private async _fireAndForgetTurn(input: unknown[], options: SessionSendOptions): Promise<void> {
+    const id = await this._startTurn(this._turnStartParams(input, options));
+    this._awaitTurn(id, 'detached', 0).catch(() => undefined);
+  }
+
+  /**
+   * `turn/start` params.
+   *
+   * The model, the effort and the collaboration mode a turn names stay on the
+   * thread for the turns after it, so what one send asked for alone is undone
+   * on the next: its model by the session's (or the thread's own), its effort
+   * by the session's (or the one the thread opened with), plan mode by default
+   * mode. The output schema is for this turn only, so every turn carries it.
+   */
+  private _turnStartParams(input: unknown[], options: SessionSendOptions): Record<string, unknown> {
+    const sessionEffort = codexReasoningEffort(this.options.effort);
+    const askedEffort = codexReasoningEffort(options.effort);
+    const effort = askedEffort ?? sessionEffort ?? (this._effortOverridden ? this._threadEffort : undefined);
+    this._effortOverridden = !!askedEffort && askedEffort !== sessionEffort;
+    const model = options.model ?? (this._modelOverridden ? (this.options.model ?? this._reportedModel) : undefined);
+    this._modelOverridden = !!options.model;
+    this._turnModel = options.model;
+    const tc = codexTurnCommand(this.options.turnCommand);
+    const plan = !!options.plan || (!!tc && 'plan' in tc);
+    let collaborationMode: Record<string, unknown> | undefined;
+    if (plan || this._planMode) {
+      // The mode takes precedence over the turn's model and effort, so it carries them.
+      collaborationMode = {
+        mode: plan ? 'plan' : 'default',
+        settings: {
+          model: model ?? this.options.model ?? this._reportedModel ?? 'gpt-5.5',
+          reasoning_effort: effort ?? null,
+          developer_instructions: null,
+        },
+      };
+      this._planMode = plan;
+    }
     const sandboxPolicy = this._addDirSandboxPolicy();
     return {
       threadId: this.threadId,
-      // Images first, as `codex exec --image` places them, then the text.
-      input: [
-        ...(options.images ?? []).map((imagePath) => ({ type: 'localImage', path: imagePath })),
-        { type: 'text', text, text_elements: [] },
-      ],
+      input,
+      ...(model ? { model } : {}),
       ...(effort ? { effort } : {}),
+      ...(collaborationMode ? { collaborationMode } : {}),
       ...(this._outputSchema !== undefined ? { outputSchema: this._outputSchema } : {}),
       ...(sandboxPolicy ? { sandboxPolicy } : {}),
     };
@@ -531,37 +808,149 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
     return { ...base, writableRoots: [...new Set([...roots, ...dirs.map((d) => path.resolve(cwd, d))])] };
   }
 
-  /** Clear the per-turn buffers: a turn has started, or is about to. */
+  /** Clear the per-turn buffers: a root turn has started. */
   private _resetTurnBuffers(): void {
     this.turnAssistantText = '';
     this.turnMessages = [];
     this.turnStreamedItems = new Set();
     this.turnUntaggedDeltas = false;
     this.turnImages = [];
+    this.turnPlan = '';
+    this.turnReview = undefined;
+    this.turnDiff = undefined;
+    this.turnShell = undefined;
   }
 
   /**
    * The turn's answer: the agent message the server marked `final_answer`,
-   * else the last agent message, else whatever streamed. A turn's messages
-   * include its commentary ("Running the tests." before a tool call), and a
+   * else a plan-mode turn's plan, else the last agent message, else whatever
+   * streamed. A turn's messages include its commentary ("Running the tests."
+   * before a tool call; a plan turn's "I'll read calc.py first."), and a
    * `jsonSchema` caller has to get the schema-shaped answer alone.
    */
   private _turnAnswer(): string {
     for (let i = this.turnMessages.length - 1; i >= 0; i--) {
       if (this.turnMessages[i].phase === 'final_answer') return this.turnMessages[i].text;
     }
+    if (this.turnPlan) return this.turnPlan;
     return this.turnMessages.at(-1)?.text ?? this.turnAssistantText;
   }
 
-  private async _runTurn(text: string, options: SessionSendOptions): Promise<TurnResult> {
-    const timeout = options.timeout || 600_000;
-    this._resetTurnBuffers();
+  /**
+   * Start a turn (`turn/start` or `review/start`) and return its id, or
+   * undefined when the response names none (then the next root turn of the
+   * thread is taken as this one).
+   */
+  private async _startTurn(params: Record<string, unknown>, method = 'turn/start'): Promise<string | undefined> {
+    this._turnRequestsInFlight++;
+    let id: string | undefined;
+    try {
+      const resp = (await this._request(method, params)) as { turn?: { id?: unknown } } | undefined;
+      id = typeof resp?.turn?.id === 'string' ? resp.turn.id : undefined;
+    } finally {
+      this._turnRequestsInFlight--;
+    }
+    // The turn this client now waits for; its own notifications follow the response.
+    if (id && !this._early.has(id) && this.currentTurnId !== id) {
+      this.currentTurnId = id;
+      this._resetTurnBuffers();
+    }
+    return id;
+  }
 
-    const turnPromise = new Promise<TurnResult>((resolve, reject) => {
-      this.turnResolve = resolve;
-      this.turnReject = reject;
+  /**
+   * Wait for root turn `id` of this thread to end, counted and reported as
+   * `kind`; with no id, for the next root turn to start and end. A `timeoutMs`
+   * of 0 waits for as long as the server runs.
+   */
+  private _awaitTurn(id: string | undefined, kind: TurnKind, timeoutMs: number): Promise<FinishedTurn> {
+    return new Promise<FinishedTurn>((resolve, reject) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const waiter: TurnWaiter = {
+        kind,
+        resolve: (t) => {
+          if (timer) clearTimeout(timer);
+          resolve(t);
+        },
+        reject: (e) => {
+          if (timer) clearTimeout(timer);
+          reject(e);
+        },
+      };
+      if (timeoutMs > 0) {
+        timer = setTimeout(() => {
+          // A turn that ends later is one nobody waits for: an engine turn.
+          for (const [key, w] of this._waiters) if (w === waiter) this._waiters.delete(key);
+          if (this._claim === waiter) this._claim = null;
+          reject(new Error('Timeout waiting for Codex app-server turn to complete'));
+        }, timeoutMs);
+      }
+      // With no id: a turn that ended before this call, else the one in flight, else the next.
+      const key = id ?? [...this._early.keys()].at(-1) ?? this.currentTurnId;
+      const early = key !== undefined ? this._early.get(key) : undefined;
+      if (early && key !== undefined) {
+        this._early.delete(key);
+        this._finishTurn(early, waiter);
+      } else if (key !== undefined && !this._waiters.has(key)) {
+        this._waiters.set(key, waiter);
+      } else if (!this._claim) {
+        this._claim = waiter;
+      } else {
+        waiter.reject(new Error('another request is waiting for its turn to start'));
+      }
+      this._flushEarly();
     });
+  }
 
+  /**
+   * Run a request that starts a turn whose id only its `turn/started` tells
+   * (`thread/compact/start`, `thread/shellCommand`), and wait for that turn.
+   */
+  private _claimNextTurn(kind: TurnKind, timeoutMs: number, request: () => Promise<unknown>): Promise<FinishedTurn> {
+    if (this._claim) return Promise.reject(new Error(`another ${this._claim.kind} is waiting for its turn to start`));
+    return new Promise<FinishedTurn>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        if (this._claim === waiter) this._claim = null;
+        for (const [id, w] of this._waiters) if (w === waiter) this._waiters.delete(id);
+        reject(new Error(`Timeout waiting for the Codex ${kind} to end`));
+      }, timeoutMs);
+      const waiter: TurnWaiter = {
+        kind,
+        resolve: (t) => {
+          clearTimeout(timer);
+          resolve(t);
+        },
+        reject: (e) => {
+          clearTimeout(timer);
+          reject(e);
+        },
+      };
+      this._claim = waiter;
+      request().catch((err: Error) => {
+        if (this._claim === waiter) this._claim = null;
+        waiter.reject(err);
+      });
+    });
+  }
+
+  private _rejectWaiters(err: Error): void {
+    const waiters = [...this._waiters.values(), ...(this._claim ? [this._claim] : [])];
+    this._waiters.clear();
+    this._claim = null;
+    for (const w of waiters) w.reject(err);
+  }
+
+  /** Report the turns that ended before any response named them, once no response is pending. */
+  private _flushEarly(): void {
+    if (this._turnRequestsInFlight > 0) return;
+    for (const [id, turn] of this._early) {
+      this._early.delete(id);
+      this._finishTurn(turn, undefined);
+    }
+  }
+
+  private async _runTurn(input: unknown[], options: SessionSendOptions): Promise<TurnResult> {
+    const timeout = options.timeout || 600_000;
     // Wire up text streaming for this turn
     const onText = (chunk: string) => {
       try {
@@ -571,43 +960,112 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
       }
     };
     this.on(SESSION_EVENT.TEXT, onText);
-
-    const timer = setTimeout(() => {
-      if (this.turnReject) {
-        const r = this.turnReject;
-        this.turnResolve = null;
-        this.turnReject = null;
-        r(new Error('Timeout waiting for Codex app-server turn to complete'));
-      }
-    }, timeout);
-
     try {
-      await this._request('turn/start', this._turnStartParams(text, options));
-      const result = await turnPromise;
-      return result;
+      const id = await this._startTurn(this._turnStartParams(input, options));
+      const turn = await this._awaitTurn(id, 'send', timeout);
+      // A failed turn is surfaced as a rejection (mirrors the exec wrapper), not
+      // an empty-text resolve, so callers see the failure.
+      if (turn.failed) throw new Error(`Codex app-server turn failed${turn.text ? `: ${turn.text}` : ''}`);
+      return { text: turn.text, event: this._resultEvent(turn) };
     } finally {
-      clearTimeout(timer);
       this.removeListener(SESSION_EVENT.TEXT, onText);
     }
   }
 
+  /** The `result` event for a finished turn. */
+  private _resultEvent(turn: FinishedTurn): StreamEvent {
+    return {
+      type: 'result',
+      result: turn.text,
+      stop_reason: turn.failed ? 'error' : 'end_turn',
+      session_id: this.threadId,
+      ...(turn.durationMs ? { duration_ms: turn.durationMs } : {}),
+      ...(turn.images.length ? { generated_images: [...turn.images] } : {}),
+      ...(turn.diff ? { diff: turn.diff } : {}),
+    };
+  }
+
+  /**
+   * Count and report a finished root turn by what started it:
+   *   - a send (or a fire-and-forget one) or a review: a turn, a success when
+   *     it completed, `result` and `turn_complete`;
+   *   - a compaction or a shell command: no model turn, nothing reported;
+   *   - nothing this client waits for (a goal loop's turn, a send that timed
+   *     out): a turn but never a success, `result`, and `unsolicited_result`
+   *     unless a goal owns the thread — the goal reports its own spend.
+   */
+  private _finishTurn(turn: FinishedTurn, waiter: TurnWaiter | undefined): void {
+    const kind = waiter?.kind;
+    this._lastFinishedTurnId = turn.id;
+    if (turn.id === this._turnSettingsTurnId) {
+      this._turnModel = undefined;
+      this._turnSettingsTurnId = undefined;
+    }
+    const modelTurn = kind !== 'compact' && kind !== 'shell';
+    if (modelTurn) {
+      this._stats.turns++;
+      if (kind && turn.status === 'completed') this._stats.turnsSucceeded++;
+      if (kind && turn.failed) this._stats.toolErrors++;
+      this._stats.lastActivity = new Date().toISOString();
+      if (kind) this._lastDiff = turn.diff ?? '';
+      const event = this._resultEvent(turn);
+      this.emit(SESSION_EVENT.RESULT, event);
+      if (kind) this.emit(SESSION_EVENT.TURN_COMPLETE, event);
+      else if (!this.currentGoal) this.emit(SESSION_EVENT.UNSOLICITED_RESULT, { text: turn.text, event });
+    }
+    waiter?.resolve(turn);
+  }
+
   // ── JSON-RPC plumbing ──────────────────────────────────────────────────
 
-  private _request(method: string, params: unknown): Promise<unknown> {
+  /**
+   * One JSON-RPC request. A timeout rejects with an error marked `timedOut`;
+   * `onSent` gets the request id, for a request a later one cancels.
+   */
+  private _request(method: string, params: unknown, timeoutMs = 0, onSent?: (id: number) => void): Promise<unknown> {
     if (!this.proc?.stdin?.writable) {
       return Promise.reject(new Error('codex app-server stdin not writable'));
     }
     const id = this._nextRpcId++;
+    onSent?.(id);
     const msg = JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n';
     return new Promise((resolve, reject) => {
-      this.pendingRequests.set(id, { resolve, reject, method });
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const done =
+        <T>(fn: (v: T) => void) =>
+        (v: T) => {
+          if (timer) clearTimeout(timer);
+          fn(v);
+        };
+      this.pendingRequests.set(id, { resolve: done(resolve), reject: done(reject), method });
+      if (timeoutMs > 0) {
+        timer = setTimeout(() => {
+          this.pendingRequests.delete(id);
+          reject(
+            Object.assign(new Error(`codex app-server did not answer ${method} within ${timeoutMs} ms`), {
+              timedOut: true,
+            }),
+          );
+        }, timeoutMs);
+      }
       this.proc!.stdin!.write(msg, (err) => {
         if (err) {
           this.pendingRequests.delete(id);
+          if (timer) clearTimeout(timer);
           reject(err);
         }
       });
     });
+  }
+
+  /** This session's app-server as a `CodexRpc`, for the command and quota helpers. */
+  private _rpc(): CodexRpc {
+    return { request: (method, params, timeoutMs) => this._request(method, params, timeoutMs ?? 120_000) };
+  }
+
+  /** The app-server, for a reader that asks it directly (the quota); undefined when it is not running. */
+  codexRpc(): CodexRpc | undefined {
+    return this._isReady ? this._rpc() : undefined;
   }
 
   private _reply(id: number | string, error: { code: number; message: string }): void {
@@ -663,6 +1121,14 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
     }
   }
 
+  /**
+   * Whether a notification is about this session's thread. One without a thread
+   * id (an older server) is taken as this thread's.
+   */
+  private _ours(threadId: unknown): boolean {
+    return typeof threadId !== 'string' || !threadId || threadId === this.threadId;
+  }
+
   private _dispatchNotification(method: string, params: unknown): void {
     switch (method) {
       case 'thread/started': {
@@ -671,15 +1137,25 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
         break;
       }
       case 'turn/started': {
-        const p = params as { threadId: string; turn: { id: string } };
-        this.currentTurnId = p.turn?.id;
+        const p = params as { threadId?: string; turn?: { id?: string; rootTurnId?: string | null } };
+        // A sub-agent's turn runs on its own thread; it is not this one's.
+        if (!this._ours(p.threadId) || !p.turn?.id) break;
+        const root = p.turn.rootTurnId || p.turn.id;
+        // An inner turn of the turn in flight (a review's reviewer) adds to it.
+        if (root === this.currentTurnId) break;
+        this.currentTurnId = root;
         // Also clears what a turn no send() waited on (the goal loop's, a
-        // fire-and-forget one) left behind. Only for this session's thread.
-        if (!p.threadId || p.threadId === this.threadId) this._resetTurnBuffers();
+        // fire-and-forget one) left behind.
+        this._resetTurnBuffers();
+        if (this._claim && !this._waiters.has(root)) {
+          this._waiters.set(root, this._claim);
+          this._claim = null;
+        }
         break;
       }
       case 'item/agentMessage/delta': {
         const p = params as AgentMessageDeltaNotification;
+        if (!this._ours(p.threadId)) break;
         if (typeof p.delta === 'string' && p.delta.length > 0) {
           this.turnAssistantText += p.delta;
           if (p.itemId) this.turnStreamedItems.add(p.itemId);
@@ -688,9 +1164,33 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
         }
         break;
       }
+      case 'item/plan/delta': {
+        // A plan-mode turn streams its plan here instead of an agent message.
+        const p = params as AgentMessageDeltaNotification;
+        if (!this._ours(p.threadId)) break;
+        if (typeof p.delta === 'string' && p.delta.length > 0) this.emit(SESSION_EVENT.TEXT, p.delta);
+        break;
+      }
       case 'item/completed': {
         const p = params as ItemCompletedNotification;
         const type = p.item?.type;
+        if (!this._ours(p.threadId)) {
+          // A sub-agent's work: its answer reaches this thread as its parent's
+          // next message, so it is only logged.
+          if (type === 'agentMessage' && p.item.text) {
+            const path = this._subAgents.get(p.threadId)?.path ?? p.threadId;
+            this.emit(SESSION_EVENT.LOG, `[codex-app subagent ${path}] ${p.item.text.slice(0, 2000)}`);
+          }
+          break;
+        }
+        if (type === 'subAgentActivity' && typeof p.item.agentThreadId === 'string') {
+          const known = this._subAgents.get(p.item.agentThreadId) ?? {};
+          this._subAgents.set(p.item.agentThreadId, {
+            path: p.item.agentPath ?? known.path,
+            model: p.item.model ?? known.model,
+          });
+          break;
+        }
         // Codex's built-in image generation reports where it saved the file.
         if (type === 'imageGeneration' && typeof p.item.savedPath === 'string' && p.item.savedPath) {
           this.turnImages.push({
@@ -698,6 +1198,8 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
             ...(typeof p.item.revisedPrompt === 'string' ? { revisedPrompt: p.item.revisedPrompt } : {}),
           });
         }
+        if (type === 'plan' && typeof p.item.text === 'string') this.turnPlan = p.item.text;
+        if (type === 'exitedReviewMode' && typeof p.item.review === 'string') this.turnReview = p.item.review;
         if (type === 'agentMessage' && typeof p.item.text === 'string') {
           this.turnMessages.push({ text: p.item.text, phase: p.item.phase ?? null });
           // A message that did not stream as deltas is streamed whole, once.
@@ -705,6 +1207,9 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
             ? this.turnAssistantText.length > 0
             : !!p.item.id && this.turnStreamedItems.has(p.item.id);
           if (!streamed && p.item.text) this.emit(SESSION_EVENT.TEXT, p.item.text);
+        } else if (type === 'commandExecution' && p.item.source === 'userShell') {
+          // `thread/shellCommand`: the user's command, not a model tool call.
+          this.turnShell = { output: p.item.aggregatedOutput ?? '', exitCode: p.item.exitCode ?? null };
         } else if (type && !NON_TOOL_ITEMS.has(type)) {
           this._stats.toolCalls++;
           if (type === 'commandExecution' && typeof p.item.exitCode === 'number' && p.item.exitCode !== 0) {
@@ -713,21 +1218,26 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
         }
         break;
       }
+      case 'turn/diff/updated': {
+        const p = params as { threadId?: string; turnId?: string; diff?: string };
+        if (this._ours(p.threadId) && typeof p.diff === 'string' && (!p.turnId || p.turnId === this.currentTurnId)) {
+          this.turnDiff = p.diff;
+        }
+        break;
+      }
       case 'thread/tokenUsage/updated': {
         const p = params as ThreadTokenUsageUpdatedNotification;
-        if (p.tokenUsage?.total) {
-          // Replace (not increment) — the server reports cumulative totals.
-          this._stats.tokensIn = p.tokenUsage.total.inputTokens;
-          this._stats.tokensOut = p.tokenUsage.total.outputTokens + p.tokenUsage.total.reasoningOutputTokens;
-          this._stats.cachedTokens = p.tokenUsage.total.cachedInputTokens;
-          this._updateCost();
-        }
+        const thread = typeof p.threadId === 'string' && p.threadId ? p.threadId : (this.threadId ?? '');
+        if (p.tokenUsage?.total) this._recordThreadUsage(thread, p.tokenUsage.total);
+        if (!this._ours(p.threadId)) break;
         // `last` is this turn's own prompt, which for a thread-resuming engine
         // is the live context occupancy; `total` only ever grows and would pin
-        // contextPercent at 100 on any long session.
-        if (typeof p.tokenUsage?.last?.inputTokens === 'number') {
-          this._lastTurnTokensIn = p.tokenUsage.last.inputTokens;
-        }
+        // contextPercent at 100 on any long session. A compaction reports a
+        // `last` of zero input with the compacted context's size as its total.
+        const last = p.tokenUsage?.last;
+        if (typeof last?.inputTokens === 'number' && last.inputTokens > 0) this._lastTurnTokensIn = last.inputTokens;
+        else if (typeof last?.totalTokens === 'number' && last.totalTokens > 0)
+          this._lastTurnTokensIn = last.totalTokens;
         if (typeof p.tokenUsage?.modelContextWindow === 'number') {
           this._modelContextWindow = p.tokenUsage.modelContextWindow;
         }
@@ -735,30 +1245,37 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
       }
       case 'thread/goal/updated': {
         const p = params as ThreadGoalUpdatedNotification;
+        if (!this._ours(p.threadId)) break;
         if (p.goal) this.currentGoal = p.goal;
         this.emit('goal:updated', this.currentGoal);
         break;
       }
       case 'thread/goal/cleared': {
+        const p = params as { threadId?: string };
+        if (!this._ours(p?.threadId)) break;
         this.currentGoal = null;
         this.emit('goal:cleared');
         break;
       }
       case 'turn/completed': {
         const p = params as TurnCompletedNotification;
+        // A sub-agent's turn ends on its own thread, before the parent's does.
+        if (!this._ours(p.threadId) || !p.turn?.id) break;
+        // An inner turn (a review's reviewer) ends with the turn it serves.
+        if (p.turn.rootTurnId && p.turn.rootTurnId !== p.turn.id) break;
         // This notification can itself report how the turn ended. The engine's
         // TurnStatus is `completed | interrupted | failed | inProgress`, so the counter
         // tests for completion rather than for the absence of failure: an interrupted
         // turn — which `interrupt()` on this class produces on purpose — resolves with
         // partial text and is not a success. `stop_reason` keeps its own two-state
         // mapping, so `interrupted` stays out of the error bucket there.
-        const failed = p.turn?.status === 'failed';
+        const failed = p.turn.status === 'failed';
         // A failed goal turn may report its cause only here, not as an `error`
         // notification: a model at capacity ends the turn with
         // `turn.error.codexErrorInfo: serverOverloaded` and the goal then goes
         // `blocked` (codex 0.166.0). Surfaced as `codex:error` unless the same
         // turn already raised a final one.
-        const turnError = p.turn?.error;
+        const turnError = p.turn.error;
         if (turnError && p.turn.status !== 'completed' && this._lastErrorTurn !== p.turn.id) {
           this._lastError = {
             message: turnError.message ?? 'codex app-server turn failed',
@@ -769,38 +1286,33 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
           this._lastErrorTurn = p.turn.id;
           this.emit('codex:error', this._lastError);
         }
-        this._stats.turns++;
-        if (p.turn?.status === 'completed') this._stats.turnsSucceeded++;
-        this._stats.lastActivity = new Date().toISOString();
         // Clear the active-turn id so a later interrupt()/steer() does not target
         // an already-finished turn (only clear if it is the turn that completed).
-        if (p.turn?.id && this.currentTurnId === p.turn.id) this.currentTurnId = undefined;
-        const turnText = this._turnAnswer();
-        const event: StreamEvent = {
-          type: 'result',
-          result: turnText,
-          stop_reason: failed ? 'error' : 'end_turn',
-          session_id: this.threadId,
-          ...(this.turnImages.length ? { generated_images: [...this.turnImages] } : {}),
+        if (this.currentTurnId === p.turn.id) this.currentTurnId = undefined;
+        const finished: FinishedTurn = {
+          id: p.turn.id,
+          status: p.turn.status,
+          failed,
+          text: this.turnReview ?? this._turnAnswer(),
+          images: [...this.turnImages],
+          ...(this.turnDiff ? { diff: this.turnDiff } : {}),
+          ...(this.turnReview !== undefined ? { review: this.turnReview } : {}),
+          ...(this.turnShell ? { shellOutput: this.turnShell.output, shellExitCode: this.turnShell.exitCode } : {}),
+          ...(typeof p.turn.durationMs === 'number' ? { durationMs: p.turn.durationMs } : {}),
+          ...(turnError?.message ? { errorMessage: turnError.message } : {}),
         };
-        this.emit(SESSION_EVENT.RESULT, event);
-        this.emit(SESSION_EVENT.TURN_COMPLETE, event);
-        // A failed turn is surfaced as a rejection (mirrors the exec wrapper),
-        // not an empty-text resolve, so callers see the failure.
-        if (failed && this.turnReject) {
-          this._stats.toolErrors++;
-          const rej = this.turnReject;
-          this.turnResolve = null;
-          this.turnReject = null;
-          rej(new Error(`Codex app-server turn failed${turnText ? `: ${turnText}` : ''}`));
-          break;
+        // What the turn left is in `finished` now; the next turn starts clean.
+        this._resetTurnBuffers();
+        let waiter = this._waiters.get(p.turn.id);
+        if (waiter) this._waiters.delete(p.turn.id);
+        else if (this._claim) {
+          waiter = this._claim;
+          this._claim = null;
         }
-        if (this.turnResolve) {
-          const r = this.turnResolve;
-          this.turnResolve = null;
-          this.turnReject = null;
-          r({ text: turnText, event });
-        }
+        // A turn whose starting response has not been read yet may be this
+        // client's: held until that response names its turn.
+        if (!waiter && this._turnRequestsInFlight > 0) this._early.set(p.turn.id, finished);
+        else this._finishTurn(finished, waiter);
         break;
       }
       case 'error': {
@@ -808,8 +1320,13 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
           error?: { message?: string; codexErrorInfo?: unknown };
           willRetry?: boolean;
           turnId?: string;
+          threadId?: string;
         };
         const message = p.error?.message ?? 'codex app-server error';
+        if (!this._ours(p.threadId)) {
+          this.emit(SESSION_EVENT.LOG, `[codex-app subagent ${p.threadId}] error: ${message}`);
+          break;
+        }
         this._lastError = {
           message,
           code: errorInfoName(p.error?.codexErrorInfo),
@@ -821,10 +1338,96 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
         this._emitError(new Error(message));
         break;
       }
+      case 'model/rerouted': {
+        // The turn ran on another model than the thread's: billed as that one.
+        const p = params as { threadId?: string; fromModel?: string; toModel?: string; reason?: unknown };
+        if (!this._ours(p.threadId) || typeof p.toModel !== 'string' || !p.toModel) break;
+        this._reroutedModel = p.toModel;
+        this.emit(
+          SESSION_EVENT.LOG,
+          `[codex-app] model rerouted from ${p.fromModel ?? '?'} to ${p.toModel} (${JSON.stringify(p.reason ?? null)})`,
+        );
+        break;
+      }
+      case 'warning':
+      case 'configWarning':
+      case 'deprecationNotice':
+      case 'guardianWarning': {
+        const p = params as { message?: string; summary?: string; details?: string | null; threadId?: string | null };
+        if (p?.threadId && !this._ours(p.threadId)) break;
+        const text = p?.message ?? [p?.summary, p?.details].filter(Boolean).join(': ');
+        this.emit(SESSION_EVENT.LOG, `[codex-app] ${method}: ${sanitizeSecrets(text || JSON.stringify(params))}`);
+        break;
+      }
+      case 'hook/started':
+      case 'hook/completed': {
+        const p = params as { threadId?: string };
+        if (!this._ours(p?.threadId)) break;
+        this.emit(SESSION_EVENT.LOG, `[codex-app] ${method} ${JSON.stringify(params).slice(0, 500)}`);
+        if (this.options.includeHookEvents) this.emit(SESSION_EVENT.EVENT, { type: 'hook', method, params });
+        break;
+      }
       default:
         // Unhandled notifications still go to history for debugging
         break;
     }
+  }
+
+  /**
+   * Take a thread's cumulative usage. The spend since its last report is
+   * priced now, at the model it ran on: a sub-agent's own, a per-send model, a
+   * rerouted one, else the session's.
+   */
+  private _recordThreadUsage(threadId: string, total: TokenUsageBreakdown): void {
+    const now: UsageTotals = {
+      input: total.inputTokens ?? 0,
+      cached: total.cachedInputTokens ?? 0,
+      output: (total.outputTokens ?? 0) + (total.reasoningOutputTokens ?? 0),
+    };
+    const prev = this._threadUsage.get(threadId) ?? ZERO_USAGE;
+    this._threadUsage.set(threadId, now);
+    const model = this._ours(threadId)
+      ? this._turnPricedModel()
+      : (this._subAgents.get(threadId)?.model ?? this._turnPricedModel());
+    this._addCost(model, {
+      input: Math.max(0, now.input - prev.input),
+      cached: Math.max(0, now.cached - prev.cached),
+      output: Math.max(0, now.output - prev.output),
+    });
+  }
+
+  /** Add usage no notification reports (a side question, a reviewer) to the session's. */
+  private _recordExtraUsage(usage: UsageTotals, model?: string): void {
+    this._extraUsage = {
+      input: this._extraUsage.input + usage.input,
+      cached: this._extraUsage.cached + usage.cached,
+      output: this._extraUsage.output + usage.output,
+    };
+    this._addCost(model ?? this._turnPricedModel(), usage);
+  }
+
+  private _addCost(model: string | undefined, d: UsageTotals): void {
+    const pricing = getModelPricing(model, 'gpt-5.5');
+    this._cost.input += (Math.max(0, d.input - d.cached) / 1_000_000) * pricing.input;
+    this._cost.cached += (d.cached / 1_000_000) * (pricing.cached ?? 0);
+    this._cost.output += (d.output / 1_000_000) * pricing.output;
+    let input = this._extraUsage.input;
+    let cached = this._extraUsage.cached;
+    let output = this._extraUsage.output;
+    for (const u of this._threadUsage.values()) {
+      input += u.input;
+      cached += u.cached;
+      output += u.output;
+    }
+    this._stats.tokensIn = input;
+    this._stats.cachedTokens = cached;
+    this._stats.tokensOut = output;
+    this._stats.costUsd = this._cost.input + this._cost.cached + this._cost.output;
+  }
+
+  /** The model the usage now arriving ran on. */
+  private _turnPricedModel(): string | undefined {
+    return this._turnModel ?? this._billedModel();
   }
 
   // ── ISession surface ───────────────────────────────────────────────────
@@ -855,14 +1458,40 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
     return this._history.slice(-limit);
   }
 
-  async compact(_summary?: string): Promise<TurnResult> {
-    // Codex has its own `thread/compact/start` RPC, but the existing public
-    // ISession contract returns a TurnResult. Wire it as a request, ignore
-    // the response shape, and return a synthesized result.
+  /** Compact the thread, waiting for the compaction to end (see `compactDetailed`). */
+  async compact(summary?: string): Promise<TurnResult> {
+    const outcome = await this.compactDetailed(summary);
+    const text = outcome.ok
+      ? 'Codex thread compacted'
+      : `Codex thread compaction failed${outcome.note ? `: ${outcome.note}` : ''}`;
+    return { text, event: { type: 'result', result: text, ...(outcome.ok ? {} : { is_error: true }) } };
+  }
+
+  /**
+   * Compact the thread (`thread/compact/start`) and resolve once the
+   * compaction's own turn has ended: a send right after it would otherwise be
+   * refused with `ActiveTurnNotSteerable { turn_kind: Compact }` (measured on
+   * 0.172.0). The compaction's turn is not a model turn: it is not counted and
+   * reports no result. Codex compacts with its own prompt; `summary` is not used.
+   */
+  async compactDetailed(_summary?: string): Promise<CompactOutcome> {
     if (!this.threadId) throw new Error('No thread id');
-    await this._request('thread/compact/start', { threadId: this.threadId });
-    const event: StreamEvent = { type: 'result', result: 'Codex thread compaction started' };
-    return { text: 'Codex thread compaction started', event };
+    if (this.currentTurnId)
+      throw new Error('compaction: a turn is in flight on the thread; wait for it or interrupt it');
+    const preTokens = this._lastTurnTokensIn;
+    const turn = await this._claimNextTurn('compact', COMPACT_TIMEOUT_MS, () =>
+      this._request('thread/compact/start', { threadId: this.threadId }),
+    );
+    const ok = turn.status === 'completed';
+    return {
+      ok,
+      trigger: 'manual',
+      ...(preTokens > 0 ? { preTokens } : {}),
+      ...(this._lastTurnTokensIn > 0 && this._lastTurnTokensIn !== preTokens
+        ? { postTokens: this._lastTurnTokensIn }
+        : {}),
+      ...(ok ? {} : { note: turn.errorMessage ?? `the compaction ended ${turn.status}` }),
+    };
   }
 
   getEffort(): EffortLevel {
@@ -879,18 +1508,15 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
   getCost(): CostBreakdown {
     const pricing = getModelPricing(this._billedModel(), 'gpt-5.5');
     const cachedPrice = pricing.cached ?? 0;
-    const nonCachedIn = Math.max(0, this._stats.tokensIn - this._stats.cachedTokens);
     return {
       model: this._billedModel() || 'gpt-5.5',
       tokensIn: this._stats.tokensIn,
       tokensOut: this._stats.tokensOut,
       cachedTokens: this._stats.cachedTokens,
       pricing: { inputPer1M: pricing.input, outputPer1M: pricing.output, cachedPer1M: cachedPrice || undefined },
-      breakdown: {
-        inputCost: (nonCachedIn / 1_000_000) * pricing.input,
-        cachedCost: (this._stats.cachedTokens / 1_000_000) * cachedPrice,
-        outputCost: (this._stats.tokensOut / 1_000_000) * pricing.output,
-      },
+      // Each report priced at the model it ran on, so a per-send model or a
+      // sub-agent's own model bills as itself.
+      breakdown: { inputCost: this._cost.input, cachedCost: this._cost.cached, outputCost: this._cost.output },
       totalUsd: this._stats.costUsd,
     };
   }
@@ -908,6 +1534,11 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
     tokenBudget?: number | null;
   }): Promise<ThreadGoal> {
     if (!this.threadId) throw new Error('No thread id');
+    if (this.options.noSessionPersistence && p.objective !== undefined) {
+      throw new Error(
+        'a goal needs a persisted thread: Codex says "ephemeral thread does not support goals" (noSessionPersistence)',
+      );
+    }
     const params: Record<string, unknown> = { threadId: this.threadId, origin: 'user' };
     if (p.objective !== undefined) params.objective = p.objective;
     if (p.status !== undefined) params.status = p.status;
@@ -1012,25 +1643,9 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
     if (!this.threadId) throw new Error('No thread id');
     if (!Number.isInteger(numTurns) || numTurns < 1) throw new Error('rollback: numTurns must be a positive integer');
     if (this.currentTurnId) throw new Error('rollback: a turn is in flight; interrupt it first');
-    const turnIds: string[] = [];
-    let cursor: string | undefined;
-    while (turnIds.length < numTurns) {
-      const page = (await this._request('thread/turns/list', {
-        threadId: this.threadId,
-        limit: numTurns - turnIds.length,
-        sortDirection: 'desc',
-        itemsView: 'notLoaded',
-        ...(cursor ? { cursor } : {}),
-      })) as { data?: Array<{ id?: unknown }>; nextCursor?: string | null };
-      const ids = (page?.data ?? []).map((t) => t.id).filter((id): id is string => typeof id === 'string');
-      turnIds.push(...ids);
-      if (!ids.length || !page?.nextCursor) break;
-      cursor = page.nextCursor;
-    }
-    if (turnIds.length < numTurns) {
-      throw new Error(`rollback: the thread has ${turnIds.length} turn(s), fewer than ${numTurns}`);
-    }
-    await this._request('thread/revert', { threadId: this.threadId, beforeTurnId: turnIds[numTurns - 1] });
+    await revertCodexTurns(this._rpc(), this.threadId, numTurns);
+    // The reverted thread goes on in a rollout file of its own.
+    this._rolloutFile = undefined;
   }
 
   /** List available models (`model/list`); returns the `data` array. */
@@ -1052,6 +1667,420 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
     params.sourceKinds = LISTED_SOURCE_KINDS;
     const resp = (await this._request('thread/list', params)) as { data?: unknown[]; nextCursor?: string | null };
     return { data: resp?.data ?? [], nextCursor: resp?.nextCursor ?? null };
+  }
+
+  // ── Engine commands and capabilities ──────────────────────────────────
+
+  /** The built-in commands (`codex-commands.ts`) and the directory's enabled skills. */
+  async listCommands(): Promise<EngineCommand[]> {
+    const builtins = codexBuiltinCommands({
+      engine: 'codex-app',
+      sandboxMode: this.options.sandboxMode || 'workspace-write',
+    });
+    let skills: CodexSkill[] = [];
+    try {
+      skills = await this._listSkills();
+    } catch (err) {
+      this.emit(SESSION_EVENT.LOG, `[codex-app] skills/list failed: ${(err as Error).message}`);
+    }
+    return [...builtins, ...codexSkillCommands(skills, builtins)];
+  }
+
+  /**
+   * Run a command through its RPC: an info list, `exec`, `queue`, `turn`,
+   * `compact`, `review`, `init`, `implement`, `inject`, `shell` (on a
+   * danger-full-access session only), `diff`, or a skill by its name. Slash
+   * text is never sent: Codex reads it as a prompt.
+   */
+  async runCommand(
+    name: string,
+    args?: string,
+    opts: { timeout?: number; callbacks?: StreamCallbacks } = {},
+  ): Promise<CommandOutcome> {
+    if (!this._isReady || !this.threadId) throw new Error('Session not ready. Call start() first.');
+    const timeout = opts.timeout || TURN_TIMEOUT_MS;
+    switch (name) {
+      case 'rollout': {
+        const file = this._rolloutFile ?? findCodexRollout(this.threadId);
+        return {
+          name,
+          ok: !!file,
+          text: file ?? 'the thread has no rollout file (an ephemeral thread writes none)',
+          data: { path: file ?? null },
+          startedTurn: false,
+        };
+      }
+      case 'diff':
+        return {
+          name,
+          ok: true,
+          text: this._lastDiff || 'the last turn changed no files',
+          data: { diff: this._lastDiff },
+          startedTurn: false,
+        };
+      case 'compact': {
+        const outcome = await this.compactDetailed();
+        return {
+          name,
+          ok: outcome.ok,
+          text: outcome.ok ? 'compacted' : (outcome.note ?? 'the compaction failed'),
+          data: outcome,
+          startedTurn: false,
+          ...(outcome.ok ? {} : { error: outcome.note }),
+        };
+      }
+      case 'review':
+        return this._runReview(args, timeout, opts.callbacks);
+      case 'init':
+        return this._commandTurn(name, CODEX_INIT_PROMPT, timeout, opts.callbacks);
+      case 'inject': {
+        const text = args?.trim();
+        if (!text) throw new Error('/inject takes the text to add to the thread');
+        await this._request(
+          'thread/inject_items',
+          {
+            threadId: this.threadId,
+            items: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text }] }],
+          },
+          60_000,
+        );
+        return { name, ok: true, text: 'added to the thread history; the next turn reads it', startedTurn: false };
+      }
+      case 'shell':
+        return this._runShell(args, timeout);
+      case 'turn':
+        return this._turnSettings(args);
+      case 'implement':
+        return this._implementPlan(args, timeout, opts.callbacks);
+    }
+    const info = await runCodexInfoCommand(this._rpc(), name, args, {
+      engine: 'codex-app',
+      cwd: this.options.cwd,
+      threadId: this.threadId,
+      sandboxPolicy: this._execSandboxPolicy(),
+      timeoutMs: timeout,
+    });
+    // `skills roots` changed where skills are read from.
+    if (name === 'skills' && args?.trim()) this._skills = undefined;
+    if (info) return info;
+    const skill = (await this._listSkills()).find((s) => s.name === name && s.enabled);
+    if (skill) return this._commandTurn(name, args?.trim() ?? '', timeout, opts.callbacks, skill.name);
+    throw unknownCodexCommand(name, 'codex-app');
+  }
+
+  /** A command that runs one model turn (`init`, a skill), as a CommandOutcome. */
+  private async _commandTurn(
+    name: string,
+    text: string,
+    timeout: number,
+    callbacks: StreamCallbacks | undefined,
+    skill?: string,
+  ): Promise<CommandOutcome> {
+    const input = await this._turnInput(text, {}, skill ?? false);
+    this._isBusy = true;
+    try {
+      const r = await this._runTurn(input, { timeout, callbacks, waitForComplete: true });
+      return { name, ok: true, text: r.text, startedTurn: true };
+    } catch (err) {
+      return { name, ok: false, text: '', startedTurn: true, error: (err as Error).message };
+    } finally {
+      this._isBusy = false;
+    }
+  }
+
+  /**
+   * The sandbox `/exec` runs in: the thread's own policy (what `thread/start`
+   * or the start-time settings update reported, the user's network setting
+   * included) with `addDir` writable, else one built from the session's mode.
+   */
+  private _execSandboxPolicy(): Record<string, unknown> {
+    const cwd = this.options.cwd ?? process.cwd();
+    return (
+      this._addDirSandboxPolicy() ??
+      this._threadSandbox ??
+      codexSandboxPolicy(
+        this.options.sandboxMode,
+        (this.options.addDir ?? []).map((d) => path.resolve(cwd, d)),
+      )
+    );
+  }
+
+  /**
+   * `turn/settings/update` on the turn in flight: its model, effort or
+   * reasoning summary for the rest of that turn only. The thread's settings,
+   * and so the turns after it, stay as they were; the rest of the turn bills
+   * at the model it switched to. Codex takes it only with its
+   * `step_model_switching` feature on (under development and off by default
+   * in 0.172.0), so a session that wants it enables the feature itself.
+   */
+  private async _turnSettings(args: string | undefined): Promise<CommandOutcome> {
+    const turnId = this.currentTurnId;
+    if (!turnId) {
+      throw new Error(
+        '/turn changes the turn in flight, and none is running; session_switch_model and the effort switch change the next turns',
+      );
+    }
+    const settings: Record<string, string> = {};
+    for (const pair of (args ?? '').trim().split(/\s+/).filter(Boolean)) {
+      const m = /^(model|effort|summary)=(\S+)$/.exec(pair);
+      if (!m) {
+        throw new Error(
+          `/turn takes model=<id>, effort=<level> and summary=<auto|concise|detailed|none>, not '${pair}'`,
+        );
+      }
+      settings[m[1]] = m[2];
+    }
+    if (!Object.keys(settings).length) {
+      throw new Error('/turn takes model=<id>, effort=<level> or summary=<auto|concise|detailed|none>');
+    }
+    const model = settings.model ? resolveAlias(settings.model) : undefined;
+    let resp: { status?: string };
+    try {
+      resp = (await this._request(
+        'turn/settings/update',
+        {
+          threadId: this.threadId,
+          turnId,
+          ...(model ? { model } : {}),
+          ...(settings.effort ? { effort: settings.effort } : {}),
+          ...(settings.summary ? { summary: settings.summary } : {}),
+        },
+        30_000,
+      )) as { status?: string };
+    } catch (err) {
+      if (/step_model_switching/.test((err as Error).message)) {
+        throw new Error(
+          "/turn needs Codex's step_model_switching feature, which is off by default: start the session with " +
+            "codexFeatures { enable: ['step_model_switching'] }",
+        );
+      }
+      throw err;
+    }
+    const applied = resp?.status === 'applied';
+    if (applied && model && this.currentTurnId === turnId) {
+      this._turnModel = model;
+      this._turnSettingsTurnId = turnId;
+    }
+    const changed = { ...settings, ...(model ? { model } : {}) };
+    return {
+      name: 'turn',
+      ok: applied,
+      text: applied
+        ? `turn ${turnId}: ${Object.entries(changed)
+            .map(([k, v]) => `${k} ${v}`)
+            .join(', ')} for the rest of the turn`
+        : `turn ${turnId} ended before the change reached it`,
+      data: { turnId, status: resp?.status ?? null, ...changed },
+      startedTurn: false,
+      ...(applied ? {} : { error: `turn ${turnId} ended before the change reached it` }),
+    };
+  }
+
+  /**
+   * `thread/prepareApprovedPlan`, then the turn it prepares: the plan goes into
+   * the thread's context as the plan tool's output, and Codex's own prompt
+   * ("Implement the plan.") runs. A plan given as a file is read here and also
+   * named as the attachment, which Codex then has the turn read instead.
+   */
+  private async _implementPlan(
+    args: string | undefined,
+    timeout: number,
+    callbacks: StreamCallbacks | undefined,
+  ): Promise<CommandOutcome> {
+    const text = args?.trim();
+    if (!text) throw new Error('/implement takes the approved plan, or the path of a file that holds it');
+    if (this.currentTurnId) {
+      throw new Error('implement: a turn is in flight on the thread; wait for it or interrupt it');
+    }
+    let markdown = text;
+    let attachmentPath: string | undefined;
+    if (!/\s/.test(text)) {
+      const file = path.resolve(this.options.cwd ?? process.cwd(), text);
+      if (fs.existsSync(file) && fs.statSync(file).isFile()) {
+        markdown = fs.readFileSync(file, 'utf8');
+        attachmentPath = file;
+      }
+    }
+    const resp = (await this._request(
+      'thread/prepareApprovedPlan',
+      { threadId: this.threadId, markdown, ...(attachmentPath ? { attachmentPath } : {}) },
+      60_000,
+    )) as { prompt?: string };
+    return this._commandTurn('implement', resp?.prompt || 'Implement the plan.', timeout, callbacks);
+  }
+
+  /**
+   * `review/start` on this thread, inline: the review turn's id comes back in
+   * the response, and its answer is the `exitedReviewMode` item. The reviewer
+   * reports no usage while it runs, so its rollout is read when it ends.
+   */
+  private async _runReview(
+    args: string | undefined,
+    timeout: number,
+    callbacks: StreamCallbacks | undefined,
+  ): Promise<CommandOutcome> {
+    if (this.currentTurnId) throw new Error('review: a turn is in flight on the thread; wait for it or interrupt it');
+    const since = Date.now();
+    const onText = (chunk: string) => {
+      try {
+        callbacks?.onText?.(chunk);
+      } catch {
+        // User callback errors are not fatal.
+      }
+    };
+    this.on(SESSION_EVENT.TEXT, onText);
+    this._isBusy = true;
+    try {
+      const id = await this._startTurn({ threadId: this.threadId, target: codexReviewTarget(args) }, 'review/start');
+      const turn = await this._awaitTurn(id, 'review', timeout);
+      await this._addReviewerUsage(since);
+      const ok = turn.status === 'completed';
+      return {
+        name: 'review',
+        ok,
+        text: turn.review ?? turn.text,
+        startedTurn: true,
+        ...(ok ? {} : { error: turn.errorMessage ?? `the review ended ${turn.status}` }),
+      };
+    } finally {
+      this._isBusy = false;
+      this.removeListener(SESSION_EVENT.TEXT, onText);
+    }
+  }
+
+  /** The reviewer thread's spend, from its rollout; read again once if codex has not written it yet. */
+  private async _addReviewerUsage(since: number): Promise<void> {
+    if (!this.threadId || this.options.noSessionPersistence || !fs.existsSync(codexSessionsRoot())) return;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const r = reviewRolloutUsage(this.threadId, since);
+      if (r.totals) {
+        this._recordExtraUsage(r.totals, r.model);
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+  }
+
+  /**
+   * `thread/shellCommand`, the TUI's `!cmd`. It runs unsandboxed, whatever the
+   * thread's sandbox, so it is refused unless the session already runs
+   * `danger-full-access`. Its turn is no model turn.
+   */
+  private async _runShell(args: string | undefined, timeout: number): Promise<CommandOutcome> {
+    if ((this.options.sandboxMode || 'workspace-write') !== 'danger-full-access') {
+      throw new Error(
+        '/shell runs its command unsandboxed (thread/shellCommand), so it runs only on a danger-full-access session',
+      );
+    }
+    const command = args?.trim();
+    if (!command) throw new Error('/shell takes the command to run');
+    if (this.currentTurnId) throw new Error('shell: a turn is in flight on the thread; wait for it or interrupt it');
+    const turn = await this._claimNextTurn('shell', timeout + 5_000, () =>
+      this._request('thread/shellCommand', { threadId: this.threadId, command, timeoutMs: timeout }),
+    );
+    const exitCode = turn.shellExitCode ?? null;
+    const ok = turn.status === 'completed' && (exitCode === null || exitCode === 0);
+    return {
+      name: 'shell',
+      ok,
+      text: turn.shellOutput ?? '',
+      data: { exitCode },
+      startedTurn: false,
+      ...(ok ? {} : { error: `the command exited with ${exitCode ?? turn.status}` }),
+    };
+  }
+
+  /**
+   * A side question (`thread/sample`): answered from the thread's context, not
+   * added to it, no tools. It samples after the thread's latest turn, the one
+   * in flight included. Its usage is in the response only, so it is added here.
+   */
+  async askAside(question: string, opts: { timeout?: number } = {}): Promise<AsideOutcome> {
+    if (!this._isReady || !this.threadId) throw new Error('Session not ready. Call start() first.');
+    const inFlight = this.currentTurnId;
+    const expectedTurnId =
+      inFlight ?? this._lastFinishedTurnId ?? (await latestCodexTurnId(this._rpc(), this.threadId));
+    if (!expectedTurnId) {
+      throw new Error('a side question samples the thread after a turn; send a first message');
+    }
+    let sampleId: number | undefined;
+    let resp: {
+      text?: string | null;
+      inputTokens?: number | null;
+      cachedInputTokens?: number | null;
+      outputTokens?: number | null;
+    };
+    try {
+      resp = (await this._request(
+        'thread/sample',
+        {
+          threadId: this.threadId,
+          expectedTurnId,
+          prompt: question,
+          ...(inFlight ? { allowInProgressTurn: true } : {}),
+        },
+        opts.timeout || TURN_TIMEOUT_MS,
+        (id) => (sampleId = id),
+      )) as typeof resp;
+    } catch (err) {
+      // A sample nobody waits for still runs, and spends what no response will count.
+      if ((err as { timedOut?: boolean }).timedOut && sampleId !== undefined) {
+        this._request('thread/sample/cancel', { requestId: sampleId }, 10_000).catch(() => undefined);
+      }
+      throw err;
+    }
+    this._recordExtraUsage({
+      input: resp?.inputTokens ?? 0,
+      cached: resp?.cachedInputTokens ?? 0,
+      output: resp?.outputTokens ?? 0,
+    });
+    if (typeof resp?.text !== 'string') {
+      throw new Error(
+        'the side question got no text answer: the model tried to call a tool, which a side question cannot',
+      );
+    }
+    return { text: resp.text };
+  }
+
+  /** Drop the last `turns` turns (`thread/revert`); the files they changed stay changed. */
+  async rewind(target: RewindTarget): Promise<RewindOutcome> {
+    if (target.messageId !== undefined) {
+      throw new Error('codex-app rewinds by turns (thread/revert), not to a message; give turns');
+    }
+    if (target.files) {
+      throw new Error(
+        'restoring files on rewind is not supported on codex-app: thread/revert changes the conversation only; omit files',
+      );
+    }
+    const turns = target.turns ?? 1;
+    await this.rollback(turns);
+    return { ok: true, turnsRemoved: turns, filesRestored: false };
+  }
+
+  /** Switch the thread's model in place (`thread/settings/update`); later turns bill at it. */
+  async setModelLive(model: string): Promise<boolean> {
+    if (!this._isReady || !this.threadId) return false;
+    await this._request('thread/settings/update', { threadId: this.threadId, model }, 30_000);
+    this.options.model = model;
+    this._reroutedModel = undefined;
+    this._modelOverridden = false;
+    return true;
+  }
+
+  /** Switch the thread's effort in place; `auto` has no value to set, so it waits for the next turn. */
+  async setEffortLive(level: EffortLevel): Promise<boolean> {
+    const effort = codexReasoningEffort(level);
+    if (!effort || !this._isReady || !this.threadId) return false;
+    await this._request('thread/settings/update', { threadId: this.threadId, effort }, 30_000);
+    this._effortOverridden = false;
+    return true;
+  }
+
+  /** The last request's prompt against the window codex enforces; codex gives no categories. */
+  async contextBreakdown(): Promise<ContextBreakdown | undefined> {
+    if (this._lastTurnTokensIn <= 0) return undefined;
+    const window = this._modelContextWindow ?? getContextWindow(this._billedModel() || 'gpt-5.5');
+    return { totalTokens: this._lastTurnTokensIn, ...(window ? { windowTokens: window } : {}) };
   }
 
   // ── Helpers ────────────────────────────────────────────────────────────
@@ -1089,18 +2118,8 @@ export class PersistentCodexAppServerSession extends EventEmitter implements ISe
     return Math.min(100, Math.round((this._lastTurnTokensIn / ctx) * 100));
   }
 
-  /** The configured model, else the one the app-server reported for the thread. */
+  /** The model the server rerouted the thread to, else the configured one, else the one it reported. */
   private _billedModel(): string | undefined {
-    return this.options.model || this._reportedModel;
-  }
-
-  private _updateCost(): void {
-    const pricing = getModelPricing(this._billedModel(), 'gpt-5.5');
-    const cachedPrice = pricing.cached ?? 0;
-    const nonCachedIn = Math.max(0, this._stats.tokensIn - this._stats.cachedTokens);
-    this._stats.costUsd =
-      (nonCachedIn / 1_000_000) * pricing.input +
-      (this._stats.cachedTokens / 1_000_000) * cachedPrice +
-      (this._stats.tokensOut / 1_000_000) * pricing.output;
+    return this._reroutedModel || this.options.model || this._reportedModel;
   }
 }

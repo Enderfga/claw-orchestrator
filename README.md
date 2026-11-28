@@ -104,7 +104,7 @@ including running commands as the server's user, so keep it private; see
 - 🧪 **Acceptance contracts and evidence bundles** ([guide](./skills/references/verification.md))
 - 🔁 **Workflows, resume and the goal node** ([guide](./skills/references/workflow.md))
 - 🖥️ **Every CLI command** ([guide](./skills/references/cli.md))
-- 🧰 **All 81 tools** ([guide](./skills/references/tools.md))
+- 🧰 **All 85 tools** ([guide](./skills/references/tools.md))
 
 ## Ways to run
 
@@ -115,7 +115,7 @@ including running commands as the server's user, so keep it private; see
 | **ACP agent**                  | Zed, JetBrains, Neovim, Emacs, the VS Code ACP extension, dsh                            | `clawo acp`, then [`acp.md`](./skills/references/acp.md)                                          |
 | **OpenAI-compatible endpoint** | Any OpenAI SDK client or webchat, without changing call sites                            | `POST /v1/chat/completions` ([`openai-compat.md`](./skills/references/openai-compat.md))          |
 | **TypeScript SDK**             | Embedding the runtime in your own service                                                | `import { SessionManager } from '@enderfga/claw-orchestrator'` (below)                            |
-| **OpenClaw plugin**            | Every OpenClaw agent gets all 81 tools                                                   | `curl -fsSL https://raw.githubusercontent.com/Enderfga/claw-orchestrator/main/install.sh \| bash` |
+| **OpenClaw plugin**            | Every OpenClaw agent gets all 85 tools                                                   | `curl -fsSL https://raw.githubusercontent.com/Enderfga/claw-orchestrator/main/install.sh \| bash` |
 
 ```ts
 import { SessionManager } from '@enderfga/claw-orchestrator';
@@ -131,16 +131,16 @@ engine, so one dropdown switches between Claude, Codex, Antigravity and Grok mod
 
 ## Engine compatibility
 
-| Engine      | CLI            | Tested version                  |
-| ----------- | -------------- | ------------------------------- |
-| Claude Code | `claude`       | 2.1.332                         |
-| Codex       | `codex`        | 0.172.0                         |
-| Antigravity | `agy`          | 1.5.17                          |
-| Grok Build  | `grok`         | 1.0.92                          |
-| Cursor      | `cursor-agent` | 2026.11.22                      |
-| OpenCode    | `opencode`     | 1.19.6, 2.4.2                   |
-| ACP agent   | any            | Kimi Code 2.3.1, dsh 0.2.1-rc.2 |
-| Custom CLI  | any            | —                               |
+| Engine      | CLI            | Tested version                                                                            |
+| ----------- | -------------- | ----------------------------------------------------------------------------------------- |
+| Claude Code | `claude`       | 2.1.332                                                                                   |
+| Codex       | `codex`        | 0.172.0                                                                                   |
+| Antigravity | `agy`          | 1.5.19                                                                                    |
+| Grok Build  | `grok`         | 1.0.92                                                                                    |
+| Cursor      | `cursor-agent` | 2026.11.22                                                                                |
+| OpenCode    | `opencode`     | 1.19.6, 2.4.2                                                                             |
+| ACP agent   | any            | Kimi Code 2.3.1, dsh 0.2.1-rc.2, Grok Build 1.0.92, Cursor 2026.11.22, Antigravity 1.5.19 |
+| Custom CLI  | any            | —                                                                                         |
 
 An agent that serves the Agent Client Protocol on stdio runs as
 [`engine: 'acp'`](./skills/references/multi-engine.md#acp-agents-engine-acp); any other coding CLI that runs as a
@@ -150,10 +150,13 @@ subprocess can be wired up as a [custom engine](./skills/references/multi-engine
 <summary><b>How the table stays current</b></summary>
 
 The versions above are what the weekly sweep last ran. `scripts/sweep.ts` measures each core engine's installed,
-pinned and upstream version, diffs the flags the wrapper passes against the binary's `--help`, runs one live turn
-**through the real wrapper class**, smokes the ACP and MCP entry points, and checks `src/models.ts` against the
-OpenAI, Anthropic and xAI published price tables. It contains no model call, so the check that reports a wrapper as broken does not
-share the wrapper's failure modes.
+pinned and upstream version, diffs the flags the wrapper passes against the binary's `--help` and, for Claude Code
+and Cursor, against the options their own JavaScript declares, hidden ones included, lists each engine's built-in
+slash commands (Codex: its app-server methods) and holds every listed name to a recorded decision, runs one live turn
+**through the real wrapper class**, checks on a scratch copy that a session option does not rewrite the user's engine
+config, smokes the ACP and MCP entry points, and checks `src/models.ts` against the OpenAI, Anthropic and xAI
+published price tables. No model judges any of it, so the check that reports a wrapper as broken does not share the
+wrapper's failure modes.
 
 `scripts/sweep-workflow.json` wraps the same script as a durable run on this project's own kernel: verifier → router
 → an agent that drafts the alignment on a `sweep/<date>` branch → a human gate. A person reviews and merges; the
@@ -168,6 +171,7 @@ orchestrator does not edit its own code unattended.
 | **Persistent sessions**     | Long-lived agents kept alive across requests, with context, tool, model and worktree control.                                                                                                                            | [`sessions.md`](./skills/references/sessions.md)                                      |
 | **Multi-engine runtime**    | One interface and one set of CLI flags over the engines above, any ACP agent, and custom CLIs; a configurable default engine.                                                                                            | [`multi-engine.md`](./skills/references/multi-engine.md)                              |
 | **Session handoff**         | Moves a live conversation to another engine or model in the same workspace; the old session keeps running.                                                                                                               | [`sessions.md`](./skills/references/sessions.md)                                      |
+| **Engine features**         | Each engine's own commands and skills, quota, side questions, rewinds, a model per send, live model switches and its own goal loop (`session_command`, `engine_quota`, `session_aside`, `session_rewind`, `nativeGoal`). | [`sessions.md`](./skills/references/sessions.md#engine-commands)                      |
 | **Claude accounts**         | Several Claude accounts, keys or gateways; a session moves to the next one at its usage limit and keeps its conversation.                                                                                                | [`multi-engine.md`](./skills/references/multi-engine.md#claude-accounts-and-rotation) |
 | **Verification plane**      | Acceptance contracts the runtime runs itself, metrics against the base commit included, with an evidence bundle on disk.                                                                                                 | [`verification.md`](./skills/references/verification.md)                              |
 | **Durable run kernel**      | Declarative workflows over `agent`, `goal`, `fanout`, `council`, `verifier`, `human_gate`, `router` and more, checkpointed.                                                                                              | [`workflow.md`](./skills/references/workflow.md)                                      |

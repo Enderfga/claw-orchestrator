@@ -14,6 +14,13 @@
  *     conversation continuity (Codex 0.119+). With `forkSession`, the first
  *     send runs `codex exec fork <resumeSessionId>` instead and the session
  *     continues the new thread.
+ *
+ * What `codex exec` cannot do — compact, review or sample the thread, revert
+ * turns, list skills or read the rate limits — runs through a short-lived
+ * `codex app-server` that loads the same thread (`codex-app-client.ts`); the
+ * next `codex exec resume` reads what it left in the rollout. Sub-agents are
+ * threads of their own whose usage `--json` leaves out; it is read from their
+ * rollouts after each turn.
  */
 
 import { killEngineTree, spawnEngine } from './engine-spawn.js';
@@ -28,20 +35,56 @@ import {
   closeSync,
 } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve as resolvePath } from 'node:path';
 
 import type {
+  AsideOutcome,
+  CommandOutcome,
+  CompactOutcome,
+  ContextBreakdown,
+  CostBreakdown,
   EffortLevel,
+  EngineCommand,
   GeneratedImage,
+  RewindOutcome,
+  RewindTarget,
   SessionConfig,
   SessionSendOptions,
+  StreamCallbacks,
   StreamEvent,
   TurnResult,
 } from './types.js';
-import { SESSION_EVENT } from './constants.js';
+import { SESSION_EVENT, TURN_TIMEOUT_MS } from './constants.js';
 import { BaseOneShotSession } from './base-oneshot-session.js';
+import { getModelPricing } from './models.js';
 import { sanitizeSecrets } from './sanitize.js';
 import { codexConfigArgs, codexFeatureArgs } from './codex-config.js';
+import { CodexAppClient, withCodexAppClient } from './codex-app-client.js';
+import {
+  CODEX_INIT_PROMPT,
+  codexBuiltinCommands,
+  codexCommandNeedsThread,
+  codexCommandReadsStoredThread,
+  codexReviewTarget,
+  codexSandboxPolicy,
+  codexSkillCommands,
+  codexTurnCommand,
+  latestCodexTurnId,
+  listCodexSkills,
+  revertCodexTurns,
+  runCodexInfoCommand,
+  unknownCodexCommand,
+  type CodexSkill,
+} from './codex-commands.js';
+import {
+  codexSessionsRoot,
+  findCodexRollout,
+  readFileSlice,
+  reviewRolloutUsage,
+  subAgentThreadIds,
+  subAgentUsage,
+  type CodexTokenTotals,
+} from './codex-rollout.js';
 
 // ─── Codex JSON event shapes (subset we consume) ────────────────────────────
 //
@@ -101,7 +144,23 @@ export function codexReasoningEffort(effort: EffortLevel | undefined): string | 
 
 // ─── PersistentCodexSession ─────────────────────────────────────────────────
 
+/** The planning prefix the engines without a plan mode take (as Claude Code's and the custom engines'). */
+const PLAN_PREFIX =
+  '[Planning Mode] Analyze the request and create a detailed plan only. Do not write code or make changes yet.';
+
+/** How long a compaction, review or shell command on the short-lived app-server may take. */
+const THREAD_JOB_TIMEOUT_MS = 600_000;
+/** How long the skills list is reused. */
+const SKILLS_CACHE_MS = 60_000;
+
+const ZERO: CodexTokenTotals = { input: 0, cached: 0, output: 0 };
+
 export class PersistentCodexSession extends BaseOneShotSession {
+  /** Commands are app-server RPCs, run on a short-lived app-server: slash text reaches the model as text. */
+  readonly commandStyle = 'rpc' as const;
+  /** Each turn is its own process, so `--model` can be this turn's alone. */
+  readonly perSendModel = true;
+
   /**
    * Captured from the first `thread.started` event. Each subsequent send()
    * issues `codex exec resume <id>` so the model sees prior turns.
@@ -159,6 +218,25 @@ export class PersistentCodexSession extends BaseOneShotSession {
    */
   private _codexModel?: string;
 
+  /** The main thread's cumulative usage as the last `turn.completed` gave it. */
+  private _mainTotals: CodexTokenTotals = { ...ZERO };
+  /** Sub-agent threads this thread started, and the usage each one's rollout last recorded. */
+  private _subAgents = new Map<string, { totals: CodexTokenTotals; model?: string }>();
+  /** How far the main rollout has been read for sub-agent ids. */
+  private _rolloutScanOffset = 0;
+  /** Usage no `turn.completed` reports: side questions, reviewers. */
+  private _extraTotals: CodexTokenTotals = { ...ZERO };
+  /** What has been priced so far, per bucket (`main`, a sub-agent's thread id). */
+  private _priced = new Map<string, CodexTokenTotals>();
+  /** Spend so far, each report priced at the model it ran on. */
+  private _costParts = { input: 0, cached: 0, output: 0 };
+  /** The model of the turn in flight when it was given per send. */
+  private _turnModel?: string;
+  /** The last request's prompt, for `contextBreakdown`. */
+  private _contextTokens = 0;
+  /** `skills/list`, reused for a minute. */
+  private _skills?: { at: number; skills: CodexSkill[] };
+
   constructor(config: SessionConfig, codexBin?: string) {
     super(config, codexBin || process.env.CODEX_BIN || 'codex', {
       enginePrefix: 'codex',
@@ -183,11 +261,22 @@ export class PersistentCodexSession extends BaseOneShotSession {
     return this.codexThreadId;
   }
 
-  /** Refuses a `codexConfig` or `codexFeatures` codex would not take before any turn runs. */
+  /** Refuses a `codexConfig`, `codexFeatures` or `turnCommand` codex would not take before any turn runs. */
   override async start(): Promise<this> {
     codexConfigArgs(this.options.codexConfig);
     codexFeatureArgs(this.options.codexFeatures);
+    codexTurnCommand(this.options.turnCommand);
     return super.start();
+  }
+
+  /**
+   * The message under the session's `turnCommand`: plan mode as the planning
+   * prefix (`codex exec` has no plan mode), a skill as Codex's `$name` mention.
+   */
+  applyTurnCommand(_command: string, message: string): string {
+    const tc = codexTurnCommand(this.options.turnCommand);
+    if (!tc) return message;
+    return 'plan' in tc ? `${PLAN_PREFIX}\n\n${message}` : `$${tc.skill} ${message}`;
   }
 
   protected override _continuesConversation(): boolean {
@@ -225,8 +314,7 @@ export class PersistentCodexSession extends BaseOneShotSession {
     if (this._rolloutRead || !threadId) return;
     this._rolloutRead = true;
     try {
-      const root = join(process.env.CODEX_HOME || join(homedir(), '.codex'), 'sessions');
-      const match = this._findRolloutFile(root, `-${threadId}.jsonl`);
+      const match = findCodexRollout(threadId);
       if (!match) return;
       this._rolloutPath = match;
 
@@ -324,34 +412,6 @@ export class PersistentCodexSession extends BaseOneShotSession {
   }
 
   /**
-   * Locate a thread's rollout under `sessions/<year>/<month>/<day>/`.
-   *
-   * Walks newest-first and stops at the first hit, so the usual case — a thread
-   * from today — costs a handful of small readdirs. A recursive listing would
-   * instead materialize every rollout the user has ever recorded, which for a
-   * long-lived fleet is tens of thousands of paths to find one file.
-   */
-  private _findRolloutFile(root: string, suffix: string): string | undefined {
-    const newestFirst = (dir: string): string[] =>
-      readdirSync(dir, { withFileTypes: true })
-        .filter((e) => e.isDirectory())
-        .map((e) => e.name)
-        .sort()
-        .reverse();
-
-    for (const year of newestFirst(root)) {
-      for (const month of newestFirst(join(root, year))) {
-        for (const day of newestFirst(join(root, year, month))) {
-          const dir = join(root, year, month, day);
-          const hit = readdirSync(dir).find((f) => f.endsWith(suffix));
-          if (hit) return join(dir, hit);
-        }
-      }
-    }
-    return undefined;
-  }
-
-  /**
    * Build the Codex spawn args for this turn.
    *
    * First turn:    `codex exec --sandbox W --skip-git-repo-check --json -C cwd … -`
@@ -361,7 +421,11 @@ export class PersistentCodexSession extends BaseOneShotSession {
    * The prompt is always on stdin (`-`); `lastMessagePath` is where codex
    * writes the turn's final message.
    */
-  private _buildArgs(images: readonly string[] | undefined, lastMessagePath: string): string[] {
+  private _buildArgs(
+    images: readonly string[] | undefined,
+    lastMessagePath: string,
+    turn: { model?: string; effort?: EffortLevel } = {},
+  ): string[] {
     const args: string[] = ['exec'];
     const isResume = !!this.codexThreadId;
     const isFork = !isResume && !!this._forkSourceId;
@@ -390,8 +454,10 @@ export class PersistentCodexSession extends BaseOneShotSession {
     // The engine-agnostic `jsonSchema` config is inline; Codex needs a path.
     const schemaPath = this._ensureSchemaFile();
     if (schemaPath) args.push('--output-schema', schemaPath);
-    if (this.options.model) args.push('--model', this.options.model);
-    args.push(...this._reasoningEffortArgs());
+    // A model or effort given for this send only: the next process goes back to the session's.
+    const model = turn.model ?? this.options.model;
+    if (model) args.push('--model', model);
+    args.push(...this._reasoningEffortArgs(turn.effort));
     // The caller's config overrides and feature switches, on every turn: like
     // the sandbox, nothing says a resumed thread keeps them. Keys the wrapper
     // sets itself were refused in start().
@@ -438,8 +504,8 @@ export class PersistentCodexSession extends BaseOneShotSession {
    * (`-c model_reasoning_effort=<level>`), which both `exec` and `exec resume`
    * accept.
    */
-  private _reasoningEffortArgs(): string[] {
-    const e = codexReasoningEffort(this.options.effort);
+  private _reasoningEffortArgs(effort?: EffortLevel): string[] {
+    const e = codexReasoningEffort(effort ?? this.options.effort);
     return e ? ['-c', `model_reasoning_effort=${e}`] : [];
   }
 
@@ -479,7 +545,9 @@ export class PersistentCodexSession extends BaseOneShotSession {
       tmpdir(),
       `claw-codex-last-${this.sessionId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.txt`,
     );
-    const args = this._buildArgs(options.images, lastMessagePath);
+    if (options.plan && !message.startsWith(PLAN_PREFIX)) message = `${PLAN_PREFIX}\n\n${message}`;
+    this._turnModel = options.model;
+    const args = this._buildArgs(options.images, lastMessagePath, { model: options.model, effort: options.effort });
     const timeout = options.timeout || 300_000;
 
     /** The final message codex wrote, if it wrote one; the file is removed either way. */
@@ -663,19 +731,24 @@ export class PersistentCodexSession extends BaseOneShotSession {
         // assigned; this brings `codex exec` in line with it.
         if (lastUsage) {
           const cumulativeIn = lastUsage.input_tokens ?? 0;
-          this._reportTurnInputTokens(cumulativeIn - (this._prevCumulativeIn ?? 0));
+          this._noteContext(cumulativeIn - (this._prevCumulativeIn ?? 0));
           this._prevCumulativeIn = cumulativeIn;
-          this._stats.tokensIn = cumulativeIn;
-          this._stats.tokensOut = (lastUsage.output_tokens ?? 0) + (lastUsage.reasoning_output_tokens ?? 0);
-          this._stats.cachedTokens = lastUsage.cached_input_tokens ?? 0;
+          this._mainTotals = {
+            input: cumulativeIn,
+            cached: lastUsage.cached_input_tokens ?? 0,
+            output: (lastUsage.output_tokens ?? 0) + (lastUsage.reasoning_output_tokens ?? 0),
+          };
         }
-        this._updateCost();
         // A fresh session has no rollout to read until its first turn has
-        // created one; retry now that the thread id is known.
+        // created one; retry now that the thread id is known. Read before the
+        // turn is priced, so its first turn bills at the model codex ran.
         this._readRollout();
+        this._updateCost();
+        // The sub-agents' usage, which `turn.completed` leaves out.
+        this._readSubAgents();
         // The context is the turn's last request, which only the rollout records.
         const lastRequestPrompt = this._lastRequestPrompt();
-        if (lastRequestPrompt !== undefined) this._reportTurnInputTokens(lastRequestPrompt);
+        if (lastRequestPrompt !== undefined) this._noteContext(lastRequestPrompt);
         // The answer alone when codex wrote it; every message of the turn when it
         // did not (a failed turn, or an older codex).
         const text = takeLastMessage() ?? assistantText;
@@ -719,5 +792,554 @@ export class PersistentCodexSession extends BaseOneShotSession {
   getStats(): ReturnType<BaseOneShotSession['getStats']> {
     const base = super.getStats();
     return { ...base, codexThreadId: this.codexThreadId };
+  }
+
+  // ── Usage and cost ─────────────────────────────────────────────────────
+
+  /** The last request's prompt size: the context figure, and `contextBreakdown`'s total. */
+  private _noteContext(tokens: number): void {
+    if (tokens <= 0) return;
+    this._contextTokens = tokens;
+    this._reportTurnInputTokens(tokens);
+  }
+
+  /**
+   * The session's totals: the main thread's, its sub-agents', and what no
+   * stream reports (side questions, reviewers). What was added since the last
+   * call is priced now, each part at the model it ran on, so a per-send model
+   * or a sub-agent's own model bills as itself.
+   */
+  protected override _updateCost(): void {
+    const turnModel = this._turnModel ?? this._billedModel();
+    this._price('main', this._mainTotals, turnModel);
+    for (const [id, sub] of this._subAgents) this._price(id, sub.totals, sub.model ?? turnModel);
+    let input = this._mainTotals.input + this._extraTotals.input;
+    let cached = this._mainTotals.cached + this._extraTotals.cached;
+    let output = this._mainTotals.output + this._extraTotals.output;
+    for (const sub of this._subAgents.values()) {
+      input += sub.totals.input;
+      cached += sub.totals.cached;
+      output += sub.totals.output;
+    }
+    this._stats.tokensIn = input;
+    this._stats.cachedTokens = cached;
+    this._stats.tokensOut = output;
+    this._stats.costUsd = this._costParts.input + this._costParts.cached + this._costParts.output;
+  }
+
+  private _price(bucket: string, now: CodexTokenTotals, model: string | undefined): void {
+    const prev = this._priced.get(bucket) ?? ZERO;
+    this._priced.set(bucket, { ...now });
+    this._addCost(model, {
+      input: Math.max(0, now.input - prev.input),
+      cached: Math.max(0, now.cached - prev.cached),
+      output: Math.max(0, now.output - prev.output),
+    });
+  }
+
+  private _addCost(model: string | undefined, d: CodexTokenTotals): void {
+    const pricing = getModelPricing(model, 'gpt-5.5');
+    this._costParts.input += (Math.max(0, d.input - d.cached) / 1_000_000) * pricing.input;
+    this._costParts.cached += (d.cached / 1_000_000) * (pricing.cached ?? 0);
+    this._costParts.output += (d.output / 1_000_000) * pricing.output;
+  }
+
+  /** Add usage no `turn.completed` reports, priced at `model`. */
+  private _addExtraUsage(usage: CodexTokenTotals, model?: string): void {
+    this._extraTotals = {
+      input: this._extraTotals.input + usage.input,
+      cached: this._extraTotals.cached + usage.cached,
+      output: this._extraTotals.output + usage.output,
+    };
+    this._addCost(model ?? this._billedModel(), usage);
+    this._updateCost();
+  }
+
+  override getCost(): CostBreakdown {
+    const base = super.getCost();
+    return {
+      ...base,
+      breakdown: {
+        inputCost: this._costParts.input,
+        cachedCost: this._costParts.cached,
+        outputCost: this._costParts.output,
+      },
+    };
+  }
+
+  /**
+   * Read the sub-agents' usage from their rollouts: their ids from what the
+   * main rollout gained since the last read, each one's total from its own.
+   * Best effort; an `--ephemeral` thread has no rollouts.
+   */
+  private _readSubAgents(): void {
+    if (!this._rolloutPath || this.options.noSessionPersistence) return;
+    try {
+      const { text, size } = readFileSlice(this._rolloutPath, { from: this._rolloutScanOffset });
+      // Up to the last full line: a torn one is read again next time.
+      const cut = text.lastIndexOf('\n');
+      if (cut >= 0) this._rolloutScanOffset += Buffer.byteLength(text.slice(0, cut + 1));
+      else if (size < this._rolloutScanOffset) this._rolloutScanOffset = 0;
+      for (const id of subAgentThreadIds(cut >= 0 ? text.slice(0, cut + 1) : '')) {
+        if (!this._subAgents.has(id)) this._subAgents.set(id, { totals: { ...ZERO } });
+      }
+      if (!this._subAgents.size) return;
+      for (const u of subAgentUsage([...this._subAgents.keys()], codexSessionsRoot())) {
+        this._subAgents.set(u.threadId, { totals: u.totals, model: u.model });
+      }
+      this._updateCost();
+    } catch {
+      // Best effort: the main thread's usage stands.
+    }
+  }
+
+  // ── The short-lived app-server ─────────────────────────────────────────
+
+  /** Spawn options for a short-lived app-server that sees what this session's turns see. */
+  codexClientOptions(): { bin: string; cwd?: string; launcher?: readonly string[]; args: string[] } {
+    return {
+      bin: this.engineBin,
+      cwd: this.options.cwd,
+      launcher: this.options.launcher,
+      args: [
+        ...codexConfigArgs(this.options.codexConfig),
+        ...codexFeatureArgs(this.options.codexFeatures),
+        ...this._reasoningEffortArgs(),
+      ],
+    };
+  }
+
+  /** The thread, or why there is none to work on. */
+  private _requireThread(what: string): string {
+    if (!this.codexThreadId) throw new Error(`${what} needs the session's thread; send a first message`);
+    if (this.options.noSessionPersistence) {
+      throw new Error(
+        `${what} loads the thread in another codex process, and an ephemeral thread (noSessionPersistence) has no rollout to load`,
+      );
+    }
+    return this.codexThreadId;
+  }
+
+  /** Run `fn` with this session's thread loaded on a short-lived app-server. No turn may be running. */
+  private async _withThread<T>(what: string, fn: (client: CodexAppClient, threadId: string) => Promise<T>): Promise<T> {
+    const threadId = this._requireThread(what);
+    if (this.isBusy) throw new Error(`${what}: a turn is running on the thread; wait for it to end`);
+    return withCodexAppClient(this.codexClientOptions(), async (client) => {
+      await client.request('thread/resume', {
+        threadId,
+        ...(this.options.cwd ? { cwd: this.options.cwd } : {}),
+        ...(this.options.model ? { model: this.options.model } : {}),
+        sandbox: this.options.sandboxMode || 'workspace-write',
+        approvalPolicy: 'never',
+        excludeTurns: true,
+      });
+      return fn(client, threadId);
+    });
+  }
+
+  /**
+   * Start a turn on the loaded thread and wait for it to end: the root turn
+   * the response names, or, when it names none, the first root turn of the
+   * thread to end. Returns what the turn left.
+   */
+  private async _threadTurn(
+    client: CodexAppClient,
+    threadId: string,
+    start: () => Promise<unknown>,
+    timeoutMs: number,
+  ): Promise<{
+    status: string;
+    review?: string;
+    answer?: string;
+    shell?: { output: string; exitCode: number | null };
+    error?: string;
+    lastTokens?: number;
+  }> {
+    type Note = {
+      threadId?: string;
+      turnId?: string;
+      turn?: { id?: string; rootTurnId?: string | null; status?: string; error?: { message?: string } | null };
+      item?: Record<string, unknown>;
+      tokenUsage?: { last?: { inputTokens?: number; totalTokens?: number } };
+    };
+    const ended = new Map<string, Note>();
+    const out: {
+      review?: string;
+      answer?: string;
+      shell?: { output: string; exitCode: number | null };
+      lastTokens?: number;
+    } = {};
+    let wake: (() => void) | undefined;
+    const onNote = (method: string, params: unknown) => {
+      const p = (params ?? {}) as Note;
+      if (p.threadId !== threadId) return;
+      if (method === 'item/completed' && p.item) {
+        if (p.item.type === 'exitedReviewMode' && typeof p.item.review === 'string') out.review = p.item.review;
+        if (p.item.type === 'agentMessage' && typeof p.item.text === 'string') out.answer = p.item.text;
+        if (p.item.type === 'commandExecution' && p.item.source === 'userShell') {
+          out.shell = {
+            output: typeof p.item.aggregatedOutput === 'string' ? p.item.aggregatedOutput : '',
+            exitCode: typeof p.item.exitCode === 'number' ? p.item.exitCode : null,
+          };
+        }
+      } else if (method === 'thread/tokenUsage/updated') {
+        const last = p.tokenUsage?.last;
+        const n = last?.inputTokens && last.inputTokens > 0 ? last.inputTokens : last?.totalTokens;
+        if (typeof n === 'number' && n > 0) out.lastTokens = n;
+      } else if (method === 'turn/completed' && p.turn?.id && (!p.turn.rootTurnId || p.turn.rootTurnId === p.turn.id)) {
+        ended.set(p.turn.id, p);
+        wake?.();
+      }
+    };
+    client.on('notification', onNote);
+    try {
+      const resp = (await start()) as { turn?: { id?: string } } | undefined;
+      const id = resp?.turn?.id;
+      const deadline = Date.now() + timeoutMs;
+      const pick = (): Note | undefined => (id ? ended.get(id) : [...ended.values()][0]);
+      let done = pick();
+      while (!done) {
+        const left = deadline - Date.now();
+        if (left <= 0) throw new Error(`codex app-server: the turn did not end within ${timeoutMs} ms`);
+        await new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(resolve, left);
+          wake = () => {
+            clearTimeout(timer);
+            resolve();
+          };
+          client.once('close', () => {
+            clearTimeout(timer);
+            reject(new Error('codex app-server exited before the turn ended'));
+          });
+        });
+        done = pick();
+      }
+      return {
+        status: done.turn?.status ?? 'completed',
+        ...out,
+        ...(done.turn?.error?.message ? { error: done.turn.error.message } : {}),
+      };
+    } finally {
+      client.off('notification', onNote);
+    }
+  }
+
+  // ── Capabilities ───────────────────────────────────────────────────────
+
+  /**
+   * Compact the thread on a short-lived app-server (`thread/resume`, then
+   * `thread/compact/start`), and resolve when the compaction's turn has ended.
+   * The next `codex exec resume` goes on from the compacted thread. Codex
+   * compacts with its own prompt; `summary` is not used.
+   */
+  async compactDetailed(_summary?: string): Promise<CompactOutcome> {
+    const preTokens = this._contextTokens;
+    // Nothing to compact, and no process to start: said, not thrown, so an
+    // auto-compaction gate does not fail the send it runs before.
+    if (!this.codexThreadId) {
+      return { ok: false, trigger: 'manual', note: 'nothing to compact yet: the thread starts with the first message' };
+    }
+    if (this.options.noSessionPersistence) {
+      return {
+        ok: false,
+        trigger: 'manual',
+        note: 'an ephemeral thread (noSessionPersistence) has no rollout another codex process can load to compact it',
+      };
+    }
+    const turn = await this._withThread('compaction', (client, threadId) =>
+      this._threadTurn(
+        client,
+        threadId,
+        () => client.request('thread/compact/start', { threadId }),
+        THREAD_JOB_TIMEOUT_MS,
+      ),
+    );
+    const ok = turn.status === 'completed';
+    if (ok && turn.lastTokens) this._noteContext(turn.lastTokens);
+    return {
+      ok,
+      trigger: 'manual',
+      ...(preTokens > 0 ? { preTokens } : {}),
+      ...(ok && turn.lastTokens && turn.lastTokens !== preTokens ? { postTokens: turn.lastTokens } : {}),
+      ...(ok ? {} : { note: turn.error ?? `the compaction ended ${turn.status}` }),
+    };
+  }
+
+  /** `compact()` is `compactDetailed()` as a TurnResult. */
+  override async compact(summary?: string): Promise<TurnResult> {
+    const outcome = await this.compactDetailed(summary);
+    const text = outcome.ok
+      ? 'Codex thread compacted'
+      : `Codex thread compaction failed${outcome.note ? `: ${outcome.note}` : ''}`;
+    return { text, event: { type: 'result', result: text, ...(outcome.ok ? {} : { is_error: true }) } };
+  }
+
+  /**
+   * A side question (`thread/sample` on a short-lived app-server): answered
+   * from the thread's context after its latest turn, not added to it, no tools.
+   */
+  async askAside(question: string, opts: { timeout?: number } = {}): Promise<AsideOutcome> {
+    // Loading the thread appends to its rollout, which a running `codex exec`
+    // writes too: the aside waits for no turn, it refuses beside one.
+    const resp = await this._withThread('a side question', async (client, threadId) => {
+      const expectedTurnId = await latestCodexTurnId(client, threadId);
+      if (!expectedTurnId) throw new Error('a side question samples the thread after a turn; send a first message');
+      return (await client.request(
+        'thread/sample',
+        { threadId, expectedTurnId, prompt: question },
+        opts.timeout || TURN_TIMEOUT_MS,
+      )) as {
+        text?: string | null;
+        inputTokens?: number | null;
+        cachedInputTokens?: number | null;
+        outputTokens?: number | null;
+      };
+    });
+    this._addExtraUsage({
+      input: resp?.inputTokens ?? 0,
+      cached: resp?.cachedInputTokens ?? 0,
+      output: resp?.outputTokens ?? 0,
+    });
+    if (typeof resp?.text !== 'string') {
+      throw new Error(
+        'the side question got no text answer: the model tried to call a tool, which a side question cannot',
+      );
+    }
+    return { text: resp.text };
+  }
+
+  /** Drop the last `turns` turns (`thread/revert` on a short-lived app-server); the files stay as they are. */
+  async rewind(target: RewindTarget): Promise<RewindOutcome> {
+    if (target.messageId !== undefined)
+      throw new Error('codex rewinds by turns (thread/revert), not to a message; give turns');
+    if (target.files) {
+      throw new Error(
+        'restoring files on rewind is not supported on codex: thread/revert changes the conversation only; omit files',
+      );
+    }
+    const turns = target.turns ?? 1;
+    await this._withThread('rewind', (client, threadId) => revertCodexTurns(client, threadId, turns));
+    // The reverted thread goes on in a rollout file of its own: read that one from now on.
+    this._rolloutRead = false;
+    this._rolloutPath = undefined;
+    this._rolloutScanOffset = 0;
+    return { ok: true, turnsRemoved: turns, filesRestored: false };
+  }
+
+  /** Each turn is a new process: the next one runs `--model <model>`. */
+  async setModelLive(model: string): Promise<boolean> {
+    this.options.model = model;
+    return true;
+  }
+
+  /** Each turn is a new process: the next one takes the effort. */
+  async setEffortLive(_level: EffortLevel): Promise<boolean> {
+    return true;
+  }
+
+  /** The last request's prompt against the window codex enforces; codex gives no categories. */
+  async contextBreakdown(): Promise<ContextBreakdown | undefined> {
+    if (this._contextTokens <= 0) return undefined;
+    const window = this._effectiveContextWindow();
+    return { totalTokens: this._contextTokens, ...(window ? { windowTokens: window } : {}) };
+  }
+
+  // ── Commands ───────────────────────────────────────────────────────────
+
+  private async _listSkills(): Promise<CodexSkill[]> {
+    if (this._skills && Date.now() - this._skills.at < SKILLS_CACHE_MS) return this._skills.skills;
+    const skills = await withCodexAppClient(this.codexClientOptions(), (client) =>
+      listCodexSkills(client, this.options.cwd),
+    );
+    this._skills = { at: Date.now(), skills };
+    return skills;
+  }
+
+  /** The built-in commands and the directory's enabled skills. */
+  async listCommands(): Promise<EngineCommand[]> {
+    const builtins = codexBuiltinCommands({
+      engine: 'codex',
+      sandboxMode: this.options.sandboxMode || 'workspace-write',
+    });
+    let skills: CodexSkill[] = [];
+    try {
+      skills = await this._listSkills();
+    } catch (err) {
+      this.emit(SESSION_EVENT.LOG, `[codex] skills/list failed: ${(err as Error).message}`);
+    }
+    return [...builtins, ...codexSkillCommands(skills, builtins)];
+  }
+
+  /**
+   * Run a command: an info list, `exec`, and the reads of the stored thread
+   * (`thread`, `items`, `search`) on a short-lived app-server; `rename`,
+   * `memories <arg>`, `compact`, `review`, `inject`, `shell` with the thread
+   * loaded on one; `init` and a skill as a turn (`$name` for a skill). Slash
+   * text is never sent: Codex reads it as a prompt.
+   */
+  async runCommand(
+    name: string,
+    args?: string,
+    opts: { timeout?: number; callbacks?: StreamCallbacks } = {},
+  ): Promise<CommandOutcome> {
+    if (!this.isReady) throw new Error('Session not ready. Call start() first.');
+    const timeout = opts.timeout || TURN_TIMEOUT_MS;
+    switch (name) {
+      case 'rollout': {
+        const file = this.codexThreadId ? (this._rolloutPath ?? findCodexRollout(this.codexThreadId)) : undefined;
+        return {
+          name,
+          ok: !!file,
+          text:
+            file ??
+            (this.codexThreadId
+              ? 'the thread has no rollout file (an ephemeral thread writes none)'
+              : "the session's thread starts with the first message"),
+          data: { path: file ?? null },
+          startedTurn: false,
+        };
+      }
+      case 'compact': {
+        const outcome = await this.compactDetailed();
+        return {
+          name,
+          ok: outcome.ok,
+          text: outcome.ok ? 'compacted' : (outcome.note ?? 'the compaction failed'),
+          data: outcome,
+          startedTurn: false,
+          ...(outcome.ok ? {} : { error: outcome.note }),
+        };
+      }
+      case 'review':
+        return this._runReview(args, timeout);
+      case 'init':
+        return this._commandTurn(name, CODEX_INIT_PROMPT, timeout, opts.callbacks);
+      case 'inject': {
+        const text = args?.trim();
+        if (!text) throw new Error('/inject takes the text to add to the thread');
+        await this._withThread('/inject', (client, threadId) =>
+          client.request('thread/inject_items', {
+            threadId,
+            items: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text }] }],
+          }),
+        );
+        return { name, ok: true, text: 'added to the thread history; the next turn reads it', startedTurn: false };
+      }
+      case 'shell':
+        return this._runShell(args, timeout);
+    }
+    const isBuiltin = codexBuiltinCommands({ engine: 'codex', sandboxMode: 'danger-full-access' }).some(
+      (c) => c.name === name,
+    );
+    if (isBuiltin) {
+      // `memories` without an argument reads a status; with one, and `rename`, need the thread loaded.
+      const touchesThread = codexCommandNeedsThread(name) || (name === 'memories' && !!args?.trim());
+      const cwd = this.options.cwd ?? process.cwd();
+      const run = (client: CodexAppClient, threadId?: string) =>
+        runCodexInfoCommand(client, name, args, {
+          engine: 'codex',
+          cwd: this.options.cwd,
+          threadId,
+          sandboxPolicy: codexSandboxPolicy(
+            this.options.sandboxMode,
+            (this.options.addDir ?? []).map((d) => resolvePath(cwd, d)),
+          ),
+          timeoutMs: timeout,
+        });
+      let outcome: CommandOutcome | undefined;
+      if (touchesThread) outcome = await this._withThread(`/${name}`, (client, threadId) => run(client, threadId));
+      else if (codexCommandReadsStoredThread(name)) {
+        // The stored thread is read as it is, a turn in flight or not: nothing is loaded.
+        const threadId = this._requireThread(`/${name}`);
+        outcome = await withCodexAppClient(this.codexClientOptions(), (client) => run(client, threadId));
+      } else outcome = await withCodexAppClient(this.codexClientOptions(), (client) => run(client, this.codexThreadId));
+      if (outcome) return outcome;
+    }
+    const skill = (await this._listSkills()).find((s) => s.name === name && s.enabled);
+    if (skill) {
+      const text = args?.trim();
+      return this._commandTurn(name, `$${skill.name}${text ? ` ${text}` : ''}`, timeout, opts.callbacks);
+    }
+    throw unknownCodexCommand(name, 'codex');
+  }
+
+  /** A command that runs one model turn (`init`, a skill), as a CommandOutcome. */
+  private async _commandTurn(
+    name: string,
+    text: string,
+    timeout: number,
+    callbacks: StreamCallbacks | undefined,
+  ): Promise<CommandOutcome> {
+    try {
+      const r = (await this.send(text, { waitForComplete: true, timeout, callbacks })) as TurnResult;
+      return { name, ok: true, text: r.text, startedTurn: true };
+    } catch (err) {
+      return { name, ok: false, text: '', startedTurn: true, error: (err as Error).message };
+    }
+  }
+
+  /**
+   * `review/start` on the thread, loaded on a short-lived app-server: inline,
+   * as the TUI's /review. The answer is the `exitedReviewMode` item. The
+   * reviewer reports no usage while it runs, so its rollout is read after.
+   * Counted as a turn of this session.
+   */
+  private async _runReview(args: string | undefined, timeout: number): Promise<CommandOutcome> {
+    const since = Date.now();
+    const turn = await this._withThread('/review', (client, threadId) =>
+      this._threadTurn(
+        client,
+        threadId,
+        () => client.request('review/start', { threadId, target: codexReviewTarget(args) }),
+        Math.max(timeout, THREAD_JOB_TIMEOUT_MS),
+      ),
+    );
+    const ok = turn.status === 'completed';
+    this._recordTurnComplete(ok);
+    if (this.codexThreadId) {
+      const reviewer = reviewRolloutUsage(this.codexThreadId, since);
+      if (reviewer.totals) this._addExtraUsage(reviewer.totals, reviewer.model);
+    }
+    const text = turn.review ?? turn.answer ?? '';
+    this._addHistory({ text, code: ok ? 0 : 1 });
+    return {
+      name: 'review',
+      ok,
+      text,
+      startedTurn: true,
+      ...(ok ? {} : { error: turn.error ?? `the review ended ${turn.status}` }),
+    };
+  }
+
+  /**
+   * `thread/shellCommand`, the TUI's `!cmd`, on a short-lived app-server. It
+   * runs unsandboxed, so only a `danger-full-access` session runs it.
+   */
+  private async _runShell(args: string | undefined, timeout: number): Promise<CommandOutcome> {
+    if ((this.options.sandboxMode || 'workspace-write') !== 'danger-full-access') {
+      throw new Error(
+        '/shell runs its command unsandboxed (thread/shellCommand), so it runs only on a danger-full-access session',
+      );
+    }
+    const command = args?.trim();
+    if (!command) throw new Error('/shell takes the command to run');
+    const turn = await this._withThread('/shell', (client, threadId) =>
+      this._threadTurn(
+        client,
+        threadId,
+        () => client.request('thread/shellCommand', { threadId, command, timeoutMs: timeout }),
+        timeout + 5_000,
+      ),
+    );
+    const exitCode = turn.shell?.exitCode ?? null;
+    const ok = turn.status === 'completed' && (exitCode === null || exitCode === 0);
+    return {
+      name: 'shell',
+      ok,
+      text: turn.shell?.output ?? '',
+      data: { exitCode },
+      startedTurn: false,
+      ...(ok ? {} : { error: `the command exited with ${exitCode ?? turn.status}` }),
+    };
   }
 }

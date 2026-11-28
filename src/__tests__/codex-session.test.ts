@@ -721,20 +721,27 @@ describe('PersistentCodexSession', () => {
     session.stop();
   });
 
-  // The openai-compat auto-compaction gate calls compact() and discards the
-  // result, so a one-shot engine's inability to compact was invisible: the
-  // thread grew until the CLI refused it with nothing in the log explaining why.
-  it('warns once on the log channel when asked to compact', async () => {
+  // Compaction runs on a short-lived app-server that loads the thread; before
+  // the first turn there is no thread, and an ephemeral one cannot be loaded.
+  // Either is said in the outcome, with no process started.
+  it('reports nothing to compact before the first turn, and on an ephemeral thread, without spawning', async () => {
     const session = new PersistentCodexSession({ name: 'test', cwd: '/tmp' });
     await session.start();
-    const logs: string[] = [];
-    session.on('log', (line: string) => logs.push(line));
-
-    await session.compact();
-    await session.compact();
-
-    expect(logs.filter((l) => l.includes('does not support compaction'))).toHaveLength(1);
+    expect(await session.compactDetailed()).toMatchObject({ ok: false, note: expect.stringMatching(/first message/) });
+    const compacted = await session.compact();
+    expect(compacted.event.is_error).toBe(true);
     session.stop();
+
+    const ephemeral = new PersistentCodexSession({
+      name: 'eph',
+      cwd: '/tmp',
+      noSessionPersistence: true,
+      resumeSessionId: '01a2210c-e7ad-7b93-bdd3-a2f233145aef',
+    });
+    await ephemeral.start();
+    expect(await ephemeral.compactDetailed()).toMatchObject({ ok: false, note: expect.stringMatching(/ephemeral/) });
+    expect(mockSpawn).not.toHaveBeenCalled();
+    ephemeral.stop();
   });
 
   // `turns` counts turns that reached the engine; `turnsSucceeded` counts the ones

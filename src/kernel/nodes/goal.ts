@@ -1,15 +1,17 @@
 /**
  * `goal` node — a `/goal` run on one thread: a Codex `codex-app` thread, a
- * Claude Code session (`engine: 'claude'`), or a conversation on an engine with
- * no goal loop of its own (`agy`, `grok`, `opencode`, `acp`), where
- * `TurnGoalSession` runs the loop turn by turn.
+ * Claude Code session (`engine: 'claude'`), or a conversation on another engine
+ * (`agy`, `grok`, `cursor`, `opencode`, `acp`), where `TurnGoalSession` runs the
+ * loop turn by turn unless `nativeGoal` asks for the engine's own.
  *
  * Codex's app-server runs a goal itself: `thread/goal/set` starts its turn loop,
  * which keeps going until the goal is `complete`, out of budget, blocked, or
  * stopped by a usage limit. Claude Code's `/goal` keeps a session working the
  * same way, through a Stop hook; `ClaudeGoalSession` puts it behind the same
  * surface, and `TurnGoalSession` does for the rest, so everything below holds
- * for every engine. What the kernel adds is what a
+ * for every engine. With `nativeGoal`, an engine that has a goal loop of its own
+ * runs it behind the same surface (`ISession.nativeGoalSession`) instead of
+ * `TurnGoalSession`. What the kernel adds is what a
  * long unattended run needs around that loop:
  *
  *  - **Reattach, never restart.** The thread id is checkpointed as soon as the
@@ -495,11 +497,16 @@ export async function executeGoalNode(node: NodeSpec, ctx: NodeContext): Promise
       tokensUsed: data.tokensUsed,
       timeUsedSeconds: data.timeUsedSeconds,
     };
-    const live = manager.goalSession
-      ? manager.goalSession(sessionName, opening)
-      : claude
-        ? undefined
-        : manager.codexGoalSession?.(sessionName);
+    let live: GoalSession | undefined;
+    try {
+      live = manager.goalSession
+        ? manager.goalSession(sessionName, opening, spec.nativeGoal ? { native: true } : undefined)
+        : claude
+          ? undefined
+          : manager.codexGoalSession?.(sessionName);
+    } catch (err) {
+      return (err as Error).message;
+    }
     if (!live) return `the ${engineName} session has no goal surface`;
     if (!live.codexThreadId && !turns) return `the ${engineName} session has no thread`;
     if (threadId && live.codexThreadId !== threadId) {

@@ -49,6 +49,7 @@ export const TOOL_ANNOTATIONS: Record<string, ToolAnnotation> = {
   ultraapp_list: { readOnlyHint: true, idempotentHint: true },
   ultraapp_get: { readOnlyHint: true, idempotentHint: true },
   ultraapp_status: { readOnlyHint: true, idempotentHint: true },
+  engine_quota: { readOnlyHint: true, idempotentHint: true },
   // destructive
   session_stop: { destructiveHint: true },
   council_abort: { destructiveHint: true },
@@ -64,6 +65,7 @@ export const TOOL_ANNOTATIONS: Record<string, ToolAnnotation> = {
   ultraapp_promote_version: { destructiveHint: true },
   ultraapp_stop_container: { destructiveHint: true },
   ultraapp_delete: { destructiveHint: true },
+  session_rewind: { destructiveHint: true },
   // mutating + open-world (call external model APIs)
   session_start: { openWorldHint: true },
   session_send: { openWorldHint: true },
@@ -87,6 +89,8 @@ export const TOOL_ANNOTATIONS: Record<string, ToolAnnotation> = {
   codex_goal_resume: { openWorldHint: true },
   codex_goal_clear: {},
   session_compact: { openWorldHint: true },
+  session_command: { openWorldHint: true },
+  session_aside: { openWorldHint: true },
   session_update_tools: {},
   session_switch_model: {},
   claude_goal_set: { openWorldHint: true },

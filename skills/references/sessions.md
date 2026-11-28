@@ -58,6 +58,43 @@ Sends to one session run one at a time: a second `sendMessage()` waits for the f
 
 `SendOptions` also accepts `parentRunId`, `nodeKind` and `taskKind`, all stamped onto the turn's run ledger row ([observability.md](./observability.md)). `taskKind` is caller-declared and never inferred from the prompt.
 
+`model` runs this one message on another model, on an engine whose session takes a model per send; the session's own model is unchanged. Any other engine refuses the message before the turn starts, as it does for `images`; switch the session with `switchModel()` there.
+
+A reply the engine gave itself — an info command that ran no model, such as a bare `/goal` or `/help` — comes back with `localCommand: true`. It is not a turn: it has no ledger row, it is not carried by a handoff, and it leaves the context figure as the last turn left it.
+
+### Engine commands
+
+`listSessionCommands()` and `runSessionCommand()` (tool: `session_command`, CLI: `clawo session-command`) reach a session's engine commands: slash commands, skills, custom commands, and engine RPCs. A session says how its engine takes them:
+
+- `commandStyle: 'text'` — a `/name args` message is a command. A command runs through the session's own command call when it has one, else as that message.
+- `commandStyle: 'rpc'` — only through the session's command call (an app-server request, for example).
+- neither — the engine takes no commands, and both calls fail with `running engine commands is not supported on <engine>`.
+
+Each listed command says whether it starts an agent turn (`startsTurn`). One that does waits for the message in flight, like a send, and has a ledger row; an info command that does not runs at once. A command the engine lists as needing a person (`needsHuman`: a picker, an interview, a TUI screen) is refused, and so is a name the engine's full listing does not have: sent as `/name`, it would reach the model as a paid message (`sendMessage()` sends such text as a message). [multi-engine.md](./multi-engine.md) lists what each engine has.
+
+### Turn command
+
+`turnCommand` (a session field: `session_start`, `clawo session-start --turn-command`, and a `clawo config` key) is an engine command every message of the session goes through — `/boost` or `/teamwork` on Antigravity, `/best-of-n` on Cursor:
+
+```typescript
+await manager.startSession({ name: 'big-task', engine: 'agy', cwd: '/repo', turnCommand: '/boost' });
+await manager.sendMessage('big-task', 'Port the parser to Rust'); // sent as "/boost Port the parser to Rust"
+```
+
+A message that is itself a command (it starts with `/`) is sent as it is. An engine may adapt the command to the message (`applyTurnCommand`); otherwise a text-command engine gets `/<command> <message>`. A session on an engine whose messages take no commands is refused at start, before anything spawns. It applies to the messages sent through the session manager (`session_send`, inbox deliveries, workflow agent nodes), not to the turns a goal runs. Set it per engine in the defaults file, not under `defaults`: a session on an engine without commands would refuse to start.
+
+### Side questions and rewinds
+
+`askAside()` (tool: `session_aside`) answers a question from the session's conversation without adding to it and without tools. `rewindSession()` (tool: `session_rewind`) drops the last `turns` turns, or goes back to `messageId`, after any message in flight; `files: true` also restores the files those turns changed, where the engine can. A rewind also drops those turns from what a later `handoffSession()` carries. On `codex-app` a rewind by turns is `thread/revert` (as `codex_rollback`), which keeps the files. An engine without either fails with `… is not supported on <engine>`.
+
+### Quota
+
+`engineQuota(engine?)` and `sessionQuota(name)` (tool: `engine_quota`, CLI: `clawo quota`) read how much of an engine account's usage quota is left: each window (`5h`, `weekly`, credits, …) with its used or remaining percentage and reset time, and where the figure was read. Each engine's reader registers itself in `src/engine-quota.ts`; a reader that needs a live session (a figure the engine reports during turns) is given the engine's most recently active session. A reader that fails, takes more than 30 seconds, or has nothing to read is listed in `unavailable`; an engine with no reader fails with `quota is not supported on <engine>`.
+
+### Turns the engine starts itself
+
+Some turns start without a send: a `/loop` tick, a scheduled wakeup, a background workflow or sub-agent reporting back. The session never hands such a result to a waiting send and never counts it in `turnsSucceeded`; it emits it as `SESSION_EVENT.UNSOLICITED_RESULT`. The session manager records each one in the run ledger as its own row with `origin: 'engine'`, so a send's row never includes it, and keeps the last five on the session (`coding_session_status` `engineTurns`: time, the end of the reply, outcome, tokens and cost). It routes them nowhere else: not to a waiting caller, not to a forum. On a session a goal drives, the spend is the goal's, which its node reports, so such a turn is kept on the status but has no row.
+
 ### Session Persistence
 
 A session is recorded in the resume registry, `~/.openclaw/claude-sessions.json` (the directory can be moved with `CLAWO_SESSIONS_DIR`), once its engine has reported a resume id:
@@ -196,7 +233,7 @@ start, so a change applies without a restart; unknown fields and values are igno
 
 ### Model Switching
 
-Switch models mid-conversation with `switchModel()` (tool: `session_switch_model`). The session restarts on the new model and resumes the engine's own conversation by its resume id, so history is preserved:
+Switch models mid-conversation with `switchModel()` (tool: `session_switch_model`). Where the engine can switch in place, it does — no restart, nothing reloaded — and the result says `live: true`. Otherwise the session restarts on the new model and resumes the engine's own conversation by its resume id, so history is preserved (`live: false`):
 
 ```typescript
 await manager.switchModel('my-task', 'haiku'); // fast model for simple tasks
@@ -204,6 +241,8 @@ await manager.switchModel('my-task', 'opus'); // back to powerful model
 ```
 
 The switch is refused while a turn is running, for a model the registry does not know (a `provider/model` string is accepted; on `agy` any name is, since agy lists models the registry has no entry for — an effort suffix, its orchestrators, other vendors' models it serves — and refuses an unknown one at the next turn), and for a session with no resume id yet — except `agy`, which then restarts fresh. Over HTTP, `POST /session/model` with `"now": true` switches this way; without it the model is only stored, as `setModel()` does. If the restart fails, the session is restarted with its old configuration and the call throws. `setModel()` only changes the stored model, which takes effect at the next restart.
+
+`switchEffort()` (`POST /session/effort`) does the same for effort: in place where the engine can (`live: true`), otherwise from the next turn. `setEffort()` only stores it for the next turn.
 
 ### Claude Account Rotation
 
@@ -250,20 +289,23 @@ unset), so it only grows (and a one-shot `custom` engine reports 0).
 `stats.tokensIn` is the different question of how many input tokens the session
 has been billed for in total, which only ever grows.
 
-`compactSession()` runs `/compact` (with the optional summary) on `claude` and a
-persistent `custom` engine, and starts the thread's own compaction on `codex-app`.
+`compactSession()` runs after any message in flight and returns
+`{ ok, trigger, preTokens?, postTokens?, note? }`. It runs `/compact` (with the
+optional summary) on `claude` and a persistent `custom` engine, and starts the
+thread's own compaction on `codex-app`. An engine that compacts in the background
+(`compactDetailed`) is waited for, and reports the token counts before and after.
 A `claude` session started with `disableSlashCommands` refuses it with an error,
 since `/compact` would reach the model as text. On `agy` it runs agy's own `/compact`
 as a turn of its own, with slash commands on for that turn whatever the session says
 (an agy session with no conversation yet has nothing to compact).
-It is a no-op on the one-shot engines whose CLI has no compaction command (`codex`,
-`grok`, `cursor`, `opencode`), which log a warning the first time it is called, and a
-silent no-op on `acp` agents, which manage their own context, and on one-shot
-`custom` engines.
+It fails with `compaction is not supported on <engine>` on the one-shot engines whose
+CLI has no compaction command (`codex`, `grok`, `cursor`, `opencode`), on `acp`
+agents, which manage their own context, and on one-shot `custom` engines.
 
 A long-lived session can compact itself: start it with `autoCompactPercent`
 (1–99, off by default) and, before each send, the session is compacted first
-if `contextPercent` has reached that value. Every call in a turn re-reads the
+if `contextPercent` has reached that value, and the send waits until the
+compaction is done. Every call in a turn re-reads the
 whole context from cache, so cost grows with context size; compacting earlier
 trades detail of older turns for cheaper ones. The setting survives a restart
 of the server, and a failed compaction never costs the send.

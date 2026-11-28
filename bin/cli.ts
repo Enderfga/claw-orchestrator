@@ -202,7 +202,7 @@ addSessionFlags(
     program
       .command('session-start [name]')
       .description(
-        'Start a persistent coding session on any engine: -e <engine> or --claude / --codex / --codex-app / --agy / --grok / --opencode / --acp <preset> / --custom <preset>. Without one, the configured default engine (`clawo config`; Claude Code out of the box)',
+        'Start a persistent coding session on any engine: -e <engine> or --claude / --codex / --codex-app / --agy / --grok / --cursor / --opencode / --acp <preset> / --custom <preset>. Without one, the configured default engine (`clawo config`; Claude Code out of the box)',
       )
       .option('-e, --engine <engine>', 'Engine: claude, codex, codex-app, agy, grok, opencode, acp, or custom'),
   ),
@@ -227,9 +227,10 @@ program
   .option('--message-file <file>', 'Read the message from a file (for long or dash-leading text)')
   .option('--effort <level>', 'Effort level')
   .option('--plan', 'Plan mode')
+  .option('-m, --model <model>', "The model for this message only; refused on an engine that can't take one per send")
   .option(
     '--image <path>',
-    'Attach an image (PNG, JPEG, GIF, WebP) to the message; repeatable. Claude Code, Codex, codex-app, Grok and OpenCode take images',
+    'Attach an image (PNG, JPEG, GIF, WebP) to the message; repeatable. Claude Code, Codex, codex-app, Grok, OpenCode and Cursor take images',
     collect,
     [],
   )
@@ -249,6 +250,7 @@ program
       message,
       effort: opts.effort,
       plan: opts.plan,
+      ...(opts.model ? { model: opts.model } : {}),
       ...(opts.image.length ? { images: (opts.image as string[]).map((p) => path.resolve(p)) } : {}),
       timeout: parseInt(opts.timeout),
     });
@@ -490,8 +492,129 @@ program
   .option('--summary <text>', 'Custom summary')
   .action(async (name, opts) => {
     const r = await api('/session/compact', 'POST', { name, summary: opts.summary });
-    if (r.ok) console.log('Compacted.');
-    else fail(r.error);
+    if (!r.ok) return fail(r.error ?? r.note ?? 'not compacted');
+    const tokens =
+      typeof r.preTokens === 'number' && typeof r.postTokens === 'number'
+        ? ` ${r.preTokens} → ${r.postTokens} tokens.`
+        : '';
+    console.log(`Compacted.${tokens}${r.note ? ` ${String(r.note)}` : ''}`);
+  });
+
+/** Call a plugin tool on the server; print its failure and return undefined when it failed. */
+async function callTool(tool: string, params: Record<string, unknown>): Promise<Record<string, unknown> | undefined> {
+  const r = await api(`/tool/${tool}`, 'POST', params);
+  if (r.ok === false) return void fail(r);
+  const result = (r.result ?? {}) as Record<string, unknown>;
+  if (result.ok === false) return void fail(result.error ?? result.note ?? result.text ?? 'failed');
+  return result;
+}
+
+program
+  .command('session-command <name> [command] [args...]')
+  .description(
+    "List a session's engine commands (no command), or run one: slash commands, skills, custom commands, engine RPCs",
+  )
+  .option('-t, --timeout <ms>', 'Timeout for a command that starts a turn')
+  .option('--json', 'Print the whole result as JSON')
+  .action(async (name: string, command: string | undefined, args: string[], opts) => {
+    const params = command
+      ? {
+          name,
+          action: 'run',
+          command,
+          ...(args.length ? { args: args.join(' ') } : {}),
+          ...(opts.timeout ? { timeout: parseInt(opts.timeout, 10) } : {}),
+        }
+      : { name, action: 'list' };
+    const r = await callTool('session_command', params);
+    if (!r) return;
+    if (opts.json) return console.log(JSON.stringify(r));
+    if (command) return console.log(String(r.text ?? ''));
+    const commands = (r.commands ?? []) as Array<{
+      name: string;
+      source: string;
+      description?: string;
+      startsTurn: boolean;
+      needsHuman?: boolean;
+    }>;
+    if (!commands.length) return console.log('No commands.');
+    const tagsOf = (c: (typeof commands)[number]) =>
+      [c.source, c.startsTurn ? 'turn' : 'info', ...(c.needsHuman ? ['needs a person'] : [])].join(', ');
+    // As wide as the longest name, up to a cap: one very long name only widens its own line.
+    const nameWidth = Math.min(32, Math.max(...commands.map((c) => c.name.length)));
+    const tagWidth = Math.max(...commands.map((c) => tagsOf(c).length));
+    for (const c of commands) {
+      // One line per command: an engine's description can span several.
+      const description = (c.description ?? '').replace(/\s+/g, ' ').trim();
+      console.log(`  /${c.name.padEnd(nameWidth)}  ${tagsOf(c).padEnd(tagWidth)}  ${description}`);
+    }
+  });
+
+program
+  .command('quota [engine]')
+  .description(
+    "How much of an engine account's usage quota is left: one engine, a session's, or every engine clawo can read",
+  )
+  .option('--session <name>', 'The quota of the account this session runs under')
+  .option('--json', 'Print the whole result as JSON')
+  .action(async (engine: string | undefined, opts) => {
+    const r = await callTool('engine_quota', {
+      ...(engine ? { engine } : {}),
+      ...(opts.session ? { name: opts.session } : {}),
+    });
+    if (!r) return;
+    if (opts.json) return console.log(JSON.stringify(r));
+    type Window = { name: string; usedPercent?: number; remainingPercent?: number; resetsAt?: string };
+    const quotas = (r.quotas ?? []) as Array<{ engine: string; plan?: string; source: string; windows: Window[] }>;
+    for (const q of quotas) {
+      console.log(`${q.engine}${q.plan ? ` (${q.plan})` : ''} — from ${q.source}`);
+      for (const w of q.windows) {
+        const left =
+          typeof w.remainingPercent === 'number'
+            ? `${w.remainingPercent}% left`
+            : typeof w.usedPercent === 'number'
+              ? `${w.usedPercent}% used`
+              : '';
+        console.log(`  ${w.name.padEnd(20)} ${left.padEnd(12)} ${w.resetsAt ? `resets ${w.resetsAt}` : ''}`);
+      }
+    }
+    for (const u of (r.unavailable ?? []) as Array<{ engine: string; reason: string }>) {
+      console.log(`${u.engine} — unavailable: ${u.reason}`);
+    }
+    if (!quotas.length && !((r.unavailable as unknown[]) ?? []).length) console.log('No engine has a quota reader.');
+  });
+
+program
+  .command('session-aside <name> <question>')
+  .description('Ask a session a side question, answered from its context without adding to its conversation')
+  .option('-t, --timeout <ms>', 'Timeout')
+  .action(async (name: string, question: string, opts) => {
+    const r = await callTool('session_aside', {
+      name,
+      question,
+      ...(opts.timeout ? { timeout: parseInt(opts.timeout, 10) } : {}),
+    });
+    if (r) console.log(String(r.text ?? ''));
+  });
+
+program
+  .command('session-rewind <name>')
+  .description(
+    "Rewind a session's conversation by turns, or to a message; --files restores the files too, where the engine can",
+  )
+  .option('--turns <n>', 'Turns to drop from the end')
+  .option('--message-id <id>', "Go back to this message (the engine's id) instead")
+  .option('--files', 'Restore the files the dropped turns changed, too')
+  .action(async (name: string, opts) => {
+    const r = await callTool('session_rewind', {
+      name,
+      ...(opts.turns !== undefined ? { turns: Number(opts.turns) } : {}),
+      ...(opts.messageId ? { messageId: opts.messageId } : {}),
+      ...(opts.files ? { files: true } : {}),
+    });
+    if (!r) return;
+    const removed = typeof r.turnsRemoved === 'number' ? ` ${r.turnsRemoved} turn(s) dropped.` : '';
+    console.log(`Rewound.${removed}${r.filesRestored ? ' Files restored.' : ''}${r.note ? ` ${String(r.note)}` : ''}`);
   });
 
 // Agent management
@@ -1203,7 +1326,7 @@ addEngineFlags(program.command('goal'), 'Run the goal on')
   .option('--objective-file <file>', 'Read the objective from a file')
   .option(
     '-e, --engine <engine>',
-    'Who runs the goal: claude | codex | agy | grok | opencode | acp (default: the configured default engine)',
+    'Who runs the goal: claude | codex | codex-app | agy | grok | cursor | opencode | acp (codex and codex-app both run a codex app-server thread; default: the configured default engine)',
   )
   .option('-m, --model <model>', "Model (default: the engine's own)")
   .option('--effort <level>', 'Reasoning effort')
@@ -1223,6 +1346,10 @@ addEngineFlags(program.command('goal'), 'Run the goal on')
     "Start on this existing thread (a codex thread, a claude session, another engine's conversation id): its goal is replaced, its history kept",
   )
   .option('--token-budget <n>', 'Tokens the goal may spend before it stops as budgetLimited')
+  .option(
+    '--native-goal',
+    "Run the engine's own goal loop instead of clawo's turn loop: agy, grok, cursor and OpenCode 2 have one (Claude Code and Codex run their own either way)",
+  )
   .option('--goal-timeout <minutes>', 'Wall-clock budget for one goal pass (default: none)')
   .option('-c, --check <command>', 'Acceptance check the runtime runs after the goal (repeatable)', collect, [])
   .option('--check-timeout <minutes>', 'Timeout for each --check (default 10)')
@@ -1300,6 +1427,7 @@ addEngineFlags(program.command('goal'), 'Run the goal on')
       launcher: opts.launcher.length ? opts.launcher : undefined,
       threadId: opts.thread,
       tokenBudget: opts.tokenBudget ? parseInt(opts.tokenBudget, 10) : undefined,
+      ...(opts.nativeGoal ? { nativeGoal: true } : {}),
       goalTimeoutMs: minutes(opts.goalTimeout),
       maxRepairs: Math.max(0, parseInt(opts.maxRepairs, 10) || 0),
       ...(opts.isolate ? { isolation: 'worktree' as const } : {}),

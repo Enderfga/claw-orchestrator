@@ -404,6 +404,8 @@ export interface GoalArgs extends CommonArgs {
   goalTimeoutMs?: number;
   /** How many times a red verifier may send the goal back. Default 1. */
   maxRepairs?: number;
+  /** The engine's own goal loop instead of clawo's (`GoalNode.nativeGoal`). */
+  nativeGoal?: boolean;
 }
 
 /**
@@ -432,6 +434,7 @@ export function goalWorkflow(args: GoalArgs): WorkflowSpec {
     threadId: args.threadId,
     tokenBudget: args.tokenBudget,
     timeoutMs: args.goalTimeoutMs,
+    ...(args.nativeGoal ? { nativeGoal: true } : {}),
     // A goal that ends out of budget or blocked still goes to the verifier, so
     // the verdict says what state the tree was left in.
     onFailure: 'continue',

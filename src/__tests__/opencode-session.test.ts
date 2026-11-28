@@ -13,6 +13,9 @@ import { Readable } from 'node:stream';
 
 import type { SessionConfig } from '../types.js';
 
+// These tests drive `opencode run` itself; the held server's path is in opencode-held-server.test.ts.
+process.env.CLAWO_OPENCODE_STANDALONE = '1';
+
 // Mock child_process before importing the session
 const mockSpawn = vi.fn();
 // `opencode --version`, keyed by binary — the session checks it once at start.

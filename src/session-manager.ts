@@ -209,7 +209,7 @@ import { compileSafeRegex, sanitizeCwd, validateImagePaths, validateName } from 
 import { defaultEngine, sessionDefaults } from './clawo-config.js';
 
 /** Engines whose wrapper passes `SendOptions.images` to the model. */
-const IMAGE_ENGINES = new Set<string>(['claude', 'codex', 'codex-app', 'grok', 'opencode']);
+const IMAGE_ENGINES = new Set<string>(['claude', 'codex', 'codex-app', 'grok', 'opencode', 'cursor']);
 import { PersistentClaudeSession } from './persistent-session.js';
 import {
   ClaudeAccountPool,
@@ -223,6 +223,7 @@ import {
 import {
   cloneTranscript,
   DEFAULT_HANDOFF_CHARS,
+  dropLastTurns,
   MIN_HANDOFF_CHARS,
   newTranscript,
   recordExchange,
@@ -268,9 +269,20 @@ import {
   type InboxMessage,
   type UltraplanResult,
   type UltrareviewResult,
+  type EngineCommand,
+  type CommandOutcome,
+  type CompactOutcome,
+  type RewindTarget,
+  type RewindOutcome,
+  type AsideOutcome,
+  type ContextBreakdown,
+  type EngineQuota,
+  type EngineTurn,
+  type TurnResult,
   overrideModelPricing,
   ENGINE_BINARY_NAMES,
 } from './types.js';
+import { quotaEngines, readEngineQuota } from './engine-quota.js';
 import {
   resolveAlias,
   isClaudeModel,
@@ -345,11 +357,22 @@ interface ManagedSession {
    */
   budgetExhausted?: boolean;
   /**
-   * Sends recorded in the run ledger for this session in this process — the
-   * row's `turn` index. Not `stats.turns`: on claude that counts every `user`
-   * event, one per tool-result batch, so it is not an index of anything.
+   * Rows recorded in the run ledger for this session in this process — the
+   * row's `turn` index: sends, and turns the engine started itself. Not
+   * `stats.turns`: on claude that counts every `user` event, one per tool-result
+   * batch, so it is not an index of anything.
    */
   ledgerTurns?: number;
+  /**
+   * The session's stats as far as a ledger row has counted them. A send's row
+   * and an engine turn's row both count from here, so a turn the engine started
+   * while a send waited is not counted in the send's row as well.
+   */
+  ledgerMark?: LedgerSnapshot;
+  /** The last turns the engine started itself, oldest first (`coding_session_status.engineTurns`). */
+  engineTurns?: EngineTurn[];
+  /** Set once the engine said it cannot compact: `autoCompactPercent` stops trying. */
+  cannotCompact?: boolean;
   /**
    * The conversation as sent and answered, kept for `handoffSession()`. Not the
    * engine's history buffer, which is capped by event count and loses the
@@ -362,6 +385,56 @@ interface ManagedSession {
    * so a first turn that fails does not strand the conversation it was carrying.
    */
   pendingHandoff?: string;
+}
+
+/** The counters a ledger row is the difference of. */
+type LedgerSnapshot = {
+  turns: number;
+  turnsSucceeded: number;
+  tokensIn: number;
+  tokensOut: number;
+  cachedTokens: number;
+  toolCalls: number;
+  toolErrors: number;
+  costUsd: number;
+  refusalFallbacks: number;
+};
+
+/** Engine turns kept on a session for its status. */
+const ENGINE_TURNS_KEPT = 5;
+/** Characters of an engine turn's reply kept on the session. */
+const ENGINE_TURN_TEXT_CHARS = 2_000;
+
+/**
+ * An engine-initiated result as a `TurnResult`: wrappers emit one, and Claude's
+ * emits the bare result event.
+ */
+function engineTurnOf(payload: unknown): TurnResult | undefined {
+  if (!payload || typeof payload !== 'object') return undefined;
+  const p = payload as Record<string, unknown>;
+  if (p.event && typeof p.event === 'object' && typeof p.text === 'string') return payload as TurnResult;
+  const event = payload as StreamEvent;
+  return { text: typeof event.result === 'string' ? event.result : '', event };
+}
+
+/** A capability the session's engine does not have: "… is not supported on <engine>". */
+export class CapabilityUnsupportedError extends Error {
+  override name = 'CapabilityUnsupportedError';
+}
+
+/** A command name as `session_command` takes it: without the `/`, one word. */
+function commandName(command: unknown): string {
+  const name = typeof command === 'string' ? command.trim().replace(/^\//, '') : '';
+  if (!name || /\s/.test(name)) {
+    throw new Error(`a command is one name, with or without its '/' (e.g. review), not '${String(command)}'`);
+  }
+  return name;
+}
+
+/** The session's `turnCommand` without its `/`, or undefined when it names none. */
+function turnCommandOf(config: SessionConfig): string | undefined {
+  const cmd = config.turnCommand?.trim().replace(/^\//, '').trim();
+  return cmd || undefined;
 }
 
 /**
@@ -1151,6 +1224,8 @@ export class SessionManager {
   private sessions = new Map<string, ManagedSession>();
   /** Goal adapters over `claude` sessions, by session name; dropped when the session stops. */
   private _claudeGoals = new Map<string, ClaudeGoalSession | TurnGoalSession>();
+  /** Engines' own goal adapters (`nativeGoal`), by session name, with the session each was made over. */
+  private _nativeGoals = new Map<string, { host: ISession; adapter: GoalSession & { detach?(): void } }>();
   private _pendingSessions = new Map<string, Promise<SessionInfo>>();
   /**
    * Starts that passed the capacity check and are not in `sessions` yet. The
@@ -1273,6 +1348,12 @@ export class SessionManager {
     const compactAt = config.autoCompactPercent;
     if (compactAt !== undefined && !(Number.isFinite(compactAt) && compactAt >= 1 && compactAt <= 99)) {
       throw new Error('autoCompactPercent must be a number from 1 to 99');
+    }
+    if (
+      config.turnCommand !== undefined &&
+      (typeof config.turnCommand !== 'string' || !turnCommandOf(config as SessionConfig))
+    ) {
+      throw new Error('turnCommand must name an engine command, e.g. /boost');
     }
 
     // Check pending first — a concurrent caller may have already started creation
@@ -1421,6 +1502,13 @@ export class SessionManager {
       }
     }
     const session = this._createSession(engine, fullConfig);
+    // Refused before anything spawns: a session whose engine takes no commands
+    // would send `/boost …` to the model as text.
+    if (turnCommandOf(fullConfig) && session.commandStyle !== 'text' && !session.applyTurnCommand) {
+      throw new Error(
+        `turnCommand is not supported on ${engine}: its sessions take no engine commands in their messages`,
+      );
+    }
     if (account && session instanceof PersistentClaudeSession) session.setAccountEnv(account.env);
 
     session.on(SESSION_EVENT.LOG, (...args: unknown[]) => this.logger.info(`[Session:${name}]`, ...args));
@@ -1456,6 +1544,8 @@ export class SessionManager {
 
     release();
     this.sessions.set(name, managed);
+    managed.ledgerMark = this._statsSnapshot(managed);
+    session.on(SESSION_EVENT.UNSOLICITED_RESULT, (payload: unknown) => this._onEngineTurn(name, session, payload));
     // A plain session is on the session forum from start to stop; a run's session is on its run's.
     if (!fullConfig.ownerRunId) {
       try {
@@ -1491,34 +1581,7 @@ export class SessionManager {
     replyTo?: string,
   ): Promise<SendResult> {
     const managed = this._getSession(name);
-
-    // Per-session serialization. Two concurrent sendMessage() calls on the
-    // same session previously raced on PersistentClaudeSession._streamCallbacks
-    // and the shared TURN_COMPLETE listener — the second caller would receive
-    // the first caller's response, and stream callbacks would clobber each
-    // other. Chain waiters via a per-session promise so a slow turn blocks
-    // (rather than corrupts) subsequent sends.
-    const prior = managed.sendChain ?? Promise.resolve();
-    let releaseChain!: () => void;
-    const link = new Promise<void>((resolve) => {
-      releaseChain = resolve;
-    });
-    managed.sendChain = prior.then(() => link).catch(() => link);
-    try {
-      await prior;
-    } catch {
-      /* prior failure shouldn't block this caller */
-    }
-
-    // The prior-chain await can sleep arbitrarily long. In that window a
-    // concurrent stopSession() may have stopped this session and removed it
-    // from the map. Re-check before writing, so we fail cleanly instead of
-    // calling send() on a detached/stopped session (TOCTOU on the sessions map).
-    if (this.sessions.get(name) !== managed) {
-      releaseChain();
-      if (managed.sendChain === link) managed.sendChain = undefined;
-      throw new Error(`Session '${name}' was stopped while a prior turn was in flight`);
-    }
+    const releaseChain = await this._acquireSendChain(name, managed);
 
     try {
       managed.lastActivity = Date.now();
@@ -1532,16 +1595,37 @@ export class SessionManager {
         engine: managed.config.engine || 'claude',
       });
 
+      // A model for this turn only, refused before anything runs on an engine that
+      // cannot take one per send, as images are: an answer from the session's own
+      // model would read as the other model's.
+      let sendModel: string | undefined;
+      if (options.model !== undefined) {
+        if (typeof options.model !== 'string' || !options.model.trim()) {
+          throw new Error('model must name a model');
+        }
+        if (!managed.session.perSendModel) {
+          throw new Error(
+            `a model per send is not supported on ${this._engineOf(managed)} (session '${name}'); ` +
+              'switch the session with session_switch_model instead',
+          );
+        }
+        sendModel = this._resolveModel(options.model.trim(), managed.config.modelOverrides);
+      }
+
       // Compact before the send rather than after the previous reply, so the
       // caller is never kept waiting for it, and inside the send chain, so no
-      // other send can interleave. Best effort: a failed or unsupported compact
-      // must not cost the caller their turn.
+      // other send can interleave. An engine that compacts in the background is
+      // waited for (`compactDetailed`), so the send goes on the compacted
+      // conversation. Best effort: a failed or unsupported compact must not cost
+      // the caller their turn.
       const compactAt = managed.config.autoCompactPercent;
-      if (compactAt && managed.session.getStats().contextPercent >= compactAt) {
+      if (compactAt && !managed.cannotCompact && managed.session.getStats().contextPercent >= compactAt) {
         try {
-          await managed.session.compact();
+          await this._compact(name, managed);
           this.logger.info(`[SessionManager] ${name}: context at or above ${compactAt}% — compacted before send`);
         } catch (err) {
+          // Said once: an engine that cannot compact will not learn to by the next send.
+          if (err instanceof CapabilityUnsupportedError) managed.cannotCompact = true;
           this.logger.warn(`[SessionManager] ${name}: auto-compact failed: ${(err as Error).message}`);
         }
       }
@@ -1559,13 +1643,14 @@ export class SessionManager {
 
       if (options.effort) sendOpts.effort = options.effort;
       if (options.plan) sendOpts.plan = true;
+      if (sendModel) sendOpts.model = sendModel;
       if (options.images !== undefined) {
         // Refused, not dropped: a turn about a screenshot answered without it
         // reads as an answer.
         const engine = managed.config.engine ?? 'claude';
         if (!IMAGE_ENGINES.has(engine)) {
           throw new Error(
-            `Session '${name}' runs on ${engine}, which cannot take images; claude, codex, codex-app, grok and opencode can`,
+            `Session '${name}' runs on ${engine}, which cannot take images; claude, codex, codex-app, grok, opencode and cursor can`,
           );
         }
         sendOpts.images = validateImagePaths(options.images, [
@@ -1616,13 +1701,22 @@ export class SessionManager {
       // every caller funnels through (council, fanout, autoloop, ACP,
       // openai-compat, MCP, CLI), so a single hook covers all of them.
       const ledgerBefore = this._statsSnapshot(managed);
+      managed.ledgerMark = ledgerBefore;
       const startedAt = Date.now();
       let turnError: string | undefined;
+      let localCommand = false;
 
       try {
         // A session handed off from another engine carries that conversation in
         // front of its first message; after that the engine holds it itself.
-        const outgoing = managed.pendingHandoff ? `${managed.pendingHandoff}\n\n${message}` : message;
+        let outgoing = managed.pendingHandoff ? `${managed.pendingHandoff}\n\n${message}` : message;
+        // The session's turn command takes every message, except one that is itself a command.
+        const turnCommand = turnCommandOf(managed.config);
+        if (turnCommand && !message.trimStart().startsWith('/')) {
+          outgoing = managed.session.applyTurnCommand
+            ? managed.session.applyTurnCommand(turnCommand, outgoing)
+            : `/${turnCommand} ${outgoing}`;
+        }
         onDispatch?.();
         let result = await managed.session.send(outgoing, sendOpts);
         // An account that refused the turn: continue the conversation under the next
@@ -1632,10 +1726,13 @@ export class SessionManager {
           result = await managed.session.send(outgoing, sendOpts);
         }
         const after = this._statsSnapshot(managed);
+        // From the mark, not from `ledgerBefore`: a turn the engine started and
+        // finished while this one waited has its own row, and is not this send's.
+        const base = managed.ledgerMark ?? ledgerBefore;
         const usage = {
-          tokensIn: Math.max(0, after.tokensIn - ledgerBefore.tokensIn),
-          tokensOut: Math.max(0, after.tokensOut - ledgerBefore.tokensOut),
-          costUsd: Math.max(0, after.costUsd - ledgerBefore.costUsd),
+          tokensIn: Math.max(0, after.tokensIn - base.tokensIn),
+          tokensOut: Math.max(0, after.tokensOut - base.tokensOut),
+          costUsd: Math.max(0, after.costUsd - base.costUsd),
         };
 
         // Update the resume-capable session ID if available (skip disk persist
@@ -1678,13 +1775,18 @@ export class SessionManager {
           // only record of a blocked call: the turn itself still reports success.
           const permissionDenials = readPermissionDenials(evt);
           const images = readGeneratedImages(evt);
-          // The record holds what the caller said, never the replayed history in
-          // front of it — a second handoff would otherwise nest one inside the other.
-          managed.transcript ??= newTranscript();
-          recordExchange(managed.transcript, 'user', message);
-          if (!turnError) {
-            recordExchange(managed.transcript, 'assistant', result.text);
-            managed.pendingHandoff = undefined;
+          // An info command the engine answered itself is not a turn: no ledger
+          // row, and nothing a handoff should carry as conversation.
+          localCommand = result.localCommand === true;
+          if (!localCommand) {
+            // The record holds what the caller said, never the replayed history in
+            // front of it — a second handoff would otherwise nest one inside the other.
+            managed.transcript ??= newTranscript();
+            recordExchange(managed.transcript, 'user', message);
+            if (!turnError) {
+              recordExchange(managed.transcript, 'assistant', result.text);
+              managed.pendingHandoff = undefined;
+            }
           }
           return {
             output: result.text,
@@ -1694,6 +1796,7 @@ export class SessionManager {
             usage,
             ...(permissionDenials.length ? { permissionDenials } : {}),
             ...(images.length ? { images } : {}),
+            ...(localCommand ? { localCommand: true as const } : {}),
           };
         }
 
@@ -1702,15 +1805,76 @@ export class SessionManager {
         turnError = (err as Error).message;
         throw err;
       } finally {
-        this._recordRunTurn(name, managed, ledgerBefore, startedAt, turnError, options.parentRunId, {
-          nodeKind: options.nodeKind,
-          taskKind: options.taskKind,
-        });
+        if (localCommand) managed.ledgerMark = this._statsSnapshot(managed);
+        else {
+          this._recordRunTurn(
+            name,
+            managed,
+            managed.ledgerMark ?? ledgerBefore,
+            startedAt,
+            turnError,
+            options.parentRunId,
+            {
+              nodeKind: options.nodeKind,
+              taskKind: options.taskKind,
+              ...(sendModel ? { model: sendModel } : {}),
+            },
+          );
+        }
       }
     } finally {
       releaseChain();
+    }
+  }
+
+  /**
+   * Wait for the session's earlier sends, then hold it until the returned
+   * release is called.
+   *
+   * Per-session serialization. Two concurrent sendMessage() calls on the
+   * same session previously raced on PersistentClaudeSession._streamCallbacks
+   * and the shared TURN_COMPLETE listener — the second caller would receive
+   * the first caller's response, and stream callbacks would clobber each
+   * other. Chain waiters via a per-session promise so a slow turn blocks
+   * (rather than corrupts) subsequent sends. Compaction, rewinds and engine
+   * commands that start a turn hold the same chain.
+   */
+  private async _acquireSendChain(name: string, managed: ManagedSession): Promise<() => void> {
+    const prior = managed.sendChain ?? Promise.resolve();
+    let resolveLink!: () => void;
+    const link = new Promise<void>((resolve) => {
+      resolveLink = resolve;
+    });
+    managed.sendChain = prior.then(() => link).catch(() => link);
+    const release = () => {
+      resolveLink();
       // If this was the tail of the chain, clear it so memory doesn't grow.
       if (managed.sendChain === link) managed.sendChain = undefined;
+    };
+    try {
+      await prior;
+    } catch {
+      /* prior failure shouldn't block this caller */
+    }
+
+    // The prior-chain await can sleep arbitrarily long. In that window a
+    // concurrent stopSession() may have stopped this session and removed it
+    // from the map. Re-check before writing, so we fail cleanly instead of
+    // calling send() on a detached/stopped session (TOCTOU on the sessions map).
+    if (this.sessions.get(name) !== managed) {
+      release();
+      throw new Error(`Session '${name}' was stopped while a prior turn was in flight`);
+    }
+    return release;
+  }
+
+  /** Run `fn` holding the session's send chain (see `_acquireSendChain`). */
+  private async _withSendChain<T>(name: string, managed: ManagedSession, fn: () => Promise<T>): Promise<T> {
+    const release = await this._acquireSendChain(name, managed);
+    try {
+      return await fn();
+    } finally {
+      release();
     }
   }
 
@@ -1835,17 +1999,7 @@ export class SessionManager {
     }
   }
 
-  private _statsSnapshot(managed: ManagedSession): {
-    turns: number;
-    turnsSucceeded: number;
-    tokensIn: number;
-    tokensOut: number;
-    cachedTokens: number;
-    toolCalls: number;
-    toolErrors: number;
-    costUsd: number;
-    refusalFallbacks: number;
-  } {
+  private _statsSnapshot(managed: ManagedSession): LedgerSnapshot {
     const empty = {
       turns: 0,
       turnsSucceeded: 0,
@@ -1885,13 +2039,14 @@ export class SessionManager {
   private _recordRunTurn(
     name: string,
     managed: ManagedSession,
-    before: ReturnType<SessionManager['_statsSnapshot']>,
+    before: LedgerSnapshot,
     startedAt: number,
     error: string | undefined,
     parent: string | undefined,
-    dims: { nodeKind?: string; taskKind?: string } = {},
+    dims: { nodeKind?: string; taskKind?: string; origin?: 'engine'; ok?: boolean; model?: string } = {},
   ): void {
     const after = this._statsSnapshot(managed);
+    managed.ledgerMark = after;
     const delta = (a: number, b: number): number => Math.max(0, a - b);
     const row: RunLedgerRow = {
       ts: new Date().toISOString(),
@@ -1914,15 +2069,18 @@ export class SessionManager {
       // thrown", which is what the field meant before. The counter is also what closes
       // `stop_reason: 'process_exit'`: a CLI that dies mid-turn resolves without a result
       // event, so the counter never moves and the row is no longer recorded as a success.
-      ok: !error && (after.turns > before.turns ? after.turnsSucceeded > before.turnsSucceeded : true),
+      ok: dims.ok ?? (!error && (after.turns > before.turns ? after.turnsSucceeded > before.turnsSucceeded : true)),
     };
-    // Fall back to the engine's own reported model, so a session started
-    // without an explicit `model` still records what actually answered. An
-    // alias (`opus[1m]`) is the CLI's to resolve, so what it reports wins there.
+    if (dims.origin) row.origin = dims.origin;
+    // A model given for this send alone is what the turn ran on. Otherwise fall
+    // back to the engine's own reported model, so a session started without an
+    // explicit `model` still records what actually answered. An alias
+    // (`opus[1m]`) is the CLI's to resolve, so what it reports wins there.
     const configured = managed.config.resolvedModel || managed.config.model;
     const bare = configured?.replace(/\[1m\]$/i, '');
     const isAlias = !!bare && resolveAlias(bare) !== bare;
-    const model = (isAlias ? this._reportedModel(managed) : undefined) || configured || this._reportedModel(managed);
+    const model =
+      dims.model || (isAlias ? this._reportedModel(managed) : undefined) || configured || this._reportedModel(managed);
     if (model) row.model = model;
     if (error) row.error = error.slice(0, 500);
     if (after.refusalFallbacks > before.refusalFallbacks) {
@@ -1942,6 +2100,58 @@ export class SessionManager {
 
     if (isBudgetExceeded(after.costUsd, managed.config.maxBudgetUsd)) {
       managed.budgetExhausted = true;
+    }
+  }
+
+  /**
+   * A turn the engine started itself (a `/loop` tick, a scheduled wakeup, a
+   * background workflow or sub-agent reporting back): its own ledger row, marked
+   * `origin: 'engine'`, and kept on the session for its status. It is routed
+   * nowhere — not to a waiting send, not to a forum. On a session a goal adapter
+   * drives, the spend is the goal's, which its node reports, so there is no row.
+   */
+  private _onEngineTurn(name: string, session: ISession, payload: unknown): void {
+    const managed = this.sessions.get(name);
+    if (!managed || managed.session !== session) return;
+    const turn = engineTurnOf(payload);
+    if (!turn) return;
+    // An info command that ran no model is not a turn.
+    if (turn.localCommand) {
+      managed.ledgerMark = this._statsSnapshot(managed);
+      return;
+    }
+    const event = turn.event as Record<string, unknown>;
+    const failed = !!(event.is_error || event.stop_reason === 'error');
+    const duration = typeof event.duration_ms === 'number' && event.duration_ms > 0 ? event.duration_ms : 0;
+    try {
+      const before = managed.ledgerMark ?? this._statsSnapshot(managed);
+      const after = this._statsSnapshot(managed);
+      const goalOwned = this._claudeGoals.has(name) || this._nativeGoals.has(name);
+      if (goalOwned) managed.ledgerMark = after;
+      else {
+        this._recordRunTurn(
+          name,
+          managed,
+          before,
+          Date.now() - duration,
+          failed ? String(turn.text || event.result || 'the engine turn failed') : undefined,
+          managed.config.ownerRunId,
+          { origin: 'engine', ok: !failed },
+        );
+      }
+      const kept = (managed.engineTurns ??= []);
+      kept.push({
+        at: new Date().toISOString(),
+        text: turn.text.slice(-ENGINE_TURN_TEXT_CHARS),
+        ok: !failed,
+        tokensIn: Math.max(0, after.tokensIn - before.tokensIn),
+        tokensOut: Math.max(0, after.tokensOut - before.tokensOut),
+        costUsd: Math.round(Math.max(0, after.costUsd - before.costUsd) * 10000) / 10000,
+      });
+      if (kept.length > ENGINE_TURNS_KEPT) kept.splice(0, kept.length - ENGINE_TURNS_KEPT);
+      this.logger.info(`[SessionManager] ${name}: a turn the engine started ended (${failed ? 'failed' : 'ok'})`);
+    } catch (err) {
+      this.logger.warn(`[SessionManager] ${name}: could not record an engine turn: ${(err as Error).message}`);
     }
   }
 
@@ -2353,12 +2563,27 @@ export class SessionManager {
     return Array.from(this.persistedSessions.values());
   }
 
-  getStatus(name: string): SessionInfo & { stats: ReturnType<ISession['getStats']> } {
+  getStatus(name: string): SessionInfo & { stats: ReturnType<ISession['getStats']>; engineTurns?: EngineTurn[] } {
     const managed = this._getSession(name);
     return {
       ...this._toSessionInfo(name, managed),
       stats: managed.session.getStats(),
+      ...(managed.engineTurns?.length ? { engineTurns: managed.engineTurns.map((t) => ({ ...t })) } : {}),
     };
+  }
+
+  /** `getStatus`, with the engine's context breakdown when it gives one (`coding_session_status`). */
+  async getStatusDetailed(
+    name: string,
+  ): Promise<ReturnType<SessionManager['getStatus']> & { contextBreakdown?: ContextBreakdown }> {
+    const status = this.getStatus(name);
+    try {
+      const contextBreakdown = await this.contextBreakdown(name);
+      return contextBreakdown ? { ...status, contextBreakdown } : status;
+    } catch (err) {
+      this.logger.warn(`[SessionManager] ${name}: no context breakdown: ${(err as Error).message}`);
+      return status;
+    }
   }
 
   // ─── Session Operations ────────────────────────────────────────────────
@@ -2390,15 +2615,243 @@ export class SessionManager {
     return interruptRunning(managed.session, managed.config.engine ?? 'claude');
   }
 
-  async compactSession(name: string, summary?: string): Promise<void> {
+  /**
+   * Compact the session's conversation, after any send in flight. Waits for an
+   * engine that compacts in the background (`compactDetailed`). Throws on an
+   * engine that cannot compact.
+   */
+  async compactSession(name: string, summary?: string): Promise<CompactOutcome> {
     const managed = this._getSession(name);
-    await managed.session.compact(summary);
+    return this._withSendChain(name, managed, async () => {
+      const outcome = await this._compact(name, managed, summary);
+      // Compaction is not a turn: what it spent goes in no row.
+      managed.ledgerMark = this._statsSnapshot(managed);
+      return outcome;
+    });
   }
 
+  private async _compact(name: string, managed: ManagedSession, summary?: string): Promise<CompactOutcome> {
+    const session = managed.session;
+    if (session.compactDetailed) return session.compactDetailed(summary);
+    const result = await session.compact(summary);
+    if ('event' in result && (result.event as Record<string, unknown> | undefined)?.compacted === false) {
+      throw new CapabilityUnsupportedError(
+        `compaction is not supported on ${this._engineOf(managed)} (session '${name}'): ${result.text}`,
+      );
+    }
+    return { ok: true, trigger: 'manual' };
+  }
+
+  /** Record an effort for the session's next turns, without asking the engine (see `switchEffort`). */
   setEffort(name: string, level: EffortLevel): void {
     const managed = this._getSession(name);
     managed.session.setEffort(level);
     managed.config.effort = level;
+  }
+
+  /**
+   * Switch the session's effort: in place when the engine can (`live: true`),
+   * else from its next turn on.
+   */
+  async switchEffort(name: string, level: EffortLevel): Promise<{ effort: EffortLevel; live: boolean }> {
+    const managed = this._getSession(name);
+    if (!EFFORT_LEVELS.includes(level)) {
+      throw new Error(`effort must be one of ${EFFORT_LEVELS.join(', ')}, not '${String(level)}'`);
+    }
+    const live = managed.session.setEffortLive ? await managed.session.setEffortLive(level) : false;
+    managed.session.setEffort(level);
+    managed.config.effort = level;
+    return { effort: level, live };
+  }
+
+  // ─── Engine commands, quota, asides, rewinds ───────────────────────────
+
+  private _engineOf(managed: ManagedSession): EngineType {
+    return (managed.config.engine || 'claude') as EngineType;
+  }
+
+  private _unsupported(name: string, managed: ManagedSession, what: string): CapabilityUnsupportedError {
+    return new CapabilityUnsupportedError(`${what} is not supported on ${this._engineOf(managed)} (session '${name}')`);
+  }
+
+  /** The commands the session's engine can run (`session_command list`). */
+  async listSessionCommands(name: string): Promise<EngineCommand[]> {
+    const managed = this._getSession(name);
+    if (!managed.session.listCommands) throw this._unsupported(name, managed, 'listing engine commands');
+    return managed.session.listCommands();
+  }
+
+  /**
+   * Run an engine command on the session (`session_command run`): through the
+   * session's `runCommand`, or, on an engine whose messages take commands
+   * (`commandStyle: 'text'`), as the message `/<command> <args>`. A command the
+   * engine lists as needing a person is refused. A command that starts a turn
+   * waits for the send in flight and has a ledger row; an info command the
+   * engine lists as answering without a turn runs at once.
+   */
+  async runSessionCommand(
+    name: string,
+    command: string,
+    args?: string,
+    opts: { timeout?: number; parentRunId?: string } = {},
+  ): Promise<CommandOutcome> {
+    const managed = this._getSession(name);
+    const cmd = commandName(command);
+    const session = managed.session;
+    if (!session.runCommand && session.commandStyle !== 'text') {
+      throw this._unsupported(name, managed, 'running engine commands');
+    }
+    const listed = session.listCommands
+      ? await session.listCommands().catch((err: Error) => {
+          this.logger.warn(`[SessionManager] ${name}: could not list the engine's commands: ${err.message}`);
+          return undefined;
+        })
+      : undefined;
+    const entry = listed?.find((c) => c.name === cmd);
+    if (entry?.needsHuman) {
+      throw new Error(`/${cmd} needs a person on ${this._engineOf(managed)} and cannot run headless`);
+    }
+    const argText = args?.trim() || undefined;
+    const runCommand = session.runCommand?.bind(session);
+    if (!runCommand) {
+      // Sent as `/name`, a name the engine has no command for reaches the model
+      // as a message: a paid turn that answers about the text.
+      if (listed?.length && !entry) {
+        throw new Error(
+          `there is no command /${cmd} on ${this._engineOf(managed)} (session '${name}'): session_command list ` +
+            'shows what there is, and session_send sends the text to the model as a message',
+        );
+      }
+      const result = await this._sendTurn(name, `/${cmd}${argText ? ` ${argText}` : ''}`, {
+        timeout: opts.timeout,
+        parentRunId: opts.parentRunId,
+      });
+      return {
+        name: cmd,
+        ok: !result.error,
+        text: result.output,
+        startedTurn: !result.localCommand,
+        ...(result.error ? { error: result.error } : {}),
+      };
+    }
+    // Counted like a send when it holds the chain; one that runs beside a send
+    // counts from the mark, as a turn the engine started would, so the two rows
+    // never count the same usage.
+    const run = async (held: boolean): Promise<CommandOutcome> => {
+      const before = this._statsSnapshot(managed);
+      if (held) managed.ledgerMark = before;
+      const startedAt = Date.now();
+      const outcome = await runCommand(cmd, argText, { timeout: opts.timeout || TURN_TIMEOUT_MS });
+      if (outcome.startedTurn) {
+        this._recordRunTurn(
+          name,
+          managed,
+          managed.ledgerMark ?? before,
+          startedAt,
+          outcome.ok ? undefined : outcome.error || `/${cmd} failed`,
+          opts.parentRunId,
+        );
+      } else if (held) managed.ledgerMark = this._statsSnapshot(managed);
+      return outcome;
+    };
+    managed.lastActivity = Date.now();
+    return entry && !entry.startsTurn ? run(false) : this._withSendChain(name, managed, () => run(true));
+  }
+
+  /** Answer a question from the session's context without adding it to the conversation. */
+  async askAside(name: string, question: string, opts: { timeout?: number } = {}): Promise<AsideOutcome> {
+    const managed = this._getSession(name);
+    if (typeof question !== 'string' || !question.trim()) throw new Error('question must not be empty');
+    if (!managed.session.askAside) throw this._unsupported(name, managed, 'a side question');
+    managed.lastActivity = Date.now();
+    return managed.session.askAside(question, { timeout: opts.timeout || TURN_TIMEOUT_MS });
+  }
+
+  /**
+   * Rewind the session's conversation by `turns` turns, or to `messageId`, after
+   * any send in flight; `files: true` restores the files those turns changed,
+   * where the engine can. On `codex-app` it is `thread/revert` (as
+   * `codex_rollback`), which keeps the files.
+   */
+  async rewindSession(name: string, target: RewindTarget): Promise<RewindOutcome> {
+    const managed = this._getSession(name);
+    const turns = target.turns;
+    const byTurns = turns !== undefined;
+    const byMessage = target.messageId !== undefined;
+    if (byTurns === byMessage) throw new Error('rewind takes turns or messageId, one of the two');
+    if (byTurns && !(Number.isInteger(turns) && (turns as number) >= 1)) {
+      throw new Error('turns must be a whole number of at least 1');
+    }
+    if (byMessage && (typeof target.messageId !== 'string' || !target.messageId.trim())) {
+      throw new Error('messageId must not be empty');
+    }
+    const session = managed.session;
+    const codexApp = session as Partial<CodexAppSession>;
+    const codexRollback = typeof codexApp.interrupt === 'function' && typeof codexApp.rollback === 'function';
+    if (!session.rewind && !codexRollback) throw this._unsupported(name, managed, 'rewind');
+    if (!session.rewind) {
+      if (byMessage) throw new Error(`codex-app rewinds by turns, not to a message (session '${name}')`);
+      if (target.files) {
+        throw new Error(`restoring files on rewind is not supported on codex-app (session '${name}'); omit files`);
+      }
+    }
+    return this._withSendChain(name, managed, async () => {
+      let outcome: RewindOutcome;
+      if (session.rewind) outcome = await session.rewind(target);
+      else {
+        await codexApp.rollback!(turns as number);
+        outcome = { ok: true, turnsRemoved: turns, filesRestored: false };
+      }
+      const removed = outcome.turnsRemoved ?? (outcome.ok ? turns : undefined);
+      if (outcome.ok && removed && managed.transcript) dropLastTurns(managed.transcript, removed);
+      return outcome;
+    });
+  }
+
+  /** The session's context as its engine breaks it down; undefined when the engine gives none. */
+  async contextBreakdown(name: string): Promise<ContextBreakdown | undefined> {
+    const managed = this._getSession(name);
+    return managed.session.contextBreakdown ? managed.session.contextBreakdown() : undefined;
+  }
+
+  /** The quota of the account the session's engine runs under. Throws on an engine with no quota reader. */
+  async sessionQuota(name: string): Promise<EngineQuota | undefined> {
+    const managed = this._getSession(name);
+    return readEngineQuota(this._engineOf(managed), { session: managed.session, cwd: managed.cwd });
+  }
+
+  /**
+   * The quota of `engine`, or of every engine with a reader. A reader is given
+   * the engine's most recently active session, when there is one. A reader that
+   * fails or has nothing to read is listed in `unavailable` with why.
+   */
+  async engineQuota(engine?: EngineType): Promise<{
+    quotas: EngineQuota[];
+    unavailable: Array<{ engine: EngineType; reason: string }>;
+  }> {
+    if (engine !== undefined && !ENGINE_TYPES.includes(engine)) throw new Error(`unknown engine '${String(engine)}'`);
+    // One engine named, and it has no reader: say so, rather than an empty answer.
+    if (engine !== undefined && !quotaEngines().includes(engine)) {
+      throw new Error(`quota is not supported on ${engine}: it has no quota reader`);
+    }
+    const engines = engine ? [engine] : quotaEngines();
+    const readings = await Promise.all(
+      engines.map(async (e): Promise<EngineQuota | { engine: EngineType; reason: string }> => {
+        const live = [...this.sessions.values()]
+          .filter((m) => this._engineOf(m) === e)
+          .sort((a, b) => b.lastActivity - a.lastActivity)[0];
+        try {
+          const quota = await readEngineQuota(e, { session: live?.session, cwd: live?.cwd });
+          return quota ?? { engine: e, reason: 'nothing to read now' };
+        } catch (err) {
+          return { engine: e, reason: (err as Error).message };
+        }
+      }),
+    );
+    return {
+      quotas: readings.filter((r): r is EngineQuota => 'windows' in r),
+      unavailable: readings.filter((r): r is { engine: EngineType; reason: string } => 'reason' in r),
+    };
   }
 
   /**
@@ -2422,7 +2875,7 @@ export class SessionManager {
    * - Validates model string against known aliases before restarting
    * - Rolls back to old session if startSession fails
    */
-  async switchModel(name: string, model: string): Promise<SessionInfo> {
+  async switchModel(name: string, model: string): Promise<SessionInfo & { live: boolean }> {
     const managed = this._getSession(name);
 
     // Busy guard — don't restart mid-message
@@ -2432,13 +2885,6 @@ export class SessionManager {
       );
     }
 
-    // An agy session with no harvested conversation yet has no history to
-    // preserve — restart it fresh instead of rejecting the switch.
-    const sessionId = this._managedResumeId(managed);
-    if (!sessionId && managed.config.engine !== 'agy') {
-      throw new Error(`Session '${name}' has no claude session ID — cannot resume after restart`);
-    }
-
     // Validate against the registry, not against a frozen prefix list. The list
     // was ['claude-','gemini-','gpt-','anthropic/','google/','openai/'] and the
     // registry has since grown grok-4.6, composer-*, o3, o4-mini and
@@ -2446,13 +2892,30 @@ export class SessionManager {
     // this guard rejected. A provider-qualified string stays accepted because
     // the error message below offers it.
     const resolvedModel = this._resolveModel(model, managed.config.modelOverrides);
-    // agy names its models its own way (an effort suffix, orchestrators, other vendors' models it serves),
-    // mostly not in the registry: `agy models` knows them, and agy refuses at the next turn a name it doesn't
-    const looksValid = managed.config.engine === 'agy' || !!lookupModel(resolvedModel) || resolvedModel.includes('/');
+    // agy and Cursor name their models their own way (an effort suffix, orchestrators, other vendors' models
+    // they serve), mostly not in the registry: `agy models` / `cursor-agent models` know them, and the engine
+    // refuses at the next turn a name it doesn't
+    const ownNames = managed.config.engine === 'agy' || managed.config.engine === 'cursor';
+    const looksValid = ownNames || !!lookupModel(resolvedModel) || resolvedModel.includes('/');
     if (!looksValid) {
       throw new Error(
         `Unknown model '${model}' (resolved: '${resolvedModel}'). Use a known alias (opus, sonnet, haiku, gemini-pro, etc.) or a full provider/model string.`,
       );
+    }
+
+    // In place, when the engine can: no restart, nothing reloaded.
+    if (managed.session.setModelLive && (await managed.session.setModelLive(resolvedModel))) {
+      managed.config.model = model;
+      managed.config.resolvedModel = resolvedModel;
+      if (!managed.skipPersistence) this._persistSession(name, managed);
+      return { ...this._toSessionInfo(name, managed), live: true };
+    }
+
+    // An agy session with no harvested conversation yet has no history to
+    // preserve — restart it fresh instead of rejecting the switch.
+    const sessionId = this._managedResumeId(managed);
+    if (!sessionId && managed.config.engine !== 'agy') {
+      throw new Error(`Session '${name}' has no claude session ID — cannot resume after restart`);
     }
 
     const oldConfig = { ...managed.config };
@@ -2460,12 +2923,13 @@ export class SessionManager {
     this._removeSession(name);
 
     try {
-      return await this.startSession({
+      const info = await this.startSession({
         ...oldConfig,
         name,
         model,
         ...(sessionId ? { resumeSessionId: sessionId } : {}),
       });
+      return { ...info, live: false };
     } catch (err) {
       // Rollback: restart with original config
       this.logger.error(`switchModel failed for '${name}', attempting rollback:`, err);
@@ -2997,6 +3461,8 @@ export class SessionManager {
     this._inbox.close();
     for (const adapter of this._claudeGoals.values()) adapter.detach();
     this._claudeGoals.clear();
+    for (const { adapter } of this._nativeGoals.values()) adapter.detach?.();
+    this._nativeGoals.clear();
     // Clear PID tracking
     this._activePids.clear();
     this._pidCommands.clear();
@@ -3022,18 +3488,23 @@ export class SessionManager {
 
   /**
    * The goal surface of the session behind `name`: a `codex-app` session as it
-   * is, a `claude` session through `ClaudeGoalSession`, and a session on an
-   * engine with no goal loop of its own (`agy`, `grok`, `opencode`, `acp`)
-   * through `TurnGoalSession`, which runs the loop itself. One adapter per
+   * is, a `claude` session through `ClaudeGoalSession`, and a session on another
+   * engine (`agy`, `grok`, `cursor`, `opencode`, `acp`) through `TurnGoalSession`,
+   * which runs the loop itself, unless `native` asks for its own. One adapter per
    * session, made on first use with what the node knows of the thread.
+   *
+   * `native`: the engine's own goal loop (`ISession.nativeGoalSession`) instead
+   * of clawo's turn loop. Claude Code and codex-app run their own either way;
+   * any other engine without one throws.
    */
-  goalSession(name: string, open?: ClaudeGoalOpen): GoalSession | undefined {
+  goalSession(name: string, open?: ClaudeGoalOpen, opts: { native?: boolean } = {}): GoalSession | undefined {
     const managed = this.sessions.get(name);
     const session = managed?.session;
     if (!managed || !session) return undefined;
     if (session instanceof PersistentCodexAppServerSession) return session;
     const engine = managed.config.engine ?? 'claude';
     const claude = session instanceof PersistentClaudeSession;
+    if (opts.native && !claude) return this._nativeGoalSession(name, managed, open);
     if (!claude && !TURN_GOAL_ENGINES.has(engine)) return undefined;
     let adapter = this._claudeGoals.get(name);
     // A session replaced under the same name (model switch, tool update) gets a new adapter.
@@ -3052,6 +3523,28 @@ export class SessionManager {
       this._claudeGoals.set(name, adapter);
     }
     return adapter;
+  }
+
+  private _nativeGoalSession(name: string, managed: ManagedSession, open?: ClaudeGoalOpen): GoalSession {
+    const session = managed.session;
+    if (!session.nativeGoalSession) {
+      throw new Error(
+        `a native goal loop is not supported on ${this._engineOf(managed)}; without nativeGoal clawo runs the goal turn by turn`,
+      );
+    }
+    let entry = this._nativeGoals.get(name);
+    // A session replaced under the same name gets a new adapter.
+    if (entry && entry.host !== session) {
+      entry.adapter.detach?.();
+      entry = undefined;
+    }
+    if (!entry) {
+      const adapter = session.nativeGoalSession(open);
+      if (!adapter) throw new Error(`the ${this._engineOf(managed)} session has no native goal loop now`);
+      entry = { host: session, adapter };
+      this._nativeGoals.set(name, entry);
+    }
+    return entry.adapter;
   }
 
   /**
@@ -3899,6 +4392,8 @@ export class SessionManager {
   private _removeSession(name: string): void {
     this._claudeGoals.get(name)?.detach();
     this._claudeGoals.delete(name);
+    this._nativeGoals.get(name)?.adapter.detach?.();
+    this._nativeGoals.delete(name);
     this.sessions.delete(name);
     // Off the session forum; its mail waits for a session under the name (a restart, a resume).
     this._inbox.leave(name);

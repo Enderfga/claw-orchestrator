@@ -181,7 +181,7 @@ describe('PersistentCodexAppServerSession v2 RPCs', () => {
     const session = await startSession(proc);
     await session.rollback(2);
     const list = proc.written.find((m) => m.method === 'thread/turns/list');
-    expect(list?.params).toEqual({ threadId: 't1', limit: 2, sortDirection: 'desc', itemsView: 'notLoaded' });
+    expect(list?.params).toEqual({ threadId: 't1', limit: 2, sortDirection: 'desc', itemsView: 'summary' });
     const revert = proc.written.find((m) => m.method === 'thread/revert');
     expect(revert?.params).toEqual({ threadId: 't1', beforeTurnId: 'turn-b' });
     expect(proc.written.some((m) => m.method === 'thread/rollback')).toBe(false);
@@ -618,7 +618,10 @@ describe('PersistentCodexAppServerSession — session options', () => {
   // `exec --add-dir` adds writable roots; the app-server has no such flag, and
   // a turn's `sandboxPolicy` replaces the thread's. It is built from the policy
   // `thread/start` reports, so the user's network access and roots survive.
-  it('adds addDir to the writable roots of the policy the thread reports, on workspace-write only', async () => {
+  // The thread opens read-only (a writable thread/start records the project as
+  // trusted in ~/.codex/config.toml) and gets the policy codex would build from
+  // [sandbox_workspace_write], which addDir then extends.
+  it('adds addDir to the writable roots of the policy built from the config, on workspace-write only', async () => {
     const reported = {
       type: 'workspaceWrite',
       writableRoots: ['/already'],
@@ -628,7 +631,10 @@ describe('PersistentCodexAppServerSession — session options', () => {
     };
     const proc = createMockProc((msg) => {
       if (msg.method === 'initialize') return {};
-      if (msg.method === 'thread/start') return { thread: { id: 't1' }, sandbox: reported };
+      if (msg.method === 'thread/start') return { thread: { id: 't1' }, sandbox: { type: 'readOnly' } };
+      if (msg.method === 'config/read') {
+        return { config: { sandbox_workspace_write: { writable_roots: ['/already'], network_access: true } } };
+      }
       return {};
     });
     mockSpawn.mockReturnValue(proc);
@@ -639,6 +645,11 @@ describe('PersistentCodexAppServerSession — session options', () => {
       addDir: ['/srv/a', '/srv/b'],
     });
     await session.start();
+    expect(proc.written.find((m) => m.method === 'thread/start')?.params?.sandbox).toBe('read-only');
+    expect(proc.written.find((m) => m.method === 'thread/settings/update')?.params).toEqual({
+      threadId: 't1',
+      sandboxPolicy: reported,
+    });
     await session.send('hi');
     await new Promise((r) => setTimeout(r, 5));
     expect(proc.written.find((m) => m.method === 'turn/start')?.params?.sandboxPolicy).toEqual({

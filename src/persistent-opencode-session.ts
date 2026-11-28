@@ -50,16 +50,59 @@
  *     read-only agent has its own V2 definition.
  *   - an `--agent` that does not exist fails the turn instead of falling back to
  *     the default, writable agent.
+ *   - an `--agent` stays the session's agent for the turns after it, so a turn
+ *     after a `plan` turn names the agent to go back to.
+ *
+ * On OpenCode 2 a session holds a private server (`OpencodeServer`) while it is
+ * in use and runs its turns as `run --server <url>` clients of it; the server is
+ * stopped after `SERVER_IDLE_MS` without use. Through it the session reaches what
+ * `run` has no flag for: steering the turn in flight (`deliverMidTurn`), an
+ * interrupt the server's execution honours, engine commands (`runCommand`, with
+ * clawo's own operations beside them), compaction, side questions, reverts,
+ * shell commands, skills and the native `/goal` (`OpencodeGoalSession`). A server
+ * that does not start leaves turns on `--standalone`, as before. OpenCode 1 runs
+ * a command as `run --command <name>`.
  */
 
 import { execEngine, killEngineTree, spawnEngine } from './engine-spawn.js';
 import * as readline from 'node:readline';
+import type { ChildProcess } from 'node:child_process';
 
-import type { SessionConfig, SessionSendOptions, StreamEvent, TurnResult } from './types.js';
+import type {
+  AsideOutcome,
+  CommandOutcome,
+  CompactOutcome,
+  EffortLevel,
+  EngineCommand,
+  RewindOutcome,
+  RewindTarget,
+  SessionConfig,
+  SessionSendOptions,
+  StreamCallbacks,
+  StreamEvent,
+  TurnResult,
+} from './types.js';
 import { estimateTokens } from './models.js';
 import { sanitizeSecrets } from './sanitize.js';
-import { SESSION_EVENT } from './constants.js';
+import { SESSION_EVENT, TURN_TIMEOUT_MS } from './constants.js';
 import { BaseOneShotSession } from './base-oneshot-session.js';
+import {
+  OPENCODE_BUILTIN_COMMANDS,
+  OpencodeApiError,
+  OpencodeServer,
+  assistantText,
+  foldMessages,
+  followSessionWork,
+  messagesAfter,
+  newestMessageId,
+  promptTokens,
+  type OpencodeMessage,
+  type OpencodeTokens,
+} from './opencode-server.js';
+import { OpencodeGoalSession, type OpencodeGoalState } from './opencode-goal-session.js';
+import type { ClaudeGoalOpen } from './claude-goal-session.js';
+import type { GoalSession } from './kernel/nodes/goal.js';
+import { parseUsageLimits, readUsageLimitsStandalone, type OpencodeUsageLimits } from './opencode-quota.js';
 
 /**
  * Read-only enforcement for opencode.
@@ -155,6 +198,60 @@ const AGENT_FALLBACK_RE =
 function flagValue(flag: string, value: string): string {
   return `${flag}=${value}`;
 }
+
+/** How long a held server is kept with nothing using it. */
+export const SERVER_IDLE_MS = 30_000;
+
+/** Set to `1` to run every OpenCode 2 turn on `--standalone`, with no held server. */
+const STANDALONE_ENV = 'CLAWO_OPENCODE_STANDALONE';
+
+/** OpenCode 2's primary agent when nobody named one. */
+const DEFAULT_AGENT = 'build';
+
+/** `provider/model#variant` as the API's model reference. */
+export function modelRef(model: string | undefined): { providerID: string; id: string; variant?: string } | undefined {
+  if (!model || !model.includes('/')) return undefined;
+  const slash = model.indexOf('/');
+  const [id, variant] = model.slice(slash + 1).split('#', 2);
+  if (!id) return undefined;
+  return { providerID: model.slice(0, slash), id, ...(variant ? { variant } : {}) };
+}
+
+/**
+ * Operations clawo runs through the held server beside OpenCode's own commands.
+ * `startsTurn: false` ones only read, so they run beside a turn.
+ */
+const CLAWO_OPERATIONS: readonly EngineCommand[] = [
+  {
+    name: 'compact',
+    description: 'compact the conversation and wait for it (OpenCode writes the summary)',
+    source: 'rpc',
+    startsTurn: true,
+  },
+  {
+    name: 'shell',
+    description: "run a shell command; its output goes to the agent's next turn, no model call",
+    source: 'rpc',
+    args: '<command>',
+    startsTurn: true,
+  },
+  {
+    name: 'skill',
+    description: 'load a skill into the conversation without a turn',
+    source: 'rpc',
+    args: '<skill id>',
+    startsTurn: true,
+  },
+  { name: 'goal-status', description: "the native goal's state", source: 'rpc', startsTurn: false },
+  { name: 'models', description: 'the models OpenCode can run', source: 'rpc', startsTurn: false },
+  { name: 'agents', description: 'the agents OpenCode has, primary and subagent', source: 'rpc', startsTurn: false },
+  { name: 'skills', description: 'the skills OpenCode loads', source: 'rpc', startsTurn: false },
+  { name: 'mcp', description: 'the MCP servers and their status', source: 'rpc', startsTurn: false },
+  { name: 'usage', description: 'OpenCode Go usage limits', source: 'rpc', startsTurn: false },
+];
+
+/** `goal` arguments that change the goal's state without a turn. */
+const GOAL_NO_TURN_ARGS: ReadonlySet<string> = new Set(['pause', 'clear']);
 
 /**
  * Sessions a stopped ephemeral session created, waiting to be deleted, by
@@ -320,6 +417,51 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
   private _retries = 0;
   private _lastRetryError?: string;
 
+  // ─── The held server (OpenCode 2) ─────────────────────────────────────
+
+  private _server: OpencodeServer | null = null;
+  /** The held server's start in progress, which every caller waits for. */
+  private _opening: Promise<OpencodeServer> | null = null;
+  /** Users of the held server now: a turn, a command, a goal. At zero it is stopped after `serverIdleMs`. */
+  private _serverLeases = 0;
+  private _serverIdleTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Held-server starts that failed in a row; at two, turns stay on `--standalone`. */
+  private _serverFailures = 0;
+  /** A `run --server` turn is in flight. */
+  private _turnOnServer = false;
+  /** Server-side work in flight that is not a `run` turn: a command, a compaction, a goal. */
+  private _serverWork = 0;
+  /** How long an unused held server is kept. */
+  protected serverIdleMs = SERVER_IDLE_MS;
+  /** How often server-side work is read while it runs. */
+  protected serverPollMs = 500;
+  /** Prompt tokens of the last model call, for a compaction's `preTokens`. */
+  private _lastPromptTokens = 0;
+  /** The message `applyTurnCommand` handed back, to run as the turn command when it arrives. */
+  private _turnCommandFor?: { command: string; message: string };
+  /** A `plan` turn moved the session to the `plan` agent; the next turn names this one to go back. */
+  private _agentAfterPlan?: string;
+  /**
+   * A send's own model stays the conversation's on OpenCode 2, so a session that
+   * names no model of its own names, from then on, the model the conversation
+   * had before it (or the server's default).
+   */
+  private _modelAfterOverride?: string;
+  /** Engine commands the held server listed, once it listed any. */
+  private _engineCommands?: { server: OpencodeServer; commands: EngineCommand[] };
+
+  /** Commands go through `runCommand`: the server's API on OpenCode 2, `run --command` on OpenCode 1. */
+  readonly commandStyle = 'rpc' as const;
+  /** A send's `model` runs that turn only: every turn names its model. */
+  readonly perSendModel = true;
+
+  // Capabilities that only OpenCode 2's server has; set by start() on a 2.x binary.
+  compactDetailed?: (summary?: string) => Promise<CompactOutcome>;
+  askAside?: (question: string, opts?: { timeout?: number }) => Promise<AsideOutcome>;
+  rewind?: (target: RewindTarget) => Promise<RewindOutcome>;
+  listCommands?: () => Promise<EngineCommand[]>;
+  nativeGoalSession?: (open?: ClaudeGoalOpen) => GoalSession | undefined;
+
   protected override _continuesConversation(): boolean {
     return !!this.opencodeSessionId;
   }
@@ -345,7 +487,23 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
     if (this._v2 && customId && !this.opencodeSessionId && !customId.startsWith('ses')) {
       throw new Error(`OpenCode 2 session ids start with "ses"; customSessionId '${customId}' would be refused`);
     }
+    if (this._v2) {
+      this.compactDetailed = (summary) => this._compactOnServer(summary);
+      this.askAside = (question, opts) => this._askAside(question, opts);
+      this.rewind = (target) => this._rewind(target);
+      this.listCommands = () => this._listCommands();
+      this.nativeGoalSession = (open) => new OpencodeGoalSession(this, open);
+    }
     return super.start();
+  }
+
+  /** The OpenCode session id this session continues, once there is one. */
+  get conversationId(): string | undefined {
+    return this.opencodeSessionId;
+  }
+
+  override get isBusy(): boolean {
+    return super.isBusy || this._serverWork > 0;
   }
 
   private _noteOnce(key: string, message: string): void {
@@ -396,6 +554,7 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
    */
   override stop(): void {
     super.stop();
+    this._dropServer();
     try {
       const id = this.opencodeSessionId;
       if (!id || !this._ownsSession || !this._ephemeral || pendingDeletes.has(id)) return;
@@ -430,15 +589,51 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
     super._cleanupProc();
   }
 
-  protected _run(message: string, options: SessionSendOptions): Promise<TurnResult> {
+  protected async _run(message: string, options: SessionSendOptions): Promise<TurnResult> {
+    // The session's turn command takes this message: run it as that command.
+    const turnCommand = this._turnCommandFor;
+    this._turnCommandFor = undefined;
+    if (turnCommand && message.endsWith(turnCommand.message)) {
+      const [name, ...rest] = turnCommand.command.split(/\s+/);
+      const text = [...rest, message].join(' ');
+      return this._v2 ? this._commandTurn(name, text, options) : this._runProcess(text, options, undefined, name);
+    }
+    const lease = this._v2 ? await this._leaseForTurn() : undefined;
+    try {
+      if (this._v2 && options.model && !this.options.model && !this._modelAfterOverride) {
+        this._modelAfterOverride = lease ? await this._defaultModel(lease.server) : undefined;
+        if (!this._modelAfterOverride) {
+          this._noteOnce('modelAfterOverride', "the turns after a send's own model keep running on that model");
+        }
+      }
+      return await this._runProcess(message, options, lease?.server);
+    } finally {
+      lease?.release();
+    }
+  }
+
+  /**
+   * One `opencode run`: a client of the held server when there is one, else a
+   * private server of its own (`--standalone`, OpenCode 2) or OpenCode 1's.
+   * `command`: OpenCode 1's `--command`, with `message` as its arguments.
+   */
+  private _runProcess(
+    message: string,
+    options: SessionSendOptions,
+    server: OpencodeServer | undefined,
+    command?: string,
+  ): Promise<TurnResult> {
     // opencode run --format json [--session <id>], with the message on stdin.
     // On Windows `opencode` is an npm `.cmd` shim that runs through cmd.exe,
     // which would cut a message at its first newline; stdin carries it unchanged.
     const args: string[] = ['run', '--format', 'json'];
     // A private server for this run. Without it OpenCode 2 hands the turn to its
     // background service when one is running, which reads its own configuration
-    // and not this process's environment (see the header).
-    if (this._v2) args.push('--standalone');
+    // and not this process's environment (see the header). The held server is
+    // that same private server, kept for the session.
+    if (server?.url) args.push('--server', server.url);
+    else if (this._v2) args.push('--standalone');
+    if (command) args.push(flagValue('--command', command));
     // Reasoning events. Both lines send `reasoning` only with this flag, which
     // changes nothing else in the JSON output; they go to the log channel.
     args.push('--thinking');
@@ -468,18 +663,22 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
     if (this._v2 && this._ephemeral && (creating || forking)) args.push('--archived');
 
     const readOnly = this.options.sandboxMode === 'read-only';
-    if (readOnly) {
-      // NOT opencode's built-in `plan` agent: that is a user-overridable preset
-      // whose rules start with {"permission":"*","action":"allow"} and deny
-      // neither `bash` nor `edit` — a "read-only" session could still write via
-      // a shell heredoc. Instead we inject our own agent whose permissions deny
-      // edit/bash/external_directory outright, so read-only is enforced by the
-      // permission engine rather than requested politely.
-      args.push('--agent', READ_ONLY_AGENT);
-    } else if (this.options.agent) {
-      args.push('--agent', this.options.agent);
+    // A plan turn runs OpenCode's own `plan` agent; a read-only session's agent is
+    // stricter than plan, so it keeps that one.
+    const plan = !!options.plan && !readOnly;
+    const agentName = this._turnAgent(plan);
+    // NOT opencode's built-in `plan` agent for read-only: that is a user-overridable
+    // preset whose rules start with {"permission":"*","action":"allow"} and deny
+    // neither `bash` nor `edit` — a "read-only" session could still write via
+    // a shell heredoc. Instead we inject our own agent whose permissions deny
+    // edit/bash/external_directory outright, so read-only is enforced by the
+    // permission engine rather than requested politely.
+    if (agentName) args.push('--agent', agentName);
+    if (this._v2) {
+      // OpenCode 2 keeps the agent for later turns: the turn after a plan turn goes back.
+      if (plan && !this._agentAfterPlan) this._agentAfterPlan = this.options.agent || DEFAULT_AGENT;
+      else if (!plan) this._agentAfterPlan = undefined;
     }
-    const agentName = readOnly ? READ_ONLY_AGENT : this.options.agent;
 
     // Never on a read-only session: there a request the agent's rules leave to
     // `ask` must stay rejected.
@@ -499,7 +698,9 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
     }
 
     // opencode wants `provider/model` format. Only pass through if it looks correct.
-    let model = this.options.model && this.options.model.includes('/') ? this.options.model : undefined;
+    // A send's own model runs that turn only (`perSendModel`).
+    const configured = options.model || this.options.model || this._modelAfterOverride;
+    let model = configured && configured.includes('/') ? configured : undefined;
 
     // `--variant` is opencode's reasoning-effort knob ("provider-specific
     // reasoning effort, e.g., high, max, minimal"). Before this the engine
@@ -547,18 +748,15 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
       let stderr = '';
       let settled = false;
 
+      const env = this._engineEnv();
       const proc = spawnEngine(this.engineBin, args, {
         launcher: this.options.launcher,
         cwd: this.options.cwd,
-        env: readOnly
-          ? {
-              ...process.env,
-              OPENCODE_CONFIG_CONTENT: this._v2 ? READ_ONLY_AGENT_CONFIG_V2 : READ_ONLY_AGENT_CONFIG,
-            }
-          : { ...process.env },
+        env: server ? server.clientEnv(env) : env,
         stdio: ['pipe', 'pipe', 'pipe'],
       });
       this.currentProc = proc;
+      if (server) this._turnOnServer = true;
       // Writing the message closes stdin too; opencode waits for EOF before it starts.
       proc.stdin?.on('error', () => {});
       proc.stdin?.end(message);
@@ -566,6 +764,8 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
       const timer = setTimeout(() => {
         if (!settled) {
           settled = true;
+          // On the held server the turn runs in the server: stop it there too.
+          if (server) this._stopServerTurn(proc);
           killEngineTree(proc);
           reject(new Error('Timeout waiting for OpenCode response'));
         }
@@ -629,6 +829,7 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
       proc.on('close', (code) => {
         clearTimeout(timer);
         this.currentProc = null;
+        if (server) this._turnOnServer = false;
         if (this._currentRl) {
           this._currentRl.close();
           this._currentRl = null;
@@ -647,7 +848,7 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
             SESSION_EVENT.LOG,
             `[opencode] ${state.errorMessage ?? `variant refused: ${variantTried}`}; running on the model's default`,
           );
-          this._run(message, options).then(resolve, reject);
+          this._runProcess(message, options, server, command).then(resolve, reject);
           return;
         }
 
@@ -673,10 +874,12 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
 
         this._addHistory({ text: finalText, code });
 
+        // The held server's `/interrupt` ends `run` with an `aborted` error ("Session interrupted: …").
+        const interrupted = !ok && /\bSession interrupted\b/i.test(state.errorMessage ?? '');
         const event: StreamEvent = {
           type: 'result',
           result: finalText,
-          stop_reason: ok ? 'end_turn' : 'error',
+          stop_reason: ok ? 'end_turn' : interrupted ? 'interrupted' : 'error',
         };
 
         this.emit(SESSION_EVENT.RESULT, event);
@@ -803,25 +1006,22 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
 
       case 'step_finish': {
         if (!part) break;
-        const tokens = part.tokens as
-          | { input?: number; output?: number; cache?: { read?: number; write?: number } }
-          | undefined;
+        const tokens = part.tokens as OpencodeTokens | undefined;
         if (tokens) {
-          const cacheRead = tokens.cache?.read || 0;
-          const cacheWrite = tokens.cache?.write || 0;
-          this._stats.tokensIn += tokens.input || 0;
-          this._stats.tokensOut += tokens.output || 0;
-          this._stats.cachedTokens += cacheRead;
-          this._stats.cacheCreationTokens += cacheWrite;
-          // `tokens.input` is only the uncached remainder, so the context this
-          // turn actually filled is the whole input side.
-          this._reportTurnInputTokens((tokens.input || 0) + cacheRead + cacheWrite);
-          if (typeof part.cost === 'number' && Number.isFinite(part.cost)) {
-            this._reportedCostUsd = (this._reportedCostUsd ?? 0) + part.cost;
-          }
-          this._updateCost();
+          this._addUsage(tokens, part.cost, true);
           state.gotUsage = true;
         }
+        break;
+      }
+
+      case 'background_wait': {
+        // OpenCode 2: `run` waits for background jobs (a subagent) before it ends the turn.
+        const jobs = Array.isArray(event.jobs) ? (event.jobs as Array<{ kind?: unknown; title?: unknown }>) : [];
+        const what = jobs.map((j) => `${String(j.kind ?? 'job')}${j.title ? ` '${String(j.title)}'` : ''}`);
+        this.emit(
+          SESSION_EVENT.LOG,
+          `[opencode] waiting for ${jobs.length || 'its'} background job(s)${what.length ? `: ${what.join(', ')}` : ''}`,
+        );
         break;
       }
 
@@ -840,6 +1040,871 @@ export class PersistentOpencodeSession extends BaseOneShotSession {
         // Unknown event type — ignore for forward compatibility.
         break;
     }
+  }
+
+  // ─── Usage ────────────────────────────────────────────────────────────
+
+  /**
+   * Add one model call's usage to the session: a `step_finish` of a `run` turn,
+   * or an assistant or compaction message the held server wrote. `context`: the
+   * call's prompt is the conversation as it now stands.
+   */
+  private _addUsage(tokens: OpencodeTokens, cost: unknown, context: boolean): void {
+    const cacheRead = tokens.cache?.read || 0;
+    const cacheWrite = tokens.cache?.write || 0;
+    this._stats.tokensIn += tokens.input || 0;
+    this._stats.tokensOut += tokens.output || 0;
+    this._stats.cachedTokens += cacheRead;
+    this._stats.cacheCreationTokens += cacheWrite;
+    if (context) {
+      // `tokens.input` is only the uncached remainder, so the context this
+      // call actually filled is the whole input side.
+      const prompt = promptTokens(tokens);
+      this._reportTurnInputTokens(prompt);
+      if (prompt > 0) this._lastPromptTokens = prompt;
+    }
+    if (typeof cost === 'number' && Number.isFinite(cost)) {
+      this._reportedCostUsd = (this._reportedCostUsd ?? 0) + cost;
+    }
+    this._updateCost();
+  }
+
+  /** The environment OpenCode runs in: the read-only agent's definition on a read-only session. */
+  private _engineEnv(): NodeJS.ProcessEnv {
+    return this.options.sandboxMode === 'read-only'
+      ? { ...process.env, OPENCODE_CONFIG_CONTENT: this._v2 ? READ_ONLY_AGENT_CONFIG_V2 : READ_ONLY_AGENT_CONFIG }
+      : { ...process.env };
+  }
+
+  /** The agent a turn names: read-only first, then a plan turn's, the session's, or the one a plan turn left. */
+  private _turnAgent(plan: boolean): string | undefined {
+    if (this.options.sandboxMode === 'read-only') return READ_ONLY_AGENT;
+    if (plan) return 'plan';
+    return this.options.agent || this._agentAfterPlan;
+  }
+
+  // ─── The held server ──────────────────────────────────────────────────
+
+  /** Overridden in tests. */
+  protected _createServer(): OpencodeServer {
+    return new OpencodeServer({
+      bin: this.engineBin,
+      cwd: this.options.cwd || process.cwd(),
+      env: this._engineEnv(),
+      launcher: this.options.launcher,
+      log: (m) => this.emit(SESSION_EVENT.LOG, m),
+    });
+  }
+
+  /**
+   * The held server, started when there is none (or it died). One start at a
+   * time: a server is not `alive` until its URL arrives, so a second caller
+   * during the start would otherwise take it for dead and stop it — a command
+   * or an aside run beside a turn that is still opening the server.
+   */
+  private _openServer(): Promise<OpencodeServer> {
+    if (this._server?.alive) return Promise.resolve(this._server);
+    this._opening ??= this._startServer().finally(() => {
+      this._opening = null;
+    });
+    return this._opening;
+  }
+
+  private async _startServer(): Promise<OpencodeServer> {
+    if (!this.isReady) throw new Error('Session not ready. Call start() first.');
+    this._server?.stop();
+    const server = this._createServer();
+    this._server = server;
+    try {
+      await server.start();
+    } catch (err) {
+      if (this._server === server) this._server = null;
+      throw err;
+    }
+    // stop() may have run while it started.
+    if (this._server !== server) {
+      server.stop();
+      throw new Error('Session not ready. Call start() first.');
+    }
+    this.emit(SESSION_EVENT.LOG, `[opencode] holding a private server at ${server.url} (pid ${server.pid ?? '?'})`);
+    return server;
+  }
+
+  /** Use the held server; `release` when done, and the server stops once nothing has used it for a while. */
+  private async _lease(): Promise<{ server: OpencodeServer; release: () => void }> {
+    if (!this._v2) throw new Error('this needs OpenCode 2: OpenCode 1 has no server API clawo drives');
+    this._serverLeases++;
+    this._clearServerIdle();
+    let server: OpencodeServer;
+    try {
+      server = await this._openServer();
+    } catch (err) {
+      this._releaseLease();
+      throw err;
+    }
+    let released = false;
+    return {
+      server,
+      release: () => {
+        if (released) return;
+        released = true;
+        this._releaseLease();
+      },
+    };
+  }
+
+  private _releaseLease(): void {
+    this._serverLeases = Math.max(0, this._serverLeases - 1);
+    if (this._serverLeases > 0 || !this._server) return;
+    this._clearServerIdle();
+    this._serverIdleTimer = setTimeout(() => {
+      this._serverIdleTimer = null;
+      if (this._serverLeases === 0) this._dropServer();
+    }, this.serverIdleMs);
+    this._serverIdleTimer.unref?.();
+  }
+
+  private _clearServerIdle(): void {
+    if (this._serverIdleTimer) clearTimeout(this._serverIdleTimer);
+    this._serverIdleTimer = null;
+  }
+
+  /** Stop the held server now, with whatever it is running. */
+  private _dropServer(): void {
+    this._clearServerIdle();
+    const server = this._server;
+    this._server = null;
+    this._engineCommands = undefined;
+    server?.stop();
+  }
+
+  /**
+   * The held server for a turn, or undefined to run it on `--standalone`: when
+   * `CLAWO_OPENCODE_STANDALONE=1`, or the server failed to start twice in a row.
+   */
+  private async _leaseForTurn(): Promise<{ server: OpencodeServer; release: () => void } | undefined> {
+    if (process.env[STANDALONE_ENV] === '1' || this._serverFailures >= 2) return undefined;
+    try {
+      const lease = await this._lease();
+      this._serverFailures = 0;
+      return lease;
+    } catch (err) {
+      if (!this.isReady) throw err;
+      this._serverFailures++;
+      this.emit(
+        SESSION_EVENT.LOG,
+        `[opencode] could not start a private server (${sanitizeSecrets((err as Error).message)}); running the turn on --standalone`,
+      );
+      return undefined;
+    }
+  }
+
+  /**
+   * Stop the server-side execution of a turn whose `run` client is going away:
+   * `/interrupt` once the conversation id is known, else the whole server (the
+   * execution is the server's alone, and a new one starts for the next use).
+   */
+  private _stopServerTurn(proc?: ChildProcess): void {
+    const server = this._server;
+    const id = this.opencodeSessionId;
+    if (server?.alive && id) {
+      void server
+        .call<{ interrupted?: boolean }>('POST', `/api/session/${id}/interrupt`)
+        .catch((err: Error) => this.emit(SESSION_EVENT.LOG, `[opencode] interrupt failed: ${err.message}`));
+    } else if (server) {
+      this._dropServer();
+    }
+    // `run` ends on the server's `aborted` error; one that does not is ended.
+    if (proc) {
+      const kill = setTimeout(() => {
+        if (this.currentProc === proc) this._cleanupProc();
+      }, 5_000);
+      kill.unref?.();
+    }
+  }
+
+  /**
+   * Stop the turn now running. On the held server: the server's own interrupt,
+   * which also stops the turn's background shells and subagents; `run` ends on
+   * it, and the session stays usable. Otherwise the process, as before.
+   */
+  override interruptRun(): boolean {
+    const onServer = !!this._server?.alive && (this._turnOnServer || this._serverWork > 0);
+    if (!onServer) return super.interruptRun();
+    this._stopServerTurn(this._turnOnServer ? (this.currentProc ?? undefined) : undefined);
+    return true;
+  }
+
+  /**
+   * Hand `text` to the turn in flight on the held server (`/prompt`, delivery
+   * `steer`): the agent reads it before its next model call. False when no turn
+   * runs there, as on `--standalone` or OpenCode 1, whose turns cannot be reached.
+   */
+  async deliverMidTurn(text: string): Promise<boolean> {
+    const server = this._server;
+    const id = this.opencodeSessionId;
+    if (!server?.alive || !id || !(this._turnOnServer || this._serverWork > 0)) return false;
+    await server.call('POST', `/api/session/${id}/prompt`, { text, delivery: 'steer' });
+    return true;
+  }
+
+  /** A turn command runs through `runCommand`: the message is sent as it is and `_run` routes it. */
+  applyTurnCommand(command: string, message: string): string {
+    this._turnCommandFor = { command, message };
+    return message;
+  }
+
+  // ─── Conversations on the server ──────────────────────────────────────
+
+  private _adopt(id: string, owns: boolean): void {
+    this.opencodeSessionId = id;
+    this.sessionId = `opencode-live-${id}`;
+    this._forkPending = false;
+    if (owns) this._ownsSession = true;
+  }
+
+  /**
+   * The conversation server-side work runs on: the one this session continues
+   * (forked first when the session is a fork not yet made), or a new one, made
+   * as a first turn would make it.
+   */
+  private async _ensureConversation(server: OpencodeServer): Promise<string> {
+    if (this.opencodeSessionId && !this._forkPending) return this.opencodeSessionId;
+    let id: string | undefined;
+    let owns = true;
+    if (this.opencodeSessionId) {
+      const r = await server.call<{ data?: { id?: string } }>(
+        'POST',
+        `/api/session/${this.opencodeSessionId}/fork`,
+        {},
+      );
+      id = r?.data?.id;
+    } else {
+      const customId = this.options.customSessionId;
+      owns = !customId;
+      const agent = this._turnAgent(false);
+      const model = modelRef(this.options.model);
+      const r = await server.call<{ data?: { id?: string } }>('POST', '/api/session', {
+        ...(customId ? { id: customId } : {}),
+        title: this.options.sessionName || this.options.name,
+        location: { directory: this.options.cwd || process.cwd() },
+        ...(agent ? { agent } : {}),
+        ...(model ? { model } : {}),
+      });
+      id = r?.data?.id;
+    }
+    if (!id) throw new Error('OpenCode did not return a session id');
+    this._adopt(id, owns);
+    if (this._ephemeral && owns) {
+      await server.call('PATCH', `/api/session/${id}`, { archived: true }).catch(() => undefined);
+    }
+    return id;
+  }
+
+  /**
+   * Before server-side model work: the agent and the model this session's turns
+   * name, since a command runs on the conversation's current ones. A read-only
+   * session's work always runs its read-only agent.
+   */
+  private async _syncConversation(server: OpencodeServer, id: string): Promise<void> {
+    const agent = this._turnAgent(false);
+    if (agent) {
+      await server.call('POST', `/api/session/${id}/agent`, { agent });
+      this._agentAfterPlan = undefined;
+    }
+    const model = modelRef(this.options.model || this._modelAfterOverride);
+    if (model) await server.call('POST', `/api/session/${id}/model`, { model });
+  }
+
+  /**
+   * The model the conversation runs on now, as `provider/model`: its own, or
+   * the server's default (which a fresh server answers null while it loads).
+   */
+  private async _defaultModel(server: OpencodeServer): Promise<string | undefined> {
+    const id = this.opencodeSessionId;
+    if (id && !this._forkPending) {
+      const r = await server
+        .call<{
+          data?: { model?: { providerID?: string; id?: string; variant?: string } };
+        }>('GET', `/api/session/${id}`)
+        .catch(() => undefined);
+      const m = r?.data?.model;
+      if (m?.providerID && m.id)
+        return `${m.providerID}/${m.id}${m.variant && m.variant !== 'default' ? `#${m.variant}` : ''}`;
+    }
+    for (let i = 0; i < 20; i++) {
+      const r = await server
+        .call<{ data?: { providerID?: string; modelID?: string; id?: string } | null }>('GET', '/api/model/default')
+        .catch(() => undefined);
+      const m = r?.data;
+      if (m?.providerID && (m.modelID || m.id)) return `${m.providerID}/${m.modelID ?? m.id}`;
+      await new Promise((res) => setTimeout(res, 150));
+    }
+    return undefined;
+  }
+
+  /** A message the held server wrote, as a `run` turn's stream would have carried it. */
+  private _absorbMessage(
+    m: OpencodeMessage,
+    callbacks: StreamCallbacks | undefined,
+    counts: { tools: number; errors: number },
+  ): void {
+    if (m.type === 'assistant') {
+      for (const c of m.content ?? []) {
+        if (c.type !== 'tool') continue;
+        counts.tools++;
+        if (c.state?.status === 'error') counts.errors++;
+        const event = { type: 'tool_use', part: { type: 'tool', tool: c.name, state: c.state } };
+        try {
+          callbacks?.onToolUse?.(event);
+          callbacks?.onToolResult?.(event);
+        } catch {
+          // User callback error
+        }
+        this.emit(SESSION_EVENT.TOOL_USE, event);
+        this.emit(SESSION_EVENT.TOOL_RESULT, event);
+      }
+      const text = assistantText(m);
+      if (text) {
+        try {
+          callbacks?.onText?.(text);
+        } catch {
+          // User callback error
+        }
+        this.emit(SESSION_EVENT.TEXT, text);
+      }
+      if (m.tokens) this._addUsage(m.tokens, m.cost, true);
+    } else if (m.type === 'compaction' && m.tokens) {
+      this._addUsage(m.tokens, m.cost, false);
+    }
+  }
+
+  /**
+   * Start work on the held server and follow it to idle: the session's
+   * conversation (made or forked if needed), its agent and model, and every
+   * message the work writes added to the stats as a `run` turn's events are.
+   */
+  private async _followOnServer(
+    start: (server: OpencodeServer, id: string) => Promise<void>,
+    opts: { timeout: number; callbacks?: StreamCallbacks; model?: boolean },
+  ): Promise<{ id: string; result: Awaited<ReturnType<typeof followSessionWork>> }> {
+    const lease = await this._lease();
+    this._serverWork++;
+    const counts = { tools: 0, errors: 0 };
+    try {
+      const { server } = lease;
+      const id = await this._ensureConversation(server);
+      if (opts.model !== false) await this._syncConversation(server, id);
+      const result = await followSessionWork(server, id, () => start(server, id), {
+        timeoutMs: opts.timeout,
+        pollMs: this.serverPollMs,
+        allowPermissions: !!this.options.dangerouslySkipPermissions && this.options.sandboxMode !== 'read-only',
+        onMessage: (m) => this._absorbMessage(m, opts.callbacks, counts),
+        log: (msg) => this.emit(SESSION_EVENT.LOG, msg),
+        cancelled: () => !this.isReady,
+      });
+      return { id, result };
+    } finally {
+      this._stats.toolCalls += counts.tools;
+      this._stats.toolErrors += counts.errors;
+      this._serverWork--;
+      lease.release();
+    }
+  }
+
+  // ─── Engine commands ──────────────────────────────────────────────────
+
+  /** OpenCode's commands (builtin ones and the user's and project's), then clawo's operations they do not shadow. */
+  private async _listCommands(): Promise<EngineCommand[]> {
+    const lease = await this._lease();
+    try {
+      const engine = await this._engineCommandList(lease.server);
+      const names = new Set(engine.map((c) => c.name));
+      const readOnly = this.options.sandboxMode === 'read-only';
+      return [...engine, ...CLAWO_OPERATIONS.filter((op) => !names.has(op.name) && !(readOnly && op.name === 'shell'))];
+    } finally {
+      lease.release();
+    }
+  }
+
+  /**
+   * `GET /api/command`. A fresh server lists nothing for about 300 ms while it
+   * loads the location, and the project's own commands can arrive after the
+   * builtin ones, so a first listing is read again once.
+   */
+  private async _engineCommandList(server: OpencodeServer): Promise<EngineCommand[]> {
+    if (this._engineCommands?.server === server) return this._engineCommands.commands;
+    const read = async () =>
+      (await server.call<{ data?: Array<{ name?: unknown; description?: unknown }> }>('GET', '/api/command'))?.data ??
+      [];
+    let listed = await read();
+    for (let i = 0; i < 20 && listed.length === 0; i++) {
+      await new Promise((r) => setTimeout(r, 150));
+      listed = await read();
+    }
+    await new Promise((r) => setTimeout(r, 250));
+    const again = await read();
+    if (again.length > listed.length) listed = again;
+    const commands: EngineCommand[] = listed
+      .filter((c): c is { name: string; description?: unknown } => typeof c.name === 'string' && !!c.name)
+      .map((c) => ({
+        name: c.name,
+        ...(typeof c.description === 'string' ? { description: c.description } : {}),
+        source: OPENCODE_BUILTIN_COMMANDS.has(c.name) ? 'builtin' : 'custom',
+        startsTurn: true,
+      }));
+    if (commands.length) this._engineCommands = { server, commands };
+    return commands;
+  }
+
+  /**
+   * Run one command: OpenCode's own (`session.command` on OpenCode 2, `run
+   * --command` on OpenCode 1), or one of clawo's operations on the held server.
+   */
+  async runCommand(
+    name: string,
+    args?: string,
+    opts: { timeout?: number; callbacks?: StreamCallbacks } = {},
+  ): Promise<CommandOutcome> {
+    if (!this.isReady) throw new Error('Session not ready. Call start() first.');
+    const timeout = opts.timeout || TURN_TIMEOUT_MS;
+    if (!this._v2) {
+      // OpenCode 1 refuses an unknown command with a server error before any model call: no usage, no turn.
+      const used = () => this._stats.tokensIn + this._stats.tokensOut;
+      const before = used();
+      try {
+        const r = await this._runProcess(args ?? '', { timeout, callbacks: opts.callbacks }, undefined, name);
+        return { name, ok: true, text: r.text, startedTurn: true };
+      } catch (err) {
+        return { name, ok: false, text: '', startedTurn: used() > before, error: (err as Error).message };
+      }
+    }
+    const op = CLAWO_OPERATIONS.find((o) => o.name === name);
+    if (op) {
+      const lease = await this._lease();
+      let shadowed: boolean;
+      try {
+        shadowed = (await this._engineCommandList(lease.server)).some((c) => c.name === name);
+      } finally {
+        lease.release();
+      }
+      if (!shadowed) return this._runOperation(name, args, timeout);
+    }
+    return this._runServerCommand(name, args, { timeout, callbacks: opts.callbacks });
+  }
+
+  /** `session.command` on the held server, followed until the session is idle again. */
+  private async _runServerCommand(
+    name: string,
+    args: string | undefined,
+    opts: { timeout: number; callbacks?: StreamCallbacks },
+  ): Promise<CommandOutcome> {
+    const text = args ?? '';
+    // `/goal pause` and `/goal clear` change the goal and run nothing: no follow.
+    if (name === 'goal' && GOAL_NO_TURN_ARGS.has(text.trim())) {
+      const lease = await this._lease();
+      try {
+        const id = await this._ensureConversation(lease.server);
+        await lease.server.call('POST', `/api/session/${id}/command`, { name, text: text.trim() });
+        const state = await this._goalStateOn(lease.server, id);
+        return { name, ok: true, text: state ? JSON.stringify(state) : 'no goal', data: state, startedTurn: false };
+      } catch (err) {
+        return { name, ok: false, text: '', startedTurn: false, error: (err as Error).message };
+      } finally {
+        lease.release();
+      }
+    }
+    let followed: Awaited<ReturnType<PersistentOpencodeSession['_followOnServer']>>;
+    try {
+      followed = await this._followOnServer(async (server, id) => {
+        await server.call('POST', `/api/session/${id}/command`, { name, text });
+      }, opts);
+    } catch (err) {
+      // Refused before it ran (no such command, bad arguments): not a turn.
+      if (err instanceof OpencodeApiError) {
+        return { name, ok: false, text: '', startedTurn: false, error: err.message };
+      }
+      throw err;
+    }
+    const { result } = followed;
+    const fold = foldMessages(result.messages);
+    const startedTurn = result.messages.some((m) => m.type === 'assistant');
+    const ok = !result.timedOut && fold.outcome !== 'failed' && fold.outcome !== 'interrupted';
+    const error = result.timedOut
+      ? `Timeout waiting for OpenCode to finish /${name}`
+      : fold.outcome === 'interrupted'
+        ? `/${name} was interrupted`
+        : fold.error;
+    if (startedTurn) {
+      this._recordTurnComplete(ok);
+      this._addHistory({ text: fold.text, code: ok ? 0 : 1 });
+      const event: StreamEvent = { type: 'result', result: fold.text, stop_reason: ok ? 'end_turn' : 'error' };
+      this.emit(SESSION_EVENT.RESULT, event);
+      this.emit(SESSION_EVENT.TURN_COMPLETE, event);
+    }
+    return { name, ok, text: fold.text, startedTurn, ...(ok ? {} : { error: error ?? `/${name} failed` }) };
+  }
+
+  /** A turn the session's `turnCommand` takes, as a send: rejects as a failed `run` would. */
+  private async _commandTurn(name: string, text: string, options: SessionSendOptions): Promise<TurnResult> {
+    const outcome = await this._runServerCommand(name, text, {
+      timeout: options.timeout || TURN_TIMEOUT_MS,
+      callbacks: options.callbacks,
+    });
+    if (!outcome.ok) throw new Error(outcome.error ?? `/${name} failed`);
+    return { text: outcome.text, event: { type: 'result', result: outcome.text, stop_reason: 'end_turn' } };
+  }
+
+  /** One of clawo's operations (`CLAWO_OPERATIONS`). */
+  private async _runOperation(name: string, args: string | undefined, timeout: number): Promise<CommandOutcome> {
+    const done = (text: string, data?: unknown): CommandOutcome => ({
+      name,
+      ok: true,
+      text,
+      ...(data === undefined ? {} : { data }),
+      startedTurn: false,
+    });
+    const failed = (error: string, data?: unknown): CommandOutcome => ({
+      name,
+      ok: false,
+      text: '',
+      ...(data === undefined ? {} : { data }),
+      startedTurn: false,
+      error,
+    });
+    if (name === 'compact') {
+      const o = await this._compactOnServer();
+      const sizes = o.preTokens && o.postTokens ? `: ${o.preTokens} → ${o.postTokens} tokens` : '';
+      return o.ok ? done(o.note ?? `compacted${sizes}`, o) : failed(o.note ?? 'not compacted', o);
+    }
+    if ((name === 'shell' || name === 'skill') && !args)
+      return failed(`${name} needs ${name === 'shell' ? 'a command' : 'a skill id'}`);
+    // The user's shell, not the agent's: no permission rule applies to it.
+    if (name === 'shell' && this.options.sandboxMode === 'read-only') {
+      return failed('shell is refused on a read-only session: the command would run outside its read-only agent');
+    }
+    const lease = await this._lease();
+    const { server } = lease;
+    try {
+      switch (name) {
+        case 'shell':
+          return await this._shell(server, args as string, timeout);
+        case 'skill': {
+          const id = await this._ensureConversation(server);
+          await server.call('POST', `/api/experimental/session/${id}/skill`, { id: args, resume: false });
+          return done(`skill '${args}' loaded into the conversation`);
+        }
+        case 'goal-status': {
+          const id = this.opencodeSessionId;
+          const state = id ? await this._goalStateOn(server, id) : null;
+          return done(state ? `${state.status}: ${state.objective}` : 'no goal', state);
+        }
+        case 'models': {
+          const models = await this._readList<{
+            providerID?: string;
+            modelID?: string;
+            id?: string;
+            name?: string;
+            variants?: Array<{ id?: string }>;
+          }>(server, '/api/model');
+          const lines = models.map((m) => {
+            const variants = (m.variants ?? []).map((v) => v.id).filter(Boolean);
+            return `${m.providerID}/${m.modelID ?? m.id}${variants.length ? ` (variants: ${variants.join(', ')})` : ''}`;
+          });
+          return done(
+            lines.join('\n'),
+            models.map((m) => ({
+              id: `${m.providerID}/${m.modelID ?? m.id}`,
+              name: m.name,
+              variants: (m.variants ?? []).map((v) => v.id),
+            })),
+          );
+        }
+        case 'agents': {
+          const listed = await this._readList<{ id?: string; mode?: string; hidden?: boolean; description?: string }>(
+            server,
+            '/api/agent',
+          );
+          const agents = listed.map((a) => ({
+            id: a.id,
+            mode: a.mode,
+            hidden: !!a.hidden,
+            description: a.description,
+          }));
+          return done(
+            agents
+              .map(
+                (a) => `${a.id} (${a.mode}${a.hidden ? ', hidden' : ''})${a.description ? ` — ${a.description}` : ''}`,
+              )
+              .join('\n'),
+            agents,
+          );
+        }
+        case 'skills': {
+          const listed = await this._readList<{ id?: string; description?: string; path?: string }>(
+            server,
+            '/api/skill',
+          );
+          const skills = listed.map((s) => ({ id: s.id, description: s.description, path: s.path }));
+          return done(skills.map((s) => `${s.id}${s.description ? ` — ${s.description}` : ''}`).join('\n'), skills);
+        }
+        case 'mcp': {
+          const r = await server.call<{ data?: unknown[] }>('GET', '/api/mcp');
+          const servers = r?.data ?? [];
+          return done(servers.length ? JSON.stringify(servers, null, 2) : 'no MCP servers', servers);
+        }
+        case 'usage': {
+          const raw = await server.call<OpencodeUsageLimits>('GET', '/api/experimental/usage/limits');
+          const quota = parseUsageLimits(raw, 'opencode /usage');
+          return done(
+            quota
+              ? quota.windows
+                  .map((w) => `${w.name}: ${w.usedPercent ?? '?'}% used${w.resetsAt ? `, resets ${w.resetsAt}` : ''}`)
+                  .join('\n')
+              : 'no usage limits: no OpenCode Go subscription or budget on this account',
+            raw?.data ?? null,
+          );
+        }
+        default:
+          return failed(`unknown operation '${name}'`);
+      }
+    } catch (err) {
+      return failed((err as Error).message);
+    } finally {
+      lease.release();
+    }
+  }
+
+  /** A listing a fresh server answers empty while it loads the location (about 300 ms): read until it has entries. */
+  private async _readList<T>(server: OpencodeServer, path: string): Promise<T[]> {
+    let data: T[] = [];
+    for (let i = 0; i < 20; i++) {
+      data = (await server.call<{ data?: T[] }>('GET', path))?.data ?? [];
+      if (data.length) break;
+      await new Promise((r) => setTimeout(r, 150));
+    }
+    return data;
+  }
+
+  /** `session.shell`: the command's output goes into the conversation for the agent's next turn. */
+  private async _shell(server: OpencodeServer, command: string, timeout: number): Promise<CommandOutcome> {
+    const id = await this._ensureConversation(server);
+    const before = await newestMessageId(server, id);
+    await server.call('POST', `/api/session/${id}/shell`, { command });
+    const deadline = Date.now() + timeout;
+    for (;;) {
+      const shell = (await messagesAfter(server, id, before)).find((m) => m.type === 'shell');
+      if (shell && shell.status !== 'running') {
+        const exit = typeof shell.exit === 'number' ? shell.exit : Number(shell.exit);
+        const ok = shell.status === 'exited' && exit === 0;
+        const text = shell.output?.output ?? '';
+        const data = { status: shell.status, exit: shell.exit, truncated: !!shell.output?.truncated };
+        return {
+          name: 'shell',
+          ok,
+          text,
+          data,
+          startedTurn: false,
+          ...(ok ? {} : { error: `${shell.status}, exit ${String(shell.exit)}` }),
+        };
+      }
+      if (Date.now() >= deadline) {
+        return {
+          name: 'shell',
+          ok: false,
+          text: '',
+          startedTurn: false,
+          error: 'Timeout waiting for the shell command',
+        };
+      }
+      await new Promise((r) => setTimeout(r, this.serverPollMs));
+    }
+  }
+
+  // ─── Compaction, asides, rewinds, live switches ─────────────────────────
+
+  /**
+   * `session.compact`, waited for. OpenCode writes the summary with its own
+   * prompt (`summary` is not sent); the compaction's tokens and cost are the
+   * session's, and the context afterwards is the summary.
+   */
+  private async _compactOnServer(summary?: string): Promise<CompactOutcome> {
+    if (!this.opencodeSessionId) return { ok: true, trigger: 'manual', note: 'nothing to compact: no turn yet' };
+    const preTokens = this._lastPromptTokens || undefined;
+    const { result } = await this._followOnServer(
+      async (server, id) => {
+        await server.call('POST', `/api/session/${id}/compact`, {});
+      },
+      { timeout: TURN_TIMEOUT_MS, model: false },
+    );
+    const compaction = result.messages.filter((m) => m.type === 'compaction').at(-1);
+    const ignored = summary?.trim()
+      ? '; OpenCode writes the summary with its own prompt, so the summary given was not sent'
+      : '';
+    if (!compaction || compaction.status !== 'completed') {
+      const why = compaction?.error?.message ?? (result.timedOut ? 'timed out' : 'no compaction ran');
+      return { ok: false, trigger: 'manual', note: `${sanitizeSecrets(why)}${ignored}` };
+    }
+    const postTokens = compaction.tokens?.output || undefined;
+    if (postTokens) {
+      this._reportTurnInputTokens(postTokens);
+      this._lastPromptTokens = postTokens;
+    }
+    return {
+      ok: true,
+      trigger: 'manual',
+      ...(preTokens ? { preTokens } : {}),
+      ...(postTokens ? { postTokens } : {}),
+      ...(ignored ? { note: ignored.replace(/^; /, '') } : {}),
+    };
+  }
+
+  /** Compaction for callers of `compact()`: OpenCode 2 compacts on its server; OpenCode 1 cannot. */
+  override async compact(summary?: string): Promise<TurnResult> {
+    if (!this._v2) return super.compact(summary);
+    const o = await this._compactOnServer(summary);
+    const text = o.note ?? (o.ok ? 'compacted' : 'not compacted');
+    return { text, event: { type: 'result', result: text, compacted: o.ok } };
+  }
+
+  /**
+   * `session.generate`: an answer from the conversation's context, which stays
+   * as it was. No tools run. Its tokens and cost are the session's.
+   */
+  private async _askAside(question: string, opts: { timeout?: number } = {}): Promise<AsideOutcome> {
+    const id = this.opencodeSessionId;
+    if (!id) throw new Error('a side question needs a conversation, and this session has had no turn yet');
+    const lease = await this._lease();
+    try {
+      const r = await lease.server.call<{ data?: { text?: string; tokens?: OpencodeTokens; cost?: number } }>(
+        'POST',
+        `/api/session/${id}/generate`,
+        { prompt: question },
+        { timeoutMs: opts.timeout || TURN_TIMEOUT_MS },
+      );
+      if (r?.data?.tokens) this._addUsage(r.data.tokens, r.data.cost, false);
+      return { text: r?.data?.text ?? '' };
+    } finally {
+      lease.release();
+    }
+  }
+
+  /**
+   * `session.revert`, staged and committed: the conversation goes back to
+   * before the user message `turns` turns ago (or `messageId`), and with
+   * `files` the files those turns changed are restored from OpenCode's snapshots.
+   */
+  private async _rewind(target: RewindTarget): Promise<RewindOutcome> {
+    if (!this.opencodeSessionId) throw new Error('nothing to rewind: this session has had no turn yet');
+    const lease = await this._lease();
+    try {
+      const { server } = lease;
+      const id = await this._ensureConversation(server);
+      const messages = await messagesAfter(server, id, undefined);
+      const turnStarts = messages.filter((m) => m.type === 'user');
+      let at: OpencodeMessage | undefined;
+      let removed: number;
+      if (target.turns !== undefined) {
+        if (turnStarts.length < target.turns) {
+          throw new Error(`the conversation has ${turnStarts.length} turn(s); cannot rewind ${target.turns}`);
+        }
+        at = turnStarts[turnStarts.length - target.turns];
+        removed = target.turns;
+      } else {
+        const index = messages.findIndex((m) => m.id === target.messageId);
+        if (index < 0) throw new Error(`no message '${target.messageId}' in this conversation`);
+        at = messages[index];
+        removed = messages.slice(index).filter((m) => m.type === 'user').length;
+      }
+      const staged = await server.call<{ data?: { files?: Array<{ file?: string }> } }>(
+        'POST',
+        `/api/session/${id}/revert/stage`,
+        { messageID: at.id, files: !!target.files },
+      );
+      await server.call('POST', `/api/session/${id}/revert/commit`);
+      const files = (staged?.data?.files ?? []).map((f) => f.file).filter((f): f is string => !!f);
+      return {
+        ok: true,
+        turnsRemoved: removed,
+        filesRestored: !!target.files && files.length > 0,
+        ...(target.files ? { note: files.length ? `files restored: ${files.join(', ')}` : 'no files to restore' } : {}),
+      };
+    } finally {
+      lease.release();
+    }
+  }
+
+  /** Every turn names its model, so a switch applies from the next turn with nothing restarted. */
+  async setModelLive(model: string): Promise<boolean> {
+    this.options.model = model;
+    this.options.resolvedModel = model;
+    return true;
+  }
+
+  /** Effort is the model variant each turn names, so it applies from the next turn. */
+  async setEffortLive(_level: EffortLevel): Promise<boolean> {
+    return true;
+  }
+
+  // ─── The native goal (OpenCode 2's /goal) ───────────────────────────────
+
+  /** The goal plugin's state; a fresh server answers `RPC is unavailable` until the plugin has loaded. */
+  private async _goalStateOn(server: OpencodeServer, id: string): Promise<OpencodeGoalState | null> {
+    for (let i = 0; ; i++) {
+      try {
+        const r = await server.call<{ output?: OpencodeGoalState | null }>('POST', '/api/rpc/opencode.goal/get', {
+          input: { sessionID: id },
+        });
+        return r?.output ?? null;
+      } catch (err) {
+        const loading = err instanceof OpencodeApiError && err.tag === 'RpcError' && /unavailable/i.test(err.message);
+        if (!loading || i >= 20) throw err;
+        await new Promise((r) => setTimeout(r, 150));
+      }
+    }
+  }
+
+  /** The goal plugin's state for this conversation; null with no goal or no conversation. */
+  async goalState(): Promise<OpencodeGoalState | null> {
+    const id = this.opencodeSessionId;
+    if (!id) return null;
+    const lease = await this._lease();
+    try {
+      return await this._goalStateOn(lease.server, id);
+    } finally {
+      lease.release();
+    }
+  }
+
+  /**
+   * `/goal <args>`: an objective or `resume` is followed until the goal stops
+   * (it runs its rounds with no idle between them); `pause` and `clear` return
+   * at once.
+   */
+  goalCommand(args: string, opts: { timeout: number; callbacks?: StreamCallbacks }): Promise<CommandOutcome> {
+    return this._runServerCommand('goal', args, opts);
+  }
+
+  /** Put `text` in the conversation without starting the agent; the next round reads it. */
+  async goalContext(text: string): Promise<void> {
+    const lease = await this._lease();
+    try {
+      const id = await this._ensureConversation(lease.server);
+      await lease.server.call('POST', `/api/session/${id}/prompt`, { text, resume: false });
+    } finally {
+      lease.release();
+    }
+  }
+
+  // ─── Quota ──────────────────────────────────────────────────────────────
+
+  /** `GET /api/experimental/usage/limits`, through the held server when it runs, else `opencode api --standalone`. */
+  async readUsageLimits(): Promise<OpencodeUsageLimits | undefined> {
+    if (!this._v2) return undefined;
+    if (this._server?.alive) {
+      return this._server.call<OpencodeUsageLimits>('GET', '/api/experimental/usage/limits');
+    }
+    return readUsageLimitsStandalone(this.engineBin, this.options.cwd, this.options.launcher);
   }
 
   protected override _updateCost(): void {

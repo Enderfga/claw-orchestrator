@@ -30,6 +30,15 @@
  * dropped by the engine; the wrapper's defaults are part of what is under test.
  * The not-advertised list is a prompt for the judgement step downstream.
  *
+ * Where a CLI ships its commander program as JavaScript (Claude's binary,
+ * Cursor's bundle), the options it declares are read from there, hidden ones
+ * included, and reviewed with the --help flags. Each engine's own slash
+ * commands (codex: its app-server's RPC methods) are listed without a model
+ * turn and reviewed the same way, against `slashCommands` in
+ * sweep-reviewed.json. And on a live run, one turn per configured engine runs
+ * with session-level options on a scratch copy of the engine's config dir, to
+ * catch an option that writes the user's own config.
+ *
  * It also diffs `src/models.ts` against both vendors' published price tables.
  * That half was added after a sweep passed clean while all three GPT-5.6 tiers
  * sat at their launch rates — a wrong cost is silent, so nothing was ever going
@@ -39,15 +48,36 @@
  * Usage:
  *   npx tsx scripts/sweep.ts               # human table, exit 1 on a regression
  *   npx tsx scripts/sweep.ts --json        # machine-readable, same exit code
- *   npx tsx scripts/sweep.ts --no-live     # versions + flag surface only
+ *   npx tsx scripts/sweep.ts --no-live     # no turns: versions, flags, hidden options, slash commands
  *   npx tsx scripts/sweep.ts --out report.json
+ *   npx tsx scripts/sweep.ts --only cursor,claude   # those engines only (a partial check)
  */
 
 import { execFile, spawn } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  type AcpCommand,
+  type ListedCommand,
+  type ListingReview,
+  agyCommands,
+  claudeBuiltinCommands,
+  codexRpcMethods,
+  configChanges,
+  contradictedDecisions,
+  cursorEngineCommands,
+  declaredOptions,
+  grokEngineCommands,
+  opencodeListingEnv,
+  programRegion,
+  quotedIn,
+  reviewListing,
+  scanCovers,
+  unreviewedNames,
+} from './sweep-surface.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -79,6 +109,53 @@ interface Engine {
   liveCwd: 'repo' | 'empty';
   /** Wall-clock budget for the live turn. Default 240s. */
   liveTimeoutMs?: number;
+  /** Engine modules beside the wrapper (`src/<prefix>-*.ts`) whose literals count as passed too. */
+  modules?: string;
+  /**
+   * Where the CLI's own option list is read, hidden options included: the
+   * commander program in its shipped JavaScript, from `anchor` to its first
+   * subcommand. `file` maps the resolved binary to the file that holds it.
+   */
+  optionList?: { file: (binPath: string) => string; anchor: string };
+  /**
+   * The engine's own slash commands (on codex, the app-server's RPC methods),
+   * reviewed against `slashCommands` and `unlistedSlashCommands` in
+   * sweep-reviewed.json. Only what the engine ships: the user's and the
+   * project's skills and commands are left out — by the source the engine
+   * reports, by where their files are, or by listing on a config of the
+   * sweep's own — or the list would change with every skill the user adds.
+   */
+  slashCommands?: (e: Engine) => Promise<CommandListing>;
+  /** Files besides the wrapper and its modules whose quoted literals count as handling a listed command. */
+  commandSources?: string[];
+  /**
+   * A session-level option that must not write the user's global engine
+   * config: one turn through the wrapper with `session`, the config dir moved
+   * to a scratch copy through `env`, the copy compared afterwards.
+   */
+  configWrite?: ConfigWriteCheck;
+}
+
+/** The engine's own commands, and how a source file names one (`'/compact'` or `'thread/start'`). */
+interface CommandListing {
+  source: string;
+  commands: ListedCommand[];
+  literalPrefix: string;
+  /** How many listed commands were the user's or the project's, and left out. */
+  leftOut?: number;
+}
+
+interface ConfigWriteCheck {
+  /** The environment variable that relocates the config dir. */
+  env: string;
+  /** That dir, relative to HOME. */
+  dir: string;
+  /** The files in it that hold the user's settings. */
+  files: string[];
+  /** Keys the engine rewrites on every run whatever the flags (caches). */
+  volatileKeys?: RegExp;
+  /** Session options for the turn; each maps to a session-level flag. */
+  session: Record<string, unknown>;
 }
 
 const ENGINES: Engine[] = [
@@ -90,6 +167,10 @@ const ENGINES: Engine[] = [
     upstream: () => npmLatest('@anthropic-ai/claude-code'),
     session: { file: 'persistent-session.js', cls: 'PersistentClaudeSession' },
     liveCwd: 'repo',
+    modules: 'claude',
+    // A Bun single-file build: the JavaScript is embedded in the binary.
+    optionList: { file: (bin) => bin, anchor: '.name("claude")' },
+    slashCommands: claudeSlashCommands,
   },
   {
     id: 'codex',
@@ -99,6 +180,11 @@ const ENGINES: Engine[] = [
     upstream: () => ghLatestStable('openai/codex', /^rust-v(\d+\.\d+\.\d+)$/),
     session: { file: 'persistent-codex-session.js', cls: 'PersistentCodexSession' },
     liveCwd: 'repo',
+    modules: 'codex',
+    // `codex exec` and app-server turns pass slash text to the model, so the
+    // command surface is the app-server's RPC methods.
+    slashCommands: codexAppServerMethods,
+    commandSources: ['src/persistent-codex-app-session.ts'],
   },
   {
     id: 'agy',
@@ -108,6 +194,8 @@ const ENGINES: Engine[] = [
     upstream: null, // `agy update` upgrades in place; there is no check-only form.
     session: { file: 'persistent-agy-session.js', cls: 'PersistentAgySession' },
     liveCwd: 'repo',
+    modules: 'agy',
+    slashCommands: agySlashCommands,
   },
   {
     id: 'grok',
@@ -123,6 +211,20 @@ const ENGINES: Engine[] = [
     // the same day. 90s is enough for a real turn (7–8s measured) and short
     // enough that a hang does not stall the whole sweep.
     liveTimeoutMs: 90_000,
+    modules: 'grok',
+    // grok unpacks its bundled skills into the (scratch) grok home after
+    // session/new and advertises them in a later update: 2.4 s after it on
+    // 1.0.92, which a quiet period alone missed under load.
+    slashCommands: (e) =>
+      acpSlashCommands(e, {
+        args: ['agent', 'stdio'],
+        filter: grokListed,
+        envFor: grokListingEnv,
+        complete: {
+          test: (commands) => commands.some((c) => c._meta?.scope === 'bundled'),
+          what: "listed grok's bundled skills",
+        },
+      }),
   },
   // Cursor Agent — `cursor-agent`, never the bare `agent`, which xAI's installer
   // also claims. No check-only update command: the official installer names the
@@ -136,6 +238,19 @@ const ENGINES: Engine[] = [
     upstream: cursorLatest,
     session: { file: 'persistent-cursor-session.js', cls: 'PersistentCursorSession' },
     liveCwd: 'empty',
+    modules: 'cursor',
+    // The launcher script sits beside the bundle it runs.
+    optionList: { file: (bin) => path.join(path.dirname(bin), 'index.js'), anchor: '"Cursor Agent")' },
+    slashCommands: (e) =>
+      acpSlashCommands(e, { args: ['acp'], filter: cursorEngineCommands, envFor: cursorListingEnv }),
+    // `--model` is written into cli-config.json as the user's default model.
+    configWrite: {
+      env: 'CURSOR_CONFIG_DIR',
+      dir: '.cursor',
+      files: ['cli-config.json'],
+      volatileKeys: /Cache$/,
+      session: { model: 'gpt-5.2' },
+    },
   },
   // OpenCode 1.x — npm `opencode-ai`, which stays on that line. Still supported
   // for callers on it, but this machine runs OpenCode 2, so the 1.x binary is
@@ -154,6 +269,7 @@ const ENGINES: Engine[] = [
     session: { file: 'persistent-opencode-session.js', cls: 'PersistentOpencodeSession' },
     liveCwd: 'repo',
     otherLineFlags: ['--standalone', '--archived'],
+    modules: 'opencode',
   },
   // OpenCode 2 — npm `@opencode/cli` (what its installer downloads), and also
   // GitHub release binaries. Its first release, 2.2.0, went unseen for three
@@ -168,7 +284,9 @@ const ENGINES: Engine[] = [
     upstream: () => npmLatest('@opencode/cli'),
     session: { file: 'persistent-opencode-session.js', cls: 'PersistentOpencodeSession' },
     liveCwd: 'repo',
-    otherLineFlags: ['--variant', '--pure'],
+    otherLineFlags: ['--variant', '--pure', '--command'],
+    modules: 'opencode',
+    slashCommands: opencodeSlashCommands,
   },
 ];
 
@@ -181,7 +299,11 @@ interface Ran {
   ms: number;
 }
 
-function run(cmd: string, args: string[], opts: { cwd?: string; timeoutMs?: number } = {}): Promise<Ran> {
+function run(
+  cmd: string,
+  args: string[],
+  opts: { cwd?: string; timeoutMs?: number; env?: NodeJS.ProcessEnv } = {},
+): Promise<Ran> {
   const t0 = Date.now();
   const timeoutMs = opts.timeoutMs ?? 30_000;
   return new Promise((resolve) => {
@@ -191,7 +313,7 @@ function run(cmd: string, args: string[], opts: { cwd?: string; timeoutMs?: numb
     // them out and blamed the wrapper. The opencode wrapper has carried this
     // exact fix for a long time — the script is allowed to be simpler than the
     // wrappers, not more ignorant than them.
-    const p = spawn(cmd, args, { cwd: opts.cwd, env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
+    const p = spawn(cmd, args, { cwd: opts.cwd, env: opts.env ?? process.env, stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '';
     let err = '';
     let timedOut = false;
@@ -301,12 +423,42 @@ function flagsFromHelp(help: string): Set<string> {
   return out;
 }
 
-/** Every `'--flag'` literal the wrapper source passes. */
-function flagsFromWrapper(file: string): Set<string> {
-  const src = fs.readFileSync(path.join(ROOT, file), 'utf8');
+/**
+ * The wrapper and the engine's own modules (`src/<prefix>-*.ts`, tests aside):
+ * an engine's flag handling can live in a helper module as well as in the
+ * wrapper (`src/codex-config.ts` builds codex's `--enable` / `--disable`).
+ */
+function engineSources(e: Engine): string[] {
+  const files = [e.wrapper];
+  if (e.modules) {
+    for (const f of fs.readdirSync(path.join(ROOT, 'src')).sort()) {
+      if (f.startsWith(`${e.modules}-`) && f.endsWith('.ts')) files.push(path.join('src', f));
+    }
+  }
+  return files;
+}
+
+function readSources(files: string[]): string {
+  return files.map((f) => fs.readFileSync(path.join(ROOT, f), 'utf8')).join('\n');
+}
+
+/** Every `'--flag'` literal the engine's source passes. */
+function flagsFromSources(files: string[]): Set<string> {
+  const src = readSources(files);
   const out = new Set<string>();
   for (const m of src.matchAll(/'(--[a-zA-Z][a-zA-Z0-9-]*)'/g)) out.add(m[1]);
   return out;
+}
+
+/**
+ * A command name resolved through PATH to the file it runs. `readlink -f` on a
+ * bare name resolves it against the working directory, not PATH — the model
+ * scan below returned an empty set on every run for two months that way.
+ */
+async function resolveBin(bin: string): Promise<string | null> {
+  const onPath = (await run('which', [bin])).out.trim().split('\n')[0] ?? '';
+  const target = onPath ? (await run('readlink', ['-f', onPath])).out.trim() || onPath : '';
+  return target && fs.existsSync(target) ? target : null;
 }
 
 /**
@@ -351,6 +503,18 @@ function commandsFromHelp(help: string, bin: string): Set<string> {
 interface Reviewed {
   flags?: Record<string, string>;
   commands?: Record<string, string>;
+  /**
+   * Slash commands (codex: app-server methods) the engine's listing shows; one
+   * it no longer shows is reported stale. A key ending in `*` covers every name
+   * with that prefix; an alias of a listed command matches it.
+   */
+  slashCommands?: Record<string, string>;
+  /**
+   * Reviewed commands the listing cannot show — the TUI's own, and ones the
+   * headless list leaves out — never reported stale, and reported once the
+   * listing shows them. One name per key: an alias is an entry of its own.
+   */
+  unlistedSlashCommands?: Record<string, string>;
 }
 function reviewedFor(id: string): Reviewed {
   const file = path.join(ROOT, 'scripts', 'sweep-reviewed.json');
@@ -377,6 +541,493 @@ function installedVersion(out: string): string | null {
   return out.match(/(\d+\.\d+\.\d+)/)?.[1] ?? null;
 }
 
+// ─── Surface checks ─────────────────────────────────────────────────────────
+//
+// --help is not the whole surface. Claude and Cursor hide options from it
+// (`.hideHelp()`): `--advisor`, `--image`, `--single-turn` never reached the
+// review. Slash commands are a second surface the flag review never saw at
+// all, and codex's is its app-server's RPC methods. And a session-level flag
+// can change the user's own engine config: Cursor writes `--model` into
+// cli-config.json as their default model.
+
+/** Byte offset of `needle` in a file, read in chunks with an overlap: the claude binary is ~380 MB. */
+function offsetInFile(file: string, needle: string): number {
+  const pat = Buffer.from(needle, 'utf8');
+  const fd = fs.openSync(file, 'r');
+  try {
+    const CHUNK = 4 << 20;
+    const buf = Buffer.alloc(CHUNK);
+    let pos = 0;
+    for (;;) {
+      const n = fs.readSync(fd, buf, 0, CHUNK, pos);
+      if (n <= 0) return -1;
+      const i = buf.subarray(0, n).indexOf(pat);
+      if (i >= 0) return pos + i;
+      if (n < CHUNK) return -1;
+      pos += n - pat.length + 1;
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+function readAt(file: string, offset: number, length: number): string {
+  const fd = fs.openSync(file, 'r');
+  try {
+    const buf = Buffer.alloc(length);
+    const n = fs.readSync(fd, buf, 0, length, offset);
+    return buf.subarray(0, n).toString('utf8');
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+type OptionScan = { source: string; declared: Map<string, string> } | { error: string };
+
+/**
+ * The options the CLI's commander program declares, hidden ones included.
+ * A scan that finds nothing, or finds options that do not cover what --help
+ * lists, says so instead of reporting "nothing hidden".
+ */
+async function scanOptionList(e: Engine, helpFlags: Set<string>): Promise<OptionScan> {
+  const spec = e.optionList!;
+  const bin = await resolveBin(e.bin);
+  if (!bin) return { error: `\`${e.bin}\` not found on PATH` };
+  const file = spec.file(bin);
+  if (!fs.existsSync(file)) return { error: `${file} does not exist` };
+  const at = offsetInFile(file, spec.anchor);
+  if (at < 0) return { error: `anchor ${spec.anchor} not found in ${file}` };
+  const declared = declaredOptions(programRegion(readAt(file, at, 256 << 10)));
+  if (!scanCovers(new Set(declared.keys()), helpFlags)) {
+    return { error: `the options after ${spec.anchor} in ${file} do not match --help (${declared.size} found)` };
+  }
+  return { source: file, declared };
+}
+
+interface JsonPeer {
+  send: (msg: unknown) => void;
+}
+
+/**
+ * Talk JSON lines to a child in its own process group until `onLine` (or
+ * `onTick`, every 250 ms) returns a value; then kill the whole group, so an
+ * engine's MCP servers or workers do not outlive the listing.
+ */
+function converse<T>(
+  cmd: string,
+  args: string[],
+  opts: { cwd: string; env?: NodeJS.ProcessEnv; timeoutMs: number },
+  start: (peer: JsonPeer) => void,
+  onLine: (msg: NonNullable<ReturnType<typeof safeJson>>, peer: JsonPeer) => T | undefined,
+  onTick?: () => T | undefined,
+): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const p = spawn(cmd, args, {
+      cwd: opts.cwd,
+      env: opts.env ?? process.env,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      detached: true,
+    });
+    let settled = false;
+    let err = '';
+    let buf = '';
+    const peer: JsonPeer = { send: (msg) => p.stdin.write(JSON.stringify(msg) + '\n') };
+    const finish = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearInterval(tick);
+      clearTimeout(timer);
+      try {
+        if (p.pid) process.kill(-p.pid, 'SIGKILL');
+      } catch {
+        p.kill('SIGKILL');
+      }
+      fn();
+    };
+    const timer = setTimeout(
+      () => finish(() => reject(new Error(`timed out after ${Math.round(opts.timeoutMs / 1000)}s`))),
+      opts.timeoutMs,
+    );
+    const tick = setInterval(() => {
+      try {
+        const v = onTick?.();
+        if (v !== undefined) finish(() => resolve(v));
+      } catch (e) {
+        finish(() => reject(e));
+      }
+    }, 250);
+    p.stdin.on('error', () => {});
+    p.stderr.on('data', (d) => (err = (err + d).slice(-2000)));
+    p.stdout.on('data', (d) => {
+      buf += d;
+      for (let i = buf.indexOf('\n'); i >= 0; i = buf.indexOf('\n')) {
+        const line = buf.slice(0, i);
+        buf = buf.slice(i + 1);
+        const msg = safeJson(line);
+        if (!msg || settled) continue;
+        try {
+          const v = onLine(msg, peer);
+          if (v !== undefined) finish(() => resolve(v));
+        } catch (e) {
+          finish(() => reject(e));
+        }
+      }
+    });
+    p.on('error', (e) => finish(() => reject(e)));
+    p.on('close', (code) =>
+      finish(() => reject(new Error(`exited ${code} first: ${err.trim().split('\n').pop() ?? ''}`.trim()))),
+    );
+    start(peer);
+  });
+}
+
+function listLength(v: unknown): number {
+  return Array.isArray(v) ? v.length : 0;
+}
+
+/**
+ * Claude's built-in commands, from the `initialize` control response — no
+ * model turn. With no setting sources the user's hooks, skills and plugins do
+ * not load; the built-in list is the same either way (2.1.332).
+ */
+async function claudeSlashCommands(e: Engine): Promise<CommandListing> {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'sweep-claude-cmds-'));
+  try {
+    const args = ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose'];
+    const response = await converse(
+      e.bin,
+      [...args, '--setting-sources', ''],
+      { cwd, timeoutMs: 60_000 },
+      (peer) => peer.send({ type: 'control_request', request_id: 'sweep-init', request: { subtype: 'initialize' } }),
+      (msg) =>
+        msg.type === 'control_response' && msg.response?.request_id === 'sweep-init'
+          ? (msg.response.response ?? {})
+          : undefined,
+    );
+    const commands = claudeBuiltinCommands(response);
+    return {
+      source: 'initialize control response (builtin)',
+      commands,
+      literalPrefix: '/',
+      leftOut: listLength((response as { commands?: unknown }).commands) - commands.length,
+    };
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+}
+
+/** agy answers `/help` and `/skills` itself, with structured data and no model turn. */
+async function agySlashCommands(e: Engine): Promise<CommandListing> {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'sweep-agy-cmds-'));
+  try {
+    const result = async (cmd: string) => {
+      const r = await run(e.bin, ['-p', cmd, '--output-format', 'stream-json'], { cwd, timeoutMs: 60_000 });
+      for (const line of r.out.split('\n')) {
+        const msg = safeJson(line);
+        if (msg?.event === 'result') return msg.result;
+      }
+      throw new Error(`no result for ${cmd}: ${(r.err.trim().split('\n').pop() ?? '').slice(0, 120)}`);
+    };
+    const help = await result('/help');
+    const skills = await result('/skills');
+    const commands = agyCommands(help, skills);
+    const listed = listLength(help?.command?.data?.commands) + listLength(skills?.command?.data?.skills);
+    return {
+      source: '-p /help and /skills (builtin)',
+      commands,
+      literalPrefix: '/',
+      leftOut: listed - commands.length,
+    };
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+}
+
+interface AcpListing {
+  args: string[];
+  /** The engine's own commands among those advertised, by name; `scratch` is the listing's scratch dir. */
+  filter: (commands: AcpCommand[], scratch: string) => string[];
+  envFor: (scratch: string) => NodeJS.ProcessEnv;
+  /**
+   * When the advertised list is whole, for an agent that sends part of it
+   * first; with `what` naming what is still missing. A list that is not whole
+   * after 15 s fails the listing rather than pass with names missing.
+   */
+  complete?: { test: (commands: AcpCommand[]) => boolean; what: string };
+}
+
+/**
+ * The commands an ACP agent advertises for a new session in an empty git
+ * repository (Cursor drops `/worktree` and `/best-of-n` outside one). No
+ * prompt is sent. The list can arrive in several updates; the last one counts.
+ */
+async function acpSlashCommands(e: Engine, spec: AcpListing): Promise<CommandListing> {
+  const { args, filter, envFor, complete } = spec;
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), `sweep-${e.id}-cmds-`));
+  const cwd = path.join(scratch, 'ws');
+  try {
+    fs.mkdirSync(cwd);
+    await run('git', ['init', '-q', cwd]);
+    let newAt = 0;
+    let lastAt = 0;
+    let commands: AcpCommand[] | null = null;
+    const list = await converse<AcpCommand[] | null>(
+      e.bin,
+      args,
+      { cwd, env: envFor(scratch), timeoutMs: 60_000 },
+      (peer) =>
+        peer.send({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'initialize',
+          params: { protocolVersion: 1, clientCapabilities: { fs: { readTextFile: false, writeTextFile: false } } },
+        }),
+      (msg, peer) => {
+        if (msg.id === 1 && msg.result) {
+          peer.send({ jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd, mcpServers: [] } });
+        } else if (msg.id === 1 || msg.id === 2) {
+          if (msg.error) throw new Error(`${msg.id === 1 ? 'initialize' : 'session/new'}: ${msg.error.message}`);
+          newAt = Date.now();
+        } else if (
+          msg.method === 'session/update' &&
+          msg.params?.update?.sessionUpdate === 'available_commands_update'
+        ) {
+          commands = msg.params.update.availableCommands ?? [];
+          lastAt = Date.now();
+        } else if (msg.id !== undefined && msg.method) {
+          peer.send({ jsonrpc: '2.0', id: msg.id, error: { code: -32601, message: 'not supported by the sweep' } });
+        }
+        return undefined;
+      },
+      () => {
+        const now = Date.now();
+        if (!newAt) return undefined;
+        const whole = !!commands && (!complete || complete.test(commands));
+        if (whole && now - newAt >= 3000 && now - lastAt >= 1500) return commands;
+        return now - newAt >= 15_000 ? commands : undefined;
+      },
+    );
+    if (!list) throw new Error('no available_commands_update within 15s of session/new');
+    if (complete && !complete.test(list)) throw new Error(`no available_commands_update within 15s ${complete.what}`);
+    const names = filter(list, scratch);
+    return {
+      source: `\`${[e.bin, ...args].join(' ')}\` available_commands_update`,
+      commands: names.map((name) => ({ name })),
+      literalPrefix: '/',
+      leftOut: list.length - names.length,
+    };
+  } finally {
+    fs.rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+/**
+ * grok's listing runs on a scratch GROK_HOME (its session and the user's grok
+ * plugins stay out of ~/.grok) and reads the login where it is. What grok
+ * imports from Claude, Cursor and Codex is switched off: it is the user's, and
+ * their MCP servers would be started for nothing.
+ */
+function grokListingEnv(scratch: string): NodeJS.ProcessEnv {
+  const home = process.env.GROK_HOME || path.join(os.homedir(), '.grok');
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    GROK_HOME: grokHomeIn(scratch),
+    GROK_AUTH_PATH: process.env.GROK_AUTH_PATH || path.join(home, 'auth.json'),
+  };
+  for (const source of ['CLAUDE', 'CURSOR', 'CODEX'])
+    for (const kind of ['SKILLS', 'MCPS', 'HOOKS', 'AGENTS', 'RULES']) env[`GROK_${source}_${kind}_ENABLED`] = '0';
+  return env;
+}
+
+function grokHomeIn(scratch: string): string {
+  return path.join(scratch, 'grok-home');
+}
+
+/**
+ * grok's own commands: what it unpacks into the listing's grok home is what it
+ * ships; a skill file anywhere else is the machine's (grokEngineCommands).
+ */
+function grokListed(commands: AcpCommand[], scratch: string): string[] {
+  const home = grokHomeIn(scratch);
+  const dirs = fs.existsSync(home) ? [home, fs.realpathSync(home)] : [home];
+  return grokEngineCommands(commands, dirs);
+}
+
+/** Cursor's listing keeps its ACP session out of ~/.cursor/acp-sessions; the login is in the keychain. */
+function cursorListingEnv(scratch: string): NodeJS.ProcessEnv {
+  return { ...process.env, CURSOR_CONFIG_DIR: path.join(scratch, 'cursor-config') };
+}
+
+/**
+ * OpenCode's command list from a private server (`serve --stdio`, as
+ * `--standalone` starts internally) isolated from the user's and any project's
+ * configuration (opencodeListingEnv), so only the built-in commands are
+ * listed. The list is empty for a few hundred ms on a cold location; it is
+ * asked again until it is not.
+ */
+async function opencodeSlashCommands(e: Engine): Promise<CommandListing> {
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'sweep-opencode-cmds-'));
+  const cwd = path.join(scratch, 'ws');
+  const env = opencodeListingEnv(
+    process.env,
+    { configHome: path.join(scratch, 'config'), cwd },
+    randomBytes(24).toString('base64url'),
+  );
+  let server: ReturnType<typeof spawn> | undefined;
+  try {
+    fs.mkdirSync(cwd);
+    server = spawn(e.bin, ['serve', '--stdio', '--port', '0'], {
+      cwd,
+      env,
+      stdio: ['pipe', 'pipe', 'ignore'],
+      detached: true,
+    });
+    const url = await new Promise<string>((resolve, reject) => {
+      let buf = '';
+      const timer = setTimeout(() => reject(new Error('serve printed no url within 30s')), 30_000);
+      server!.stdout!.on('data', (d) => {
+        buf += d;
+        const first = buf.split('\n')[0];
+        if (buf.includes('\n')) {
+          clearTimeout(timer);
+          const u = safeJson(first)?.url;
+          if (typeof u === 'string') resolve(u);
+          else reject(new Error(`serve printed ${first.slice(0, 120)}`));
+        }
+      });
+      server!.on('close', (code) => reject(new Error(`serve exited ${code}`)));
+    });
+    for (let i = 0; i < 20; i++) {
+      const r = await run(e.bin, ['api', '--server', url, 'GET', '/api/command'], { cwd, env, timeoutMs: 30_000 });
+      const data = safeJson(r.out)?.data;
+      if (Array.isArray(data) && data.length) {
+        const names = data.map((c: { name?: unknown }) => c?.name).filter((n): n is string => typeof n === 'string');
+        return {
+          source: 'private server GET /api/command',
+          commands: names.map((name) => ({ name })),
+          literalPrefix: '/',
+        };
+      }
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    throw new Error('GET /api/command stayed empty for 5s');
+  } finally {
+    try {
+      if (server?.pid) process.kill(-server.pid, 'SIGKILL');
+    } catch {
+      // Already exited.
+    }
+    fs.rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+/** The app-server's request methods, from the schema codex generates for its own protocol. */
+async function codexAppServerMethods(e: Engine): Promise<CommandListing> {
+  const out = fs.mkdtempSync(path.join(os.tmpdir(), 'sweep-codex-schema-'));
+  try {
+    const r = await run(e.bin, ['app-server', 'generate-json-schema', '--experimental', '--out', out], {
+      timeoutMs: 60_000,
+    });
+    const file = path.join(out, 'ClientRequest.json');
+    if (!fs.existsSync(file))
+      throw new Error(`no ClientRequest.json: ${(r.err.trim().split('\n').pop() ?? '').slice(0, 120)}`);
+    const commands = codexRpcMethods(JSON.parse(fs.readFileSync(file, 'utf8'))).map((name) => ({ name }));
+    return { source: 'app-server generate-json-schema --experimental (ClientRequest)', commands, literalPrefix: '' };
+  } finally {
+    fs.rmSync(out, { recursive: true, force: true });
+  }
+}
+
+/** One turn through the real wrapper class under dist/, as a session would run it. */
+async function liveTurn(
+  e: Engine,
+  cwd: string,
+  extra: Record<string, unknown> = {},
+): Promise<{ ok: boolean; ms: number; note?: string }> {
+  const t0 = Date.now();
+  let ok = false;
+  let note: string | undefined;
+  try {
+    const mod = await import(path.join(ROOT, 'dist', 'src', e.session.file));
+    const Cls = mod[e.session.cls];
+    const config = { name: `sweep-${e.id}`, cwd, permissionMode: 'bypassPermissions', ...extra };
+    const session = e.passBin ? new Cls(config, e.bin) : new Cls(config);
+    const result: Promise<unknown> = new Promise((resolve) => session.once('result', resolve));
+    session.on('log', (m: unknown) => {
+      const line = String(m);
+      if (/usage limit|rate limit|quota/i.test(line)) note = 'usage limit';
+    });
+    await session.start();
+    await session.send('Reply with exactly: OK', { waitForComplete: true, timeout: e.liveTimeoutMs ?? 240_000 });
+    // The persistent claude wrapper resolves send() before the turn ends and
+    // reports the outcome on its `result` event; one-shot wrappers have
+    // already finished by now, so this only waits when there is something
+    // to wait for.
+    await Promise.race([result, new Promise((r) => setTimeout(r, e.liveTimeoutMs ?? 240_000))]);
+    const stats = session.getStats();
+    ok = stats.turnsSucceeded >= 1;
+    if (!ok && !note) {
+      note =
+        stats.turns === 0
+          ? 'no turn completed — silent hang (grok on a spent free tier does this); try `grok -p` by hand'
+          : `turnsSucceeded=${stats.turnsSucceeded} of ${stats.turns}`;
+    }
+    await session.stop();
+  } catch (err) {
+    const msg = String((err as Error)?.message ?? err);
+    note = /usage limit|rate limit|quota/i.test(msg) ? 'usage limit' : msg.split('\n')[0].slice(0, 120);
+  }
+  return { ok, ms: Date.now() - t0, ...(ok ? {} : { note }) };
+}
+
+interface ConfigWriteReport {
+  /** The session options the turn ran with. */
+  session: Record<string, unknown>;
+  /** `<file>:<key>` the turn changed in the scratch copy. */
+  changed: string[];
+  /** Set when the check could not measure, or saw the user's real file change. */
+  note?: string;
+}
+
+/**
+ * One turn with session-level options, the engine's config dir moved to a
+ * scratch copy through its environment variable. The user's real files are
+ * only read: before, to make the copy, and after, to confirm they were left
+ * alone.
+ */
+async function configWriteCheck(e: Engine, c: ConfigWriteCheck): Promise<ConfigWriteReport> {
+  const realDir = process.env[c.env] || path.join(os.homedir(), c.dir);
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), `sweep-${e.id}-config-`));
+  const copy = path.join(scratch, 'config');
+  const cwd = path.join(scratch, 'ws');
+  fs.mkdirSync(copy);
+  fs.mkdirSync(cwd);
+  const read = (f: string) => (fs.existsSync(f) ? fs.readFileSync(f, 'utf8') : null);
+  const before = c.files.map((f) => read(path.join(realDir, f)));
+  c.files.forEach((f, i) => before[i] !== null && fs.writeFileSync(path.join(copy, f), before[i]!));
+  const prev = process.env[c.env];
+  process.env[c.env] = copy;
+  let turn: Awaited<ReturnType<typeof liveTurn>>;
+  try {
+    turn = await liveTurn(e, cwd, c.session);
+  } finally {
+    if (prev === undefined) delete process.env[c.env];
+    else process.env[c.env] = prev;
+  }
+  const changed = c.files.flatMap((f, i) =>
+    configChanges(before[i], read(path.join(copy, f)), c.volatileKeys).map((k) => `${f}:${k}`),
+  );
+  const realChanged = c.files.filter((f, i) => read(path.join(realDir, f)) !== before[i]);
+  fs.rmSync(scratch, { recursive: true, force: true });
+  let note: string | undefined;
+  if (realChanged.length) {
+    note = `the real ${realChanged.join(', ')} changed during the check — another ${e.bin} process, or the wrapper does not honour ${c.env}`;
+  } else if (!turn.ok && !changed.length) {
+    note = `NOT measured — the turn failed (${turn.note})`;
+  }
+  return { session: c.session, changed, ...(note ? { note } : {}) };
+}
+
 // ─── Report ─────────────────────────────────────────────────────────────────
 
 interface EngineReport {
@@ -392,9 +1043,28 @@ interface EngineReport {
   unreviewedCommands: string[];
   /** Decisions recorded for flags or subcommands the binary no longer lists. */
   staleReviewed: string[];
+  /** Flags recorded as skipped that the engine's source now passes: the decision is out of date. */
+  contradicted: string[];
+  /** Options the CLI declares and its --help leaves out, read from its own JavaScript. */
+  hiddenFlags: string[];
+  /** The help text of each hidden flag still owed a decision. */
+  hiddenHelp?: Record<string, string>;
+  /** Where the hidden options were read, or why they could not be. */
+  optionScan?: { source: string; declared: number } | { error: string };
+  /** The engine's own slash commands (codex: app-server methods) against `slashCommands` in sweep-reviewed.json. */
+  slashCommands?: SlashReport | { error: string };
+  /** Whether a session-level option wrote the user's engine config (measured on a scratch copy). */
+  configWrite?: ConfigWriteReport | 'skipped';
   live: { ok: boolean; ms: number; note?: string } | 'skipped';
   /** Why the engine was only partly checked. */
   note?: string;
+}
+
+interface SlashReport extends ListingReview {
+  source: string;
+  listed: number;
+  /** The user's and the project's commands the listing left out. */
+  leftOut: number;
 }
 
 interface Report {
@@ -420,6 +1090,8 @@ async function sweepEngine(e: Engine, pinned: string | null, live: boolean): Pro
       unreferenced: [],
       unreviewedCommands: [],
       staleReviewed: [],
+      contradicted: [],
+      hiddenFlags: [],
       live: 'skipped',
       note: e.missingBin,
     };
@@ -429,63 +1101,94 @@ async function sweepEngine(e: Engine, pinned: string | null, live: boolean): Pro
   const upstream = e.upstream ? await e.upstream() : 'n/a';
 
   const help = await run(e.bin, e.helpArgv);
-  const cliFlags = flagsFromHelp(help.out + help.err);
-  const ours = flagsFromWrapper(e.wrapper);
-  for (const f of e.otherLineFlags ?? []) ours.delete(f);
-  const notAdvertised = [...ours].filter((f) => !cliFlags.has(f)).sort();
+  const helpFlags = flagsFromHelp(help.out + help.err);
+  // The CLI's surface is what --help lists plus what its option list declares
+  // and hides; both go through the same review.
+  let optionScan: EngineReport['optionScan'];
+  let declared = new Map<string, string>();
+  if (e.optionList) {
+    const scan = await scanOptionList(e, helpFlags);
+    if ('error' in scan) optionScan = scan;
+    else {
+      declared = scan.declared;
+      optionScan = { source: scan.source, declared: declared.size };
+    }
+  }
+  const cliFlags = new Set([...helpFlags, ...declared.keys()]);
+  const hiddenFlags = [...declared.keys()].filter((f) => !helpFlags.has(f)).sort();
+  // A flag passed anywhere in the engine's source needs no decision. But its
+  // modules also spawn other subcommands (`serve --stdio --port 0`, `app-server
+  // --listen`), so what the wrapper passes that the CLI does not list, and a
+  // skip the wrapper now contradicts, are read from the wrapper alone.
+  const sources = engineSources(e);
+  const ours = flagsFromSources(sources);
+  const wrapperFlags = flagsFromSources([e.wrapper]);
+  for (const f of e.otherLineFlags ?? []) {
+    ours.delete(f);
+    wrapperFlags.delete(f);
+  }
+  const notAdvertised = [...wrapperFlags].filter((f) => !cliFlags.has(f)).sort();
   const reviewed = reviewedFor(e.id);
-  const unreferenced = [...cliFlags]
-    .filter((f) => !ours.has(f) && !['--help', '--version'].includes(f) && !(f in (reviewed.flags ?? {})))
-    .sort();
+  const flagDecisions = reviewed.flags ?? {};
+  const unreferenced = unreviewedNames(
+    [...cliFlags].filter((f) => !['--help', '--version'].includes(f)),
+    flagDecisions,
+    ours,
+  );
+  const hiddenHelp = Object.fromEntries(
+    unreferenced.filter((f) => hiddenFlags.includes(f)).map((f) => [f, declared.get(f) ?? '']),
+  );
   const top = await run(e.bin, e.commandsArgv ?? ['--help']);
   const cliCommands = commandsFromHelp(top.out + top.err, e.bin);
   const unreviewedCommands = [...cliCommands].filter((c) => !(c in (reviewed.commands ?? {}))).sort();
   const staleReviewed = [
-    ...Object.keys(reviewed.flags ?? {}).filter((f) => !cliFlags.has(f)),
+    ...Object.keys(flagDecisions).filter((f) => !cliFlags.has(f)),
     ...Object.keys(reviewed.commands ?? {})
       .filter((c) => cliCommands.size > 0 && !cliCommands.has(c))
       .map((c) => `command ${c}`),
   ].sort();
+  const contradicted = contradictedDecisions(flagDecisions, wrapperFlags);
+
+  let slashCommands: EngineReport['slashCommands'];
+  if (e.slashCommands) {
+    try {
+      const listing = await e.slashCommands(e);
+      if (!listing.commands.length) throw new Error('the listing came back empty');
+      const referenced = quotedIn(
+        readSources([...sources, ...(e.commandSources ?? [])]),
+        listing.commands.flatMap((c) => [c.name, ...(c.aliases ?? [])]),
+        listing.literalPrefix,
+      );
+      slashCommands = {
+        source: listing.source,
+        listed: new Set(listing.commands.map((c) => c.name)).size,
+        leftOut: listing.leftOut ?? 0,
+        // Codex's method names are paths; a slash command's name holds no `/`.
+        ...reviewListing(
+          listing.commands,
+          { listed: reviewed.slashCommands ?? {}, unlisted: reviewed.unlistedSlashCommands ?? {} },
+          referenced,
+          { slashInNames: listing.literalPrefix === '' },
+        ),
+      };
+    } catch (err) {
+      slashCommands = {
+        error: String((err as Error)?.message ?? err)
+          .split('\n')[0]
+          .slice(0, 200),
+      };
+    }
+  }
 
   let liveResult: EngineReport['live'] = 'skipped';
   if (live) {
     const cwd = e.liveCwd === 'empty' ? fs.mkdtempSync(path.join(os.tmpdir(), `sweep-${e.id}-`)) : ROOT;
-    const t0 = Date.now();
-    let ok = false;
-    let note: string | undefined;
-    try {
-      const mod = await import(path.join(ROOT, 'dist', 'src', e.session.file));
-      const Cls = mod[e.session.cls];
-      const config = { name: `sweep-${e.id}`, cwd, permissionMode: 'bypassPermissions' };
-      const session = e.passBin ? new Cls(config, e.bin) : new Cls(config);
-      const result: Promise<unknown> = new Promise((resolve) => session.once('result', resolve));
-      session.on('log', (m: unknown) => {
-        const line = String(m);
-        if (/usage limit|rate limit|quota/i.test(line)) note = 'usage limit';
-      });
-      await session.start();
-      await session.send('Reply with exactly: OK', { waitForComplete: true, timeout: e.liveTimeoutMs ?? 240_000 });
-      // The persistent claude wrapper resolves send() before the turn ends and
-      // reports the outcome on its `result` event; one-shot wrappers have
-      // already finished by now, so this only waits when there is something
-      // to wait for.
-      await Promise.race([result, new Promise((r) => setTimeout(r, e.liveTimeoutMs ?? 240_000))]);
-      const stats = session.getStats();
-      ok = stats.turnsSucceeded >= 1;
-      if (!ok && !note) {
-        note =
-          stats.turns === 0
-            ? 'no turn completed — silent hang (grok on a spent free tier does this); try `grok -p` by hand'
-            : `turnsSucceeded=${stats.turnsSucceeded} of ${stats.turns}`;
-      }
-      await session.stop();
-    } catch (err) {
-      const msg = String((err as Error)?.message ?? err);
-      note = /usage limit|rate limit|quota/i.test(msg) ? 'usage limit' : msg.split('\n')[0].slice(0, 120);
-    }
-    liveResult = { ok, ms: Date.now() - t0, ...(ok ? {} : { note }) };
+    liveResult = await liveTurn(e, cwd);
     if (e.liveCwd === 'empty') fs.rmSync(cwd, { recursive: true, force: true });
   }
+  // A turn of its own, so it only runs when turns are allowed.
+  let configWrite: EngineReport['configWrite'];
+  if (e.configWrite) configWrite = live ? await configWriteCheck(e, e.configWrite) : 'skipped';
 
   return {
     id: e.id,
@@ -496,6 +1199,12 @@ async function sweepEngine(e: Engine, pinned: string | null, live: boolean): Pro
     unreferenced,
     unreviewedCommands,
     staleReviewed,
+    contradicted,
+    hiddenFlags,
+    ...(Object.keys(hiddenHelp).length ? { hiddenHelp } : {}),
+    ...(optionScan ? { optionScan } : {}),
+    ...(slashCommands ? { slashCommands } : {}),
+    ...(configWrite ? { configWrite } : {}),
     live: liveResult,
   };
 }
@@ -761,13 +1470,10 @@ async function anthropicPrices(): Promise<{ prices: PublishedPrice[]; note?: str
  */
 async function modelIdsInBinary(bin: string, pattern: RegExp): Promise<Set<string> | null> {
   const ids = new Set<string>();
-  // Through PATH first: `bin` is a command name, and `readlink -f` on a bare name
-  // resolves it against the working directory, not PATH. That is how this scan
-  // returned an empty set on every run from 7.1.1 until it was noticed — and an
-  // empty set reads exactly like "no new models", so nothing ever looked wrong.
-  const onPath = (await run('which', [bin])).out.trim().split('\n')[0] ?? '';
-  const target = onPath ? (await run('readlink', ['-f', onPath])).out.trim() || onPath : '';
-  if (!target || !fs.existsSync(target)) return null;
+  // Through PATH first (resolveBin): an empty set here reads exactly like "no
+  // new models", so a lookup that resolved nothing would never look wrong.
+  const target = await resolveBin(bin);
+  if (!target) return null;
   let fd: number;
   try {
     fd = fs.openSync(target, 'r');
@@ -914,10 +1620,15 @@ async function main(): Promise<void> {
   const live = !argv.includes('--no-live');
   const outIdx = argv.indexOf('--out');
   const outPath = outIdx >= 0 ? argv[outIdx + 1] : null;
+  const onlyIdx = argv.indexOf('--only');
+  const only = onlyIdx >= 0 ? new Set((argv[onlyIdx + 1] ?? '').split(',').filter(Boolean)) : null;
+  const unknown = [...(only ?? [])].filter((id) => !ENGINES.some((e) => e.id === id));
+  if (unknown.length) throw new Error(`--only: no engine ${unknown.join(', ')}`);
 
   const pinned = pins();
   const engines: EngineReport[] = [];
-  for (const e of ENGINES) engines.push(await sweepEngine(e, pinned[e.pinKey ?? e.id] ?? null, live));
+  for (const e of ENGINES)
+    if (!only || only.has(e.id)) engines.push(await sweepEngine(e, pinned[e.pinKey ?? e.id] ?? null, live));
   const acp = await acpSmoke();
   const mcp = await mcpSmoke();
   const registry = await sweepRegistry(
@@ -938,6 +1649,30 @@ async function main(): Promise<void> {
     if (e.unreferenced.length) regressions.push(`${e.id}: unreviewed flag(s): ${e.unreferenced.join(' ')}`);
     if (e.unreviewedCommands.length)
       regressions.push(`${e.id}: unreviewed subcommand(s): ${e.unreviewedCommands.join(' ')}`);
+    // A scan or listing that could not run checked nothing; "no hidden flags"
+    // and "no new commands" must not be what that looks like.
+    if (e.optionScan && 'error' in e.optionScan)
+      regressions.push(`${e.id}: hidden-option scan NOT run — ${e.optionScan.error}`);
+    if (e.slashCommands && 'error' in e.slashCommands)
+      regressions.push(`${e.id}: slash-command listing NOT run — ${e.slashCommands.error}`);
+    else if (e.slashCommands) {
+      if (e.slashCommands.unreviewed.length)
+        regressions.push(`${e.id}: unreviewed slash command(s): ${e.slashCommands.unreviewed.join(' ')}`);
+      // A key that names no single command never matches, so the command it
+      // was meant for stays undecided without anyone seeing why.
+      if (e.slashCommands.malformed.length)
+        regressions.push(
+          `${e.id}: slash-command decision key(s) that name no single command: ${e.slashCommands.malformed.join(' | ')}`,
+        );
+    }
+    if (e.configWrite && e.configWrite !== 'skipped') {
+      const c = e.configWrite;
+      if (c.changed.length)
+        regressions.push(
+          `${e.id}: a session option (${JSON.stringify(c.session)}) wrote the user's engine config: ${c.changed.join(' ')}`,
+        );
+      if (c.note) regressions.push(`${e.id}: config-write check: ${c.note}`);
+    }
   }
   if (!acp.ok) regressions.push(`acp: ${acp.note}`);
   if (!mcp.ok) regressions.push(`mcp: ${mcp.note}`);
@@ -996,6 +1731,40 @@ async function main(): Promise<void> {
       if (e.staleReviewed.length)
         console.log(
           `reviewed on ${e.id} but no longer listed (drop from sweep-reviewed.json): ${e.staleReviewed.join(' ')}`,
+        );
+      if (e.contradicted.length)
+        console.log(
+          `reviewed as skip on ${e.id} but the wrapper passes it (update the reason): ${e.contradicted.join(' ')}`,
+        );
+      if (e.optionScan && !('error' in e.optionScan))
+        console.log(
+          `${e.id} option list: ${e.optionScan.declared} declared in ${e.optionScan.source}, ${e.hiddenFlags.length} hidden from --help`,
+        );
+      for (const [flag, text] of Object.entries(e.hiddenHelp ?? {}))
+        console.log(`  hidden ${flag}${text ? ` — ${text.slice(0, 110)}` : ''}`);
+      const sc = e.slashCommands;
+      if (sc && !('error' in sc)) {
+        const leftOut = sc.leftOut ? `, ${sc.leftOut} of the user's and the project's left out` : '';
+        console.log(
+          `${e.id} slash commands: ${sc.listed} listed (${sc.source}${leftOut}), ${sc.unreviewed.length} unreviewed`,
+        );
+        if (sc.unreviewed.length) console.log(`  unreviewed: ${sc.unreviewed.join(' ')}`);
+        if (sc.stale.length)
+          console.log(
+            `  reviewed but no longer listed (drop, or move to unlistedSlashCommands if the TUI still has it): ${sc.stale.join(' ')}`,
+          );
+        if (sc.nowListed.length)
+          console.log(
+            `  under unlistedSlashCommands but listed now (move to slashCommands): ${sc.nowListed.join(' ')}`,
+          );
+        if (sc.malformed.length) console.log(`  keys that name no single command: ${sc.malformed.join(' | ')}`);
+        if (sc.contradicted.length)
+          console.log(`  reviewed as skip but the wrapper names it: ${sc.contradicted.join(' ')}`);
+      }
+      if (e.configWrite === 'skipped') console.log(`${e.id} config-write check: skipped (it needs a turn; run live)`);
+      else if (e.configWrite && !e.configWrite.changed.length && !e.configWrite.note)
+        console.log(
+          `${e.id} config-write check: ${JSON.stringify(e.configWrite.session)} left the engine config alone`,
         );
     }
     if (regressions.length) console.log(`\n${regressions.length} regression(s):\n  ${regressions.join('\n  ')}`);

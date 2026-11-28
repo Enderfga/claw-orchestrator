@@ -1,0 +1,18 @@
+{
+  "id": "agy-acp",
+  "tier": "community",
+  "description": "Google Antigravity CLI served over the Agent Client Protocol (`agy acp`): one long-lived agy process per session, where agy forwards its questions and permission requests to the client. Start with engine 'acp'; for print-mode turns use engine 'agy'.",
+  "provenance": {
+    "maintainer": "Enderfga",
+    "verifiedAgainst": "1.5.19",
+    "verifiedOn": "2026-11-28",
+    "sourceUrl": "https://antigravity.google/cli"
+  },
+  "acp": {
+    "name": "agy-acp",
+    "command": "agy",
+    "commandEnv": "AGY_BIN",
+    "args": ["acp"],
+    "contextWindow": 1000000
+  }
+}

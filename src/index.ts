@@ -47,7 +47,14 @@ import type { ForumConfig } from './kernel/forum.js';
 
 // ─── Standalone Export ───────────────────────────────────────────────────────
 
-export { SessionManager } from './session-manager.js';
+export { SessionManager, CapabilityUnsupportedError } from './session-manager.js';
+export {
+  registerQuotaReader,
+  readEngineQuota,
+  quotaEngines,
+  type QuotaReader,
+  type QuotaReadOptions,
+} from './engine-quota.js';
 export { PersistentClaudeSession } from './persistent-session.js';
 export { BaseOneShotSession, type OneShotEngineConfig } from './base-oneshot-session.js';
 export { PersistentCodexSession } from './persistent-codex-session.js';
@@ -373,18 +380,23 @@ const plugin = {
             type: 'string',
             enum: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
             description:
-              'Effort for this message. agy, grok and opencode pass it to the engine for this turn; on claude, high and above prefix the message with `ultrathink` (a persistent custom engine does the same for high and max). Other engines ignore it.',
+              'Effort for this message. claude, codex, codex-app, agy, grok, cursor and opencode pass it to the engine for this turn (claude sets it in place and puts the session effort back after the turn); a persistent custom engine prefixes the message with `ultrathink` for high and max. Other engines ignore it.',
           },
           plan: {
             type: 'boolean',
             description:
-              'Ask for a plan only: claude and persistent custom engines prefix the message with a plan-only instruction. The permission mode is unchanged (start with sandboxMode read-only to enforce it); other engines ignore this flag.',
+              'Ask for a plan only, for this turn. claude, codex-app, agy, grok, cursor and opencode run the turn in their plan mode and return to the session mode after it; codex and persistent custom engines prefix the message with a plan-only instruction, the permission mode unchanged (start with sandboxMode read-only to enforce it). Other engines ignore this flag.',
           },
           images: {
             type: 'array',
             items: { type: 'string' },
             description:
-              'Images to attach to this message: absolute paths of PNG, JPEG, GIF or WebP files of at most 20 MB, under the session directory, an addDir entry, or the temp directory. Taken by claude, codex, codex-app, grok and opencode; another engine refuses the message.',
+              'Images to attach to this message: absolute paths of PNG, JPEG, GIF or WebP files of at most 20 MB, under the session directory, an addDir entry, or the temp directory. Taken by claude, codex, codex-app, grok, opencode and cursor; another engine refuses the message.',
+          },
+          model: {
+            type: 'string',
+            description:
+              "The model for this message only; the session's own model is unchanged. Refused before the turn on an engine that cannot take a model per send (use session_switch_model there).",
           },
           timeout: { type: 'number', description: 'Timeout in ms (default 300000)' },
           stream: {
@@ -403,6 +415,7 @@ const plugin = {
           effort: args.effort as EffortLevel | undefined,
           plan: args.plan as boolean | undefined,
           images: args.images as string[] | undefined,
+          model: args.model as string | undefined,
           timeout: args.timeout as number | undefined,
           // When stream:true, collect chunks into array for caller.
           // True mid-tool streaming requires SDK-level support (not yet available).
@@ -524,14 +537,14 @@ const plugin = {
     registerTool({
       name: 'coding_session_status',
       description:
-        'Get detailed status of a coding session: context %, tokens, cost and spend cap, turns, tool calls, retries, start time and last activity',
+        'Get detailed status of a coding session: context %, tokens, cost and spend cap, turns, tool calls, retries, start time and last activity; the context breakdown when the engine gives one, and the last turns the engine started itself (engineTurns)',
       parameters: {
         type: 'object',
         properties: { name: { type: 'string', description: 'Session name' } },
         required: ['name'],
       },
       execute: async (_id, args) => {
-        const status = getManager().getStatus(args.name as string);
+        const status = await getManager().getStatusDetailed(args.name as string);
         return { ok: true, ...status };
       },
     });
@@ -566,7 +579,8 @@ const plugin = {
 
     registerTool({
       name: 'session_compact',
-      description: 'Compact a session to reclaim context window space',
+      description:
+        'Compact a session to reclaim context window space, after any message in flight. Returns when the compaction is done, with the token counts before and after where the engine reports them. Fails on an engine that cannot compact.',
       parameters: {
         type: 'object',
         properties: {
@@ -576,8 +590,8 @@ const plugin = {
         required: ['name'],
       },
       execute: async (_id, args) => {
-        await getManager().compactSession(args.name as string, args.summary as string | undefined);
-        return { ok: true };
+        const outcome = await getManager().compactSession(args.name as string, args.summary as string | undefined);
+        return { ...outcome };
       },
     });
 
@@ -683,7 +697,7 @@ const plugin = {
     registerTool({
       name: 'session_switch_model',
       description:
-        'Switch the model for a running session immediately. Restarts the session process with --resume so the new model takes effect on the next message while preserving conversation history.',
+        'Switch the model for a running session immediately, keeping the conversation. In place where the engine can (live: true); otherwise the session process restarts with --resume so the new model takes effect on the next message (live: false).',
       parameters: {
         type: 'object',
         properties: {
@@ -694,7 +708,116 @@ const plugin = {
       },
       execute: async (_id, args) => {
         const info = await getManager().switchModel(args.name as string, args.model as string);
-        return { ok: true, restarted: true, ...info };
+        return { ok: true, restarted: !info.live, ...info };
+      },
+    });
+
+    // ─── Tool: session_command ────────────────────────────────────────────
+
+    registerTool({
+      name: 'session_command',
+      description:
+        "List or run a session's engine commands — slash commands, skills, custom commands and engine RPCs (review, init, boost, …). `list` returns each command with whether it starts an agent turn; `run` runs one and returns its reply. A command that starts a turn waits for the message in flight; one that needs a person is refused. Fails on an engine whose sessions take no commands.",
+      parameters: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: 'Session name' },
+          action: { type: 'string', enum: ['list', 'run'], description: 'list the commands, or run one' },
+          command: { type: 'string', description: "`run`: the command, with or without its '/', e.g. review" },
+          args: { type: 'string', description: '`run`: its arguments, as one string' },
+          timeout: { type: 'number', description: '`run`: timeout in ms (default 300000)' },
+        },
+        required: ['name', 'action'],
+      },
+      execute: async (_id, args) => {
+        const m = getManager();
+        if (args.action === 'list') return { ok: true, commands: await m.listSessionCommands(args.name as string) };
+        if (args.action !== 'run') throw new Error("action is 'list' or 'run'");
+        if (typeof args.command !== 'string' || !args.command.trim()) throw new Error('`run` needs a command');
+        const outcome = await m.runSessionCommand(args.name as string, args.command, args.args as string | undefined, {
+          timeout: args.timeout as number | undefined,
+        });
+        return { ...outcome };
+      },
+    });
+
+    // ─── Tool: engine_quota ───────────────────────────────────────────────
+
+    registerTool({
+      name: 'engine_quota',
+      description:
+        "Read how much of an engine account's usage quota is left — each usage window with its used or remaining percentage and reset time. For one engine, for the engine of a session, or for every engine clawo can read a quota for. Read it before batch work on a subscription engine.",
+      parameters: {
+        type: 'object',
+        properties: {
+          engine: {
+            type: 'string',
+            enum: ENGINE_TYPES,
+            description: 'The engine (default: every engine with a reader)',
+          },
+          name: { type: 'string', description: 'A session: the quota of the account it runs under' },
+        },
+      },
+      execute: async (_id, args) => {
+        const m = getManager();
+        if (typeof args.name === 'string' && args.name) {
+          const quota = await m.sessionQuota(args.name);
+          return {
+            ok: true,
+            quotas: quota ? [quota] : [],
+            unavailable: quota ? [] : [{ engine: m.getStatus(args.name).engine, reason: 'nothing to read now' }],
+          };
+        }
+        return { ok: true, ...(await m.engineQuota(args.engine as EngineType | undefined)) };
+      },
+    });
+
+    // ─── Tool: session_aside ──────────────────────────────────────────────
+
+    registerTool({
+      name: 'session_aside',
+      description:
+        "Ask a session a side question: answered from its conversation's context without adding to the conversation, and without tools. Fails on an engine that cannot answer one aside.",
+      parameters: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: 'Session name' },
+          question: { type: 'string', description: 'The question' },
+          timeout: { type: 'number', description: 'Timeout in ms (default 300000)' },
+        },
+        required: ['name', 'question'],
+      },
+      execute: async (_id, args) => {
+        const answer = await getManager().askAside(args.name as string, args.question as string, {
+          timeout: args.timeout as number | undefined,
+        });
+        return { ok: true, ...answer };
+      },
+    });
+
+    // ─── Tool: session_rewind ─────────────────────────────────────────────
+
+    registerTool({
+      name: 'session_rewind',
+      description:
+        "Rewind a session's conversation: drop its last N turns, or go back to a message, after any message in flight. `files: true` also restores the files those turns changed, where the engine can. On codex-app it is thread/revert (as codex_rollback): the conversation only. Fails on an engine that cannot rewind.",
+      parameters: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: 'Session name' },
+          turns: { type: 'number', minimum: 1, description: 'Turns to drop from the end' },
+          messageId: { type: 'string', description: "The engine's id of the message to go back to (instead of turns)" },
+          files: { type: 'boolean', description: 'Restore the files the dropped turns changed, too' },
+        },
+        required: ['name'],
+      },
+      execute: async (_id, args) => {
+        const outcome = await getManager().rewindSession(args.name as string, {
+          turns: args.turns as number | undefined,
+          messageId: args.messageId as string | undefined,
+          files: args.files as boolean | undefined,
+        });
+        return { ...outcome };
       },
     });
 
@@ -1309,7 +1432,7 @@ const plugin = {
             type: 'string',
             enum: GOAL_ENGINES.filter((e) => e !== 'codex-app'),
             description:
-              '`goal` only: who runs the goal. Codex and Claude Code run their own goal loop; on agy, grok, opencode and acp clawo runs it turn by turn. Default: the configured default engine.',
+              "`goal` only: who runs the goal. Codex and Claude Code run their own goal loop; on agy, grok, cursor, opencode and acp clawo runs it turn by turn, or the engine's own loop with nativeGoal. Default: the configured default engine.",
           },
           acpAgent: { ...ACP_AGENT_ID_SCHEMA, description: '`goal` with engine acp: the ACP agent preset.' },
           model: { type: 'string', description: "`goal` only: model (default: the engine's own)." },
@@ -1319,6 +1442,11 @@ const plugin = {
               '`goal` on Claude Code: the account to run under, or `auto` for the rotation; at a usage limit the goal moves to the next account.',
           },
           tokenBudget: { type: 'number', description: '`goal` only: tokens the goal may spend.' },
+          nativeGoal: {
+            type: 'boolean',
+            description:
+              "`goal` only: run the engine's own goal loop instead of clawo's turn loop, on an engine that has one (agy, grok, cursor, opencode 2); refused where it has none. Claude Code and Codex run their own loop either way.",
+          },
           launcher: {
             type: 'array',
             items: { type: 'string' },
@@ -1407,6 +1535,7 @@ const plugin = {
               model: args.model as string | undefined,
               ...(typeof args.claudeAccount === 'string' ? { claudeAccount: args.claudeAccount } : {}),
               tokenBudget: args.tokenBudget as number | undefined,
+              ...(args.nativeGoal === true ? { nativeGoal: true } : {}),
               launcher: args.launcher as string[] | undefined,
               maxRepairs: args.maxRepairs as number | undefined,
               ...(args.isolation ? { isolation: args.isolation as 'worktree' } : {}),

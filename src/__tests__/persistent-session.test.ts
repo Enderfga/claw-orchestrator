@@ -33,7 +33,19 @@ class MockProcess extends EventEmitter {
   pid = 12345;
   killed = false;
   exitCode: number | null = null;
-  stdin = { write: vi.fn(), end: vi.fn(), on: vi.fn() };
+  /** Each control request written to stdin is answered with success, as the CLI does. */
+  stdin = {
+    write: vi.fn((line: string) => {
+      const msg = JSON.parse(String(line).trim()) as { type?: string; request_id?: string };
+      if (msg.type === 'control_request') {
+        const reply = { type: 'control_response', response: { subtype: 'success', request_id: msg.request_id } };
+        queueMicrotask(() => this.stdout.emit('data', Buffer.from(JSON.stringify(reply) + '\n')));
+      }
+      return true;
+    }),
+    end: vi.fn(),
+    on: vi.fn(),
+  };
   stdout = createMockStream();
   stderr = createMockStream();
   unref = vi.fn();
@@ -1148,18 +1160,23 @@ describe('PersistentClaudeSession', () => {
       expect(payload.message.content[0].text).toBe('hello');
     });
 
-    it('prepends ultrathink for high effort', async () => {
+    // `ultrathink` raises nothing on 2.1.332 (init: ultrathink_available false);
+    // the effort setting is what the CLI reads.
+    it('sets a per-send effort in the CLI, not as an ultrathink prefix', async () => {
       await session.send('test', { effort: 'high' });
-      const written = mockProc.stdin.write.mock.calls.at(-1)![0] as string;
-      const payload = JSON.parse(written.trim());
-      expect(payload.message.content[0].text).toContain('ultrathink');
+      const lines = mockProc.stdin.write.mock.calls.map((c) => JSON.parse(String(c[0]).trim()));
+      expect(lines.at(-2)).toMatchObject({
+        type: 'control_request',
+        request: { subtype: 'apply_flag_settings', settings: { effortLevel: 'high' } },
+      });
+      expect(lines.at(-1).message.content[0].text).toBe('test');
     });
 
-    it('prepends planning instruction for plan mode', async () => {
+    it('prepends the planning instruction and runs the turn in plan mode', async () => {
       await session.send('test', { plan: true });
-      const written = mockProc.stdin.write.mock.calls.at(-1)![0] as string;
-      const payload = JSON.parse(written.trim());
-      expect(payload.message.content[0].text).toMatch(/^\[Planning Mode\]/);
+      const lines = mockProc.stdin.write.mock.calls.map((c) => JSON.parse(String(c[0]).trim()));
+      expect(lines.at(-2)).toMatchObject({ request: { subtype: 'set_permission_mode', mode: 'plan' } });
+      expect(lines.at(-1).message.content[0].text).toMatch(/^\[Planning Mode\]/);
     });
 
     it('returns requestId when not waiting', async () => {
@@ -1192,7 +1209,7 @@ describe('PersistentClaudeSession', () => {
       ]);
       expect(content).toHaveLength(5);
       expect(content[4].type).toBe('text');
-      expect(content[4].text).toMatch(/^\[Planning Mode\][\s\S]*ultrathink\n\nWhat is shown\?$/);
+      expect(content[4].text).toMatch(/^\[Planning Mode\][^\n]*\n\nWhat is shown\?$/);
     });
 
     it('keeps a text-only message as a single text block when images is empty', async () => {

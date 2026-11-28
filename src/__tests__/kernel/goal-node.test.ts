@@ -1211,3 +1211,48 @@ describe("a Claude goal at its account's usage limit", () => {
     expect(m.starts[0]).toMatchObject({ engine: 'claude', claudeAccount: 'auto' });
   });
 });
+
+describe('a goal on the engine’s own loop (nativeGoal)', () => {
+  function nativeManager(onGoalSession: (opts: { native?: boolean } | undefined) => void) {
+    const m = fakeManager(() => {
+      const s = new FakeGoalSession('conv-N');
+      s.onSet = (_p, self) => self.move('complete', { tokensUsed: 3, timeUsedSeconds: 1 });
+      return s;
+    });
+    Object.assign(m, {
+      goalSession: (name: string, _open: unknown, opts?: { native?: boolean }) => {
+        onGoalSession(opts);
+        if (opts?.native && name.includes('refuse')) throw new Error('a native goal loop is not supported on grok');
+        return m.sessions.get(name);
+      },
+    });
+    return m;
+  }
+
+  it('asks the manager for the native adapter only when the node says so', async () => {
+    const asked: Array<{ native?: boolean } | undefined> = [];
+    const kernel = kernelWith(nativeManager((o) => asked.push(o)));
+    const native = await kernel.wait((await kernel.start(oneGoal({ engine: 'grok', nativeGoal: true }))).runId);
+    expect(native!.nodes.goal.state).toBe('succeeded');
+    const plain = await kernel.wait((await kernel.start(oneGoal({ engine: 'grok' }))).runId);
+    expect(plain!.nodes.goal.state).toBe('succeeded');
+    expect(asked).toEqual([{ native: true }, undefined]);
+  });
+
+  it('fails the node with the manager’s reason when the engine has no loop of its own', async () => {
+    const kernel = kernelWith(nativeManager(() => {}));
+    const spec = oneGoal({ engine: 'grok', nativeGoal: true });
+    spec.nodes[0].id = 'refuse';
+    const done = await kernel.wait((await kernel.start(spec)).runId);
+    expect(done!.nodes.refuse.state).toBe('failed');
+    expect(done!.nodes.refuse.error).toContain('a native goal loop is not supported on grok');
+  });
+
+  it('is carried by the goal template, and absent unless asked for', () => {
+    expect(goalWorkflow({ task: 'x', cwd: tmp, engine: 'agy', nativeGoal: true }).nodes[0]).toMatchObject({
+      kind: 'goal',
+      nativeGoal: true,
+    });
+    expect('nativeGoal' in goalWorkflow({ task: 'x', cwd: tmp }).nodes[0]).toBe(false);
+  });
+});

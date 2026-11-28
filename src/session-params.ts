@@ -117,7 +117,7 @@ export const SESSION_START_PROPERTIES: Record<string, Record<string, unknown>> =
     type: 'array',
     items: { type: 'string' },
     description:
-      'Directories the session may use besides cwd (`--add-dir`). Claude and Codex; a resumed Codex thread keeps the directories its first turn opened.',
+      'Directories the session may use besides cwd (`--add-dir`): Claude Code, Codex, Antigravity, Cursor, and Grok on a new conversation; codex-app adds them as writable roots of a workspace-write session. A resumed Codex thread keeps the directories its first turn opened.',
   },
   maxTurns: { type: 'number', description: 'Max agent loop turns' },
   maxBudgetUsd: { type: 'number', description: 'Max API spend (USD)' },
@@ -127,6 +127,11 @@ export const SESSION_START_PROPERTIES: Record<string, Record<string, unknown>> =
     maximum: 99,
     description:
       'Compact the conversation before a send once context use reaches this percentage. Off by default; for long-lived sessions, where cost grows with context size',
+  },
+  turnCommand: {
+    type: 'string',
+    description:
+      'An engine command every message of the session goes through, e.g. "/boost" or "/teamwork" on agy, "/best-of-n" on Cursor. A message that is itself a command (starts with "/") is sent as it is. Refused at start on an engine whose sessions take no commands (session_command lists what an engine has).',
   },
   systemPrompt: { type: 'string', description: 'Replace system prompt' },
   appendSystemPrompt: {
@@ -160,11 +165,26 @@ export const SESSION_START_PROPERTIES: Record<string, Record<string, unknown>> =
     description:
       'Claude engine only. Enable "ultracode" / dynamic workflows: Claude plans a JS orchestration script per substantive task and fans out to subagents. Injected as the ultracode:true settings key (not a --effort value). A workflow runs in the background: session_send returns the launch reply, and the completion arrives later in a turn that no send returns.',
   },
+  fastMode: {
+    type: 'boolean',
+    description:
+      'Claude engine only. Opt the session into fast mode (the fastMode settings key), which a headless process is otherwise refused. The account and model must allow it.',
+  },
+  advisor: {
+    type: 'string',
+    description:
+      'Claude engine only. The advisor model the session consults at key moments (`--advisor`, e.g. "opus"), for this session only. It must be at least as capable as the main model, or the CLI does not use it.',
+  },
+  outputStyle: {
+    type: 'string',
+    description:
+      'Claude engine only. The output style (e.g. "Concise", "Explanatory"), set for this session only through --settings rather than written into the project.',
+  },
   sandboxMode: {
     type: 'string',
     enum: ['read-only', 'workspace-write', 'danger-full-access'],
     description:
-      'Sandbox policy. Codex supports all values (default workspace-write). read-only is enforced on claude, agy, grok and opencode through their own plan/read-only modes; a custom engine must map it via permissionModes or the session refuses to start. The acp engine refuses read-only, because the agent runs its own tools; its permission answers follow permissionMode.',
+      'Sandbox policy. Codex supports all values (default workspace-write). read-only is enforced on claude, agy, grok, cursor and opencode through their own plan/read-only modes (Cursor: Ask mode behind a permission config that denies writes and shell commands); a custom engine must map it via permissionModes or the session refuses to start. The acp engine refuses read-only, because the agent runs its own tools; its permission answers follow permissionMode.',
   },
   launcher: {
     type: 'array',
@@ -190,7 +210,7 @@ export const SESSION_START_PROPERTIES: Record<string, Record<string, unknown>> =
   sessionName: {
     type: 'string',
     description:
-      "The engine's own name for the conversation: Claude Code `-n` (resumable as `--resume <name>`), OpenCode `--title`. Defaults to the session name on OpenCode.",
+      "The engine's own name for the conversation: Claude Code `-n` (resumable as `--resume <name>`), OpenCode `--title`, the codex-app thread's name. Defaults to the session name on OpenCode.",
   },
   strictMcpConfig: {
     type: 'boolean',
@@ -338,6 +358,6 @@ export const SESSION_START_PROPERTIES: Record<string, Record<string, unknown>> =
   resumeSessionId: {
     type: 'string',
     description:
-      "Resume an earlier conversation by the engine's own id instead of starting fresh: a Claude Code session id (`--resume`), a Codex or codex-app thread id, an Antigravity conversation id, a Grok or OpenCode session id, an ACP agent's session id, or a custom engine's id when its config maps a resume flag.",
+      "Resume an earlier conversation by the engine's own id instead of starting fresh: a Claude Code session id (`--resume`), a Codex or codex-app thread id, an Antigravity conversation id, a Cursor chat id, a Grok or OpenCode session id, an ACP agent's session id, or a custom engine's id when its config maps a resume flag.",
   },
 };

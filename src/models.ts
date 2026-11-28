@@ -509,6 +509,33 @@ const MODELS: ModelDef[] = [
     pricing: { input: 1.5, output: 7.5, cached: 0.075 },
     contextWindow: 1_000_000,
   },
+  // Orchestrators (`agy models` on 1.5.19: gemini-pro-orchestrator, -neon, -argon) plan on one model and
+  // execute on another, both of agy's choosing, and take no effort tier. Measured on 1.5.19: each variant
+  // planned on gemini-4-neon-high and executed on gemini-4-hydrogen-high, whatever its label names. The agy
+  // session prices an orchestrator turn request by request from the conversation's transcript; these rates
+  // (Neon's, the planner's and the higher of the two) price only what the transcript does not account for.
+  {
+    id: 'gemini-pro-orchestrator',
+    engine: 'agy',
+    provider: 'google',
+    pricing: { input: 3, output: 15, cached: 0.15 },
+    aliases: ['agy-orchestrator'],
+    contextWindow: 1_000_000,
+  },
+  {
+    id: 'gemini-pro-orchestrator-neon',
+    engine: 'agy',
+    provider: 'google',
+    pricing: { input: 3, output: 15, cached: 0.15 },
+    contextWindow: 1_000_000,
+  },
+  {
+    id: 'gemini-pro-orchestrator-argon',
+    engine: 'agy',
+    provider: 'google',
+    pricing: { input: 3, output: 15, cached: 0.15 },
+    contextWindow: 1_000_000,
+  },
   {
     id: 'gemini-3.8-flash',
     engine: 'agy',

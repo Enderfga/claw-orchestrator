@@ -24,11 +24,30 @@ import {
   type StreamCallbacks,
   type TurnResult,
   type CostBreakdown,
+  type EngineCommand,
+  type CommandOutcome,
+  type CompactOutcome,
+  type RewindTarget,
+  type RewindOutcome,
+  type AsideOutcome,
+  type ContextBreakdown,
+  type EngineQuota,
   getModelPricing,
 } from './types.js';
 import { resolveAlias, getContextWindow, isClaudeModel, claudeGatewayMode, gatewayModelPricing } from './models.js';
 import { sanitizeSecrets } from './sanitize.js';
 import { removeAccountSettings, writeAccountSettings, type AccountUsage } from './claude-accounts.js';
+import {
+  CLAUDE_CONTROL_COMMANDS,
+  CLAUDE_REFUSED_COMMANDS,
+  claudeCommandList,
+  claudeCommandNames,
+  contextFromUsage,
+  quotaFromRateLimit,
+  quotaFromUsage,
+  type ClaudeInitLists,
+} from './claude-commands.js';
+import { registerQuotaReader } from './engine-quota.js';
 
 import {
   CONTEXT_HIGH_THRESHOLD,
@@ -75,6 +94,23 @@ const SETTING_SOURCES = new Set<string>(['user', 'project', 'local']);
  * is refused here rather than quietly meaning 200k.
  */
 const MIN_AUTOCOMPACT_WINDOW = 100_000;
+
+/** How long a control request may take before it is given up; they answer in milliseconds. */
+const CONTROL_TIMEOUT_MS = 15_000;
+
+/** Message ids remembered, to tell a command the CLI starts itself from one this session wrote. */
+const WRITTEN_IDS_KEPT = 1_000;
+
+/**
+ * An effort as the CLI's `effortLevel` setting takes it: Claude Code's ladder
+ * tops out at `max`, so `ultra` (Codex's) clamps to it; `auto` and no effort
+ * are `null`, which clears the setting so the CLI's own default applies
+ * (measured on 2.1.332: `effortLevel: 'auto'` is ignored, `null` clears it).
+ */
+function cliEffort(level: EffortLevel | undefined): string | null {
+  if (!level || level === 'auto') return null;
+  return level === 'ultra' ? 'max' : level;
+}
 
 /**
  * Refuse, before anything is spawned or written, a session option the CLI
@@ -186,6 +222,57 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
   private _accountSettingsDir: string | undefined;
   /** The account's usage as the current turn reported it. */
   private _turnUsage: AccountUsage | undefined;
+  /** The last `rate_limit_event` of this session, for the quota reader. */
+  private _rateLimit: { info: unknown; at: string } | undefined;
+  /** Control requests written and not answered yet, by request id. */
+  private _controls = new Map<
+    string,
+    { resolve: (response: unknown) => void; reject: (err: Error) => void; timer: ReturnType<typeof setTimeout> }
+  >();
+  /** Ids of the messages this session wrote, the most recent `WRITTEN_IDS_KEPT`. */
+  private _written = new Set<string>();
+  /**
+   * The command the CLI is running that no message of this session started: a
+   * `/loop` tick, a scheduled wakeup. Its `command_lifecycle` start names it
+   * (`wakeup_source`, or an id this session never wrote); its result carries no
+   * message ids and no origin, so this is the only sign it is not a reply.
+   */
+  private _engineCommand: string | undefined;
+  /** `user` events since the last result; taken back out of `turns` when the result was not a turn. */
+  private _userEventsSinceResult = 0;
+  /**
+   * A model ran for the command in flight: an assistant message from a real
+   * model in this conversation or in a forked command (a command the CLI answers
+   * itself writes one from `<synthetic>`), or a compaction. Not read from the
+   * result's `model_usage_since_last_result`, which also holds what a side
+   * question asked in between spent.
+   */
+  private _modelRanSinceResult = false;
+  /** Results that are not turns (a local command, a compaction), for `_waitForTurnComplete`. */
+  private _notTurns = new WeakSet<object>();
+  /** This session's messages whose answer was a model turn, oldest first: what `rewind` counts back through. */
+  private _turnMessages: string[] = [];
+  /** Compactions the CLI reported (`system/compact_boundary`), and the last one. */
+  private _compactions = 0;
+  private _lastCompaction: { preTokens?: number; postTokens?: number; trigger: 'manual' | 'auto' } | undefined;
+  /** What the CLI's flag-settings layer holds for effort: `null` = no override, `undefined` = not known. */
+  private _appliedEffort: string | null | undefined = null;
+  /** The permission mode the process was started in, which a per-send plan returns to. */
+  private _permissionMode = 'acceptEdits';
+  /** Settings to put back once the result answering a message arrives (a per-send effort, model or plan). */
+  private _afterTurn = new Map<string, Array<() => void>>();
+  /** What `system/init` lists, and the command list made from it (cached until the lists change). */
+  private _initLists: ClaudeInitLists = {};
+  private _commands: Promise<{ list: EngineCommand[]; names: Set<string>; complete: boolean }> | undefined;
+  private _fastModeState: string | undefined;
+  /** Results seen; the context breakdown is cached until the next one. */
+  private _resultCount = 0;
+  private _context: { at: number; value: ContextBreakdown | undefined } | undefined;
+
+  /** Claude sessions take slash commands in their messages, and run clawo's control commands themselves. */
+  readonly commandStyle = 'text' as const;
+  /** `send()` runs a turn on another model (`set_model`, put back after the turn). */
+  readonly perSendModel = true;
 
   public sessionId?: string;
   public stats: InternalStats;
@@ -232,9 +319,9 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
     return this._isBusy;
   }
 
-  /** A turn is running, whoever started it and whether anyone waits on it. */
+  /** A turn is running, whoever started it (a `/loop` tick too) and whether anyone waits on it. */
   get turnRunning(): boolean {
-    return this._isBusy || this._turnOpen;
+    return this._isBusy || this._turnOpen || this._engineCommand !== undefined;
   }
 
   /**
@@ -255,12 +342,16 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
    * Build the `--settings` argv fragment, merging in the session options that are
    * expressed as settings keys rather than flags.
    *
-   * Two live here today:
+   * They are:
    *   - `ultracode` enables dynamic workflows. Passed as the settings key rather
    *     than `--effort ultracode` (accepted since 2.1.203), so it composes with a
    *     separately chosen `effort`.
    *   - `crossSessionInbound` sets this session's policy for peer messages from
    *     other Claude Code sessions on the machine.
+   *   - `fastMode` opts the session into fast mode, which a headless process is
+   *     refused without (`fast_mode_disabled_reason: 'sdk_opt_in_required'`).
+   *   - `outputStyle` picks the output style for this session only; `/output-style
+   *     <style>` would write it into the project's settings file.
    *
    * User-supplied settings are never dropped: inline JSON and readable settings
    * files are parsed and merged into a single object; if that fails we fall back
@@ -271,6 +362,8 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
     const injected: Record<string, unknown> = {};
     if (this.options.ultracode) injected.ultracode = true;
     if (this.options.crossSessionInbound) injected.crossSessionInbound = this.options.crossSessionInbound;
+    if (this.options.fastMode) injected.fastMode = true;
+    if (this.options.outputStyle) injected.outputStyle = this.options.outputStyle;
 
     const settings = this.options.settings;
     if (this._accountEnv) return this.buildAccountSettingsArgs(injected, settings);
@@ -344,6 +437,13 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
     // Before buildSettingsArgs(), which writes an account's credential file.
     checkClaudeOptions(this.options);
     const resolvedBin = this.claudeBin;
+    // `sandboxMode: 'read-only'` is the engine-agnostic "look, don't touch"
+    // hint; Claude's native equivalent is plan mode. It must win over any
+    // permissionMode the caller also passed, otherwise the DEFAULT engine
+    // would accept the flag and still run write-enabled (acceptEdits) — a
+    // silent no-op on the most likely call.
+    this._permissionMode =
+      this.options.sandboxMode === 'read-only' ? 'plan' : this.options.permissionMode || 'acceptEdits';
     const args = [
       '-p',
       '--input-format',
@@ -354,12 +454,7 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
       '--verbose',
       '--include-partial-messages',
       '--permission-mode',
-      // `sandboxMode: 'read-only'` is the engine-agnostic "look, don't touch"
-      // hint; Claude's native equivalent is plan mode. It must win over any
-      // permissionMode the caller also passed, otherwise the DEFAULT engine
-      // would accept the flag and still run write-enabled (acceptEdits) — a
-      // silent no-op on the most likely call.
-      this.options.sandboxMode === 'read-only' ? 'plan' : this.options.permissionMode || 'acceptEdits',
+      this._permissionMode,
     ];
 
     // Model alias resolution
@@ -396,7 +491,8 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
     }
 
     // Tool control
-    if (this.options.allowedTools?.length) args.push('--allowed-tools', this.options.allowedTools.join(','));
+    const allowed = this._allowedTools();
+    if (allowed.length) args.push('--allowed-tools', allowed.join(','));
     if (this.options.disallowedTools?.length) args.push('--disallowed-tools', this.options.disallowedTools.join(','));
     if (this.options.tools !== undefined && this.options.tools !== null) {
       const t = Array.isArray(this.options.tools) ? this.options.tools.join(',') : this.options.tools;
@@ -440,9 +536,16 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
     // own warning), and an unknown value is only warned about before the turn
     // runs at the default — so `ultra`, which only Codex has, clamps here
     // rather than silently losing the caller's intent to the default.
-    if (this.options.effort && this.options.effort !== 'auto') {
-      args.push('--effort', this.options.effort === 'ultra' ? 'max' : this.options.effort);
-    }
+    const effort = cliEffort(this.options.effort);
+    if (effort) args.push('--effort', effort);
+    // The process starts with this effort in its flag-settings layer, the same
+    // layer `apply_flag_settings` changes (measured on 2.1.332).
+    this._appliedEffort = effort;
+
+    // The advisor model, for this session only. Not listed by `claude --help`;
+    // 2.1.332 accepts it, and ignores an advisor less capable than the main model
+    // (saying so on stderr).
+    if (this.options.advisor) args.push('--advisor', this.options.advisor);
 
     // Restricted mode. Structural rather than cooperative: the command-running
     // tools are removed from the session instead of being denied on request.
@@ -569,6 +672,10 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
     }
     if (this.options.baseUrl) spawnEnv.ANTHROPIC_BASE_URL = this.options.baseUrl;
     if (this.options.enableAgentTeams) spawnEnv.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS = 'true';
+    // File checkpoints, which `rewind` with `files` restores from: on, as in the
+    // terminal, unless the environment says otherwise. Without it the CLI
+    // answers every rewind_files with "File rewinding is not enabled."
+    spawnEnv.CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING ??= '1';
     // Smart default: bare mode auto-enables 1H prompt caching
     if (
       this.options.enablePromptCaching1H === true ||
@@ -640,6 +747,8 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
       if (superseded()) return;
       this._isReady = false;
       this._turnOpen = false;
+      this._engineCommand = undefined;
+      this._failControls(`the Claude process exited (code ${code})`);
       this.removeAccountSettings();
       this.emit(SESSION_EVENT.CLOSE, code);
     });
@@ -706,6 +815,8 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
         }
         if (!this._isReady) {
           this._isReady = true;
+          // The CLI sends its first init with the first command, not at start.
+          if (!this.stats.startTime) this.stats.startTime = new Date().toISOString();
           this.removeListener(SESSION_EVENT.CLOSE, onCloseBeforeReady);
           this.emit(SESSION_EVENT.READY);
         }
@@ -727,14 +838,20 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
       case 'system':
         if (event.subtype === 'init') {
           this.sessionId = event.session_id;
-          this.stats.startTime = new Date().toISOString();
+          // The CLI sends an init ahead of every command, local ones included, so
+          // only the first one is the session's start.
+          if (!this.stats.startTime) this.stats.startTime = new Date().toISOString();
           const initModel = (event as Record<string, unknown>).model;
           if (typeof initModel === 'string' && initModel) this._engineModel = initModel;
           const pluginErrors = (event as Record<string, unknown>).plugin_errors;
           if (Array.isArray(pluginErrors) && pluginErrors.length > 0) {
             this.stats.pluginErrors = pluginErrors as Array<{ plugin: string; reason: string }>;
           }
+          this._noteInitLists(event as Record<string, unknown>);
           this.emit(SESSION_EVENT.INIT, event);
+        } else if (event.subtype === 'compact_boundary') {
+          this._modelRanSinceResult = true;
+          this._noteCompaction((event as Record<string, unknown>).compact_metadata);
         } else if (event.subtype === 'model_refusal_fallback') {
           // The model refused and the CLI re-ran the turn on another model.
           // The stream-json frame is snake_case; the in-process form camelCase.
@@ -797,6 +914,7 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
 
       case 'user':
         this.stats.turns++;
+        this._userEventsSinceResult++;
         // Tool results come back inside a user message, not as a top-level
         // `tool_result` event, so a failed tool is only visible here.
         if (Array.isArray(event.message?.content)) {
@@ -811,6 +929,7 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
         break;
 
       case 'assistant':
+        if (this._ownModelMessage(event as Record<string, unknown>)) this._modelRanSinceResult = true;
         this.emit(SESSION_EVENT.ASSISTANT, event);
         this._noteRequestPrompt(event as Record<string, unknown>);
         if (event.message?.content && Array.isArray(event.message.content)) {
@@ -860,8 +979,42 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
         this.emit(SESSION_EVENT.TOOL_RESULT, event);
         break;
 
-      case 'rate_limit_event':
-        this._noteRateLimit((event as Record<string, unknown>).rate_limit_info);
+      case 'rate_limit_event': {
+        const info = (event as Record<string, unknown>).rate_limit_info;
+        this._noteRateLimit(info);
+        if (info && typeof info === 'object') this._rateLimit = { info, at: new Date().toISOString() };
+        this.emit(SESSION_EVENT.EVENT, event);
+        break;
+      }
+
+      case 'control_response':
+        this._settleControl((event as Record<string, unknown>).response);
+        this.emit(SESSION_EVENT.EVENT, event);
+        break;
+
+      case 'command_lifecycle': {
+        // One per command the CLI runs, queued → started → completed. A start
+        // this session did not write is the CLI's own: a `/loop` tick or a
+        // scheduled wakeup (`wakeup_source`, measured on 2.1.332).
+        const e = event as Record<string, unknown>;
+        const id = typeof e.command_uuid === 'string' ? e.command_uuid : undefined;
+        if (e.state === 'started' && id) {
+          const own = !e.wakeup_source && (this._written.has(id) || this._unanswered.has(id));
+          this._engineCommand = own ? undefined : id;
+        } else if (id && id === this._engineCommand && e.state !== 'queued') {
+          this._engineCommand = undefined;
+        }
+        this.emit(SESSION_EVENT.EVENT, event);
+        break;
+      }
+
+      case 'conversation_reset':
+        // `/clear`: a new conversation, with none of the old one's messages to
+        // rewind to and nothing of it in the context.
+        this._turnMessages = [];
+        this._lastTurnPromptTokens = 0;
+        this._contextHighFired = false;
+        this._context = undefined;
         this.emit(SESSION_EVENT.EVENT, event);
         break;
 
@@ -870,27 +1023,51 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
         break;
 
       case 'result': {
-        this._turnOpen = false;
-        const usage = (event as Record<string, unknown>).usage as Record<string, number> | undefined;
-        if (usage) this._applyTurnUsage(usage, true);
+        const e = event as Record<string, unknown>;
+        this._resultCount++;
+        // A command the CLI answered itself (`local_command`, `num_turns: 0`, all-zero
+        // usage) is not a model turn, and neither is a compaction: the context keeps
+        // the size the last turn (or the compaction) left, and `turnsSucceeded` does
+        // not move. A forked skill such as /code-review is also reported as a local
+        // command with zero usage, but ran a model and spent: that is a turn, whose
+        // spend comes in `total_cost_usd`, though its context is the fork's, not this
+        // conversation's.
+        const local = typeof e.local_command === 'string' && e.local_command !== '' ? e.local_command : undefined;
+        const notATurn = !!local && (local === 'compact' || !this._modelRanSinceResult);
+        this._modelRanSinceResult = false;
+        if (notATurn) {
+          this._notTurns.add(event);
+          this.stats.turns = Math.max(0, this.stats.turns - this._userEventsSinceResult);
+        }
+        this._userEventsSinceResult = 0;
+        // An own turn ends here; a turn the CLI started itself says nothing of one
+        // of this session's messages still waiting behind it.
+        if (!this._engineCommand || this._unanswered.size === 0) this._turnOpen = false;
+        const usage = e.usage as Record<string, number> | undefined;
+        if (usage) this._applyTurnUsage(usage, true, !!local);
         // A turn the account refused: the CLI answers it itself (model `<synthetic>`)
         // with `api_error: usage_limit_reached` and HTTP 429 (measured on 2.1.322).
-        if ((event as Record<string, unknown>).api_error === 'usage_limit_reached') {
+        if (e.api_error === 'usage_limit_reached') {
           this._turnUsage = { ...this._turnUsage, limited: true };
         }
-        this._applyReportedCost((event as Record<string, unknown>).total_cost_usd);
-        this._captureContextWindow((event as Record<string, unknown>).modelUsage);
+        this._applyReportedCost(e.total_cost_usd);
+        this._captureContextWindow(e.modelUsage);
+        if (typeof e.fast_mode_state === 'string') this._fastModeState = e.fast_mode_state;
+        const ids = this._resultIds(e);
+        this._afterTurnFor(ids);
+        if (notATurn && ids.length) this._turnMessages = this._turnMessages.filter((id) => !ids.includes(id));
         // A turn this session did not send ends with a result too: a background
-        // workflow reporting back, or a message from another session. It answers no
-        // send, so it must not resolve the one waiting — which would hand that caller
-        // the other turn's reply — nor count as that send's success. Its usage and
-        // cost above are real and stay counted.
+        // workflow reporting back, a `/loop` tick, or a message from another session.
+        // It answers no send, so it must not resolve the one waiting — which would
+        // hand that caller the other turn's reply — nor count as that send's
+        // success. Its usage and cost above are real and stay counted.
         const unsolicited = !this._answersOwnMessage(event);
+        if (ids.length === 0) this._engineCommand = undefined;
         // The result event is the only place the outcome is known, and it arrives once
         // per send — unlike the `user` echo that drives `turns`, which the CLI also
         // emits per tool-result batch. `is_error` is read as truthy on purpose: for a
         // persistent `custom` engine this event comes from an arbitrary CLI.
-        if (!unsolicited && !(event.is_error || event.stop_reason === 'error')) {
+        if (!unsolicited && !notATurn && !(event.is_error || event.stop_reason === 'error')) {
           this.stats.turnsSucceeded++;
         }
         this.emit(SESSION_EVENT.RESULT, event);
@@ -933,6 +1110,7 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
     // Read before anything changes, so a file that cannot be read fails the send
     // without starting a turn.
     const images = (options.images ?? []).map(imageBlock);
+    if (options.model !== undefined) this._checkTurnModel(options.model);
 
     const requestId = ++this.currentRequestId;
 
@@ -945,27 +1123,20 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
     this._turnUsage = undefined;
 
     let finalMessage = typeof message === 'string' ? message : message;
-    if (typeof finalMessage === 'string') {
-      if (
-        options.effort === 'high' ||
-        options.effort === 'xhigh' ||
-        options.effort === 'max' ||
-        options.effort === 'ultra'
-      ) {
-        finalMessage = `ultrathink\n\n${finalMessage}`;
-      }
-      if (options.plan) {
-        // /plan slash command is unreliable across Claude Code versions and environments.
-        // Instruction-based planning is universally compatible; actual plan permission
-        // mode is controlled by --permission-mode plan at session start.
-        finalMessage = `[Planning Mode] Analyze the request and create a detailed plan only. Do not write code or make changes yet.\n\n${finalMessage}`;
-      }
+    if (typeof finalMessage === 'string' && options.plan) {
+      // The turn also runs in plan mode (`_applyTurnSettings`); the instruction
+      // says what is wanted of it.
+      finalMessage = `[Planning Mode] Analyze the request and create a detailed plan only. Do not write code or make changes yet.\n\n${finalMessage}`;
     }
 
     // The CLI echoes this id back on the result that answers the message
     // (`user_message_uuids`), which is how a result is matched to its send.
     const uuid = randomUUID();
-    this._unanswered.add(uuid);
+    // Effort, model and plan mode for this turn go in before the message, and are
+    // put back when its result arrives.
+    // Awaited only when there is something to change, so a plain send writes its
+    // message in the same tick it was called in.
+    const restores = this._turnSettingsDiffer(options) ? await this._applyTurnSettings(options) : [];
     // Images go ahead of the text, as base64 content blocks: stream-json takes
     // the Messages API's content shape.
     const blocks = typeof finalMessage === 'string' ? [{ type: 'text', text: finalMessage }] : finalMessage;
@@ -975,10 +1146,15 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
       message: { role: 'user', content: images.length ? [...images, ...blocks] : blocks },
     };
 
-    const stdin = this.proc.stdin;
+    const stdin = this.proc?.stdin;
     if (!stdin || stdin.writable === false) {
+      for (const restore of restores) restore();
       throw new Error('Session stdin is not writable (process may have exited). Call start() first.');
     }
+    if (restores.length) this._afterTurn.set(uuid, restores);
+    this._unanswered.add(uuid);
+    this._remember(uuid);
+    this._turnMessages.push(uuid);
     // Pass an error callback so a broken pipe / closed stdin surfaces instead of
     // silently dropping the write and leaving waitForComplete callers hung.
     stdin.write(JSON.stringify(payload) + '\n', (err) => {
@@ -1015,6 +1191,7 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
     if (!this._isReady || !stdin || stdin.writable === false) return false;
     const uuid = randomUUID();
     this._unanswered.add(uuid);
+    this._remember(uuid);
     const payload = { type: 'user', uuid, message: { role: 'user', content: [{ type: 'text', text }] } };
     stdin.write(JSON.stringify(payload) + '\n', (err) => {
       if (err) this._emitError(new Error(`Failed to write to stdin: ${err.message}`));
@@ -1050,6 +1227,487 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
     return true;
   }
 
+  // ─── Control requests ────────────────────────────────────────────────────
+
+  /** Control subtypes this CLI answered "Unsupported control request subtype" to. */
+  private _unsupportedControls = new Set<string>();
+
+  /**
+   * Send a stream-json control request and wait for its `control_response`.
+   * Control requests are answered at once, between turns or during one, and
+   * start no turn. Rejects with the CLI's error, on timeout, and when the
+   * process ends.
+   */
+  private _control(
+    subtype: string,
+    fields: Record<string, unknown> = {},
+    timeoutMs = CONTROL_TIMEOUT_MS,
+  ): Promise<unknown> {
+    const stdin = this.proc?.stdin;
+    if (!this._isReady || !stdin || stdin.writable === false) {
+      return Promise.reject(new Error(`the Claude process is not running (control request ${subtype})`));
+    }
+    if (this._unsupportedControls.has(subtype)) {
+      return Promise.reject(new Error(`this Claude Code does not support the control request ${subtype}`));
+    }
+    const requestId = `clawo-${randomUUID()}`;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this._controls.delete(requestId);
+        reject(new Error(`control request ${subtype} got no answer in ${timeoutMs} ms`));
+      }, timeoutMs);
+      timer.unref?.();
+      this._controls.set(requestId, {
+        resolve,
+        reject: (err) => {
+          if (/unsupported control request subtype/i.test(err.message)) this._unsupportedControls.add(subtype);
+          reject(err);
+        },
+        timer,
+      });
+      const payload = { type: 'control_request', request_id: requestId, request: { subtype, ...fields } };
+      stdin.write(JSON.stringify(payload) + '\n', (err) => {
+        if (err)
+          this._settleControl({ subtype: 'error', request_id: requestId, error: `write failed: ${err.message}` });
+      });
+    });
+  }
+
+  /** A `control_response`: settle the request it answers. */
+  private _settleControl(response: unknown): void {
+    if (!response || typeof response !== 'object') return;
+    const r = response as Record<string, unknown>;
+    const pending = typeof r.request_id === 'string' ? this._controls.get(r.request_id) : undefined;
+    if (!pending) return;
+    this._controls.delete(r.request_id as string);
+    clearTimeout(pending.timer);
+    if (r.subtype === 'success') pending.resolve(r.response ?? null);
+    else pending.reject(new Error(typeof r.error === 'string' && r.error ? r.error : 'the control request failed'));
+  }
+
+  private _failControls(reason: string): void {
+    for (const [id, pending] of this._controls) {
+      clearTimeout(pending.timer);
+      this._controls.delete(id);
+      pending.reject(new Error(reason));
+    }
+  }
+
+  /** Run a control request whose answer is not waited for; a failure is logged. */
+  private _controlInBackground(subtype: string, fields: Record<string, unknown>): void {
+    this._control(subtype, fields).catch((err: Error) =>
+      this.emit(SESSION_EVENT.LOG, `[claude] control request ${subtype} failed: ${err.message}`),
+    );
+  }
+
+  /** Set the effort in the CLI's flag-settings layer (`null` clears it). */
+  private async _setEffortSetting(value: string | null): Promise<void> {
+    this._appliedEffort = value;
+    try {
+      await this._control('apply_flag_settings', { settings: { effortLevel: value } });
+    } catch (err) {
+      this._appliedEffort = undefined;
+      throw err;
+    }
+  }
+
+  /** Whether a send asks for an effort, model or plan mode the CLI does not have now. */
+  private _turnSettingsDiffer(options: SessionSendOptions): boolean {
+    const effort = options.effort !== undefined ? cliEffort(options.effort) : cliEffort(this.options.effort);
+    if (effort !== this._appliedEffort) return true;
+    if (
+      options.model !== undefined &&
+      (!this.options.model || this._cliModel(options.model) !== this._cliModel(this.options.model))
+    ) {
+      return true;
+    }
+    return !!options.plan && this._permissionMode !== 'plan';
+  }
+
+  /**
+   * Put a send's effort, model and plan mode in place before its message is
+   * written, and return what puts the session's own back after its turn.
+   * Measured on 2.1.332: `apply_flag_settings {effortLevel}`, `set_model` and
+   * `set_permission_mode` each answer in milliseconds and apply from the next
+   * request, with no restart.
+   */
+  private async _applyTurnSettings(options: SessionSendOptions): Promise<Array<() => void>> {
+    const restores: Array<() => void> = [];
+    try {
+      const sessionEffort = cliEffort(this.options.effort);
+      const effort = options.effort !== undefined ? cliEffort(options.effort) : sessionEffort;
+      if (effort !== this._appliedEffort) {
+        try {
+          await this._setEffortSetting(effort);
+          if (effort !== sessionEffort) {
+            restores.push(() => {
+              const back = cliEffort(this.options.effort);
+              this._appliedEffort = back;
+              this._controlInBackground('apply_flag_settings', { settings: { effortLevel: back } });
+            });
+          }
+        } catch (err) {
+          // The turn still runs, at the effort the CLI has.
+          this.emit(SESSION_EVENT.LOG, `[claude] effort ${effort ?? 'default'} not applied: ${(err as Error).message}`);
+        }
+      }
+      if (options.model !== undefined) {
+        const model = this._cliModel(options.model);
+        if (!this.options.model || model !== this._cliModel(this.options.model)) {
+          // No fallback: the answer of the session's own model would read as this one's.
+          await this._control('set_model', { model });
+          restores.push(() =>
+            this._controlInBackground('set_model', {
+              model: this.options.model ? this._cliModel(this.options.model) : 'default',
+            }),
+          );
+        }
+      }
+      if (options.plan && this._permissionMode !== 'plan') {
+        try {
+          await this._control('set_permission_mode', { mode: 'plan' });
+          restores.push(() => this._controlInBackground('set_permission_mode', { mode: this._permissionMode }));
+        } catch (err) {
+          this.emit(SESSION_EVENT.LOG, `[claude] plan mode not applied: ${(err as Error).message}`);
+        }
+      }
+    } catch (err) {
+      for (const restore of restores) restore();
+      throw err;
+    }
+    return restores;
+  }
+
+  /** Run what a send changed for its turn, now that the turn has ended. */
+  private _afterTurnFor(ids: string[]): void {
+    for (const id of ids) {
+      const restores = this._afterTurn.get(id);
+      if (!restores) continue;
+      this._afterTurn.delete(id);
+      for (const restore of restores) restore();
+    }
+  }
+
+  /** Remember a message id this session wrote, so the CLI's command for it is known as this session's. */
+  private _remember(id: string): void {
+    this._written.add(id);
+    if (this._written.size > WRITTEN_IDS_KEPT) {
+      const oldest = this._written.values().next().value;
+      if (oldest !== undefined) this._written.delete(oldest);
+    }
+  }
+
+  /** The model as `--model` and `set_model` take it. */
+  private _cliModel(model: string): string {
+    return model.includes('/') && !claudeGatewayMode() ? model.split('/').pop()! : model;
+  }
+
+  /** Refuse, before anything is written, a model this session cannot run one turn on. */
+  private _checkTurnModel(model: string): void {
+    if (this._realModel) {
+      throw new Error("a model per send is not supported on a claude session that runs another provider's model");
+    }
+    if (!isClaudeModel(model) && !claudeGatewayMode()) {
+      throw new Error(`a model per send on a claude session must be a Claude model (got ${model})`);
+    }
+  }
+
+  /**
+   * The tools auto-approved at spawn. With ultracode on, the Workflow tool its
+   * workflows run through is one of them, unless the caller denied it: under the
+   * default spawn (no permission prompts) it is otherwise refused on every call,
+   * and no workflow runs. Not in plan mode, which is a promise of no changes.
+   */
+  private _allowedTools(): string[] {
+    const allowed = [...(this.options.allowedTools ?? [])];
+    if (
+      this.options.ultracode &&
+      this._permissionMode !== 'plan' &&
+      !allowed.includes('Workflow') &&
+      !(this.options.disallowedTools ?? []).includes('Workflow')
+    ) {
+      allowed.push('Workflow');
+    }
+    return allowed;
+  }
+
+  /**
+   * An assistant message a model wrote for the command in flight: in this
+   * conversation, or in the agent a forked command such as /code-review runs
+   * (`parent_tool_use_id: 'forked-command-<name>'`, measured on 2.1.332); not a
+   * background agent's.
+   */
+  private _ownModelMessage(e: Record<string, unknown>): boolean {
+    const model = (e.message as Record<string, unknown> | undefined)?.model;
+    if (model === '<synthetic>') return false;
+    const parent = e.parent_tool_use_id;
+    return !parent || (typeof parent === 'string' && parent.startsWith('forked-command'));
+  }
+
+  /** The command lists of a `system/init`; a change (a skill reloaded) drops the cached command list. */
+  private _noteInitLists(e: Record<string, unknown>): void {
+    const strings = (v: unknown): string[] | undefined =>
+      Array.isArray(v) ? v.filter((s): s is string => typeof s === 'string') : undefined;
+    const next: ClaudeInitLists = {
+      slashCommands: strings(e.slash_commands),
+      skills: strings(e.skills),
+      terminalCommands: strings(e.terminal_slash_commands),
+    };
+    if (JSON.stringify(next) !== JSON.stringify(this._initLists)) {
+      this._initLists = next;
+      this._commands = undefined;
+    }
+    if (typeof e.fast_mode_state === 'string') this._fastModeState = e.fast_mode_state;
+  }
+
+  /**
+   * A compaction the CLI reports (`system/compact_boundary`), manual or one it
+   * ran itself inside a turn. The context is what it kept, until the next request.
+   */
+  private _noteCompaction(meta: unknown): void {
+    const m = meta && typeof meta === 'object' ? (meta as Record<string, unknown>) : {};
+    const num = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
+    const pre = num(m.pre_tokens);
+    const post = num(m.post_tokens);
+    this._compactions++;
+    this._lastCompaction = {
+      ...(pre !== undefined ? { preTokens: pre } : {}),
+      ...(post !== undefined ? { postTokens: post } : {}),
+      trigger: m.trigger === 'auto' ? 'auto' : 'manual',
+    };
+    if (post !== undefined) {
+      this._lastTurnPromptTokens = post;
+      this._contextHighFired = false;
+    }
+    this._context = undefined;
+  }
+
+  // ─── Capabilities ────────────────────────────────────────────────────────
+
+  /**
+   * The session's commands: the CLI's slash commands, skills and custom
+   * commands, from the `initialize` control request (the names in
+   * `system/init` when it fails), and clawo's control commands.
+   */
+  async listCommands(): Promise<EngineCommand[]> {
+    return (await this._commandListing()).list;
+  }
+
+  private _commandListing(): Promise<{ list: EngineCommand[]; names: Set<string>; complete: boolean }> {
+    if (!this._commands) {
+      const lists = { ...this._initLists };
+      const listing = this._control('initialize').then(
+        (r) => ({ list: claudeCommandList(r, lists), names: claudeCommandNames(r, lists), complete: true }),
+        () => ({
+          list: claudeCommandList(undefined, lists),
+          names: claudeCommandNames(undefined, lists),
+          complete: !!lists.slashCommands?.length,
+        }),
+      );
+      // A list with none of the CLI's commands in it is not kept, so the next call asks again.
+      this._commands = listing.then((l) => {
+        if (!l.complete) this._commands = undefined;
+        return l;
+      });
+    }
+    return this._commands;
+  }
+
+  /**
+   * Refuse a name the CLI has no command for: sent as `/name` it reaches the
+   * model as a message, a paid turn (measured on 2.1.332). Asked again once
+   * before refusing, for a command added since the list was read.
+   */
+  private async _checkCommandKnown(name: string): Promise<void> {
+    let listing = await this._commandListing();
+    if (!listing.complete || listing.names.has(name)) return;
+    this._commands = undefined;
+    listing = await this._commandListing();
+    if (listing.complete && !listing.names.has(name)) {
+      throw new Error(`there is no command /${name} on this claude session (session_command list shows what there is)`);
+    }
+  }
+
+  /**
+   * Run a command: one of clawo's control commands as its control request, any
+   * other as the message `/name args`. Commands that write a settings file of
+   * the user's are refused.
+   */
+  async runCommand(
+    name: string,
+    args?: string,
+    opts: { timeout?: number; callbacks?: StreamCallbacks } = {},
+  ): Promise<CommandOutcome> {
+    const control = CLAUDE_CONTROL_COMMANDS[name];
+    if (control) {
+      const { subtype, ...fields } = control.request(args);
+      try {
+        const response = await this._control(subtype, fields, opts.timeout ?? CONTROL_TIMEOUT_MS);
+        const { text, data } = control.render(response);
+        return { name, ok: true, text, ...(data !== undefined ? { data } : {}), startedTurn: false };
+      } catch (err) {
+        return { name, ok: false, text: '', startedTurn: false, error: (err as Error).message };
+      }
+    }
+    const refused = CLAUDE_REFUSED_COMMANDS[name];
+    if (refused && (!refused.withArgsOnly || args)) throw new Error(refused.why);
+    if (this.options.disableSlashCommands) {
+      throw new Error(
+        `/${name} cannot run: the session was started with disableSlashCommands, so it would reach the model as text`,
+      );
+    }
+    await this._checkCommandKnown(name);
+    const result = (await this.send(`/${name}${args ? ` ${args}` : ''}`, {
+      waitForComplete: true,
+      timeout: opts.timeout ?? TURN_TIMEOUT_MS,
+      ...(opts.callbacks ? { callbacks: opts.callbacks } : {}),
+    })) as TurnResult;
+    const e = result.event as Record<string, unknown>;
+    const failed = !!(e.is_error || e.stop_reason === 'error' || e.stop_reason === 'process_exit');
+    return {
+      name,
+      ok: !failed,
+      text: result.text,
+      startedTurn: !result.localCommand,
+      ...(failed ? { error: result.text || `/${name} failed` } : {}),
+    };
+  }
+
+  /**
+   * `/compact`, waited for, with the sizes the CLI reports before and after
+   * (`system/compact_boundary`). Not ok when no compaction was reported — the
+   * CLI answers a conversation too short to compact with a message instead.
+   */
+  async compactDetailed(summary?: string): Promise<CompactOutcome> {
+    const before = this._compactions;
+    const result = (await this.compact(summary)) as TurnResult;
+    const e = result.event as Record<string, unknown>;
+    const failed = !!(e.is_error || e.stop_reason === 'error' || e.stop_reason === 'process_exit');
+    const boundary = this._compactions > before ? this._lastCompaction : undefined;
+    if (!boundary) {
+      return { ok: false, trigger: 'manual', note: result.text || 'the CLI reported no compaction' };
+    }
+    return { ok: !failed, ...boundary, ...(failed && result.text ? { note: result.text } : {}) };
+  }
+
+  /**
+   * A question answered from the conversation's context without adding to it
+   * (control request `side_question`, the headless /btw). It can run while a
+   * turn does; what it spends is in the next result's running cost.
+   */
+  async askAside(question: string, opts: { timeout?: number } = {}): Promise<AsideOutcome> {
+    const r = await this._control('side_question', { question }, opts.timeout ?? TURN_TIMEOUT_MS);
+    const text = r && typeof r === 'object' ? (r as Record<string, unknown>).response : undefined;
+    if (typeof text !== 'string') throw new Error('the side question got no answer');
+    return { text };
+  }
+
+  /**
+   * Rewind the conversation to before one of this session's messages (control
+   * request `rewind_conversation`), by turns or by the message's id; with
+   * `files`, also put back the files changed since (`rewind_files`, from the
+   * file checkpoints the session keeps). Files are checked before anything
+   * changes, and restored only once the conversation is rewound.
+   */
+  async rewind(target: RewindTarget): Promise<RewindOutcome> {
+    let index: number;
+    if (target.messageId !== undefined) index = this._turnMessages.indexOf(target.messageId);
+    else {
+      const turns = target.turns ?? 0;
+      if (turns > this._turnMessages.length) {
+        throw new Error(
+          `only ${this._turnMessages.length} turn(s) of this conversation can be rewound from this session`,
+        );
+      }
+      index = this._turnMessages.length - turns;
+    }
+    const messageId = target.messageId ?? this._turnMessages[index];
+    const asRecord = (v: unknown) => (v && typeof v === 'object' ? (v as Record<string, unknown>) : {});
+    if (target.files) {
+      const dry = asRecord(await this._control('rewind_files', { user_message_id: messageId, dry_run: true }));
+      if (dry.canRewind !== true) {
+        throw new Error(`the files cannot be restored: ${String(dry.error ?? 'no checkpoint for that message')}`);
+      }
+    }
+    const conv = asRecord(await this._control('rewind_conversation', { target_message_uuid: messageId }));
+    if (conv.rewound !== true) {
+      return { ok: false, note: String(conv.error ?? conv.reason ?? 'the conversation was not rewound') };
+    }
+    let filesRestored = false;
+    let note: string | undefined;
+    if (target.files) {
+      try {
+        const files = asRecord(await this._control('rewind_files', { user_message_id: messageId }));
+        filesRestored = files.canRewind === true && files.error === undefined;
+        if (!filesRestored) note = `the conversation was rewound, the files were not: ${String(files.error ?? '')}`;
+      } catch (err) {
+        note = `the conversation was rewound, the files were not: ${(err as Error).message}`;
+      }
+    }
+    const removed = index >= 0 ? this._turnMessages.length - index : undefined;
+    if (index >= 0) this._turnMessages = this._turnMessages.slice(0, index);
+    this._context = undefined;
+    // The context is what is left, not what the last turn carried.
+    const left = await this.contextBreakdown().catch(() => undefined);
+    if (left) this._lastTurnPromptTokens = left.totalTokens;
+    return {
+      ok: true,
+      ...(removed !== undefined ? { turnsRemoved: removed } : {}),
+      filesRestored,
+      ...(note ? { note } : {}),
+    };
+  }
+
+  /**
+   * Switch the model in place (`set_model`): no restart, no MCP or plugin reload.
+   * A model of another provider, which runs through the proxy, takes a restart.
+   */
+  async setModelLive(model: string): Promise<boolean> {
+    if (this._realModel || (!isClaudeModel(model) && !claudeGatewayMode())) return false;
+    const r = await this._control('set_model', { model: this._cliModel(model) });
+    this.options.model = model;
+    this.options.resolvedModel = model;
+    const reported = r && typeof r === 'object' ? (r as Record<string, unknown>).model : undefined;
+    if (typeof reported === 'string' && reported) this._engineModel = reported;
+    this._engineContextWindow = null;
+    return true;
+  }
+
+  /** Switch the effort in place (`apply_flag_settings {effortLevel}`), keeping the prompt cache. */
+  async setEffortLive(level: EffortLevel): Promise<boolean> {
+    try {
+      await this._setEffortSetting(cliEffort(level));
+      return true;
+    } catch (err) {
+      this.emit(SESSION_EVENT.LOG, `[claude] effort not switched in place: ${(err as Error).message}`);
+      return false;
+    }
+  }
+
+  /** The context by category (`get_context_usage`), read once per result. */
+  async contextBreakdown(): Promise<ContextBreakdown | undefined> {
+    if (!this._isReady) return undefined;
+    if (this._context && this._context.at === this._resultCount) return this._context.value;
+    const value = contextFromUsage(await this._control('get_context_usage'));
+    this._context = { at: this._resultCount, value };
+    return value;
+  }
+
+  /**
+   * The account's quota: the windows the last `rate_limit_event` reported (one
+   * comes with every turn), or, before the first turn, `get_usage` — which has
+   * them only for a claude.ai login with the profile scope.
+   */
+  async readQuota(): Promise<EngineQuota | undefined> {
+    if (this._rateLimit) {
+      const q = quotaFromRateLimit(this._rateLimit.info, this._rateLimit.at);
+      if (q) return q;
+    }
+    if (!this._isReady) return undefined;
+    const usage = await this._control('get_usage').catch(() => undefined);
+    return usage === undefined ? undefined : quotaFromUsage(usage, new Date().toISOString());
+  }
+
   // ─── Wait for Turn Complete ──────────────────────────────────────────────
 
   /**
@@ -1060,22 +1718,29 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
    * background workflow, `origin: {kind: 'task-notification'}`) carries none. The
    * ids decide when present — including a message the CLI folds into a turn it
    * started itself. Without them, which is what an older CLI or a custom engine
-   * emits, a non-human `origin` is the only sign of a turn nobody sent.
+   * emits, a non-human `origin` is a sign of a turn nobody sent; so is a command
+   * the CLI started itself (`_engineCommand`): on 2.1.332 a `/loop` tick or a
+   * scheduled wakeup ends in a result with neither ids nor an origin.
    */
   private _answersOwnMessage(event: StreamEvent): boolean {
-    const e = event as Record<string, unknown>;
-    const ids = Array.isArray(e.user_message_uuids)
-      ? e.user_message_uuids.filter((id): id is string => typeof id === 'string')
-      : typeof e.user_message_uuid === 'string'
-        ? [e.user_message_uuid]
-        : [];
+    const ids = this._resultIds(event as Record<string, unknown>);
     if (ids.length > 0) {
       let own = false;
       for (const id of ids) own = this._unanswered.delete(id) || own;
       return own;
     }
-    const origin = e.origin as { kind?: unknown } | undefined;
+    if (this._engineCommand) return false;
+    const origin = (event as Record<string, unknown>).origin as { kind?: unknown } | undefined;
     return !origin || origin.kind === 'human';
+  }
+
+  /** The ids of the messages a result answers. */
+  private _resultIds(e: Record<string, unknown>): string[] {
+    return Array.isArray(e.user_message_uuids)
+      ? e.user_message_uuids.filter((id): id is string => typeof id === 'string')
+      : typeof e.user_message_uuid === 'string'
+        ? [e.user_message_uuid]
+        : [];
   }
 
   private _waitForTurnComplete(timeout: number, uuid: string): Promise<TurnResult> {
@@ -1114,8 +1779,12 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
       };
 
       // No longer waiting, so a result that arrives for it later is not this
-      // session's to hand to the next send.
-      const abandon = () => this._unanswered.delete(uuid);
+      // session's to hand to the next send; what the send changed for its turn
+      // is put back now, as its result would have.
+      const abandon = () => {
+        this._unanswered.delete(uuid);
+        this._afterTurnFor([uuid]);
+      };
       this.on(SESSION_EVENT.UNSOLICITED_RESULT, onUnsolicited);
 
       const cleanup = () => {
@@ -1159,7 +1828,7 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
           const unique = [...new Set(toolNames)];
           text = `[Agent completed ${toolNames.length} tool calls: ${unique.join(', ')}]`;
         }
-        resolve({ text, event });
+        resolve(this._notTurns.has(event) ? { text, event, localCommand: true } : { text, event });
       };
 
       const onError = (err: Error) => {
@@ -1195,7 +1864,15 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
 
   // ─── Utilities ───────────────────────────────────────────────────────────
 
-  getStats(): SessionStats & { sessionId?: string; uptime: number; cacheCreationTokens: number } {
+  getStats(): SessionStats & {
+    sessionId?: string;
+    uptime: number;
+    cacheCreationTokens: number;
+    /** Fast mode as the CLI last reported it (`on`, `off`, `cooldown`). */
+    fastModeState?: string;
+    /** Compactions the CLI reported, manual and its own. */
+    compactions?: number;
+  } {
     return {
       turns: this.stats.turns,
       turnsSucceeded: this.stats.turnsSucceeded,
@@ -1218,6 +1895,8 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
       ...(this._refusalFallbacks > 0
         ? { refusalFallbacks: this._refusalFallbacks, lastRefusalFallback: this._lastRefusalFallback }
         : {}),
+      ...(this._fastModeState ? { fastModeState: this._fastModeState } : {}),
+      ...(this._compactions > 0 ? { compactions: this._compactions } : {}),
       sessionId: this.sessionId,
       uptime: this.stats.startTime ? Math.round((Date.now() - new Date(this.stats.startTime).getTime()) / 1000) : 0,
     };
@@ -1356,6 +2035,10 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
     }
     this._isReady = false;
     this._turnOpen = false;
+    this._engineCommand = undefined;
+    this._failControls('the Claude process was stopped');
+    this._afterTurn.clear();
+    this._commands = undefined;
   }
 
   // ─── Private ─────────────────────────────────────────────────────────────
@@ -1373,7 +2056,7 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
    * turn measured while writing this, `input_tokens` was 2 against 47,371
    * cached reads — which is why the prompt size is the sum, not `input_tokens`.
    */
-  private _applyTurnUsage(usage: Record<string, unknown>, authoritative: boolean): void {
+  private _applyTurnUsage(usage: Record<string, unknown>, authoritative: boolean, keepContext = false): void {
     const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
     const creation = (usage.cache_creation as Record<string, unknown> | undefined) ?? {};
     const reported = {
@@ -1407,11 +2090,15 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
       // `result.usage` sums every request of the turn — one per tool round — so
       // it is the turn's spend, not the context's size. The context is the prompt
       // of the turn's last request; the summed figure stands in only when no
-      // request reported its own usage.
-      this._lastTurnPromptTokens =
-        this._turnRequestPromptTokens > 0
-          ? this._turnRequestPromptTokens
-          : reported.in + reported.cacheRead + reported.cacheCreate;
+      // request reported its own usage. A command the CLI answered itself
+      // (`keepContext`) reports no request of this conversation's: the context
+      // stays what the last turn left.
+      if (!keepContext) {
+        this._lastTurnPromptTokens =
+          this._turnRequestPromptTokens > 0
+            ? this._turnRequestPromptTokens
+            : reported.in + reported.cacheRead + reported.cacheCreate;
+      }
       this._turnRequestPromptTokens = 0;
       this._msgProvisional = { in: 0, out: 0, cacheRead: 0, cacheCreate: 0, cacheCreate1h: 0 };
       this._turnApplied = { in: 0, out: 0, cacheRead: 0, cacheCreate: 0, cacheCreate1h: 0 };
@@ -1599,3 +2286,8 @@ export class PersistentClaudeSession extends EventEmitter implements ISession {
     this.emit(`hook:${hookName}`, data);
   }
 }
+
+// The quota of the Claude account a live session runs under.
+registerQuotaReader('claude', async ({ session }) =>
+  session instanceof PersistentClaudeSession ? session.readQuota() : undefined,
+);

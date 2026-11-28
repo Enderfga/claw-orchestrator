@@ -1,0 +1,17 @@
+{
+  "id": "cursor",
+  "tier": "community",
+  "description": "Cursor Agent served over the Agent Client Protocol (`cursor-agent acp`): one long-lived process, Cursor's own sessions, modes and model. Start with engine 'acp'; engine 'cursor' runs the same CLI in print mode.",
+  "provenance": {
+    "maintainer": "Enderfga",
+    "verifiedAgainst": "2026.11.22",
+    "verifiedOn": "2026-11-28",
+    "sourceUrl": "https://cursor.com/cli"
+  },
+  "acp": {
+    "name": "cursor",
+    "command": "cursor-agent",
+    "commandEnv": "CURSOR_BIN",
+    "args": ["acp"]
+  }
+}

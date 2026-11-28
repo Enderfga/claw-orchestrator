@@ -36,8 +36,9 @@ export type PermissionMode = 'acceptEdits' | 'bypassPermissions' | 'default' | '
 // Engines do not share one ladder, so a level is requested here and clamped by
 // whichever wrapper receives it. Claude Code takes low|medium|high|xhigh|max,
 // Codex adds `ultra` above `max`, Grok stops at `xhigh`, Antigravity at `high`,
-// and OpenCode forwards the level to its provider without validating it. Each
-// wrapper documents its own clamp; none of them silently drops the field.
+// OpenCode forwards the level to its provider without validating it, and Cursor
+// picks the model id Cursor lists at that level (logging when it lists none).
+// Each wrapper documents its own clamp; none of them silently drops the field.
 export const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra', 'auto'] as const;
 export type EffortLevel = (typeof EFFORT_LEVELS)[number];
 
@@ -275,6 +276,12 @@ export interface AcpAgentConfig {
   contextWindow?: number;
   /** Price per million tokens, used only when the agent reports no cost. */
   pricing?: { input: number; output: number; cached?: number };
+  /**
+   * The agent's own protocol extensions the client reads, by the name they are
+   * registered under (`registerAcpExtension`), e.g. `grok`: how the agent ends a
+   * turn it started itself, and what each turn used.
+   */
+  extension?: string;
 }
 
 // ─── Session Config ──────────────────────────────────────────────────────────
@@ -329,6 +336,13 @@ export interface SessionConfig {
    * call re-reads the whole context from cache and cost grows with its size.
    */
   autoCompactPercent?: number;
+  /**
+   * An engine command every message of the session goes through, e.g. `/boost`
+   * on agy or `/best-of-n` on Cursor. A message that is itself a command (it
+   * starts with `/`) is sent as it is. Refused at start on an engine whose
+   * session takes no commands (see `ISession.commandStyle`).
+   */
+  turnCommand?: string;
   // System prompts
   systemPrompt?: string;
   appendSystemPrompt?: string;
@@ -367,6 +381,19 @@ export interface SessionConfig {
    * send returns and `turnsSucceeded` does not count; its cost is counted.
    */
   ultracode?: boolean;
+  /**
+   * Claude engine only. Opt the session into fast mode (the `fastMode` settings key), which a
+   * headless process is otherwise refused (`sdk_opt_in_required`). The account and model must
+   * allow it; `getStats().fastModeState` says what the CLI made of it.
+   */
+  fastMode?: boolean;
+  /** Claude engine only. The advisor model the session consults (`--advisor`), for this session only. */
+  advisor?: string;
+  /**
+   * Claude engine only. The output style (`outputStyle` settings key), for this session only;
+   * `/output-style <style>` would write it into the project's settings file.
+   */
+  outputStyle?: string;
   /**
    * Do not save this session to disk.
    *
@@ -696,10 +723,16 @@ export interface SendOptions {
   effort?: EffortLevel;
   plan?: boolean;
   /**
+   * The model for this send only, on an engine whose session takes one per send
+   * (`ISession.perSendModel`); any other engine refuses the turn before it starts.
+   * The session's own model is unchanged.
+   */
+  model?: string;
+  /**
    * Images to attach to this message: absolute paths of PNG, JPEG, GIF or WebP
    * files of at most 20 MB, under the session's directory, an `addDir`, or the
-   * temp directory. Taken by claude, codex, codex-app, grok and opencode; any
-   * other engine refuses the turn rather than send it without them.
+   * temp directory. Taken by claude, codex, codex-app, grok, opencode and cursor;
+   * any other engine refuses the turn rather than send it without them.
    */
   images?: string[];
   autoResume?: boolean;
@@ -806,6 +839,12 @@ export interface SendResult {
    * chain, so a send queued behind another is not charged for it.
    */
   usage?: { tokensIn: number; tokensOut: number; costUsd: number };
+  /**
+   * True when the engine answered the message itself, as an info command that
+   * ran no model (`TurnResult.localCommand`). Such an answer is not a turn: it is
+   * not in the run ledger and not in the conversation a handoff carries.
+   */
+  localCommand?: true;
 }
 
 export interface GeneratedImage {
@@ -847,6 +886,11 @@ export interface SessionSendOptions {
   effort?: EffortLevel;
   plan?: boolean;
   /**
+   * The model for this send only, resolved by the session manager. Passed only
+   * to a session that sets `perSendModel`; the session's own model is unchanged.
+   */
+  model?: string;
+  /**
    * Absolute paths of images to attach to this message, already checked by the
    * session manager (`validateImagePaths`). An engine that cannot take images
    * is refused before the turn starts.
@@ -866,6 +910,12 @@ export interface StreamCallbacks {
 export interface TurnResult {
   text: string;
   event: StreamEvent;
+  /**
+   * The engine answered without a model turn: an info command (`/help`, a bare
+   * `/goal`, `/usage`). A wrapper that sets it keeps the context-size figure the
+   * previous turn left and does not count the answer in `turnsSucceeded`.
+   */
+  localCommand?: boolean;
 }
 
 export interface CostBreakdown {
@@ -877,6 +927,107 @@ export interface CostBreakdown {
   breakdown: { inputCost: number; cachedCost: number; outputCost: number };
   totalUsd: number;
 }
+
+// ─── Engine capabilities (optional ISession methods) ─────────────────────────
+
+/** An engine command a session can run: a slash command, a skill, an RPC. */
+export interface EngineCommand {
+  /** Without the leading `/`, e.g. `boost`, `review`, `my-skill`, `plugin:skill`. */
+  name: string;
+  description?: string;
+  source: 'builtin' | 'skill' | 'custom' | 'plugin' | 'rpc';
+  /** Usage hint for the arguments. */
+  args?: string;
+  /** False: the command answers without an agent turn (an info command). */
+  startsTurn: boolean;
+  /**
+   * True: the command needs a person (a picker, an interview, a TUI screen) and
+   * cannot run headless. `session_command` refuses it.
+   */
+  needsHuman?: boolean;
+}
+
+/** What running an engine command produced. */
+export interface CommandOutcome {
+  name: string;
+  ok: boolean;
+  /** The command's reply text; `''` is allowed when `ok`. */
+  text: string;
+  /** Structured payload, when the engine gives one (agy's `command_result`, a Claude control response). */
+  data?: unknown;
+  /** Whether an agent turn ran (and was billed and recorded as a turn). */
+  startedTurn: boolean;
+  error?: string;
+}
+
+/** One usage window of an engine account: a 5-hour window, a week, a credit balance. */
+export interface QuotaWindow {
+  name: string;
+  usedPercent?: number;
+  remainingPercent?: number;
+  /** ISO time the window resets. */
+  resetsAt?: string;
+}
+
+/** An engine account's remaining quota, as one reader found it. */
+export interface EngineQuota {
+  engine: EngineType;
+  plan?: string;
+  windows: QuotaWindow[];
+  /** Where it was read: `agy /usage`, `codex account/rateLimits/read`, `claude rate_limit_event`, … */
+  source: string;
+  /** ISO time of the reading. */
+  readAt: string;
+  raw?: unknown;
+}
+
+export interface CompactOutcome {
+  ok: boolean;
+  preTokens?: number;
+  postTokens?: number;
+  trigger: 'manual' | 'auto';
+  note?: string;
+}
+
+/** What `rewind` goes back to: the last `turns` turns, or up to a message. */
+export interface RewindTarget {
+  turns?: number;
+  messageId?: string;
+  /** Restore the files the dropped turns changed, too. */
+  files?: boolean;
+}
+
+export interface RewindOutcome {
+  ok: boolean;
+  turnsRemoved?: number;
+  filesRestored?: boolean;
+  note?: string;
+}
+
+export interface AsideOutcome {
+  text: string;
+}
+
+export interface ContextBreakdown {
+  totalTokens: number;
+  windowTokens?: number;
+  categories?: Array<{ name: string; tokens: number }>;
+}
+
+/** A turn the engine started itself (a `/loop` tick, a background workflow reporting back), as recorded. */
+export interface EngineTurn {
+  /** ISO time its result arrived. */
+  at: string;
+  /** The reply, at most the last 2,000 characters. */
+  text: string;
+  ok: boolean;
+  tokensIn: number;
+  tokensOut: number;
+  costUsd: number;
+}
+
+/** What a goal adapter is opened with: what the goal node knows of the thread. */
+export type { ClaudeGoalOpen as GoalSessionOpen } from './claude-goal-session.js';
 
 // ─── ISession Interface ─────────────────────────────────────────────────────
 //
@@ -908,9 +1059,10 @@ export interface ISession {
   /**
    * Hand `text` to the turn in flight, where the engine takes it in at its next
    * tool round. False when no turn is in flight or the engine has no way in
-   * mid-turn (the one-shot engines); the caller then queues it for the next
-   * turn. Claude Code (stream-json input) and the `codex-app` engine
-   * (`turn/steer`) implement it.
+   * mid-turn (the other one-shot engines); the caller then queues it for the
+   * next turn. Claude Code (stream-json input), the `codex-app` engine
+   * (`turn/steer`) and OpenCode 2 (its held server's `/prompt` with delivery
+   * `steer`) implement it.
    */
   deliverMidTurn?(text: string): Promise<boolean>;
 
@@ -920,12 +1072,73 @@ export interface ISession {
   getCost(): CostBreakdown;
 
   // ── Context Management ──────────────────────────────────────────────────
+  /**
+   * Compact the conversation. An engine that cannot resolves with
+   * `event.compacted === false`, which SessionManager reports as not supported.
+   */
   compact(summary?: string): Promise<TurnResult | { requestId: number; sent: boolean }>;
   getEffort(): EffortLevel;
   setEffort(level: EffortLevel): void;
 
   // ── Model ───────────────────────────────────────────────────────────────
   resolveModel(alias: string): string;
+
+  // ── Optional capabilities ──────────────────────────────────────────────
+  //
+  // Each is implemented by the engines that can; SessionManager refuses the
+  // feature with "not supported on <engine>" on a session without it.
+  //
+  // Engine-initiated turns (a `/loop` tick, a scheduled fire, a background
+  // workflow or sub-agent reporting back): the wrapper emits
+  // `SESSION_EVENT.UNSOLICITED_RESULT` with the `TurnResult` (a bare result
+  // `StreamEvent` is read too), never resolves a pending send with it and never
+  // counts it in `turnsSucceeded`. SessionManager records it as an engine turn.
+
+  /**
+   * How `runCommand` reaches the engine. `text`: a `/name args` message is a
+   * command, so SessionManager runs one as a send when there is no `runCommand`.
+   * `rpc`: only through `runCommand`. Absent: the session takes no commands.
+   */
+  readonly commandStyle?: 'text' | 'rpc';
+  /** True: `send()` honours `options.model` for that turn only. */
+  readonly perSendModel?: boolean;
+  /** The commands this session can run. Called per `session_command list`, so cache it when it is costly. */
+  listCommands?(): Promise<EngineCommand[]>;
+  /** Run one command (`name` without the `/`). */
+  runCommand?(
+    name: string,
+    args?: string,
+    opts?: { timeout?: number; callbacks?: StreamCallbacks },
+  ): Promise<CommandOutcome>;
+  /**
+   * The text `send()` gets for `message` under the session's `turnCommand`
+   * (`command` without the `/`). Without it a `commandStyle: 'text'` session gets
+   * `/<command> <message>`. A wrapper that runs the command another way (an RPC)
+   * returns the message and routes the next send itself.
+   */
+  applyTurnCommand?(command: string, message: string): string;
+  /** Compact, and resolve once the compaction is done. Preferred over `compact()` when present. */
+  compactDetailed?(summary?: string): Promise<CompactOutcome>;
+  /** Answer a question from the conversation's context without adding to it. */
+  askAside?(question: string, opts?: { timeout?: number }): Promise<AsideOutcome>;
+  rewind?(target: RewindTarget): Promise<RewindOutcome>;
+  /**
+   * Switch the model in place (`model` is resolved); true when it did, with no
+   * respawn and later turns priced at the new model; false to fall back to a
+   * restart. A throw fails the switch.
+   */
+  setModelLive?(model: string): Promise<boolean>;
+  /**
+   * Switch the effort in place; true when it did, false to fall back to the next
+   * turn. `setEffort` is called after it either way.
+   */
+  setEffortLive?(level: EffortLevel): Promise<boolean>;
+  /** The context as the engine breaks it down; undefined when it cannot say now. */
+  contextBreakdown?(): Promise<ContextBreakdown | undefined>;
+  /** The engine's own goal loop behind the goal node's surface (`nativeGoal`). */
+  nativeGoalSession?(
+    open?: import('./claude-goal-session.js').ClaudeGoalOpen,
+  ): import('./kernel/nodes/goal.js').GoalSession | undefined;
 
   // ── EventEmitter ────────────────────────────────────────────────────────
   on(event: string, listener: (...args: unknown[]) => void): this;

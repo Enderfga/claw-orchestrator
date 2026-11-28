@@ -103,8 +103,46 @@ describe('OpenClaw tool result contract', () => {
     await expect(promise).rejects.toBe(error);
   });
 
+  it('routes the engine-capability tools to the manager, and passes its outcome through', async () => {
+    const list = vi
+      .spyOn(SessionManager.prototype, 'listSessionCommands')
+      .mockResolvedValue([{ name: 'review', source: 'builtin', startsTurn: true }]);
+    const run = vi
+      .spyOn(SessionManager.prototype, 'runSessionCommand')
+      .mockResolvedValue({ name: 'review', ok: false, text: '', startedTurn: true, error: 'no diff' });
+    const quota = vi.spyOn(SessionManager.prototype, 'engineQuota').mockResolvedValue({ quotas: [], unavailable: [] });
+    const aside = vi.spyOn(SessionManager.prototype, 'askAside').mockResolvedValue({ text: 'the config file' });
+    const rewind = vi.spyOn(SessionManager.prototype, 'rewindSession').mockResolvedValue({ ok: true, turnsRemoved: 2 });
+    const call = async (tool: string, params: Record<string, unknown>) =>
+      ((await registration.tools.get(tool)!.execute('cap', params)) as AgentToolResult).details;
+
+    expect(await call('session_command', { name: 's', action: 'list' })).toEqual({
+      ok: true,
+      commands: [{ name: 'review', source: 'builtin', startsTurn: true }],
+    });
+    expect(await call('session_command', { name: 's', action: 'run', command: '/review', args: 'HEAD' })).toMatchObject(
+      {
+        ok: false,
+        error: 'no diff',
+      },
+    );
+    expect(run).toHaveBeenCalledWith('s', '/review', 'HEAD', { timeout: undefined });
+    await expect(
+      registration.tools.get('session_command')!.execute('cap', { name: 's', action: 'run' }),
+    ).rejects.toThrow(/needs a command/);
+    expect(await call('engine_quota', { engine: 'agy' })).toEqual({ ok: true, quotas: [], unavailable: [] });
+    expect(quota).toHaveBeenCalledWith('agy');
+    expect(await call('session_aside', { name: 's', question: 'which file?' })).toEqual({
+      ok: true,
+      text: 'the config file',
+    });
+    expect(await call('session_rewind', { name: 's', turns: 2 })).toEqual({ ok: true, turnsRemoved: 2 });
+    expect(rewind).toHaveBeenCalledWith('s', { turns: 2, messageId: undefined, files: undefined });
+    for (const spy of [list, run, quota, aside, rewind]) spy.mockRestore();
+  });
+
   it('registers only the namespaced Codex thread-listing tool', () => {
-    expect(registration.tools).toHaveLength(81);
+    expect(registration.tools).toHaveLength(85);
     expect(registration.tools.has('codex_thread_list')).toBe(true);
     expect(registration.tools.has('codex_threads')).toBe(false);
     expect(registration.tools.has('autoloop_resume')).toBe(true);

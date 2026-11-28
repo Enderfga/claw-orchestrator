@@ -16,9 +16,10 @@ every engine passes through, not only through Claude Code's `--max-budget-usd`.
 - Location: `~/.claw-orchestrator/runs/YYYY-MM-DD.jsonl` (override with
   `CLAWO_RUNS_DIR`).
 - One JSON object per line, one line per completed turn — **successful or not**.
-  The turns a Codex `/goal` runs on its own (a workflow `goal` node, or the
-  `codex_goal_*` tools) are the exception: they do not pass through a send, so they
-  write no rows, and a goal node's spend is reported on its run instead
+  The turns a goal runs on its own (a workflow `goal` node on any engine, its
+  engine's own loop included, or a Codex goal set with the `codex_goal_*` tools) are
+  the exception: they do not pass through a send, so they write no rows, not even as
+  engine turns, and a goal node's spend is reported on its run instead
   ([`workflow.md`](./workflow.md#goal)).
 - Shards are one file per UTC day. Queries always filter on the row timestamp, so
   the shard boundary is a storage detail; `--since 24h` spans midnight correctly.
@@ -45,6 +46,7 @@ every engine passes through, not only through Claude Code's `--max-budget-usd`.
 | `ok`                                      | `false` for a turn that threw, or that the session's own `turnsSucceeded` counter did not count (see `sessions.md`). Falls back to "nothing was thrown" when the counter cannot be read                                                                                                                                                                                                                                                                                                                                                                                                     |
 | `error`                                   | Failure text, truncated to 500 chars. Absent when the turn resolved but the engine did not count it as succeeded (an interrupted or non-SUCCESS turn), so a failed row does not always carry one                                                                                                                                                                                                                                                                                                                                                                                            |
 | `refusalFallback`                         | `{ from, to, category? }` when the model refused and the engine re-ran the turn on another model (Claude Code’s refusal fallback, for example Opus 5.5 to an older Opus on a `cyber` refusal). Absent otherwise                                                                                                                                                                                                                                                                                                                                                                             |
+| `origin`                                  | `engine` on a turn the engine started itself (a `/loop` tick, a scheduled wakeup, a background workflow reporting back), not a send; absent on sends. Such a turn is its own row, never part of the row of a send that was waiting. A reply the engine gave without running a model (`localCommand`) has no row. Cursor reports a process's usage only as it exits, so a Cursor `/loop`'s whole usage lands on its last tick's row when the loop ends, on its own or by `session_interrupt`; `session_stop` ends it without that report, and the loop's usage is not recorded               |
 | `parent`                                  | The run id — workflow, council, fan-out, ultraplan, ultrareview or autoloop — when the turn belongs to one                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 
 Deltas rather than totals means summing a query window gives that window's spend
@@ -139,12 +141,14 @@ Notes:
 - `session_list` / `GET /session/list` expose `costUsd`, and `budgetUsd` and
   `budgetExhausted` when a cap is set, so a stalled session shows _why_ it stopped
   taking turns.
-- The turns a Codex `/goal` runs on its own (a `goal` workflow node, or a goal
-  set with `codex_goal_set`) are not sends: they write no ledger row, and the cap
-  does not stop a goal while it runs. Their spend does count toward the session's
-  total, so the next send on that session is gated by it; a `goal` node's spend
-  is added to its run's `costUsd`, and `tokenBudget` and `timeoutMs` are the goal's
-  own limits.
+- The turns a goal runs on its own (a `goal` workflow node on any engine, or a
+  Codex goal set with `codex_goal_set`) are not sends: they write no ledger row, and
+  the session's cap does not stop a goal while it runs. Their spend does count toward
+  the session's total, so the next send on that session is gated by it; a `goal`
+  node's spend is added to its run's `costUsd`, and `tokenBudget` and `timeoutMs` are
+  the goal's own limits. A workflow run's own `maxBudgetUsd` does stop a goal node
+  while it runs, once the engine has reported the spend
+  ([`workflow.md`](./workflow.md#native-goal-loops)).
 
 ### Zeroing a model's pricing
 

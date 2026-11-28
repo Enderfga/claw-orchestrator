@@ -101,6 +101,9 @@ MCP tool take the same options. Two different engine picks are an error.
 | JSON           | `--agents '{"r":{…}}'`, `--codex-features '{"enable":["goals"]}'`                 |
 | Optional value | `-w` or `-w my-tree` (worktree)                                                   |
 
+`--turn-command /boost` runs every message of the session through that engine command
+([sessions.md](./sessions.md#turn-command)).
+
 `-d/--cwd`, `-m/--model` and `-w/--worktree` keep their short forms; `--max-budget` (`maxBudgetUsd`),
 `--skip-persistence` (`noSessionPersistence`) and `--sandbox` (`sandboxMode`) keep their earlier names. An ACP
 agent or custom engine is named by its bundled preset (`--acp kimi-code`, `--custom zcode`, or
@@ -114,17 +117,18 @@ clawo session-send <name> <message> [options]
 clawo session-send <name> --message-file <file> [options]
 ```
 
-| Flag                    | Description                                                                                                                                          |
-| ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--message-file <file>` | Read the message from a file (long text, or text starting with `-`)                                                                                  |
-| `--effort <level>`      | Override effort for this message                                                                                                                     |
-| `--plan`                | Ask for a plan only: Claude Code and persistent custom engines get a plan-only instruction in front of the message; other engines ignore it          |
-| `--image <path>`        | Attach an image (PNG, JPEG, GIF, WebP), repeatable; Claude Code, Codex, `codex-app`, Grok and OpenCode take images, other engines refuse the message |
-| `-s, --stream`          | Accepted, but has no effect: the server returns the reply when the turn ends, with no streamed chunks                                                |
-| `-t, --timeout <ms>`    | Turn timeout (default 300000)                                                                                                                        |
-| `--json`                | Print the whole result as one line, including `ok`, `output`, `sessionId`, `error`, and `permissionDenials` / `images` when the turn had any         |
+| Flag                    | Description                                                                                                                                                                                                                                     |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--message-file <file>` | Read the message from a file (long text, or text starting with `-`)                                                                                                                                                                             |
+| `--effort <level>`      | Override effort for this message                                                                                                                                                                                                                |
+| `--plan`                | Ask for a plan only, for this turn: the engine's plan mode on Claude Code, `codex-app`, Antigravity, Grok, Cursor and OpenCode, a plan-only instruction in front of the message on Codex and persistent custom engines; other engines ignore it |
+| `--image <path>`        | Attach an image (PNG, JPEG, GIF, WebP), repeatable; Claude Code, Codex, `codex-app`, Grok, OpenCode and Cursor take images, other engines refuse the message                                                                                    |
+| `-m, --model <model>`   | The model for this message only; an engine that cannot take a model per send refuses the message (use `session_switch_model` there)                                                                                                             |
+| `-s, --stream`          | Accepted, but has no effect: the server returns the reply when the turn ends, with no streamed chunks                                                                                                                                           |
+| `-t, --timeout <ms>`    | Turn timeout (default 300000)                                                                                                                                                                                                                   |
+| `--json`                | Print the whole result as one line, including `ok`, `output`, `sessionId`, `error`, and `permissionDenials` / `images` when the turn had any                                                                                                    |
 
-`--plan` does not change the permission mode. For a session that cannot write, start it with `--sandbox read-only`.
+On Codex and a persistent custom engine `--plan` does not change the permission mode. For a session that cannot write, start it with `--sandbox read-only`.
 
 ### session-stop
 
@@ -148,7 +152,7 @@ Lists the server's live sessions as `name — model (cwd)`. Sessions held only i
 clawo session-status <name> [--json]
 ```
 
-Prints turns, tool calls, cost, tokens and uptime. `--json` prints the whole status as one line: `name`, `cwd`, `model`, `created`, `claudeSessionId` (the engine's resume id), `costUsd` (and `budgetUsd` / `budgetExhausted` when a spend cap is set), and `stats` with turns, `turnsSucceeded`, tool calls, tokens, `contextPercent`, uptime and the engine's own conversation id.
+Prints turns, tool calls, cost, tokens and uptime. `--json` prints the whole status as one line: `name`, `cwd`, `model`, `created`, `claudeSessionId` (the engine's resume id), `costUsd` (and `budgetUsd` / `budgetExhausted` when a spend cap is set), `stats` with turns, `turnsSucceeded`, tool calls, tokens, `contextPercent`, uptime and the engine's own conversation id, and, when there are any, `contextBreakdown` and `engineTurns` (the turns the engine started itself — see [sessions.md](./sessions.md#turns-the-engine-starts-itself)).
 
 ### session-grep
 
@@ -177,7 +181,51 @@ there was none; ACP and custom-engine sessions cannot be interrupted this way. O
 clawo session-compact <name> [--summary <text>]
 ```
 
-Compacts the conversation; `--summary` is passed to the engine's compaction (`/compact <summary>` on Claude Code). Engines without compaction do nothing — see [sessions.md](./sessions.md#context-management).
+Compacts the conversation after any message in flight, and prints the token counts before and after where the engine reports them; `--summary` is passed to the engine's compaction (`/compact <summary>` on Claude Code). An engine without compaction fails with `compaction is not supported on <engine>` — see [sessions.md](./sessions.md#context-management).
+
+### session-command
+
+```bash
+clawo session-command <name>                          # list the engine's commands
+clawo session-command <name> <command> [args...]      # run one
+                      [-t, --timeout <ms>] [--json]
+```
+
+Lists the session's engine commands — slash commands, skills, custom commands and engine RPCs — with their
+source and whether each starts a turn, or runs one and prints its reply (`/` optional:
+`clawo session-command s review HEAD~1`). A command that starts a turn waits for the message in flight; one
+that needs a person is refused; an engine whose sessions take no commands fails with
+`running engine commands is not supported on <engine>`. Tool: `session_command`.
+
+### quota
+
+```bash
+clawo quota [engine] [--session <name>] [--json]
+```
+
+How much of an engine account's usage quota is left: each window with its used or remaining percentage and
+reset time, and where it was read. No engine: every engine clawo has a quota reader for, with the ones that
+could not be read listed as unavailable and why. `--session`: the account that session runs under. Tool:
+`engine_quota`.
+
+### session-aside
+
+```bash
+clawo session-aside <name> "<question>" [-t, --timeout <ms>]
+```
+
+Asks a side question, answered from the session's context without adding to its conversation and without
+tools. Tool: `session_aside`.
+
+### session-rewind
+
+```bash
+clawo session-rewind <name> (--turns <n> | --message-id <id>) [--files]
+```
+
+Drops the last `n` turns of the conversation, or goes back to a message; `--files` restores the files those
+turns changed too, where the engine can. On `codex-app`: by turns only, the conversation only. Tool:
+`session_rewind`.
 
 ## Run Ledger
 
@@ -310,34 +358,35 @@ default that runs no goal is refused at start. See
 clawo goal "<objective>" | --objective-file <file>
            [--check "<command>"]... [--contract <file>] [--check-timeout <minutes>]
            [--claude | --codex | --agy | --grok | --cursor | --opencode | --acp <preset> | -e <engine>] [--launcher <arg>]... [--model <model>] [--effort <level>] [--sandbox <mode>] [--thread <id>]
-           [--token-budget N] [--goal-timeout <minutes>] [--max-repairs N] [--forum]
+           [--token-budget N] [--native-goal] [--goal-timeout <minutes>] [--max-repairs N] [--forum]
            [--cwd <dir>] [--wait] [--json]
 ```
 
-| Option             | Default                | Notes                                                                                                                                                         |
-| ------------------ | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--objective-file` | —                      | Read the objective from a file instead of the argument. A goal accepts at most 4,000 characters                                                               |
-| `-e, --engine`     | the default engine     | Who runs the goal: `claude`, `codex` (a `codex-app` thread), `agy`, `grok`, `opencode` or `acp` (with `--acp-agent`), or the shorthand of the same name       |
-| `-c, --check`      | —                      | A command check, repeatable, run after the goal. Split on whitespace; quote-needing commands go in `--contract`                                               |
-| `--contract`       | —                      | A contract JSON file; `--check` entries are appended to it                                                                                                    |
-| `--check-timeout`  | 10                     | Minutes for each `--check` (at least 1). The verifier's node timeout is sized from the checks                                                                 |
-| `--launcher`       | —                      | Run the engine under this command, one argv element per flag: `--launcher ./sandbox.sh --launcher task --launcher "0 1"`                                      |
-| `-m, --model`      | the engine's own       | Model                                                                                                                                                         |
-| `--effort`         | the engine's own       | Reasoning effort                                                                                                                                              |
-| `--sandbox`        | the engine's own       | The session's sandbox mode (Claude Code has none). With an outer sandbox as the boundary, `danger-full-access`                                                |
-| `--thread`         | —                      | Start on this existing thread (codex thread, claude session, another engine's conversation id): its goal is replaced, its history kept                        |
-| `--token-budget`   | —                      | The goal stops as `budgetLimited` past this                                                                                                                   |
-| `--claude-account` | the configured default | Claude Code: the account, or `auto` for the rotation; at a usage limit the goal moves to the next account and goes on                                         |
-| `--isolate`        | off                    | Work in a git worktree of HEAD, saved to a local branch `clawo/<runId>` when the goal ends; your checkout is not written                                      |
-| `--pass-env`       | —                      | Let checks see this variable (or `NAME_*`) when they run with a minimal environment; repeatable ([verification.md](./verification.md#the-checks-environment)) |
-| `--check-env`      | auto                   | `minimal` or `inherit`: the environment checks run with; by default minimal when an agent worked in a sandbox (Codex by default)                              |
-| `--max-budget`     | —                      | Spend cap for the whole run in USD; the goal stops when it is reached                                                                                         |
-| `--goal-timeout`   | none                   | Wall-clock minutes for one goal pass                                                                                                                          |
-| `--max-repairs`    | `1`                    | Times a red verdict sends the goal back to the same thread                                                                                                    |
-| `--forum`          | off                    | The goal on the run's forum: posts for it reach its turn; it posts findings and `ASK @name` ([workflow.md](./workflow.md#the-run-forum))                      |
-| `--cwd`            | current directory      | Project directory                                                                                                                                             |
-| `-w, --wait`       | off                    | Follow the run; exit `0` only if it completes                                                                                                                 |
-| `--json`           | off                    | Print `{ runId, state }`, or with `--wait` the final run record                                                                                               |
+| Option             | Default                | Notes                                                                                                                                                              |
+| ------------------ | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `--objective-file` | —                      | Read the objective from a file instead of the argument. A goal accepts at most 4,000 characters                                                                    |
+| `-e, --engine`     | the default engine     | Who runs the goal: `claude`, `codex` (a `codex-app` thread), `agy`, `grok`, `opencode` or `acp` (with `--acp-agent`), or the shorthand of the same name            |
+| `-c, --check`      | —                      | A command check, repeatable, run after the goal. Split on whitespace; quote-needing commands go in `--contract`                                                    |
+| `--contract`       | —                      | A contract JSON file; `--check` entries are appended to it                                                                                                         |
+| `--check-timeout`  | 10                     | Minutes for each `--check` (at least 1). The verifier's node timeout is sized from the checks                                                                      |
+| `--launcher`       | —                      | Run the engine under this command, one argv element per flag: `--launcher ./sandbox.sh --launcher task --launcher "0 1"`                                           |
+| `-m, --model`      | the engine's own       | Model                                                                                                                                                              |
+| `--effort`         | the engine's own       | Reasoning effort                                                                                                                                                   |
+| `--sandbox`        | the engine's own       | The session's sandbox mode (Claude Code has none). With an outer sandbox as the boundary, `danger-full-access`                                                     |
+| `--thread`         | —                      | Start on this existing thread (codex thread, claude session, another engine's conversation id): its goal is replaced, its history kept                             |
+| `--token-budget`   | —                      | The goal stops as `budgetLimited` past this                                                                                                                        |
+| `--native-goal`    | off                    | Run the engine's own goal loop instead of clawo's turn loop, on an engine that has one; refused where it has none ([workflow.md](./workflow.md#native-goal-loops)) |
+| `--claude-account` | the configured default | Claude Code: the account, or `auto` for the rotation; at a usage limit the goal moves to the next account and goes on                                              |
+| `--isolate`        | off                    | Work in a git worktree of HEAD, saved to a local branch `clawo/<runId>` when the goal ends; your checkout is not written                                           |
+| `--pass-env`       | —                      | Let checks see this variable (or `NAME_*`) when they run with a minimal environment; repeatable ([verification.md](./verification.md#the-checks-environment))      |
+| `--check-env`      | auto                   | `minimal` or `inherit`: the environment checks run with; by default minimal when an agent worked in a sandbox (Codex by default)                                   |
+| `--max-budget`     | —                      | Spend cap for the whole run in USD; the goal stops when it is reached                                                                                              |
+| `--goal-timeout`   | none                   | Wall-clock minutes for one goal pass                                                                                                                               |
+| `--max-repairs`    | `1`                    | Times a red verdict sends the goal back to the same thread                                                                                                         |
+| `--forum`          | off                    | The goal on the run's forum: posts for it reach its turn; it posts findings and `ASK @name` ([workflow.md](./workflow.md#the-run-forum))                           |
+| `--cwd`            | current directory      | Project directory                                                                                                                                                  |
+| `-w, --wait`       | off                    | Follow the run; exit `0` only if it completes                                                                                                                      |
+| `--json`           | off                    | Print `{ runId, state }`, or with `--wait` the final run record                                                                                                    |
 
 `clawo workflow show <runId>` prints the goal's status, tokens, time, resume
 attempts and thread id while it runs; `clawo workflow steer <runId> "<text>"`

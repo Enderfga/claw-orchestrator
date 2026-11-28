@@ -15,10 +15,14 @@
  *     back as `--conversation <id>` on later sends — true multi-turn context,
  *     like Codex thread resume. The --log-file scrape is kept only as a fallback
  *     for a turn that dies before emitting any event.
- *   - Real usage: input/output/cache-read tokens come from the `result` event,
- *     so cost is measured rather than guessed. Earlier versions of this wrapper
- *     read plain text and estimated ~4 chars/token, which is now only the
- *     fallback path when no result event arrives.
+ *   - Real usage: input/output/cache-read tokens come from the stream — each
+ *     request's own step, since the `result` reports the conversation's running
+ *     total (see `_turnUsage`) — so cost is measured rather than guessed. A
+ *     ~4 chars/token estimate is only the fallback for a turn that reported none.
+ *
+ * Print-mode slash commands, a native `/goal` loop, `/compact`, `/plan`, the
+ * quota and the spend of the agents a turn starts are documented where they are
+ * handled below, and in skills/references/multi-engine.md.
  *   - Timeout coherence: we derive --print-timeout from the send timeout so the
  *     two never disagree. Since 1.2.6 a headless run has no default timeout at
  *     all unless that flag is passed, so it is now the only bound there is.
@@ -29,12 +33,24 @@
  * nothing on stderr. Treat a wrong model as a failed turn, not a quiet swap.
  */
 
-import { spawnEngine } from './engine-spawn.js';
+import { killEngineTree, spawnEngine } from './engine-spawn.js';
+import type { ChildProcess } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
-import type { EffortLevel, SessionConfig, SessionSendOptions, StreamEvent, TurnResult } from './types.js';
+import type {
+  CommandOutcome,
+  CompactOutcome,
+  EffortLevel,
+  EngineCommand,
+  ModelPricing,
+  SessionConfig,
+  SessionSendOptions,
+  StreamCallbacks,
+  StreamEvent,
+  TurnResult,
+} from './types.js';
 import { estimateTokens, getModelPricing } from './models.js';
 import { sanitizeSecrets } from './sanitize.js';
 import {
@@ -43,6 +59,27 @@ import {
   hasAgyToolPermissionDenial,
   isAgyConversationId,
 } from './agy-conversation.js';
+import {
+  AGY_INFO_COMMAND_NAMES,
+  AGY_SYSTEM_COMMANDS,
+  agyCommandPrompt,
+  agyInfoCommands,
+  agyLeadingCommand,
+  agySkillCommands,
+} from './agy-commands.js';
+import {
+  AgyMemberSpend,
+  agyBrainDir,
+  agyBrainDirOf,
+  agyTranscriptPath,
+  priceAgyRequests,
+  readAgyTranscript,
+  type AgySpend,
+} from './agy-transcripts.js';
+import { runAgyInfoCommand } from './agy-quota.js';
+import { AGY_TURN_USAGE_EVENT, AgyGoalSession, type AgyGoalHost } from './agy-goal-session.js';
+import type { ClaudeGoalOpen } from './claude-goal-session.js';
+import type { GoalSession } from './kernel/nodes/goal.js';
 import { SESSION_EVENT } from './constants.js';
 import { BaseOneShotSession } from './base-oneshot-session.js';
 
@@ -55,21 +92,33 @@ interface AgyUsage {
   total_tokens?: number;
 }
 
-/** One line of agy `--output-format stream-json`. Captured from agy 1.1.13. */
+/** An info command's structured answer (`command_result`, and `result.command`; 1.5.x). */
+interface AgyCommandAnswer {
+  name?: string;
+  data?: unknown;
+}
+
+/** One line of agy `--output-format stream-json`. Captured from agy 1.1.13; fields added through 1.5.19. */
 interface AgyStreamEvent {
   event?: string;
   conversation_id?: string;
+  /** On `init`: the model the run is on, and each command or skill a leading `/word` expanded to. */
+  init?: { model?: string; expanded_commands?: Array<{ name?: string; type?: string }> };
+  /** On `command_result`: an info command's answer; no `init` precedes it and no turn runs. */
+  command?: AgyCommandAnswer;
   /** Progress of one step; an `agent_response` step carries its own request's usage (agy 1.5.3). */
   step_update?: {
     conversation_id?: string;
     /** Position in its conversation; a tool step is reported ACTIVE, then DONE, at the same index (1.5.13). */
     step_index?: number;
     state?: string;
+    /** `agent_response`, `tool`, `subagent`, `checkpoint` (a compaction's summary pass), `system_message`, … */
     step_type?: string;
+    tool_name?: string;
     usage?: AgyUsage;
     /** Present on every step that calls a tool: `{ name, parameters, output }`. */
     tool_info?: unknown;
-    /** Present on a step that delegates to a subagent: `{ conversation_id, log_uri, ... }`. */
+    /** Present on a step that delegates to a subagent: `{ subagents: [{ conversation_id, log_uri, ... }] }`. */
     subagent_info?: unknown;
   };
   result?: {
@@ -78,12 +127,50 @@ interface AgyStreamEvent {
     response?: string;
     error?: string;
     usage?: AgyUsage;
+    /** Model requests of the turn; 0 for an answer agy gave without one. */
+    num_turns?: number;
     /** Why the turn ended early (agy 1.4.11+): `print_timeout`, `interrupted` or `error`; absent when it finished. */
     finished_reason?: string;
     /** The value `--json-schema` asked for; `response` carries it as JSON text too (1.5.13). */
     structured_output?: unknown;
+    /** An info command's answer, as on `command_result`. */
+    command?: AgyCommandAnswer;
+    /** Tools refused in a headless run: `[{ action, display_name }]`. */
+    denied_actions?: Array<{ action?: string; display_name?: string }>;
   };
 }
+
+/** Options a turn of this wrapper takes beyond `SessionSendOptions`. */
+interface AgyTurnOptions extends SessionSendOptions {
+  /** Read a leading `/word` as agy's command on this turn, whatever `disableSlashCommands` says. */
+  agyCommands?: boolean;
+  /** The turn is a `/compact`: judged by its summary pass, and not counted as a turn. */
+  agyCompact?: boolean;
+}
+
+/**
+ * agy's orchestrator models (`gemini-pro-orchestrator`, `-neon`, `-argon`): two
+ * phases, planner and executor, each on a model of agy's choosing. They take no
+ * `--effort` (agy refuses one: "--effort is not supported for model …").
+ */
+export const AGY_ORCHESTRATOR_MODELS = /^gemini-pro-orchestrator(?:-[a-z]+)?$/;
+
+/** Tools through which a turn starts agents of its own, whose spend is not in the turn's usage. */
+const AGY_MEMBER_TOOLS: ReadonlySet<string> = new Set([
+  'invoke_subagent',
+  'define_subagent',
+  'browser_subagent',
+  'swarm',
+  'run_workflow',
+]);
+/** Commands and skills that start such agents. */
+const AGY_MEMBER_COMMANDS: ReadonlySet<string> = new Set(['teamwork', 'swarm', 'run-workflow', 'boost', 'browser']);
+
+/** A plan `/plan` writes into agy's own folder for the conversation (`plan.md`, `implementation_plan.md`). */
+const AGY_PLAN_FILE_RE = /(?:^|[\\/])[\w.-]*plan[\w.-]*\.md$/i;
+
+/** The commands a session lists are read again after this long (skills come and go). */
+const COMMANDS_TTL_MS = 10 * 60_000;
 
 /** agy models with a reasoning tier above `high`; `agy models` lists them with a `-xhigh` slug. */
 export const AGY_XHIGH_MODELS = /^gemini-4-(?:hydrogen|neon)(?:-|$)/;
@@ -200,7 +287,56 @@ export function agyAutoCompactEnv(window: SessionConfig['autoCompactWindow']): R
   return { AGY_CLI_AUTO_COMPACT_OVERRIDE: String(window) };
 }
 
+/**
+ * Put `text` in front of `message` without hiding the command the message starts
+ * with: agy reads a command only at the very start of `-p`. The text goes after
+ * the command (and a bracketed directive such as `[skip-interview]`), as part of
+ * what the command acts on. An info command takes no arguments, and a command
+ * with nothing after it (`/compact`) has nothing to act on, so both are left as
+ * they are.
+ */
+export function agyPrefixPrompt(message: string, text: string, commands: boolean): string {
+  const lead = commands ? agyLeadingCommand(message) : undefined;
+  if (!lead) return `${text}\n\n${message}`;
+  if (AGY_INFO_COMMAND_NAMES.has(lead)) return message;
+  const m = /^\s*(\/\S+(?:[ \t]+\[[^\]\n]*\])?)[ \t]*\n*([\s\S]*)$/.exec(message);
+  if (!m || !m[2].trim()) return message;
+  return `${m[1]} ${text}\n\n${m[2]}`;
+}
+
 export class PersistentAgySession extends BaseOneShotSession {
+  /** A message starting with `/word` is a command on agy (unless `disableSlashCommands`). */
+  readonly commandStyle = 'text' as const;
+
+  /** Each turn is its own process, so a turn takes its own `--model`. */
+  readonly perSendModel = true;
+
+  /** The model agy reported on the last turn's `init` event. */
+  private _reportedModel: string | undefined;
+
+  /** The conversation's running usage, as the last `result` reported it. */
+  private _conversationUsage: AgyUsage | undefined;
+
+  /**
+   * The smallest request prompt seen: close to what every request carries
+   * whatever the history (system prompt, tools, the first message).
+   */
+  private _smallestPrompt: number | undefined;
+
+  /** Spend of the agents the session's turns started (`/teamwork`, `/swarm`, `/run-workflow`, subagents). */
+  private readonly _members: AgyMemberSpend;
+
+  /** The commands `listCommands` read, and when. */
+  private _commands: { at: number; list: EngineCommand[] } | undefined;
+
+  /** Info-command processes, run beside the turns; stop() ends them. */
+  private readonly _infoProcs = new Set<ChildProcess>();
+
+  /** Set only while `send()` builds its message for a turn that reads agy's commands whatever the session says. */
+  private _commandsForced = false;
+
+  private readonly _warned = new Set<string>();
+
   /**
    * Antigravity conversation ID for this session. Captured from the agy log
    * file after the first turn, then reused via `--conversation <id>` so the
@@ -216,11 +352,11 @@ export class PersistentAgySession extends BaseOneShotSession {
       enginePrefix: 'agy',
       // 3.8 because 1.1.25 stopped serving 3.5: `--model gemini-3.5-flash`
       // returns `status: ERROR` with an empty response and nothing on stderr,
-      // while 3.7 and 3.8 complete normally — measured, not inferred. This
-      // wrapper always passes `--model`, so whatever sits here is what actually
-      // runs; and agy's stream-json carries no model field at all, so its own
-      // default cannot be read back and adopted. Re-check `agy models` when
-      // the next tier appears.
+      // while 3.7 and 3.8 complete normally — measured, not inferred. This is
+      // the price of a turn whose model is unknown: a session that names no
+      // model runs on agy's own default, which the `init` event reports and the
+      // turn is billed at (see `_pricing`). Re-check `agy models` when the next
+      // tier appears.
       defaultModel: 'gemini-3.8-flash',
       // agy's `input_tokens` leaves out `cache_read_tokens` (the prompt is their
       // sum), so cache reads are counted and priced on their own; before, they
@@ -233,9 +369,20 @@ export class PersistentAgySession extends BaseOneShotSession {
     // ignored: starting a fresh conversation beats resuming a broken one.
     // Refused at start, not at the first turn.
     agyAutoCompactEnv(config.autoCompactWindow);
+    if (config.turnCommand?.trim() && config.disableSlashCommands) {
+      throw new Error('turnCommand needs agy to read slash commands, which disableSlashCommands turns off');
+    }
     if (isAgyConversationId(config.resumeSessionId)) {
       this.agyConversationId = config.resumeSessionId;
     }
+    this._members = new AgyMemberSpend(this.engineCfg.defaultModel, (m) => this.emit(SESSION_EVENT.LOG, m));
+  }
+
+  /** Log `message` once per session under `key`. */
+  private _warnOnce(key: string, message: string): void {
+    if (this._warned.has(key)) return;
+    this._warned.add(key);
+    this.emit(SESSION_EVENT.LOG, message);
   }
 
   /** Expose the captured conversation ID for resume tooling and stats overlay. */
@@ -252,6 +399,31 @@ export class PersistentAgySession extends BaseOneShotSession {
 
   protected override _continuesConversation(): boolean {
     return !!this.agyConversationId;
+  }
+
+  /** `appendSystemPrompt` on the first message, kept behind the command the message starts with. */
+  protected override _withAppendedInstructions(message: string): string {
+    const instructions = this.options.appendSystemPrompt?.trim();
+    if (!instructions || this._continuesConversation()) return message;
+    return agyPrefixPrompt(
+      message,
+      `${instructions}\n\n---`,
+      this._commandsForced || !this.options.disableSlashCommands,
+    );
+  }
+
+  /** `send()` for a turn that reads a leading `/word` as agy's command, whatever the session's setting. */
+  private _sendCommandTurn(message: string, options: AgyTurnOptions): Promise<TurnResult> {
+    this._commandsForced = true;
+    try {
+      return this.send(message, {
+        ...options,
+        waitForComplete: true,
+        agyCommands: true,
+      } as AgyTurnOptions) as Promise<TurnResult>;
+    } finally {
+      this._commandsForced = false;
+    }
   }
 
   /**
@@ -271,14 +443,31 @@ export class PersistentAgySession extends BaseOneShotSession {
    *
    * Every session-level flag goes on every turn: each turn is a new process.
    */
-  private _buildArgs(message: string, timeoutMs: number, turnEffort?: EffortLevel): string[] {
+  /** Whether this turn reads a leading `/word` as agy's command. */
+  private _readsCommands(turn: AgyTurnOptions): boolean {
+    return !!turn.agyCommands || !!turn.plan || !this.options.disableSlashCommands;
+  }
+
+  /** The `-p` text of a turn: the message, as `/plan` asks for it, with the read-only note. */
+  private _turnPrompt(message: string, turn: AgyTurnOptions): string {
+    const commands = this._readsCommands(turn);
+    const planned = turn.plan && agyLeadingCommand(message) !== 'plan' ? `/plan ${message}` : message;
+    return this.options.sandboxMode === 'read-only' ? agyPrefixPrompt(planned, AGY_READ_ONLY_NOTE, commands) : planned;
+  }
+
+  /** The model a turn runs on: this send's, or the session's (aliases resolved, `agy/` dropped). */
+  private _turnModel(turn: AgyTurnOptions): string | undefined {
+    const configured = turn.model || this.options.resolvedModel || this.options.model;
+    return configured ? this.resolveModel(configured.replace(/^agy\//, '')) : undefined;
+  }
+
+  private _buildArgs(text: string, timeoutMs: number, turn: AgyTurnOptions = {}): string[] {
     // stream-json gives the conversation id up front, progress events while the
     // turn runs, and a final `result` carrying the answer plus real token usage.
     // Before this, the wrapper read plain text, scraped the id out of the log
     // file, and had to ESTIMATE tokens — so this engine's cost was a guess.
     // --log-file is still passed as the fallback id source for a turn that dies
     // before emitting any event.
-    const text = this.options.sandboxMode === 'read-only' ? `${AGY_READ_ONLY_NOTE}\n\n${message}` : message;
     const prompt = AGY_FLAG_LIKE_PROMPT_RE.test(text) ? `${text}\n` : text;
     const args: string[] = ['-p', prompt, '--output-format', 'stream-json', '--log-file', this._logFile];
 
@@ -323,9 +512,8 @@ export class PersistentAgySession extends BaseOneShotSession {
     // fully-qualified `-low|-medium|-high|-xhigh` slug already carries its
     // effort and needs no flag. If a caller overrides such a slug to a different
     // effort, strip the suffix first: agy rejects conflicting --model/--effort pairs.
-    const configuredModel = this.options.resolvedModel || this.options.model;
-    let model = configuredModel ? this.resolveModel(configuredModel.replace(/^agy\//, '')) : undefined;
-    const requestedEffort = turnEffort ?? this.options.effort;
+    let model = this._turnModel(turn);
+    const requestedEffort = turn.effort ?? this.options.effort;
     const topTier = model && AGY_XHIGH_MODELS.test(model) ? 'xhigh' : 'high';
     const explicitEffort =
       requestedEffort === 'max' || requestedEffort === 'xhigh' || requestedEffort === 'ultra'
@@ -337,7 +525,16 @@ export class PersistentAgySession extends BaseOneShotSession {
     if (model && modelEffortMatch && explicitEffort && modelEffortMatch[1] !== explicitEffort) {
       model = model.slice(0, -modelEffortMatch[0].length);
     }
-    const effort = explicitEffort ?? (model && !modelEffortMatch ? 'high' : undefined);
+    let effort = explicitEffort ?? (model && !modelEffortMatch ? 'high' : undefined);
+    if (model && AGY_ORCHESTRATOR_MODELS.test(model)) {
+      if (explicitEffort) {
+        this._warnOnce(
+          'orchestrator-effort',
+          `[agy] ${model} takes no reasoning effort; effort '${requestedEffort}' is not passed`,
+        );
+      }
+      effort = undefined;
+    }
 
     if (model) args.push('--model', model);
     if (effort) args.push('--effort', effort);
@@ -360,7 +557,7 @@ export class PersistentAgySession extends BaseOneShotSession {
     // `/help` answers without a model turn, and an interactive-only one such as
     // `/clear` fails with a result error. An absolute path names neither and
     // reaches the model as written (measured on 1.5.13).
-    if (this.options.disableSlashCommands) args.push('--disable-slash-commands');
+    if (!this._readsCommands(turn)) args.push('--disable-slash-commands');
 
     // 1.2.6 changed the default for a headless run from 5 minutes to unlimited,
     // so passing this is also what keeps a stuck turn from running forever.
@@ -435,12 +632,14 @@ export class PersistentAgySession extends BaseOneShotSession {
    * continues from where it stopped, with its file tools — at most
    * `AGY_READ_ONLY_CONTINUATIONS` times, within the turn's own timeout.
    */
-  protected async _run(message: string, options: SessionSendOptions): Promise<TurnResult> {
+  protected async _run(message: string, options: AgyTurnOptions): Promise<TurnResult> {
     const deadline = Date.now() + (options.timeout || 300_000);
     let next = message;
     for (let attempt = 0; ; attempt++) {
       try {
-        return await this._runOnce(next, { ...options, timeout: Math.max(1, deadline - Date.now()) });
+        // A continuation is plain text: `/plan` went out with the turn's first message.
+        const turn = attempt === 0 ? options : { ...options, plan: false };
+        return await this._runOnce(next, { ...turn, timeout: Math.max(1, deadline - Date.now()) });
       } catch (err) {
         const denied = (err as { agyToolDenial?: string[] }).agyToolDenial;
         const room = deadline - Date.now();
@@ -460,9 +659,13 @@ export class PersistentAgySession extends BaseOneShotSession {
     }
   }
 
-  private _runOnce(message: string, options: SessionSendOptions): Promise<TurnResult> {
+  private _runOnce(message: string, options: AgyTurnOptions): Promise<TurnResult> {
     const timeout = options.timeout || 300_000;
-    const args = this._buildArgs(message, timeout, options.effort);
+    const text = this._turnPrompt(message, options);
+    const args = this._buildArgs(text, timeout, options);
+    const turnModel = this._turnModel(options);
+    // The command this turn's prompt starts with, when agy reads one.
+    const commandWord = this._readsCommands(options) ? agyLeadingCommand(text) : undefined;
 
     // The path is stable for the session, so remove the previous turn's file
     // before spawning. If that cannot be proven, do not inspect the file at all:
@@ -479,8 +682,8 @@ export class PersistentAgySession extends BaseOneShotSession {
       let stderr = '';
       let settled = false;
       let turnUsage: AgyUsage | undefined;
-      // Prompt of the turn's latest request. `result.usage` sums every request
-      // of the turn, so it is the turn's spend, not the context's size.
+      // Prompt of the turn's latest request: the context's size. `result.usage`
+      // sums every request of the conversation (see `_turnUsage`).
       let lastRequestPrompt = 0;
       let turnStatus: string | undefined;
       // agy reports a rejected invocation (bad model/effort pair, unknown slug)
@@ -495,6 +698,23 @@ export class PersistentAgySession extends BaseOneShotSession {
       // Tool steps already counted this turn, by conversation and step index:
       // agy reports a tool step when it starts and again when it is done.
       const toolSteps = new Set<string>();
+      // A model turn ran: agy sends `init` first. An info command has none.
+      let sawInit = false;
+      let expanded: string[] = [];
+      let answer: AgyCommandAnswer | undefined;
+      let numTurns: number | undefined;
+      // The summary pass of a compaction (a `checkpoint` step), with its usage.
+      let checkpoint: AgyUsage | undefined;
+      let planPath: string | undefined;
+      let deniedActions: string[] = [];
+      // Agents this turn started (each in a conversation of its own), and where agy keeps them.
+      const memberIds = new Set<string>();
+      let startsMembers = false;
+      let brainDir: string | undefined;
+      // This conversation's own requests, summed from their steps: the turn's
+      // running usage, and its spend should the process end before `result`.
+      const own = { input: 0, output: 0, cache: 0 };
+      let firstOwnStep: number | undefined;
 
       const startedAt = Date.now();
       const proc = spawnEngine(this.engineBin, args, {
@@ -549,17 +769,32 @@ export class PersistentAgySession extends BaseOneShotSession {
           this.emit(SESSION_EVENT.TEXT, raw);
           return;
         }
-        if (evt.event === 'init' && evt.conversation_id && !this.agyConversationId) {
-          this.agyConversationId = evt.conversation_id;
+        if (evt.event === 'init') {
+          sawInit = true;
+          if (evt.conversation_id && !this.agyConversationId) this.agyConversationId = evt.conversation_id;
+          if (typeof evt.init?.model === 'string' && evt.init.model) this._reportedModel = evt.init.model;
+          expanded = (evt.init?.expanded_commands ?? [])
+            .map((c) => c?.name)
+            .filter((n): n is string => typeof n === 'string');
         }
+        if (evt.event === 'command_result' && evt.command) answer = evt.command;
         const step = evt.event === 'step_update' ? evt.step_update : undefined;
-        if (step?.step_type === 'agent_response' && step.usage) {
-          // A subagent's steps belong to a conversation of its own.
-          const own =
-            !step.conversation_id || !this.agyConversationId || step.conversation_id === this.agyConversationId;
+        // A subagent's steps belong to a conversation of its own.
+        const ownStep =
+          !!step &&
+          (!step.conversation_id || !this.agyConversationId || step.conversation_id === this.agyConversationId);
+        if (step && ownStep && firstOwnStep === undefined && typeof step.step_index === 'number') {
+          firstOwnStep = step.step_index;
+        }
+        if (step && ownStep && step.usage && (step.step_type === 'agent_response' || step.step_type === 'checkpoint')) {
+          own.input += step.usage.input_tokens ?? 0;
+          own.output += step.usage.output_tokens ?? 0;
+          own.cache += step.usage.cache_read_tokens ?? 0;
+          if (step.step_type === 'checkpoint') checkpoint = step.usage;
           // `input_tokens` leaves the cached reads out; the prompt is both.
           const prompt = (step.usage.input_tokens ?? 0) + (step.usage.cache_read_tokens ?? 0);
-          if (own && prompt > 0) lastRequestPrompt = prompt;
+          if (step.step_type === 'agent_response' && prompt > 0) lastRequestPrompt = prompt;
+          this.emit(AGY_TURN_USAGE_EVENT, { tokensIn: own.input, tokensOut: own.output });
         }
         // A tool call, or a delegation to a subagent, including the tool steps
         // a subagent streams from its own conversation.
@@ -569,11 +804,35 @@ export class PersistentAgySession extends BaseOneShotSession {
             if (key) toolSteps.add(key);
             this._stats.toolCalls++;
           }
+          const info = step.tool_info as { name?: unknown; parameters?: { Path?: unknown } } | undefined;
+          const tool = step.tool_name ?? (typeof info?.name === 'string' ? info.name : undefined);
+          if (tool && AGY_MEMBER_TOOLS.has(tool)) startsMembers = true;
+          const written = info?.parameters?.Path;
+          if (ownStep && tool === 'write_file' && typeof written === 'string' && AGY_PLAN_FILE_RE.test(written)) {
+            if (written.includes(`${path.sep}brain${path.sep}`) || written.includes('/brain/')) planPath = written;
+          }
+          const subagents = (step.subagent_info as { subagents?: unknown } | undefined)?.subagents;
+          if (step.subagent_info) startsMembers = true;
+          if (Array.isArray(subagents)) {
+            for (const a of subagents) {
+              const id = (a as { conversation_id?: unknown })?.conversation_id;
+              if (typeof id === 'string' && isAgyConversationId(id)) memberIds.add(id);
+              const uri = (a as { log_uri?: unknown })?.log_uri;
+              if (typeof uri === 'string') brainDir ??= agyBrainDirOf(uri);
+            }
+          }
         }
         if (evt.event === 'result' && evt.result) {
           const r = evt.result;
           if (r.conversation_id && !this.agyConversationId) this.agyConversationId = r.conversation_id;
           if (r.structured_output !== undefined && r.structured_output !== null) structuredOutput = r.structured_output;
+          if (typeof r.num_turns === 'number') numTurns = r.num_turns;
+          if (r.command && !answer) answer = r.command;
+          if (Array.isArray(r.denied_actions)) {
+            deniedActions = r.denied_actions
+              .map((d) => d?.display_name)
+              .filter((n): n is string => typeof n === 'string' && !!n);
+          }
           // `response` carries the structured result as JSON text too; should it
           // come back empty, the structured value is the reply, not a failure.
           const reply =
@@ -618,6 +877,33 @@ export class PersistentAgySession extends BaseOneShotSession {
         if (pending) handleLine(pending, false);
 
         const text = resultText.replace(/\n$/, '');
+
+        // An answer agy gave without a model turn: an info command, or a command it
+        // refused (an interactive-only one, an argument an info command does not
+        // take). No conversation, no usage, not a turn: the context figure and the
+        // turn counters stay as the last turn left them.
+        if (commandWord && !sawInit && (answer !== undefined || numTurns === 0)) {
+          if (settled) return;
+          settled = true;
+          this._stats.lastActivity = new Date().toISOString();
+          this._addHistory({ text, code });
+          const failure =
+            turnError || turnStatus || code !== 0
+              ? turnError || stderr.trim() || `/${commandWord} failed (exit ${code})`
+              : undefined;
+          const command = {
+            name: answer?.name ?? commandWord,
+            ...(answer?.data !== undefined ? { data: answer.data } : {}),
+          };
+          const event: StreamEvent = failure
+            ? { type: 'result', result: failure, is_error: true, stop_reason: 'error', command }
+            : { type: 'result', result: text, stop_reason: 'end_turn', command };
+          this.emit(SESSION_EVENT.RESULT, event);
+          this.emit(SESSION_EVENT.TURN_COMPLETE, event);
+          resolve({ text: failure ?? text, event, localCommand: true });
+          return;
+        }
+
         const emptyResponse = text.trim().length === 0;
         let turnLog: string | undefined;
         const needsLog = !this.agyConversationId || (!settled && code === 0 && !turnError);
@@ -637,7 +923,34 @@ export class PersistentAgySession extends BaseOneShotSession {
         // fallback for a turn that died before emitting one.
         this._harvestConversationId(turnLog);
 
-        if (settled) return;
+        // What the turn spent, counted even when the wrapper's timeout already
+        // settled it: the process ran and was billed either way.
+        const usage = this._turnUsage(own, turnUsage, numTurns);
+        if (turnUsage) this._conversationUsage = turnUsage;
+        const accountFor = (): void => {
+          // Real usage from the stream (see `_turnUsage`). estimateTokens() is the
+          // fallback for a turn that produced none (killed early, crashed, or an
+          // output-format change) — a ~4-chars-per-token guess, and the only
+          // source before agy grew a structured output mode.
+          if (usage) {
+            this._stats.tokensIn += usage.input_tokens ?? 0;
+            this._stats.tokensOut += usage.output_tokens ?? 0;
+            this._stats.cachedTokens += usage.cache_read_tokens ?? 0;
+            this._stats.costUsd += this._priceTurn(usage, turnModel, firstOwnStep);
+          } else if (text.length > 0 || code === 0) {
+            const tokensIn = estimateTokens(message);
+            const tokensOut = estimateTokens(text);
+            this._stats.tokensIn += tokensIn;
+            this._stats.tokensOut += tokensOut;
+            this._markTurnEstimated();
+            this._stats.costUsd += priceTokens(this._pricing(turnModel), tokensIn, 0, tokensOut);
+          }
+        };
+
+        if (settled) {
+          accountFor();
+          return;
+        }
         settled = true;
 
         // One expression for the outcome feeds both the counter and `stop_reason`.
@@ -651,34 +964,74 @@ export class PersistentAgySession extends BaseOneShotSession {
             ? finishedReason === 'print_timeout'
             : AGY_DEADLINE_IN_PROGRESS_RE.test(stderr) ||
               (!AGY_IDLE_WAIT_RE.test(stderr) && Date.now() - startedAt >= agyPrintTimeoutSec(timeout) * 1000);
+        const compact = !!options.agyCompact;
+        // A compaction is judged by its summary pass: its reply is empty by design.
+        const compacted =
+          compact &&
+          !hitDeadline &&
+          !finishedReason &&
+          !turnError &&
+          !turnStatus &&
+          code === 0 &&
+          (checkpoint !== undefined || expanded.includes('compact'));
         // Any finished_reason means the turn ended early, whatever the status says.
-        const ok = !hitDeadline && !finishedReason && !turnError && !turnStatus && code === 0 && !emptyResponse;
-        this._recordTurnComplete(ok);
+        const ok = compact
+          ? compacted
+          : !hitDeadline && !finishedReason && !turnError && !turnStatus && code === 0 && !emptyResponse;
+        // A compaction is not a turn of the conversation.
+        if (compact) this._stats.lastActivity = new Date().toISOString();
+        else this._recordTurnComplete(ok);
 
-        // Real usage from the `result` event. estimateTokens() is the fallback
-        // for a turn that produced no result event (killed, crashed, or an
-        // output-format change) — it is a ~4-chars-per-token guess and was the
-        // only source before agy grew a structured output mode, which is why
-        // this engine's cost figures used to be approximate.
-        if (turnUsage) {
-          this._stats.tokensIn += turnUsage.input_tokens ?? 0;
-          this._stats.tokensOut += turnUsage.output_tokens ?? 0;
-          this._stats.cachedTokens += turnUsage.cache_read_tokens ?? 0;
-          this._updateCost();
-        } else if (text.length > 0 || code === 0) {
-          this._stats.tokensIn += estimateTokens(message);
-          this._stats.tokensOut += estimateTokens(text);
-          this._markTurnEstimated();
-          this._updateCost();
+        accountFor();
+        const sizes = compacted && checkpoint ? this._compactSizes(checkpoint) : undefined;
+        if (sizes) this._reportTurnInputTokens(sizes.postTokens);
+        else if (lastRequestPrompt > 0) {
+          this._reportTurnInputTokens(lastRequestPrompt);
+          this._smallestPrompt = Math.min(this._smallestPrompt ?? lastRequestPrompt, lastRequestPrompt);
         }
-        if (lastRequestPrompt > 0) this._reportTurnInputTokens(lastRequestPrompt);
+
+        // The agents the turn started spend outside its usage; their transcripts say what.
+        let members: AgySpend | undefined;
+        const followsMembers =
+          startsMembers ||
+          memberIds.size > 0 ||
+          expanded.some((c) => AGY_MEMBER_COMMANDS.has(c)) ||
+          this._members.members.length > 0;
+        if (this.agyConversationId && followsMembers) {
+          members = this._members.collect(this.agyConversationId, [...memberIds], brainDir);
+          if (members.conversations > 0) {
+            this._stats.tokensIn += members.tokensIn;
+            this._stats.tokensOut += members.tokensOut;
+            this._stats.cachedTokens += members.cachedTokens;
+            this._stats.costUsd += members.costUsd;
+          }
+        }
 
         this._addHistory({ text, code });
 
-        const permissionDenials = extractAgyToolPermissionDenials(turnLog ?? '');
+        if (commandWord && sawInit && expanded.length === 0 && !AGY_INFO_COMMAND_NAMES.has(commandWord)) {
+          this._warnOnce(
+            `unknown:${commandWord}`,
+            `[agy] /${commandWord} is not an agy command or skill here; it reached the model as text`,
+          );
+        }
+
+        // The plan `/plan` wrote, read from agy's folder for the conversation.
+        let plan: { path: string; text: string } | undefined;
+        if (planPath && (options.plan || expanded.includes('plan'))) {
+          try {
+            plan = { path: planPath, text: fs.readFileSync(planPath, 'utf8').slice(0, 200_000) };
+          } catch {
+            // Written and gone, or not readable: agy's reply links it.
+          }
+        }
+        // session_send `plan`: the plan is the answer; approving it is the next message.
+        const replyText = options.plan && plan?.text.trim() ? plan.text.replace(/\n$/, '') : text;
+
+        const permissionDenials = [...new Set([...deniedActions, ...extractAgyToolPermissionDenials(turnLog ?? '')])];
         const event: StreamEvent = {
           type: 'result',
-          result: text,
+          result: replyText,
           // agy can exit 0 while reporting a non-SUCCESS status, an error, or no
           // usable response, so all terminal signals participate in the verdict.
           stop_reason: ok ? 'end_turn' : 'error',
@@ -686,6 +1039,21 @@ export class PersistentAgySession extends BaseOneShotSession {
           ...(permissionDenials.length > 0
             ? { permission_denials: permissionDenials.map((tool_name) => ({ tool_name })) }
             : {}),
+          ...(expanded.length ? { expanded_commands: expanded } : {}),
+          ...(this._reportedModel ? { model: this._reportedModel } : {}),
+          ...(plan ? { plan } : {}),
+          ...(members && members.conversations > 0
+            ? {
+                member_usage: {
+                  conversations: members.conversations,
+                  tokensIn: members.tokensIn,
+                  tokensOut: members.tokensOut,
+                  cachedTokens: members.cachedTokens,
+                  costUsd: Math.round(members.costUsd * 10000) / 10000,
+                },
+              }
+            : {}),
+          ...(compact ? { compacted, ...(sizes ? { compact: sizes } : {}) } : {}),
         };
 
         this.emit(SESSION_EVENT.RESULT, event);
@@ -699,7 +1067,7 @@ export class PersistentAgySession extends BaseOneShotSession {
           reject(new Error(turnError));
         } else if (code !== 0) {
           reject(new Error(stderr || `Antigravity exited with code ${code}`));
-        } else if (emptyResponse) {
+        } else if (emptyResponse && !compact) {
           const echoableDenials = permissionDenials.filter((name) => AGY_ECHOABLE_TOOL_NAME_RE.test(name));
           const denied = echoableDenials.length > 0 || hasAgyToolPermissionDenial(turnLog ?? '');
           const emptyResponseError =
@@ -712,7 +1080,7 @@ export class PersistentAgySession extends BaseOneShotSession {
           if (denied) err.agyToolDenial = echoableDenials;
           reject(err);
         } else {
-          resolve({ text, event });
+          resolve({ text: replyText, event });
         }
       });
 
@@ -726,6 +1094,50 @@ export class PersistentAgySession extends BaseOneShotSession {
     });
   }
 
+  /**
+   * A compaction's sizes, from its summary pass: before, that pass's prompt (the
+   * whole conversation); after, the summary on top of what every request
+   * carries — the prefix the pass read from cache, or the smallest prompt seen —
+   * an estimate until the next turn measures it.
+   */
+  private _compactSizes(checkpoint: AgyUsage): { preTokens: number; postTokens: number } {
+    const pre = (checkpoint.input_tokens ?? 0) + (checkpoint.cache_read_tokens ?? 0);
+    const prefix = checkpoint.cache_read_tokens || this._smallestPrompt || 0;
+    return { preTokens: pre, postTokens: Math.min(pre, prefix + (checkpoint.output_tokens ?? 0)) };
+  }
+
+  /**
+   * This turn's usage. agy's `result.usage` is the conversation's running total,
+   * not the turn's: measured on 1.5.18–1.5.19, a resumed conversation's result
+   * reports every request since it began (`num_turns` counts its turns), and it
+   * equals the sum of the conversation's transcript. Counting it per turn billed
+   * each turn for the whole conversation again. The turn's own requests are its
+   * `agent_response` and `checkpoint` steps, each with that request's usage;
+   * their sum is the result's for a conversation's first turn, and the
+   * difference between two results otherwise. Without step usage, a first
+   * turn's result is the turn's, a later one's is the difference from the last
+   * result seen, and with no earlier result there is nothing to measure.
+   */
+  private _turnUsage(
+    steps: { input: number; output: number; cache: number },
+    result: AgyUsage | undefined,
+    numTurns: number | undefined,
+  ): AgyUsage | undefined {
+    if (steps.input + steps.output + steps.cache > 0) {
+      return { input_tokens: steps.input, output_tokens: steps.output, cache_read_tokens: steps.cache };
+    }
+    if (!result) return undefined;
+    if (numTurns === undefined || numTurns <= 1) return result;
+    const before = this._conversationUsage;
+    if (!before) return undefined;
+    const delta = (k: keyof AgyUsage) => Math.max(0, (result[k] ?? 0) - (before[k] ?? 0));
+    return {
+      input_tokens: delta('input_tokens'),
+      output_tokens: delta('output_tokens'),
+      cache_read_tokens: delta('cache_read_tokens'),
+    };
+  }
+
   // ── Pricing ────────────────────────────────────────────────
 
   /**
@@ -737,13 +1149,60 @@ export class PersistentAgySession extends BaseOneShotSession {
     return model?.replace(/-(low|medium|high|xhigh)$/, '');
   }
 
+  private _pricing(model: string | undefined): ModelPricing {
+    return getModelPricing(this._baseModel(model || this._reportedModel), this.engineCfg.defaultModel);
+  }
+
+  /**
+   * What one turn cost, priced at the model it ran on: a send's own model
+   * (`perSendModel`) is billed at its rates, not the session's. An orchestrator
+   * turn runs its requests on models of agy's choosing, so it is priced request
+   * by request from the conversation's transcript, and whatever the transcript
+   * does not account for at the orchestrator's registered rates.
+   */
+  private _priceTurn(usage: AgyUsage, model: string | undefined, firstStep: number | undefined): number {
+    const input = usage.input_tokens ?? 0;
+    const output = usage.output_tokens ?? 0;
+    const cache = usage.cache_read_tokens ?? 0;
+    const pricing = this._pricing(model);
+    const ran = model || this._reportedModel;
+    if (!ran || !AGY_ORCHESTRATOR_MODELS.test(ran) || !this.agyConversationId || firstStep === undefined) {
+      return priceTokens(pricing, input, cache, output);
+    }
+    const transcript = readAgyTranscript(agyTranscriptPath(this.agyConversationId, agyBrainDir()));
+    const requests = (transcript?.requests ?? []).filter((r) => r.step >= firstStep);
+    const seen = requests.reduce(
+      (t, r) => ({
+        input: t.input + r.inputTokens,
+        cache: t.cache + r.cacheReadTokens,
+        output: t.output + r.outputTokens,
+      }),
+      { input: 0, cache: 0, output: 0 },
+    );
+    return (
+      priceAgyRequests(requests, this.engineCfg.defaultModel) +
+      priceTokens(
+        pricing,
+        Math.max(0, input - seen.input),
+        Math.max(0, cache - seen.cache),
+        Math.max(0, output - seen.output),
+      )
+    );
+  }
+
+  protected override _billedModel(): string | undefined {
+    return this.options.model || this._reportedModel;
+  }
+
   protected override _getModelPricing() {
-    return getModelPricing(this._baseModel(this.options.model), this.engineCfg.defaultModel);
+    return this._pricing(this.options.model);
   }
 
   /** Clean up the per-session log file along with the base teardown. */
   stop(): void {
     super.stop();
+    for (const proc of this._infoProcs) killEngineTree(proc);
+    this._infoProcs.clear();
     try {
       fs.unlinkSync(this._logFile);
     } catch {
@@ -751,23 +1210,225 @@ export class PersistentAgySession extends BaseOneShotSession {
     }
   }
 
-  /**
-   * agy's own `/compact` (a summary pass over the conversation; measured on 1.5.14: a SUCCESS result with no
-   * text, and the conversation still recalls what came before), run as a turn of its own. Slash commands are
-   * on for that turn whatever the session says, or the message would reach the model as text.
-   */
-  async compact(_summary?: string): Promise<TurnResult> {
-    if (!this.agyConversationId) {
-      const message = 'Nothing to compact yet: this agy session has no conversation';
-      return { text: message, event: { type: 'result', result: message } };
-    }
-    const disabled = this.options.disableSlashCommands;
-    this.options.disableSlashCommands = false;
+  // ── Engine commands ────────────────────────────────────────
+
+  /** `--model`/`--effort` as the next turn would pass them, for an info command that reports them. */
+  private _infoArgs(): string[] {
+    let args: string[];
     try {
-      return (await this.send('/compact', { timeout: 600_000 })) as TurnResult;
-    } finally {
-      this.options.disableSlashCommands = disabled;
+      args = this._buildArgs('', 1000);
+    } catch {
+      // Settings that are not a JSON object fail a turn; an info command runs without them.
+      return [];
     }
+    const out: string[] = [];
+    for (const flag of ['--model', '--effort', '--settings']) {
+      const i = args.indexOf(flag);
+      if (i >= 0) out.push(flag, args[i + 1]);
+    }
+    return out;
+  }
+
+  /** Run one info command as a process of its own, beside any turn: no conversation, no log file. */
+  private _infoCommand(name: string, args?: string, timeoutMs?: number) {
+    return runAgyInfoCommand(`/${name}${args ? ` ${args}` : ''}`, {
+      bin: this.engineBin,
+      cwd: this.options.cwd,
+      launcher: this.options.launcher,
+      extraArgs: this._infoArgs(),
+      timeoutMs: Math.min(timeoutMs ?? 60_000, 120_000),
+      onSpawn: (proc) => {
+        this._infoProcs.add(proc);
+        proc.once('close', () => this._infoProcs.delete(proc));
+      },
+    });
+  }
+
+  /**
+   * The commands this session can run: the info commands `/help` lists, agy's
+   * system commands, and the skills `/skills` lists for the session's directory
+   * (agy's own, the user's, the workspace's and plugins'). Read once, again after
+   * `COMMANDS_TTL_MS`.
+   */
+  async listCommands(): Promise<EngineCommand[]> {
+    if (this._commands && Date.now() - this._commands.at < COMMANDS_TTL_MS) return this._commands.list;
+    const [help, skills] = await Promise.all([
+      this._infoCommand('help').catch(() => undefined),
+      this._infoCommand('skills').catch(() => undefined),
+    ]);
+    const info = agyInfoCommands(help?.answer?.data);
+    const taken = new Set([...info, ...AGY_SYSTEM_COMMANDS].map((c) => c.name));
+    const list = [...info, ...AGY_SYSTEM_COMMANDS, ...agySkillCommands(skills?.answer?.data, taken)];
+    // A failed read is not cached: the next call tries again.
+    if (help?.answer && skills?.answer) this._commands = { at: Date.now(), list };
+    return list;
+  }
+
+  /**
+   * Run `/<name> <args>`. An info command runs as a process of its own, beside
+   * any turn, and returns its structured answer as `data`. `/compact` waits for
+   * the compaction. Anything else is a turn on the conversation, with slash
+   * commands read for it whatever `disableSlashCommands` says; `/teamwork` gets
+   * `[skip-interview]`.
+   */
+  async runCommand(
+    name: string,
+    args?: string,
+    opts: { timeout?: number; callbacks?: StreamCallbacks } = {},
+  ): Promise<CommandOutcome> {
+    const cmd = name.trim().replace(/^\//, '');
+    if (AGY_INFO_COMMAND_NAMES.has(cmd)) {
+      // A bare `/plugin` opens agy's interactive plugin manager; its listing is `/plugin list`.
+      const given = cmd === 'plugin' && !args ? 'list' : args;
+      try {
+        const r = await this._infoCommand(cmd, given, opts.timeout);
+        const a = r.answer;
+        if (!a) {
+          const why = sanitizeSecrets(r.stderr.trim()).slice(0, 500);
+          return {
+            name: cmd,
+            ok: false,
+            text: '',
+            startedTurn: false,
+            error: why || `/${cmd} gave no answer (exit ${r.code})`,
+          };
+        }
+        const ok = a.ok && r.code === 0;
+        return {
+          name: cmd,
+          ok,
+          text: a.text.replace(/\n$/, ''),
+          ...(a.data !== undefined ? { data: a.data } : {}),
+          startedTurn: false,
+          ...(ok ? {} : { error: sanitizeSecrets(a.error || r.stderr.trim() || `/${cmd} failed (exit ${r.code})`) }),
+        };
+      } catch (err) {
+        return { name: cmd, ok: false, text: '', startedTurn: false, error: (err as Error).message };
+      }
+    }
+    if (cmd === 'compact') {
+      const outcome = await this.compactDetailed(args);
+      // Not a turn of the conversation: no ledger row.
+      return {
+        name: cmd,
+        ok: outcome.ok,
+        text: outcome.note ?? '',
+        data: outcome,
+        startedTurn: false,
+        ...(outcome.ok ? {} : { error: outcome.note ?? 'nothing was compacted' }),
+      };
+    }
+    await this._checkCommandKnown(cmd);
+    try {
+      const r = await this._sendCommandTurn(agyCommandPrompt(cmd, args), {
+        timeout: opts.timeout,
+        callbacks: opts.callbacks,
+      });
+      const failed = r.event.is_error === true || r.event.stop_reason === 'error';
+      const command = r.event.command as { data?: unknown } | undefined;
+      const data = command?.data ?? r.event.plan;
+      return {
+        name: cmd,
+        ok: !failed,
+        text: r.text,
+        ...(data !== undefined ? { data } : {}),
+        startedTurn: !r.localCommand,
+        ...(failed ? { error: r.text || `/${cmd} failed` } : {}),
+      };
+    } catch (err) {
+      return { name: cmd, ok: false, text: '', startedTurn: true, error: (err as Error).message };
+    }
+  }
+
+  /**
+   * Refuse a name agy has no command for: sent as `/name` it reaches the model
+   * as a message, a paid turn. Only a whole listing (help and skills both read)
+   * refuses, and it is read again once first, for a skill added since.
+   */
+  private async _checkCommandKnown(cmd: string): Promise<void> {
+    if (AGY_SYSTEM_COMMANDS.some((c) => c.name === cmd)) return;
+    if ((await this.listCommands()).some((c) => c.name === cmd) || !this._commands) return;
+    this._commands = undefined;
+    const again = await this.listCommands();
+    if (this._commands && !again.some((c) => c.name === cmd)) {
+      throw new Error(
+        `there is no command /${cmd} on this agy session: session_command list shows what there is, ` +
+          'and session_send sends the text to the model as a message',
+      );
+    }
+  }
+
+  /** The session's `turnCommand` on a message: `/boost <message>`, `/teamwork [skip-interview] <message>`. */
+  applyTurnCommand(command: string, message: string): string {
+    return agyCommandPrompt(command, message);
+  }
+
+  /**
+   * agy's own `/compact` (a summary pass over the conversation), waited for and
+   * judged by that pass: the reply is empty by design. agy takes no instructions
+   * for it — text after `/compact` is answered as a message once it is done — so
+   * a `summary` is not sent. The sizes are `_compactSizes`'.
+   */
+  async compactDetailed(summary?: string): Promise<CompactOutcome> {
+    if (!this.agyConversationId) {
+      return { ok: false, trigger: 'manual', note: 'Nothing to compact yet: this agy session has no conversation' };
+    }
+    const ignored = summary?.trim() ? "agy's /compact takes no instructions; the summary text was not sent" : undefined;
+    try {
+      const r = await this._sendCommandTurn('/compact', { timeout: 600_000, agyCompact: true });
+      const sizes = r.event.compact as { preTokens?: number; postTokens?: number } | undefined;
+      const ok = r.event.compacted === true;
+      const note = [ok ? undefined : r.text.trim() || 'agy ran no summary pass', ignored].filter(Boolean).join('; ');
+      return {
+        ok,
+        trigger: 'manual',
+        ...(sizes?.preTokens ? { preTokens: sizes.preTokens } : {}),
+        ...(sizes?.postTokens ? { postTokens: sizes.postTokens } : {}),
+        ...(note ? { note } : {}),
+      };
+    } catch (err) {
+      return { ok: false, trigger: 'manual', note: [(err as Error).message, ignored].filter(Boolean).join('; ') };
+    }
+  }
+
+  /** `compactDetailed`, as the engine-agnostic `compact()` result; `compacted` says whether it did. */
+  async compact(summary?: string): Promise<TurnResult> {
+    const outcome = await this.compactDetailed(summary);
+    const message = outcome.note ?? 'Compacted the conversation';
+    return { text: message, event: { type: 'result', result: message, compacted: outcome.ok } };
+  }
+
+  // ── Live switches ──────────────────────────────────────────
+
+  /** Each turn is a new process: the next one runs on `model`, with nothing to restart. */
+  async setModelLive(model: string): Promise<boolean> {
+    this.options.model = model;
+    this.options.resolvedModel = model;
+    return true;
+  }
+
+  /** The next turn's process takes the effort; there is nothing to restart. */
+  async setEffortLive(_level: EffortLevel): Promise<boolean> {
+    return true;
+  }
+
+  // ── Native goal ────────────────────────────────────────────
+
+  /** agy's own `/goal` loop behind the goal node's surface (`nativeGoal`); see `AgyGoalSession`. */
+  nativeGoalSession(open?: ClaudeGoalOpen): GoalSession {
+    // eslint-disable-next-line @typescript-eslint/no-this-alias
+    const session = this;
+    const host: AgyGoalHost = {
+      get conversationId() {
+        return session.conversationId;
+      },
+      send: (message, o) => this._sendCommandTurn(message, { timeout: o?.timeout }),
+      interruptRun: () => this.interruptRun(),
+      getStats: () => this.getStats(),
+      on: (event, listener) => this.on(event, listener),
+      off: (event, listener) => this.off(event, listener),
+    };
+    return new AgyGoalSession(host, open);
   }
 
   /** Override getStats to expose the captured conversation ID. */
@@ -775,4 +1436,8 @@ export class PersistentAgySession extends BaseOneShotSession {
     const base = super.getStats();
     return { ...base, agyConversationId: this.agyConversationId };
   }
+}
+
+function priceTokens(p: ModelPricing, input: number, cache: number, output: number): number {
+  return (input * p.input + cache * (p.cached ?? 0) + output * p.output) / 1_000_000;
 }

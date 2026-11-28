@@ -5,6 +5,149 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **One surface for each engine's own features.** `session_command` lists and runs a session's engine commands
+  (slash commands, skills, custom commands, engine RPCs; `clawo session-command`) and refuses one that needs a
+  person, `engine_quota` reads how much of an engine account's quota is left (`clawo quota`), `session_aside` asks a
+  side question that leaves the conversation as it was (`clawo session-aside`), and `session_rewind` drops the last
+  turns, optionally restoring their files (`clawo session-rewind`; on `codex-app` it is `codex_rollback`). The
+  `turnCommand` session field runs every message through an engine command (`--turn-command /boost`). `session_send`
+  takes a `model` for one message, and the turn is recorded under it; `session_switch_model` and
+  `POST /session/effort` switch in place where the engine can (`live`); `session_compact` waits for the compaction
+  and returns its token counts; `coding_session_status` adds `contextBreakdown` and `engineTurns`. A goal node, the
+  `goal` template and `clawo goal --native-goal` take `nativeGoal` to run an engine's own goal loop instead of
+  clawo's. An engine without one of these says `… is not supported on <engine>`. Where they run: `session_command`
+  and a `model` per send on every engine but ACP and custom ones; `session_aside` on Claude Code, Codex, Grok and
+  OpenCode 2; `session_rewind` on Claude Code and OpenCode 2 (files too) and Codex (the conversation only);
+  `engine_quota` for Claude Code, Codex, agy, Grok, OpenCode (Go usage limits) and Cursor (the plan only);
+  `nativeGoal` on agy, Grok, Cursor and OpenCode 2; a context breakdown on Claude Code (by category) and Codex (the
+  total).
+- **Claude Code.** `session_command` lists the commands the CLI's `initialize` reports (built-in, skill, plugin,
+  custom) and adds control requests as commands that run beside a turn: `mcp-status`, `mcp-reconnect`, `get-plan`,
+  `background-tasks`, `stop-task`, `ultracode on|off`, `applied-settings`, `permission-rules`, `hooks-listing`,
+  `export-conversation`, `workspace-diff`. It refuses a name the listing does not have, `/config` and
+  `/output-style <style>` (both write the user's settings files). `session_aside` is the CLI's side question;
+  `session_rewind` takes `turns` or a `messageId`, and restores files from the session's file checkpoints after
+  checking they can be; models and efforts switch in place (a model run through the proxy still restarts);
+  `engine_quota` reads the last `rate_limit_event`, or `get_usage` before the first turn; the context breakdown is
+  `get_context_usage`'s. Status adds `fastModeState` and `compactions`. New session options, each for the session
+  only: `fastMode`, `advisor` (`--advisor`) and `outputStyle`.
+- **Codex** (`codex` and `codex-app`). Commands run as app-server RPCs, never as message text — on `codex-app`'s own
+  app-server, on a short-lived one for `codex`: `status`, `usage`, `model`, `mcp` (`reload` on `codex-app`),
+  `skills` (`roots <dir>...` on `codex-app`), `hooks`, `plugins`, `apps`, `experimental`, `permissions`, `config`,
+  `memories [on|off|summary]`, `rename`, `rollout`, `thread`, `items`, `search`, `threads` (the local Codex history),
+  `modes`, `providers`, `requirements`, `exec` (a command in the session's sandbox and directory, no model turn),
+  `compact`, `review` (its reviewer's spend counted), `init`, `inject`, `shell` (on `danger-full-access` only) and
+  each skill by name; on `codex-app` also `ps`, `stop`, `diff`, `queue` (the thread's message queue, each message an
+  engine turn once the thread is idle), `turn` (the running turn's model, effort or reasoning summary, with Codex's
+  `step_model_switching` feature on) and `implement` (runs an approved plan). `engine_quota` reads
+  `account/rateLimits/read`. On `codex`, `session_compact`, `session_aside` and `session_rewind` run on a
+  short-lived app-server; on `codex-app`, `session_aside` is `thread/sample`, cancelled when it times out.
+  `turnCommand` is `/plan` or a skill. On `codex-app`, plan mode is Codex's collaboration mode, a result event
+  carries the turn's diff, `sessionName` names the thread, and `includeHookEvents` streams hook events.
+- **Antigravity (agy).** `session_command` lists and runs agy's info commands, which answer with structured `data`
+  and no turn (`/usage`, `/credits`, `/skills`, `/model`, …), its system commands (`/goal`, `/compact`, `/plan`,
+  `/boost`, `/teamwork` (sent with `[skip-interview]`), `/schedule`, `/browser`, `/learn`) and its skills, and
+  refuses a name agy does not have. `turnCommand` takes `/boost`, `/teamwork`, `/swarm`, `/run-workflow` or a skill.
+  `plan` on a send runs `/plan` and returns the plan; models and efforts switch in place; `nativeGoal` runs agy's own
+  `/goal`; `engine_quota` reads `/usage` and `/credits`; `session_compact` reports the tokens before and after (after:
+  an estimate). The spend of `/teamwork` members, `/swarm` workers, `/run-workflow` agents and subagents is read
+  from their transcripts and counted with the session's. agy's orchestrator models are registered
+  (`gemini-pro-orchestrator`, `-neon`, `-argon`; alias `agy-orchestrator`), an orchestrator turn priced request by
+  request from the conversation's transcript. New `agy-acp` preset (`agy acp`).
+- **Grok Build.** `session_command` lists grok's built-ins, skills and workflows with grok's descriptions, and its
+  TUI commands as needing a person; it refuses a name grok does not have. `session_compact` is judged by the context
+  `/session-info` reports before and after (`ok: false` when it did not shrink), and leaves a conversation with no
+  turns alone. `session_aside` runs on a fork of the conversation with every tool removed. `nativeGoal` runs grok's
+  own `/goal`, its verdict read from grok's goal state. `engine_quota` reads the plan (ACP `_x.ai/billing`) and the
+  rolling 24-hour window from the last usage-limit refusal grok logged. New `grok` ACP preset (`grok agent stdio`)
+  for what a one-shot process cannot finish: background workflows and `/loop`, whose results arrive as engine turns.
+- **Cursor.** `effort`, which Cursor has no flag for, picks the model id for that effort from
+  `cursor-agent models`; models switch in place; images are attached with `--image`. `session_command` and
+  `turnCommand` run Cursor's commands and skills, listed through a short-lived `cursor-agent acp`. The session's
+  `agents` become Cursor subagents. `nativeGoal` runs Cursor's own `/goal` (`clawo goal --cursor --native-goal`).
+  `engine_quota` reports the plan tier (Cursor shows usage windows only in its TUI). New `cursor` ACP preset
+  (`cursor-agent acp`).
+- **OpenCode 2.** A session holds a private OpenCode server while in use (stopped after 30 s unused) and runs its
+  turns as `run --server` clients of it. Through it: steering the turn in flight (cross-session messages,
+  `workflow_steer`, goal steers), the server's own interrupt, OpenCode's commands (`init`, `review`, `goal`,
+  `automation` and custom ones) through `session_command` and `turnCommand`, beside clawo's `shell`, `skill`,
+  `models`, `agents`, `skills`, `mcp`, `usage` and `goal-status`; `session_compact` and `autoCompactPercent`, waited
+  for, with token counts; `session_aside` (`generate`); `session_rewind`, files included; and `nativeGoal`
+  (OpenCode's own `/goal`). `plan` on a send runs OpenCode's plan agent, models and efforts switch in place, and
+  `engine_quota` reads OpenCode Go's usage limits. OpenCode 1 runs a command as `run --command`.
+- Turns an engine starts itself (a `/loop` tick, a scheduled wakeup, a background workflow reporting back, a
+  `codex-app` turn no send waits for) are recorded as their own run-ledger rows (`origin: "engine"`), and an
+  engine's answer that ran no model (`localCommand`) is not recorded as a turn.
+- An ACP agent config can name a protocol extension clawo knows (`extension: "grok"`, as the `grok` preset does):
+  through it the agent reports each turn's usage, and the turns it starts itself arrive as engine turns.
+- The weekly sweep (`scripts/sweep.ts`) also reviews the options an engine hides from `--help` (read from Claude's
+  and Cursor's shipped JavaScript), lists each engine's own slash commands without a model turn (Codex: its
+  app-server methods) and holds every name to a decision in `scripts/sweep-reviewed.json`, and on a live run checks
+  that a session option does not write the user's engine config (Cursor's `--model`, on a scratch config
+  directory). A scan or listing that cannot run fails the sweep. `--only <engines>` runs a subset.
+
+### Changed
+
+- `session_compact` fails on an engine that cannot compact (`cursor`, `acp`, OpenCode 1.x, one-shot custom
+  engines) instead of returning `ok: true` having done nothing, and runs after any message in flight. `codex`,
+  `grok` and OpenCode 2 compact now.
+- `session_send`'s `effort` is taken by claude, codex, codex-app, agy, grok, cursor and opencode, for that turn
+  only: on claude it is the CLI's effort setting, set for the turn and put back after it, instead of an `ultrathink`
+  prefix (`POST /session/effort` sets it in place too); codex and cursor ignored it, and on codex-app it could stay
+  on the thread for later turns. `plan` runs the turn in the engine's own plan mode on claude, codex-app, agy, grok,
+  cursor and opencode and returns to the session's mode after it; on codex and persistent custom engines it is a
+  plan-only prefix. `images` are taken by cursor too.
+- Claude Code sessions keep file checkpoints (`CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING=1` unless the environment
+  sets it), so a rewind can restore files.
+- On `codex-app`, a turn no send waits for (a goal loop's, a send's that timed out) counts as a turn but never as a
+  success, and is an engine turn when no goal owns the thread.
+- A Grok session refuses, before anything runs, a message grok's print mode cannot do — a TUI command (which
+  headless grok would send to the model as text), `/loop`, a workflow launch, `/feedback`, `/context` — naming what
+  to use instead. `/compact` sent as a message is compacted and checked.
+- Read-only Cursor sessions run in Cursor's Ask mode (`--mode ask`) instead of Plan mode, behind the same deny
+  config. A `/goal <objective>` message on Cursor is refused with a pointer to the native goal.
+- OpenCode 2 turns no longer run on `--standalone` by default; they fall back to it when the held server fails to
+  start, and `CLAWO_OPENCODE_STANDALONE=1` keeps every turn there.
+- Tested engine versions: Antigravity 1.5.17 → 1.5.19.
+
+### Fixed
+
+- **Claude Code.** A command the CLI answers itself (`/usage`, `/context`, a bare `/goal`) no longer counts as a
+  turn or sets the session's context size to zero; a forked skill that runs a model (`/code-review`) is still a
+  turn. A `/loop` tick or a scheduled wakeup no longer answers the send waiting or counts as its success: it is an
+  engine turn. `ultracode` sessions allow the Workflow tool, which the default spawn otherwise refused on every
+  call. The session's start time no longer moves with every command.
+- **Codex (`codex-app`).** A sub-agent's turn no longer answers the parent's send (with the sub-agent's text, turn
+  count and usage): only the session thread's notifications reach its turn, and every thread's usage is added up.
+  `session_compact` and `autoCompactPercent` wait for the compaction to end, so the send after it no longer fails with
+  `ActiveTurnNotSteerable`, and a compaction is not counted as a turn. A session no longer records its project as
+  trusted in `~/.codex/config.toml`: a new thread opens read-only and gets its sandbox before any turn, and, as with
+  `codex exec`, a project's own `.codex/` config loads only where the user trusts the project. `codex_rollback` counts
+  only the turns a user message started, so it no longer fails with "no persisted start boundary" after a compaction.
+  A thread the server reroutes to another model (`model/rerouted`) is billed at that model.
+- **Codex (`codex`).** Sub-agents' spend, which `codex exec --json` does not report, is read from their rollout files
+  and counted.
+- **Antigravity (agy).** A turn on a resumed conversation was billed for the whole conversation again (agy's result
+  reports the conversation's running total); each turn is now billed from its own requests. A command that runs no
+  model — an info command, even one with an empty answer (`/agents`, `/hooks`), or one agy refuses as interactive-only
+  (`/btw`, `/clear`) — no longer counts as a turn or fails as an empty reply. `session_compact` returned before the
+  compaction finished, which then counted as a failed turn; it now waits, and a compaction is not a turn. A command in
+  a read-only session, or as the first message under `appendSystemPrompt`, reached the model as text. Orchestrator
+  models failed on the `--effort` agy refuses for them. A session without a model was billed at Flash while running
+  agy's default; it is billed at the model agy reports. A turn the timeout cut short lost its spend.
+- **Grok Build.** A turn whose `end` line leaves spend out (a cut-off subagent, `cost_is_partial`) is costed from
+  `grok usage <id>`.
+- **Cursor.** Sessions no longer change Cursor's default model: `cursor-agent --model` stores it in
+  `~/.cursor/cli-config.json`, so each session runs on a config directory of its own and always passes `--model`
+  (`auto` by default). A turn is billed at the model id it was given, not Cursor's display name.
+  `permissionMode: "plan"` is read-only (it ran with `--force`). A plan-mode turn returns its plan (it returned an
+  empty reply). `/loop` returns with the loop's first turn and reports each later tick as an engine turn until
+  `session_interrupt` (it never returned).
+
 ## [7.37.1] - 2026-11-27
 
 ### Fixed

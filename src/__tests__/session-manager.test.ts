@@ -1671,6 +1671,11 @@ describe('SessionManager', () => {
         /agy, which cannot take images/,
       );
       expect(lastMock().sendCalls).toHaveLength(0);
+
+      await mgr.startSession({ name: 'img-cursor', cwd: dir, engine: 'cursor' });
+      lastMock().setBusy(false);
+      await mgr.sendMessage('img-cursor', 'what is this?', { images: [png] });
+      expect(lastMock().sendCalls[0].options?.images).toEqual([png]);
     });
 
     it('uses the agy conversation UUID, not the synthetic session ID, when updating tools', async () => {

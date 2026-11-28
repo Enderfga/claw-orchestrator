@@ -47,11 +47,13 @@ function createMockManager(): SessionManager {
     stopSession: vi.fn().mockResolvedValue(undefined),
     sendMessage: vi.fn().mockResolvedValue({ output: 'hello', requestId: 'r1' }),
     getStatus: vi.fn().mockReturnValue({ isReady: true, turns: 0 }),
+    getStatusDetailed: vi.fn().mockResolvedValue({ isReady: true, turns: 0 }),
     getCost: vi.fn().mockReturnValue({ totalUsd: 0 }),
     setModel: vi.fn(),
     setEffort: vi.fn(),
+    switchEffort: vi.fn().mockResolvedValue({ effort: 'high', live: false }),
     grepSession: vi.fn().mockResolvedValue([]),
-    compactSession: vi.fn().mockResolvedValue(undefined),
+    compactSession: vi.fn().mockResolvedValue({ ok: true, trigger: 'manual' }),
     interruptSession: vi.fn().mockResolvedValue({ interrupted: true }),
     switchModel: vi.fn().mockResolvedValue({ name: 'test', engine: 'claude' }),
     listAgents: vi.fn().mockReturnValue([]),
@@ -669,13 +671,26 @@ describe('EmbeddedServer', () => {
       expect(manager.switchModel).toHaveBeenCalledWith('test', 'haiku');
     });
 
-    it('routes /session/status to manager.getStatus', async () => {
+    it('routes /session/status to manager.getStatusDetailed', async () => {
       const res = await request(port, '/session/status', {
         method: 'POST',
         body: { name: 'test' },
       });
       expect(res.status).toBe(200);
-      expect(manager.getStatus).toHaveBeenCalledWith('test');
+      expect(manager.getStatusDetailed).toHaveBeenCalledWith('test');
+    });
+
+    it('routes /session/effort to manager.switchEffort, and says whether it switched in place', async () => {
+      const res = await request(port, '/session/effort', { method: 'POST', body: { name: 'test', level: 'high' } });
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({ ok: true, effort: 'high', live: false });
+      expect(manager.switchEffort).toHaveBeenCalledWith('test', 'high');
+    });
+
+    it('routes /session/compact to manager.compactSession and returns its outcome', async () => {
+      const res = await request(port, '/session/compact', { method: 'POST', body: { name: 'test' } });
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({ ok: true, trigger: 'manual' });
     });
 
     it('routes /session/cost to manager.getCost', async () => {
@@ -707,6 +722,7 @@ describe('EmbeddedServer', () => {
       'compactSession',
       'setModel',
       'setEffort',
+      'switchEffort',
       'teamSend',
       'createAgent',
       'createSkill',

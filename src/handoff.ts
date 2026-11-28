@@ -81,6 +81,19 @@ export function cloneTranscript(t: Transcript): Transcript {
 }
 
 /**
+ * Drop the last `turns` exchanges — each a user entry and the replies after it —
+ * after the session's conversation was rewound by that many turns.
+ */
+export function dropLastTurns(t: Transcript, turns: number): void {
+  let cut = t.entries.length;
+  for (let left = turns; left > 0 && cut > 0; ) {
+    cut--;
+    if (t.entries[cut].role === 'user') left--;
+  }
+  for (const gone of t.entries.splice(cut)) t.chars -= gone.text.length;
+}
+
+/**
  * Append one side of an exchange. Past the cap, entries are evicted from the
  * middle of the conversation, oldest first — never the opening request and never
  * the newest entry. Assistant replies go before user turns: a user turn is

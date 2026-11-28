@@ -991,6 +991,7 @@ export class PersistentCustomSession extends EventEmitter implements ISession {
       const event: StreamEvent = {
         type: 'result',
         result: `${this.engineConfig.name} engine does not support compaction (one-shot mode)`,
+        compacted: false,
       };
       return { text: event.result as string, event };
     }

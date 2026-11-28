@@ -34,18 +34,57 @@
  * 1.0.5 by resuming a session and reading the second turn (29,711 in / $0.0597,
  * then 70 in / $0.0152). Accumulating them is therefore correct here, unlike
  * codex, where the same-looking field is a running total.
+ *
+ * Commands (`commandStyle: 'text'`): a message that starts with `/name` is a
+ * grok command. The shell built-ins answer locally with no usage on `end`,
+ * which is how such a reply is told from a turn (`localCommand`); TUI-only
+ * names, `/loop` and workflow launches are refused before anything runs, since
+ * print mode cannot do what they ask (see grok-commands.ts). The command list,
+ * with grok's descriptions, comes from ACP `_x.ai/commands/list`, which needs
+ * no session; the plan from ACP `_x.ai/billing` (grok-quota.ts).
  */
 
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
+import type { ChildProcess } from 'node:child_process';
 import { killEngineTree, spawnEngine } from './engine-spawn.js';
 
-import type { SessionConfig, SessionSendOptions, StreamEvent, TurnResult } from './types.js';
+import type {
+  AsideOutcome,
+  CommandOutcome,
+  CompactOutcome,
+  EngineCommand,
+  SessionConfig,
+  SessionSendOptions,
+  StreamCallbacks,
+  StreamEvent,
+  TurnResult,
+} from './types.js';
 import { sanitizeSecrets } from './sanitize.js';
 import { BaseOneShotSession } from './base-oneshot-session.js';
-import { SESSION_EVENT } from './constants.js';
+import { SESSION_EVENT, TURN_TIMEOUT_MS } from './constants.js';
+import {
+  GROK_PAGER_COMMANDS,
+  GROK_SHELL_COMMANDS,
+  commandsFromGrokAcpList,
+  grokCommandIsLocal,
+  grokCommandRefusal,
+  grokPagerCommands,
+  grokShellCommand,
+  parseGrokCommand,
+  parseGrokGoalStateFile,
+  parseGrokSessionContext,
+  type GrokGoalState,
+} from './grok-commands.js';
+import { grokAcpCall } from './grok-acp-client.js';
+import { GrokGoalSession, type GrokGoalOpen } from './grok-goal-session.js';
+// Registers grok's quota reader (engine-quota.ts).
+import { grokHome, latestGrokRefusal } from './grok-quota.js';
+// Registers grok's ACP extensions, read by the `acp` engine under the `grok` preset.
+import './grok-acp-extension.js';
+import type { GoalSession } from './kernel/nodes/goal.js';
 
 interface GrokUsage {
   input_tokens?: number;
@@ -83,19 +122,118 @@ interface GrokStreamEvent extends GrokJsonResult {
   toolCallId?: string;
   /** `pending`, `in_progress`, `completed` or `failed`; null on a progress update. */
   status?: string | null;
+  /** On `available_commands`: the commands and the tools the run offers. */
+  commands?: unknown;
+  tools?: unknown;
+  /** Set on `end` when grok could not count every call's cost (subagents, a cut-off turn). */
+  cost_is_partial?: boolean;
+  usage_is_incomplete?: boolean;
 }
 
 /** What one turn's stream has said so far. */
 interface TurnState {
   text: string;
-  end?: GrokJsonResult;
+  end?: GrokStreamEvent;
   error?: GrokJsonResult;
   /** The usage of the turn's last request: the context size. */
   lastRequest?: GrokUsage;
+  /** Requests that reported usage, and whether the model thought: either means a model call. */
+  requests: number;
+  thought: boolean;
+  /** grok compacted the conversation during the run (`auto_compact_completed`). */
+  compacted: boolean;
   /** Tool calls started, finished, and finished as failed, by `toolCallId`. */
   started: Set<string>;
   finished: Set<string>;
   failed: Set<string>;
+}
+
+/** Wrapper-internal choices for one turn, on top of the caller's options. */
+interface GrokTurnOptions {
+  /** A turn clawo starts itself: the command refusals do not apply. */
+  internal?: boolean;
+  /** Read a leading `/name` as a command even on a session that sends text verbatim. */
+  slashCommands?: boolean;
+  /** Let grok wait for the background work the turn starts (a native goal's later rounds). */
+  waitForBackground?: boolean;
+  /** Read the turn's spend from `grok usage <id>` afterwards. */
+  reconcileCost?: boolean;
+}
+
+/** The options `send()` takes here: the engine-agnostic ones, and the wrapper's own. */
+type GrokSendOptions = SessionSendOptions & { grok?: GrokTurnOptions };
+
+/** What a print-mode run printed, read whole (probes, asides). */
+interface PrintRun {
+  text: string;
+  end?: GrokStreamEvent;
+  /** The `error` line's message, or what stderr said when there was no result line. */
+  error?: string;
+}
+
+/** How long `/compact` may take: it summarises the whole conversation (172 s measured on a fresh session). */
+const COMPACT_TIMEOUT_MS = 600_000;
+
+/** How long a command grok answers locally may take (about 2 s measured). */
+const LOCAL_COMMAND_TIMEOUT_MS = 60_000;
+
+/** How long the command list read over ACP is reused. */
+const COMMAND_LIST_TTL_MS = 60_000;
+
+/** What an aside's run is told: the question is answered from the conversation, with no tools. */
+const ASIDE_RULES =
+  'This is a side question about the conversation so far. Answer it directly, from what the conversation ' +
+  'already holds. No tools are available in this reply, so do not plan to use any; if the conversation ' +
+  'does not hold the answer, say so.';
+
+/**
+ * The tools grok's print mode offers (its `available_commands` line, 1.0.92),
+ * used to strip an aside's run of tools before the session's own list is known.
+ */
+const GROK_TOOLS = [
+  'run_terminal_command',
+  'read_file',
+  'search_replace',
+  'list_dir',
+  'grep',
+  'kill_command_or_subagent',
+  'todo_write',
+  'get_command_or_subagent_output',
+  'spawn_subagent',
+  'scheduler_create',
+  'scheduler_delete',
+  'scheduler_list',
+  'monitor',
+  'search_tool',
+  'use_tool',
+  'workflow',
+  'enter_plan_mode',
+  'exit_plan_mode',
+  'ask_user_question',
+  'send_feedback',
+  'web_search',
+  'web_fetch',
+  'image_gen',
+  'image_edit',
+  'image_to_video',
+  'reference_to_video',
+  'write',
+];
+
+/** A grok session's folder in its store: `<grok home>/sessions/<encoded cwd>/<id>`, found by id. */
+function findGrokSessionDir(id: string): string | undefined {
+  const root = path.join(grokHome(), 'sessions');
+  let cwds: string[];
+  try {
+    cwds = fs.readdirSync(root);
+  } catch {
+    return undefined;
+  }
+  for (const cwd of cwds) {
+    const dir = path.join(root, cwd, id);
+    if (fs.existsSync(dir)) return dir;
+  }
+  return undefined;
 }
 
 /**
@@ -189,6 +327,24 @@ export class PersistentGrokSession extends BaseOneShotSession {
   /** Set once the allowedTools entries grok has no rule for have been logged. */
   private loggedIgnoredAllow = false;
 
+  /** A `/name args` message is a grok command (see the file header). */
+  readonly commandStyle = 'text' as const;
+  /** Every turn is its own process, so `--model` can name a model for one turn. */
+  readonly perSendModel = true;
+
+  /** What the last run's `available_commands` line offered. */
+  private advertisedCommands?: string[];
+  private advertisedTools?: string[];
+  /** The skills and workflows read over ACP, and when. */
+  private acpCommands?: { at: number; commands: EngineCommand[]; workflows: Set<string> };
+  /** The context window `/session-info` reported (grok's own, e.g. 256000). */
+  private grokWindow?: number;
+  /** The session's folder in grok's store, once found. */
+  private grokSessionDir?: string;
+  /** Print-mode runs beside the turns (local commands, asides, `grok usage`); one at a time. */
+  private readonly sideProcs = new Set<ChildProcess>();
+  private sideChain: Promise<unknown> = Promise.resolve();
+
   constructor(config: SessionConfig, grokBin?: string) {
     super(config, grokBin || process.env.GROK_BIN || 'grok', {
       enginePrefix: 'grok',
@@ -218,6 +374,21 @@ export class PersistentGrokSession extends BaseOneShotSession {
     return this.options.model || this.grokModel;
   }
 
+  /** The window grok itself reported for the session, else the registry's. */
+  protected override _effectiveContextWindow(): number {
+    return this.grokWindow || super._effectiveContextWindow();
+  }
+
+  /** grok's own session id, once a turn has made one. */
+  get grokConversationId(): string | undefined {
+    return this.grokSessionId;
+  }
+
+  /** The folder grok runs this session in. */
+  private _runCwd(): string | undefined {
+    return this.worktreePath ?? this.options.cwd;
+  }
+
   /** `--worktree[=name]` when this session asked for a new worktree, else undefined. */
   private _worktreeFlag(): string | undefined {
     const worktree = this.options.worktree;
@@ -228,7 +399,7 @@ export class PersistentGrokSession extends BaseOneShotSession {
     return undefined;
   }
 
-  private _buildArgs(options: SessionSendOptions, promptFile?: string): string[] {
+  private _buildArgs(options: GrokSendOptions, promptFile?: string): string[] {
     // The prompt is never an argument (see the file header): `-p` with no value
     // reads it from stdin, and a turn with images reads it from a `.json` file.
     const args: string[] = promptFile ? ['--prompt-file', promptFile] : ['-p'];
@@ -264,13 +435,19 @@ export class PersistentGrokSession extends BaseOneShotSession {
       if (worktree) args.push(worktree);
     }
 
-    const model = this.options.resolvedModel || this.options.model;
+    // A model for this turn only (`perSendModel`), else the session's.
+    const model = options.model || this.options.resolvedModel || this.options.model;
     if (model) args.push('--model', this.resolveModel(model.replace(/^grok\//, '')));
 
     // grok's --permission-mode vocabulary is the same set as ours, so this is a
     // passthrough rather than a mapping. 'manual' is ours alone; grok calls the
-    // equivalent 'default'.
-    const mode = this.options.permissionMode === 'manual' ? 'default' : this.options.permissionMode;
+    // equivalent 'default'. A plan turn (`plan` on the send) runs in grok's plan
+    // mode, whatever the session's mode.
+    const mode = options.plan
+      ? 'plan'
+      : this.options.permissionMode === 'manual'
+        ? 'default'
+        : this.options.permissionMode;
     if (mode) args.push('--permission-mode', mode);
 
     // The boundary is grok's own OS sandbox (Seatbelt / Landlock), not a tool
@@ -306,7 +483,8 @@ export class PersistentGrokSession extends BaseOneShotSession {
       args.push('--agents', json);
     }
 
-    if (this.options.dangerouslySkipPermissions) args.push('--always-approve');
+    // Not on a plan turn: auto-approving every tool is the opposite of planning.
+    if (this.options.dangerouslySkipPermissions && !options.plan) args.push('--always-approve');
 
     // `--session-id` names a NEW conversation, so it is only valid on a first
     // turn — or on a resumed one that is being forked, which is what grok's own
@@ -320,8 +498,9 @@ export class PersistentGrokSession extends BaseOneShotSession {
     // headless grok otherwise skips, and records the grant in
     // ~/.grok/trusted_folders.toml, so it outlives the session.
     if (this.options.trustProject) args.push('--trust');
-    // Without it a message starting with /name is taken as a slash command.
-    if (this.options.disableSlashCommands) args.push('--verbatim');
+    // Without it a message starting with /name is taken as a slash command. A
+    // command clawo runs itself (`/compact`, a goal) is one on any session.
+    if (this.options.disableSlashCommands && !options.grok?.slashCommands) args.push('--verbatim');
 
     // grok's `--debug` takes no categories. It writes the log to
     // $GROK_HOME/debug/<session-id>.txt, or to `--debug-file`, not to stderr.
@@ -341,7 +520,11 @@ export class PersistentGrokSession extends BaseOneShotSession {
     // (measured on 1.0.92: a turn that left `sleep 90` running exited in 12 s,
     // `end_turn`, the sleep gone). A one-shot session keeps nothing running
     // between sends anyway; a model that needs a result waits for it in its turn.
-    args.push('--no-wait-for-background');
+    //
+    // The exception is grok's own goal loop: its later rounds (implementer,
+    // verifiers) are turns grok runs after the prompt, which the process must
+    // wait for or the goal stops after its first round (`nativeGoalSession`).
+    if (!options.grok?.waitForBackground) args.push('--no-wait-for-background');
 
     return args;
   }
@@ -460,7 +643,24 @@ export class PersistentGrokSession extends BaseOneShotSession {
         break;
       }
       case 'usage':
+        turn.requests += 1;
         if (evt.usage) turn.lastRequest = evt.usage;
+        break;
+      case 'thought':
+        turn.thought = true;
+        break;
+      case 'available_commands':
+        // Every run opens with it (twice, identical), before any model call.
+        if (Array.isArray(evt.commands)) {
+          this.advertisedCommands = evt.commands.filter((c): c is string => typeof c === 'string');
+        }
+        if (Array.isArray(evt.tools))
+          this.advertisedTools = evt.tools.filter((t): t is string => typeof t === 'string');
+        break;
+      case 'auto_compact_completed':
+        // `/compact`, or grok's own compaction once the context passes its threshold.
+        turn.compacted = true;
+        this.emit(SESSION_EVENT.LOG, '[grok] grok compacted the conversation');
         break;
       case 'end':
         turn.end = evt;
@@ -471,7 +671,17 @@ export class PersistentGrokSession extends BaseOneShotSession {
     }
   }
 
-  protected _run(message: string, options: SessionSendOptions): Promise<TurnResult> {
+  protected async _run(message: string, options: GrokSendOptions): Promise<TurnResult> {
+    const startedAt = Date.now();
+    const { result, reconcile, endCost } = await this._runProcess(message, options);
+    if (reconcile) await this._reconcileCost(startedAt, endCost);
+    return result;
+  }
+
+  private _runProcess(
+    message: string,
+    options: GrokSendOptions,
+  ): Promise<{ result: TurnResult; reconcile: boolean; endCost: number }> {
     // Read-only and workspace-write are grok's built-in `--sandbox read-only`
     // and `--sandbox workspace` profiles, enforced by the OS (Seatbelt on macOS,
     // Landlock on Linux). Both read anywhere; read-only writes only to ~/.grok/
@@ -532,8 +742,16 @@ export class PersistentGrokSession extends BaseOneShotSession {
     const creatingWorktree = !this.grokSessionId && !!this._worktreeFlag();
     const timeout = options.timeout || 300_000;
 
-    return new Promise<TurnResult>((resolve, reject) => {
-      const turn: TurnState = { text: '', started: new Set(), finished: new Set(), failed: new Set() };
+    return new Promise((resolve, reject) => {
+      const turn: TurnState = {
+        text: '',
+        requests: 0,
+        thought: false,
+        compacted: false,
+        started: new Set(),
+        finished: new Set(),
+        failed: new Set(),
+      };
       // A chunk can end inside a line, and inside a multi-byte character.
       const decoder = new StringDecoder('utf8');
       let pending = '';
@@ -652,7 +870,23 @@ export class PersistentGrokSession extends BaseOneShotSession {
           );
         }
 
-        this._recordTurnComplete(ok);
+        // Answered by grok itself, with no model call: a shell built-in (`/goal
+        // status`, `/session-info`, an unknown name). Its `end` carries no usage
+        // and no cost, and nothing in the run asked the model. Not a turn: the
+        // context figure stays what the last turn left (1.0.92: every local
+        // reply measured this way; a refused model call still logs a `usage`).
+        const local =
+          ok &&
+          !!turn.end &&
+          turn.requests === 0 &&
+          !turn.thought &&
+          turn.started.size === 0 &&
+          !turn.end.usage &&
+          !turn.end.modelUsage &&
+          turn.end.total_cost_usd === undefined;
+
+        if (local) this._stats.lastActivity = new Date().toISOString();
+        else this._recordTurnComplete(ok);
         this._stats.toolCalls += turn.started.size;
         this._stats.toolErrors += turn.failed.size;
 
@@ -698,10 +932,536 @@ export class PersistentGrokSession extends BaseOneShotSession {
         this.emit(SESSION_EVENT.RESULT, event);
         this.emit(SESSION_EVENT.TURN_COMPLETE, event);
 
-        if (turnError) reject(new Error(turnError));
-        else resolve({ text, event });
+        if (turnError) {
+          reject(new Error(turnError));
+          return;
+        }
+        // The `end` line leaves out what grok could not cost (a cut-off
+        // subagent, `cost_is_partial`) and some of a native goal's verifier
+        // calls; `grok usage <id>` records the whole turn.
+        const costMissing =
+          (turn.requests > 0 || !!parsed?.usage) &&
+          (typeof parsed?.total_cost_usd !== 'number' ||
+            !!turn.end?.cost_is_partial ||
+            !!turn.end?.usage_is_incomplete);
+        resolve({
+          result: { text, event, ...(local ? { localCommand: true } : {}) },
+          // A goal's planner and verifiers run as subagents whose calls the
+          // stream may not show, so a goal turn is read whatever it looked like.
+          reconcile: !!options.grok?.reconcileCost || (!local && costMissing),
+          endCost: typeof parsed?.total_cost_usd === 'number' ? parsed.total_cost_usd : 0,
+        });
       });
     });
+  }
+
+  // ── Sends and commands ────────────────────────────────────────────────
+
+  /**
+   * A command print mode cannot do is refused here, before anything runs (see
+   * `grokCommandRefusal`); `/compact` is compacted and checked (`compactDetailed`).
+   * A session that sends text verbatim (`disableSlashCommands`) has no commands.
+   */
+  override async send(
+    message: string | unknown[],
+    options: GrokSendOptions = {},
+  ): Promise<TurnResult | { requestId: number; sent: boolean }> {
+    const commands = !this.options.disableSlashCommands || !!options.grok?.slashCommands;
+    const cmd = typeof message === 'string' && commands ? parseGrokCommand(message) : undefined;
+    if (cmd && !options.grok?.internal) {
+      if (cmd.name === 'compact') {
+        const outcome = await this.compactDetailed();
+        if (!outcome.ok) throw new Error(outcome.note ?? 'grok did not compact the conversation');
+        const text = this._compactSummary(outcome);
+        return { text, event: { type: 'result', result: text, stop_reason: 'end_turn' }, localCommand: true };
+      }
+      const refusal = grokCommandRefusal(message as string, await this._workflowNames(cmd.name));
+      if (refusal) throw new Error(refusal);
+    }
+    // A goal set or resumed by hand runs as the goal adapter's turns do (see runGoalTurn).
+    if (cmd?.name === 'goal' && !grokCommandIsLocal('goal', cmd.args)) {
+      options = { ...options, grok: { ...options.grok, waitForBackground: true, reconcileCost: true } };
+    }
+    return super.send(message, options);
+  }
+
+  /**
+   * What this session can run: grok's shell built-ins, its skills and
+   * workflows (ACP `_x.ai/commands/list`, else the names the last run
+   * advertised), and its TUI commands, listed as needing a person.
+   */
+  async listCommands(): Promise<EngineCommand[]> {
+    const read = await this._acpCommandList().catch((err: Error) => {
+      this.emit(SESSION_EVENT.LOG, `[grok] could not read grok's command list over ACP: ${err.message}`);
+      return undefined;
+    });
+    const extra: EngineCommand[] =
+      read?.commands ??
+      (this.advertisedCommands ?? [])
+        .filter((n) => !grokShellCommand(n) && !(n in GROK_PAGER_COMMANDS))
+        .map((name) => ({ name, source: 'skill' as const, startsTurn: true }));
+    const seen = new Set<string>();
+    return [...GROK_SHELL_COMMANDS, ...extra, ...grokPagerCommands()].filter((c) =>
+      seen.has(c.name) ? false : (seen.add(c.name), true),
+    );
+  }
+
+  /**
+   * Run `/name args`. A command grok answers locally runs as a process of its
+   * own beside the turns (no turn, nothing billed); one that starts a turn
+   * runs as a send. `compact` is `compactDetailed`.
+   */
+  async runCommand(
+    name: string,
+    args?: string,
+    opts: { timeout?: number; callbacks?: StreamCallbacks } = {},
+  ): Promise<CommandOutcome> {
+    const argText = args?.trim() ?? '';
+    const text = `/${name}${argText ? ` ${argText}` : ''}`;
+    const timeout = opts.timeout || TURN_TIMEOUT_MS;
+    if (name === 'compact') {
+      const outcome = await this.compactDetailed(argText || undefined);
+      return {
+        name,
+        ok: outcome.ok,
+        text: outcome.ok ? this._compactSummary(outcome) : '',
+        data: outcome,
+        startedTurn: false,
+        ...(outcome.ok ? {} : { error: outcome.note ?? 'grok did not compact the conversation' }),
+      };
+    }
+    const refusal = grokCommandRefusal(text, await this._workflowNames(name));
+    if (refusal) throw new Error(refusal);
+    if (grokCommandIsLocal(name, argText)) {
+      const r = await this.runLocalCommand(text, Math.min(timeout, LOCAL_COMMAND_TIMEOUT_MS));
+      return { name, ok: !r.error, text: r.text, startedTurn: false, ...(r.error ? { error: r.error } : {}) };
+    }
+    await this._checkCommandKnown(name);
+    try {
+      const r = (await this.send(text, {
+        waitForComplete: true,
+        timeout,
+        callbacks: opts.callbacks,
+        grok: { internal: true, slashCommands: true },
+      })) as TurnResult;
+      return { name, ok: true, text: r.text, startedTurn: !r.localCommand };
+    } catch (err) {
+      return { name, ok: false, text: '', startedTurn: true, error: (err as Error).message };
+    }
+  }
+
+  /**
+   * Run a command grok answers itself (`/session-info`, `/goal status`, …).
+   *
+   * With a conversation, as a process of its own on it, after the turn in
+   * flight (grok runs one process per session at a time here). Before the first
+   * turn, as a send: that run creates the conversation, with the session's
+   * options, and the session keeps it.
+   */
+  async runLocalCommand(text: string, timeout = LOCAL_COMMAND_TIMEOUT_MS): Promise<{ text: string; error?: string }> {
+    if (!this.grokSessionId) {
+      await this._whenIdle(timeout);
+      try {
+        const r = (await this.send(text, {
+          waitForComplete: true,
+          timeout,
+          grok: { internal: true, slashCommands: true },
+        })) as TurnResult;
+        return { text: r.text };
+      } catch (err) {
+        return { text: '', error: (err as Error).message };
+      }
+    }
+    const run = await this._sidePrint(['--resume', this.grokSessionId], text, timeout, { slashCommands: true });
+    return { text: run.text, ...(run.error ? { error: run.error } : {}) };
+  }
+
+  /**
+   * `/compact`, and the proof it worked: grok reports `auto_compact_completed`
+   * even when its compaction call was refused (1.0.92, at the usage limit:
+   * 24403 → 24506 tokens), so the context is read from `/session-info` before
+   * and after, and the outcome is `ok` only when it shrank. grok's `/compact`
+   * takes no summary. The compaction's own call is billed nowhere grok reports.
+   */
+  async compactDetailed(summary?: string): Promise<CompactOutcome> {
+    const unused = summary?.trim() ? " grok's /compact takes no summary; the one given was not used." : '';
+    if (!this.grokSessionId) {
+      return {
+        ok: true,
+        trigger: 'manual',
+        note: `nothing to compact: the session has no grok conversation yet.${unused}`,
+      };
+    }
+    const startedAt = Date.now();
+    const before = await this._sessionContext();
+    // A conversation no model turn has written to holds only grok's own
+    // preamble; compacting it took 117 s and grew it (1266 → 31382 tokens, 1.0.92).
+    if (before?.turn === 0) {
+      return {
+        ok: true,
+        trigger: 'manual',
+        preTokens: before.used,
+        postTokens: before.used,
+        note: `nothing to compact: the conversation has no turns yet.${unused}`,
+      };
+    }
+    try {
+      await this.send('/compact', {
+        waitForComplete: true,
+        timeout: COMPACT_TIMEOUT_MS,
+        grok: { internal: true, slashCommands: true },
+      });
+    } catch (err) {
+      return {
+        ok: false,
+        trigger: 'manual',
+        ...(before ? { preTokens: before.used } : {}),
+        note: `grok's /compact failed: ${(err as Error).message}${unused}`,
+      };
+    }
+    const after = await this._sessionContext();
+    const counts = { ...(before ? { preTokens: before.used } : {}), ...(after ? { postTokens: after.used } : {}) };
+    if (before && after && after.used < before.used) {
+      // The next turn reads the compacted conversation.
+      this._reportTurnInputTokens(after.used);
+      return { ok: true, trigger: 'manual', ...counts, ...(unused ? { note: unused.trim() } : {}) };
+    }
+    const refused = latestGrokRefusal({ sinceMs: startedAt });
+    const why =
+      !before || !after
+        ? "grok's /compact ran, but /session-info did not report the context size, so whether it shrank is unknown"
+        : `grok reported the compaction done, but the context did not shrink (${before.used} → ${after.used} tokens)`;
+    return {
+      ok: false,
+      trigger: 'manual',
+      ...counts,
+      note: `${why}${refused ? `; grok's compaction call was refused: ${refused.message}` : ''}.${unused}`,
+    };
+  }
+
+  /** `compact()` for a caller that does not use `compactDetailed`: the same, as a turn result. */
+  override async compact(summary?: string): Promise<TurnResult> {
+    const outcome = await this.compactDetailed(summary);
+    const text = outcome.ok ? this._compactSummary(outcome) : (outcome.note ?? 'grok did not compact the conversation');
+    return { text, event: { type: 'result', result: text, compacted: outcome.ok } };
+  }
+
+  private _compactSummary(outcome: CompactOutcome): string {
+    if (outcome.preTokens !== undefined && outcome.postTokens !== undefined) {
+      return `compacted: ${outcome.preTokens} → ${outcome.postTokens} tokens${outcome.note ? `. ${outcome.note}` : ''}`;
+    }
+    return outcome.note ?? 'compacted';
+  }
+
+  /**
+   * A side question, answered on a fork of the conversation, so the session's
+   * own conversation is unchanged: `--resume <id> --fork-session`, one model
+   * round, every tool removed (built-ins through `--disallowed-tools`, MCP tools
+   * by a deny rule, no subagents), and a rule that says so — told nothing, the
+   * model answered with a plan to look around first (1.0.92). The fork stays in
+   * grok's session store. Its spend counts in the session's stats; it is not a
+   * turn.
+   */
+  async askAside(question: string, opts: { timeout?: number } = {}): Promise<AsideOutcome> {
+    if (!this.grokSessionId) {
+      throw new Error('a side question needs a grok conversation to ask about; send the session a message first');
+    }
+    const timeout = opts.timeout || TURN_TIMEOUT_MS;
+    const tools = this.advertisedTools?.length ? this.advertisedTools : GROK_TOOLS;
+    const model = this.options.resolvedModel || this.options.model;
+    const run = await this._sidePrint(
+      [
+        '--resume',
+        this.grokSessionId,
+        '--fork-session',
+        '--max-turns',
+        '1',
+        '--no-subagents',
+        '--deny',
+        'MCPTool',
+        '--disallowed-tools',
+        tools.join(','),
+        withValue('--rules', ASIDE_RULES),
+        ...(model ? ['--model', this.resolveModel(model.replace(/^grok\//, ''))] : []),
+      ],
+      question,
+      timeout,
+      { slashCommands: false },
+    );
+    const usage = run.end?.usage;
+    if (usage) {
+      this._stats.tokensIn += usage.input_tokens ?? 0;
+      this._stats.tokensOut += usage.output_tokens ?? 0;
+      this._stats.cachedTokens += usage.cache_read_input_tokens ?? 0;
+      this._stats.cacheCreationTokens += usage.cache_creation_input_tokens ?? 0;
+    }
+    if (typeof run.end?.total_cost_usd === 'number') this._stats.costUsd += run.end.total_cost_usd;
+    if (run.error) throw new Error(run.error);
+    if (!run.text.trim()) {
+      throw new Error(
+        `grok gave no answer to the side question (it stopped for ${run.end?.stopReason ?? 'no stated reason'})`,
+      );
+    }
+    return { text: run.text };
+  }
+
+  /** A model switch takes effect on the next process; nothing is running to restart. */
+  async setModelLive(model: string): Promise<boolean> {
+    this.options.model = model;
+    this.options.resolvedModel = model;
+    return true;
+  }
+
+  // ── Native goal ────────────────────────────────────────────────────────
+
+  /** grok's own `/goal` loop behind the goal node's surface (`nativeGoal`); see grok-goal-session.ts. */
+  nativeGoalSession(open?: GrokGoalOpen): GoalSession {
+    return new GrokGoalSession(this, open);
+  }
+
+  /** One goal process: slash commands on, grok let wait for the goal's later rounds, spend read from `grok usage`. */
+  async runGoalTurn(text: string, opts: { timeout: number }): Promise<TurnResult> {
+    return (await this.send(text, {
+      waitForComplete: true,
+      timeout: opts.timeout,
+      grok: { internal: true, slashCommands: true, waitForBackground: true, reconcileCost: true },
+    })) as TurnResult;
+  }
+
+  /** The goal in the session's `goal/state.json`: null when the session has none, undefined when unreadable. */
+  readGoalState(): GrokGoalState | null | undefined {
+    const id = this.grokSessionId;
+    if (!id) return undefined;
+    this.grokSessionDir ??= findGrokSessionDir(id);
+    if (!this.grokSessionDir) return undefined;
+    const file = path.join(this.grokSessionDir, 'goal', 'state.json');
+    if (!fs.existsSync(file)) return null;
+    try {
+      return parseGrokGoalStateFile(JSON.parse(fs.readFileSync(file, 'utf8'))) ?? undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * A usage-limit refusal grok logged since `sinceMs`, if no model call has
+   * succeeded after it. Any session's: the limit is the account's, and a goal's
+   * planner and verifiers run as subagents under session ids of their own
+   * (1.0.92: the planner's 429 was logged under the subagent's id).
+   */
+  usageLimitSince(sinceMs: number): string | undefined {
+    return latestGrokRefusal({ sinceMs })?.message;
+  }
+
+  // ── Helpers ────────────────────────────────────────────────────────────
+
+  /** Wait until no turn is running, at most `timeoutMs`. */
+  private async _whenIdle(timeoutMs: number): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (this.isBusy) {
+      if (Date.now() >= deadline) throw new Error('the grok session is still running a turn; try again when it ends');
+      await new Promise((r) => setTimeout(r, 200));
+    }
+  }
+
+  /** The skills and workflows grok lists over ACP, read at most once a minute. */
+  private async _acpCommandList(): Promise<{ commands: EngineCommand[]; workflows: Set<string> }> {
+    if (this.acpCommands && Date.now() - this.acpCommands.at < COMMAND_LIST_TTL_MS) return this.acpCommands;
+    const workflows = new Set<string>();
+    const result = await grokAcpCall(
+      '_x.ai/commands/list',
+      {},
+      {
+        bin: this.engineBin,
+        cwd: this._runCwd(),
+        launcher: this.options.launcher,
+      },
+    );
+    const commands = commandsFromGrokAcpList(result, workflows);
+    this.acpCommands = { at: Date.now(), commands, workflows };
+    return this.acpCommands;
+  }
+
+  /**
+   * Refuse a name grok has no command or workflow for: sent as `/name` it
+   * reaches the model as a message, a paid turn. Only a listing read over ACP
+   * refuses, and it is read again once first, for one added since.
+   */
+  private async _checkCommandKnown(name: string): Promise<void> {
+    if (grokShellCommand(name)) return;
+    const known = (r: { commands: EngineCommand[]; workflows: Set<string> } | undefined) =>
+      !r || r.commands.some((c) => c.name === name) || r.workflows.has(name);
+    if (known(await this._acpCommandList().catch(() => undefined))) return;
+    this.acpCommands = undefined;
+    if (!known(await this._acpCommandList().catch(() => undefined))) {
+      throw new Error(
+        `there is no command /${name} on this grok session: session_command list shows what there is, ` +
+          'and session_send sends the text to the model as a message',
+      );
+    }
+  }
+
+  /** The workflows a `/name` could launch; read only for a name that is not a built-in. */
+  private async _workflowNames(name: string): Promise<ReadonlySet<string>> {
+    if (grokShellCommand(name) || name in GROK_PAGER_COMMANDS) return new Set();
+    try {
+      return (await this._acpCommandList()).workflows;
+    } catch {
+      return new Set();
+    }
+  }
+
+  /** The context `/session-info` reports, and grok's window for it. */
+  private async _sessionContext(): Promise<{ used: number; total: number; turn?: number } | undefined> {
+    const r = await this.runLocalCommand('/session-info');
+    const context = parseGrokSessionContext(r.text);
+    if (context?.total) this.grokWindow = context.total;
+    return context;
+  }
+
+  /**
+   * Add what the turn cost beyond its `end` line, from grok's per-turn record
+   * (`grok usage <id>`: costUsdTicks, 1e10 per dollar). Measured on a native
+   * goal: $0.515 over 19 calls on `end`, $0.612 over 22 in the record.
+   */
+  private async _reconcileCost(startedAt: number, endCost: number): Promise<void> {
+    const id = this.grokSessionId;
+    if (!id) return;
+    let record: { turns?: Array<{ endedAt?: string; costUsdTicks?: number }> };
+    try {
+      record = JSON.parse(await this._sideCapture(['usage', id], 15_000)) as typeof record;
+    } catch (err) {
+      this.emit(SESSION_EVENT.LOG, `[grok] could not read the turn's spend from grok usage: ${(err as Error).message}`);
+      return;
+    }
+    const last = record.turns?.at(-1);
+    const ended = last?.endedAt ? Date.parse(last.endedAt) : Number.NaN;
+    // A record from before this turn is an earlier turn's, not this one's.
+    if (!last || !Number.isFinite(ended) || ended < startedAt - 5_000) return;
+    const ticks = Number(last.costUsdTicks);
+    if (!Number.isFinite(ticks)) return;
+    const missing = ticks / 1e10 - endCost;
+    if (missing > 1e-9) {
+      this._stats.costUsd += missing;
+      this.emit(
+        SESSION_EVENT.LOG,
+        `[grok] the turn cost $${(ticks / 1e10).toFixed(4)} by grok's record; its end line reported $${endCost.toFixed(4)}`,
+      );
+    }
+  }
+
+  /** Run one side process at a time, after the ones before it. */
+  private _sideQueue<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.sideChain.then(fn, fn);
+    this.sideChain = run.catch(() => undefined);
+    return run;
+  }
+
+  /**
+   * A print-mode run beside the turns, read whole: `grok -p` with `extra`
+   * after the folder, `message` on stdin. It waits for the turn in flight and
+   * touches none of the turn bookkeeping.
+   */
+  private _sidePrint(
+    extra: string[],
+    message: string,
+    timeoutMs: number,
+    opts: { slashCommands: boolean },
+  ): Promise<PrintRun> {
+    return this._sideQueue(async () => {
+      await this._whenIdle(timeoutMs);
+      const cwd = this._runCwd();
+      const args = ['-p', '--output-format', 'streaming-json', ...(cwd ? ['--cwd', cwd] : []), ...extra];
+      if (this.options.trustProject) args.push('--trust');
+      if (!opts.slashCommands) args.push('--verbatim');
+      args.push('--no-wait-for-background');
+      const { stdout, stderr, code } = await this._spawnSide(args, message, timeoutMs);
+      let text = '';
+      let end: GrokStreamEvent | undefined;
+      let error: string | undefined;
+      for (const raw of stdout.split('\n')) {
+        const line = raw.trim();
+        if (!line.startsWith('{')) continue;
+        let evt: GrokStreamEvent;
+        try {
+          evt = JSON.parse(line) as GrokStreamEvent;
+        } catch {
+          continue;
+        }
+        if (evt.type === 'text' && typeof evt.data === 'string') text += evt.data;
+        else if (evt.type === 'end') end = evt;
+        else if (evt.type === 'error') error = evt.message?.trim() || 'Grok reported an error';
+      }
+      if (!end && !error) error = stderr.trim() || `Grok exited with code ${code} and no JSON result`;
+      if (end?.error) error = end.error;
+      return { text, ...(end ? { end } : {}), ...(error ? { error } : {}) };
+    });
+  }
+
+  /** `grok <args>` beside the turns, its stdout; throws on a non-zero exit. */
+  private _sideCapture(args: string[], timeoutMs: number): Promise<string> {
+    return this._sideQueue(async () => {
+      const { stdout, stderr, code } = await this._spawnSide(args, undefined, timeoutMs);
+      if (code !== 0) throw new Error(stderr.trim().split('\n')[0] || `grok exited with code ${code}`);
+      return stdout;
+    });
+  }
+
+  private _spawnSide(
+    args: string[],
+    input: string | undefined,
+    timeoutMs: number,
+  ): Promise<{ stdout: string; stderr: string; code: number | null }> {
+    return new Promise((resolve, reject) => {
+      let proc: ChildProcess;
+      try {
+        proc = spawnEngine(this.engineBin, args, {
+          launcher: this.options.launcher,
+          cwd: this.options.cwd,
+          env: { ...process.env },
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
+      } catch (err) {
+        reject(err);
+        return;
+      }
+      this.sideProcs.add(proc);
+      let stdout = '';
+      let stderr = '';
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        killEngineTree(proc);
+        this.sideProcs.delete(proc);
+        reject(new Error(`grok ${args[0] === '-p' ? 'run' : args[0]} took longer than ${timeoutMs} ms`));
+      }, timeoutMs);
+      proc.stdin?.on('error', () => {});
+      proc.stdin?.end(input ?? '');
+      proc.stdout?.on('data', (d: Buffer) => (stdout += d.toString('utf8')));
+      proc.stderr?.on('data', (d: Buffer) => (stderr += sanitizeSecrets(d.toString())));
+      proc.on('error', (err) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        this.sideProcs.delete(proc);
+        reject(err);
+      });
+      proc.on('close', (code) => {
+        this.sideProcs.delete(proc);
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve({ stdout, stderr, code });
+      });
+    });
+  }
+
+  /** Also stops the side processes (local commands, asides, `grok usage`). */
+  override stop(): void {
+    for (const proc of this.sideProcs) killEngineTree(proc);
+    this.sideProcs.clear();
+    super.stop();
   }
 
   /** Grok's resumable session id and the worktree it made, surfaced through getStats(). */

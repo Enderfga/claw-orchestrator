@@ -1,0 +1,18 @@
+{
+  "id": "grok",
+  "tier": "community",
+  "description": "Grok Build (xAI) as a long-lived ACP agent (`grok agent stdio`), for what its one-shot `grok` engine cannot hold: background workflows (`/deep-research`, `/workflow <name>`), whose results come back as engine turns, and `/loop` jobs. Start with engine 'acp'.",
+  "provenance": {
+    "maintainer": "Enderfga",
+    "verifiedAgainst": "1.0.92",
+    "verifiedOn": "2026-11-28",
+    "sourceUrl": "https://x.ai/cli"
+  },
+  "acp": {
+    "name": "grok",
+    "command": "grok",
+    "commandEnv": "GROK_BIN",
+    "args": ["agent", "stdio"],
+    "extension": "grok"
+  }
+}
